@@ -775,7 +775,7 @@ fn get_next_steps(
 ) -> Result<Vec<RoutingFrame>> {
     let mut seen = HashSet::new();
     let mut unique_steps = vec![];
-    dest.next_steps(chooser, &mut |step| {
+    let _ = dest.next_steps(chooser, &mut |step| {
         if let RoutingStep::Forward(frame) = step {
             let key = RoutingFrameKey::new(&frame);
             if seen.insert(key) {
@@ -1463,7 +1463,7 @@ mod tests {
                 ControlFlow::Continue(())
             };
 
-            frame.next_steps(
+            let _ = frame.next_steps(
                 &mut |_| panic!("Choice encountered in test_routing_06"),
                 &mut visitor,
             );
@@ -1488,7 +1488,7 @@ mod tests {
         let frame = RoutingFrame::root(selection, slice.clone());
 
         let mut steps = vec![];
-        frame.next_steps(
+        let _ = frame.next_steps(
             &mut |_| panic!("Choice encountered in test_routing_07"),
             &mut |step: RoutingStep| {
                 steps.push(step);

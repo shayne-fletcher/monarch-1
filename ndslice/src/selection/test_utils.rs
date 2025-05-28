@@ -193,7 +193,7 @@ pub fn collect_routed_paths(selection: &Selection, slice: &Slice) -> RoutedPathT
             ControlFlow::Continue(())
         };
 
-        frame.next_steps(
+        let _ = frame.next_steps(
             &mut |_| panic!("Choice encountered in collect_routed_nodes"),
             &mut visitor,
         );
