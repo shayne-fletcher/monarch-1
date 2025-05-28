@@ -10,6 +10,7 @@ This is the main function for the boostrapping a new process using a ProcessAllo
 
 import asyncio
 import importlib.resources
+import logging
 import os
 import sys
 
@@ -25,7 +26,34 @@ def invoke_main():
     # changes its buffering behavior. So we default to the standard
     # behavior of std out as if it were a terminal.
     sys.stdout.reconfigure(line_buffering=True)
+    global bootstrap_main
+
+    from monarch._rust_bindings.hyperactor_extension.telemetry import (  # @manual=//monarch/monarch_extension:monarch_extension
+        forward_to_tracing,
+    )
+
     # TODO: figure out what from worker_main.py we should reproduce here.
+
+    class TracingForwarder(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                forward_to_tracing(
+                    record.getMessage(),
+                    record.filename or "",
+                    record.lineno or 0,
+                    record.levelno,
+                )
+            except AttributeError:
+                forward_to_tracing(
+                    record.__str__(),
+                    record.filename or "",
+                    record.lineno or 0,
+                    record.levelno,
+                )
+
+    # forward logs to rust tracing. Defaults to on.
+    if os.environ.get("MONARCH_PYTHON_LOG_TRACING", "1") == "1":
+        logging.root.addHandler(TracingForwarder())
 
     with (
         importlib.resources.path("monarch", "py-spy") as pyspy,

@@ -7,12 +7,6 @@
 # pyre-strict
 import abc
 
-from monarch._rust_bindings.hyperactor_extension.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
-    Alloc,
-    AllocConstraints,
-    AllocSpec,
-)
-
 from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
 
 from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
@@ -23,6 +17,9 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox, PortId
 
 from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
+    Alloc,
+    AllocConstraints,
+    AllocSpec,
     init_proc,
     Proc,
     Serialized,

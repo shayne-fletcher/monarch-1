@@ -121,6 +121,10 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module,
         "hyperactor_extension.alloc",
     )?)?;
+    hyperactor_extension::telemetry::register_python_bindings(&get_or_add_new_module(
+        module,
+        "hyperactor_extension.telemetry",
+    )?)?;
     ::controller::bootstrap::register_python_bindings(&get_or_add_new_module(
         module,
         "controller.bootstrap",
