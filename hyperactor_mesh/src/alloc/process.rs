@@ -200,9 +200,9 @@ impl Child {
             }
         }
     }
-
+    #[hyperactor::instrument_infallible]
     fn stop(&self, reason: ProcStopReason) {
-        let _ = self.stop_reason.set(reason); // first stop wins 
+        let _ = self.stop_reason.set(reason); // first stop wins
         self.group.fail();
     }
 
@@ -232,6 +232,7 @@ impl Child {
         true
     }
 
+    #[hyperactor::instrument_infallible]
     fn post(&mut self, message: Allocator2Process) {
         // We're here simply assuming that if we're not connected, we're about to
         // be killed.
@@ -248,6 +249,8 @@ impl ProcessAlloc {
 
     // Currently procs and processes are 1:1, so this just fully exits
     // the process.
+
+    #[hyperactor::instrument_infallible]
     fn stop(&mut self, proc_id: &ProcId, reason: ProcStopReason) -> Result<(), anyhow::Error> {
         self.get_mut(proc_id)?.stop(reason);
         Ok(())
@@ -283,6 +286,7 @@ impl ProcessAlloc {
         Ok(proc_id.rank())
     }
 
+    #[hyperactor::instrument_infallible]
     async fn maybe_spawn(&mut self) -> Option<ProcState> {
         if self.active.len() >= self.spec.shape.slice().len() {
             return None;
@@ -305,6 +309,7 @@ impl ProcessAlloc {
         cmd.env("HYPERACTOR_MANAGED_SUBPROCESS", "1");
 
         let proc_id = ProcId(WorldId(self.name.to_string()), index);
+        tracing::debug!("Spawning process {:?}", cmd);
         match cmd.spawn() {
             Err(err) => {
                 // Should we proactively retry here, or do we always just
@@ -339,6 +344,7 @@ impl ProcessAlloc {
 
 #[async_trait]
 impl Alloc for ProcessAlloc {
+    #[hyperactor::instrument_infallible]
     async fn next(&mut self) -> Option<ProcState> {
         if !self.running && self.active.is_empty() {
             return None;

@@ -87,6 +87,7 @@ pub struct MeshAgent {
 }
 
 impl MeshAgent {
+    #[hyperactor::instrument]
     pub(crate) async fn bootstrap(
         proc_id: ProcId,
     ) -> Result<(Proc, ActorHandle<Self>), anyhow::Error> {

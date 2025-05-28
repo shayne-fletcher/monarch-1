@@ -20,6 +20,7 @@ use pyo3::wrap_pyfunction;
 #[pyfunction]
 #[pyo3(signature = ())]
 pub fn bootstrap_main(py: Python) -> PyResult<Bound<PyAny>> {
+    hyperactor::tracing::debug!("entering async bootstrap");
     pyo3_async_runtimes::tokio::future_into_py::<_, ()>(py, async move {
         bootstrap_or_die().await;
     })

@@ -27,8 +27,7 @@ def invoke_main():
     # behavior of std out as if it were a terminal.
     sys.stdout.reconfigure(line_buffering=True)
     global bootstrap_main
-
-    from monarch._rust_bindings.hyperactor_extension.telemetry import (  # @manual=//monarch/monarch_extension:monarch_extension
+    from monarch._rust_bindings.hyperactor_extension.telemetry import (  # @manual=//monarch/monarch_extension:monarch_extension  # @manual=//monarch/monarch_extension:monarch_extension
         forward_to_tracing,
     )
 

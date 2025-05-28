@@ -93,15 +93,19 @@ pub async fn bootstrap() -> anyhow::Error {
         let (serve_addr, mut rx) = channel::serve(listen_addr).await?;
         let tx = channel::dial(bootstrap_addr)?;
 
-        tx.send(Process2Allocator(
-            bootstrap_index,
-            Process2AllocatorMessage::Hello(serve_addr),
-        ))
-        .await?;
+        {
+            tx.send(Process2Allocator(
+                bootstrap_index,
+                Process2AllocatorMessage::Hello(serve_addr),
+            ))
+            .await?;
+        }
 
         let mut procs = Vec::new();
 
         loop {
+            let _ =
+                hyperactor::tracing::info_span!("wait_for_next_message_from_mesh_agent").entered();
             match rx.recv().await? {
                 Allocator2Process::StartProc(proc_id, listen_transport) => {
                     let (proc, mesh_agent) = MeshAgent::bootstrap(proc_id.clone()).await?;
@@ -123,6 +127,7 @@ pub async fn bootstrap() -> anyhow::Error {
                     procs.push(proc);
                 }
                 Allocator2Process::StopAndExit(code) => {
+                    tracing::info!("stopping procs with code {code}");
                     for mut proc_to_stop in procs {
                         if let Err(err) = proc_to_stop
                             .destroy_and_wait(Duration::from_millis(10), None)

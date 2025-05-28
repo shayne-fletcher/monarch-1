@@ -527,6 +527,7 @@ impl Proc {
     /// - the actors not observed to stop when timeout.
     ///
     /// The "skip_waiting" actor, if it is Some, is always not observed to stop.
+    #[hyperactor::instrument]
     pub async fn destroy_and_wait(
         &mut self,
         timeout: Duration,
@@ -580,6 +581,7 @@ impl Proc {
     }
 
     /// Create a root allocation in the proc.
+    #[hyperactor::instrument]
     fn allocate_root_id(&self, name: &str) -> Result<ActorId, anyhow::Error> {
         let name = name.to_string();
         match self.state().roots.entry(name.to_string()) {
@@ -779,7 +781,7 @@ impl<A: Actor> Instance<A> {
     fn change_status(&mut self, new: ActorStatus) {
         let old = self.status_tx.send_replace(new.clone());
         let actor_id_str = self.self_id().to_string();
-        tracing::debug!(actor_id = %actor_id_str, "Changed status from {old} to {new}");
+        tracing::debug!(actor_id = %actor_id_str, "Changed status from {} to {}", old.arm().unwrap_or_default(), new.arm().unwrap_or_default());
         let now = self.clock().now();
         let dur = now.duration_since(self.last_status_change);
         ACTOR_STATUS.record(

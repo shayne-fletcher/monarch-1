@@ -510,7 +510,7 @@ impl<M: RemoteMessage> NetTx<M> {
                                     }
                                 },
                                 Some(Err(err)) => {
-                                        tracing::info!(
+                                        tracing::error!(
                                             "session {}.{}: failed to receiving ack: {}",
                                             link.dest(),
                                             session_id,
