@@ -12,9 +12,8 @@ name = "tester"
 path = "main.rs"
 
 [dependencies]
-hyperactor_telemetry = { path = ".." }
+hyperactor_telemetry = { version = "0.0.0", path = ".." }
 opentelemetry = "0.29"
-otel_rs = { path = "../../../conda/observability/otel" }
 tracing = { version = "0.1.41", features = ["attributes", "valuable"] }
 
 [lints]

@@ -22,13 +22,13 @@ path = "main.rs"
 anyhow = "1.0.95"
 async-trait = "0.1.86"
 buck-resources = "1"
-hyperactor = { path = "../../hyperactor" }
-hyperactor_mesh = { path = "../../hyperactor_mesh" }
-monarch_rdma = { path = ".." }
-ndslice = { path = "../../ndslice" }
+hyperactor = { version = "0.0.0", path = "../../hyperactor" }
+hyperactor_mesh = { version = "0.0.0", path = "../../hyperactor_mesh" }
+monarch_rdma = { version = "0.0.0", path = ".." }
+ndslice = { version = "0.0.0", path = "../../ndslice" }
 rand = { version = "0.8", features = ["small_rng"] }
 serde = { version = "1.0.185", features = ["derive", "rc"] }
-timed_test = { path = "../../timed_test" }
+timed_test = { version = "0.0.0", path = "../../timed_test" }
 tokio = { version = "1.45.0", features = ["full", "test-util", "tracing"] }
 tracing = { version = "0.1.41", features = ["attributes", "valuable"] }
 tracing-subscriber = { version = "0.3.19", features = ["chrono", "env-filter", "json", "local-time", "parking_lot", "registry"] }
