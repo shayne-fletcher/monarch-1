@@ -20,4 +20,6 @@ fn main() {
 
     // Disable new dtags, as conda envs generally use `RPATH` over `RUNPATH`.
     println!("cargo::rustc-link-arg=-Wl,--disable-new-dtags");
+
+    println!("cargo:rustc-link-lib=lzma");
 }

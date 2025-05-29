@@ -100,6 +100,9 @@ class Clean(Command):
         subprocess.run(["cargo", "clean"])
 
 
+with open("requirements.txt") as f:
+    reqs = f.read()
+
 setup(
     name="monarch",
     version="1.0",
@@ -108,15 +111,7 @@ setup(
         exclude=["python/tests.*", "python/tests"],
     ),
     package_dir={"": "python"},
-    install_requires=[
-        "torch",
-        "pyzmq",
-        "requests",
-        "numpy",
-        "pyre-extensions",
-        "pytest-timeout",
-        "cloudpickle",
-    ],
+    install_requires=reqs.strip().split("\n"),
     author="Meta",
     description="Monarch: Single controller library",
     ext_modules=[
