@@ -103,6 +103,9 @@ class Clean(Command):
 with open("requirements.txt") as f:
     reqs = f.read()
 
+with open("README.md", encoding="utf8") as f:
+    readme = f.read()
+
 setup(
     name="monarch",
     version="1.0",
@@ -111,9 +114,13 @@ setup(
         exclude=["python/tests.*", "python/tests"],
     ),
     package_dir={"": "python"},
+    python_requires=">= 3.10",
     install_requires=reqs.strip().split("\n"),
     author="Meta",
+    author_email="oncall+monarch@xmail.facebook.com",
     description="Monarch: Single controller library",
+    long_description=readme,
+    long_description_content_type="text/markdown",
     ext_modules=[
         controller_C,
         common_C,

@@ -36,16 +36,11 @@ RUN apt-get update -y && \
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
-# Install Python build deps
-RUN pip install --no-cache-dir setuptools-rust
-
 # Install Python deps as a separate layer to avoid rebuilding if deps do not change
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Install monarch
 COPY . .
-# currently monarch/pyproject.toml uses meta-internal build-backend, just use setup.py
-RUN rm pyproject.toml
 RUN cargo install --path monarch_hyperactor
 RUN pip install .

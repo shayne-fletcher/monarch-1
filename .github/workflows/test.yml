@@ -48,18 +48,17 @@ jobs:
         rustup toolchain install nightly
         rustup default nightly
 
-        # Install torch
-        pip install torch
+        # Install build dependencies
+        pip install -r build-requirements.txt
 
-        # Install Python dependencies
-        pip install setuptools-rust
-        pip install pyzmq requests numpy pyre-extensions
-
-        # Test dependencies
-        pip install pytest cloudpickle pytest-timeout pytest-asyncio
+        # Install test dependencies
+        pip install -r python/tests/requirements.txt
 
         # Build and install monarch
-        python setup.py install
+        # NB: monarch is currently can't be built in isolated builds (e.g not PEP519 compatible)
+        # because 'torch-sys' needs to be compiled against 'torch' in the main python environment
+        # so that libtorch is linked correctly at runtime.
+        pip install --no-build-isolation .
 
         # Run tests
         LC_ALL=C pytest python/tests/ -s -v -m "not oss_skip"

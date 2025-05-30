@@ -1,36 +1,3 @@
-[build-system]
-requires = [
-    "torch",
-    "setuptools",
-    "setuptools-rust",
-    "wheel"
-]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "monarch"
-authors = [
-    {email = "oncall+monarch@xmail.facebook.com"},
-]
-version = "1.0"
-readme = "README.md"
-description = "Monarch: Single controller library"
-dependencies = [
-    "torch",
-    "pyzmq",
-    "requests",
-    "numpy",
-    "pyre-extensions",
-    "pytest-timeout",
-    "cloudpickle",
-    "pytest-asyncio"
-]
-requires-python = ">= 3.10"
-dynamic = [
-    "scripts", # tells pip to use console scripts defined in setup.py
-]
-
-
 [tool.pytest.ini_options]
 
 markers = [
