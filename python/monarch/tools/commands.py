@@ -12,7 +12,7 @@ import inspect
 import os
 from typing import Any, Callable, Mapping, Optional, Union
 
-from monarch.tools.config import (  # @manual=//monarch/tools/config/meta:defaults
+from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/config/meta:defaults
     Config,
     defaults,
 )

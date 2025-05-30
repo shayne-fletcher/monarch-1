@@ -8,13 +8,13 @@
 import unittest
 from pathlib import Path
 
-from monarch.tools.config import (  # @manual=//monarch/tools/config/meta:defaults
+from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/config/meta:defaults
     defaults,
 )
 from torchx.specs.builders import _create_args_parser
 
 
-class DefaultsTest(unittest.TestCase):
+class TestDefaults(unittest.TestCase):
     def test_default_config(self) -> None:
         for scheduler in defaults.scheduler_factories():
             with self.subTest(scheduler=scheduler):

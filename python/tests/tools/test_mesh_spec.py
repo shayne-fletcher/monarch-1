@@ -22,7 +22,7 @@ from torchx import specs
 UNUSED = "__UNUSED_FOR_TEST__"
 
 
-class MeshSpecTest(unittest.TestCase):
+class TestMeshSpec(unittest.TestCase):
     def test_tag_as_metadata(self) -> None:
         mesh_spec = MeshSpec(
             name="trainer", num_hosts=2, host_type="gpu.medium", gpus=2

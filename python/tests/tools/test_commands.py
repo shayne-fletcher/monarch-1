@@ -12,14 +12,14 @@ from unittest import mock
 from monarch.tools import commands
 from monarch.tools.commands import component_args_from_cli
 
-from monarch.tools.config import (  # @manual=//monarch/tools/config/meta:defaults
+from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/config/meta:defaults
     defaults,
 )
 from monarch.tools.mesh_spec import MeshSpec, ServerSpec
 from torchx.specs import AppDef, AppDryRunInfo, AppState, AppStatus, Role
 
 
-class CommandsTest(unittest.TestCase):
+class TestCommands(unittest.TestCase):
     def test_component_args_from_cli(self) -> None:
         def fn(h: str, num_hosts: int) -> AppDef:
             return AppDef("_unused_", roles=[Role("_unused_", "_unused_")])

@@ -18,7 +18,6 @@ from torchx.schedulers import (
     docker_scheduler,
     kubernetes_scheduler,
     local_scheduler,
-    ray_scheduler,
     SchedulerFactory,
     slurm_scheduler,
 )
@@ -38,7 +37,6 @@ def scheduler_factories() -> dict[str, SchedulerFactory]:
         # --- remote schedulers (yes multi-host support) ---
         "slurm": slurm_scheduler.create_scheduler,
         "k8s": kubernetes_scheduler.create_scheduler,
-        "ray": ray_scheduler.create_scheduler,
     }
 
 
