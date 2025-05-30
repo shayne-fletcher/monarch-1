@@ -9,7 +9,6 @@ import argparse
 import json
 import sys
 
-from fastcli.argparse import inject_fastcli
 from monarch.tools.commands import (
     bounce,
     component_args_from_cli,
@@ -160,11 +159,6 @@ def get_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] = sys.argv[1:]) -> None:
     parser = get_parser()
-
-    # merges this (python) CLI args with rust's
-    # see: https://fburl.com/wiki/kznp42c4
-    inject_fastcli(parser)
-
     args = parser.parse_args(argv)
     args.func(args)
 
