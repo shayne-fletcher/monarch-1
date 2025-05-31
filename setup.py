@@ -108,7 +108,7 @@ with open("README.md", encoding="utf8") as f:
 
 setup(
     name="monarch",
-    version="1.0",
+    version="0.0.1",
     packages=find_packages(
         where="python",
         exclude=["python/tests.*", "python/tests"],
@@ -116,6 +116,7 @@ setup(
     package_dir={"": "python"},
     python_requires=">= 3.10",
     install_requires=reqs.strip().split("\n"),
+    license="BSD-3-Clause",
     author="Meta",
     author_email="oncall+monarch@xmail.facebook.com",
     description="Monarch: Single controller library",
