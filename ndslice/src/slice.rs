@@ -33,6 +33,9 @@ pub enum SliceError {
 
     #[error("value {value} not in slice")]
     ValueNotInSlice { value: usize },
+
+    #[error("incompatible view: {reason}")]
+    IncompatibleView { reason: String },
 }
 
 /// Slice is a compact representation of indices into the flat

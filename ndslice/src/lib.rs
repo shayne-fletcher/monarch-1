@@ -30,6 +30,14 @@ pub use slice::SliceIterator;
 /// to linear memory.
 pub mod layout;
 
+/// View-based layout reinterpretation for `Slice`, similar to
+/// `torch.Tensor.view`.
+///
+/// Provides the [`View`] type and [`Slice::view`] method, allowing
+/// shape changes without copying when layouts are compatible. See
+/// module docs in `view.rs` for details.
+pub mod view;
+
 /// Selection algebra for describing multidimensional mesh regions.
 pub mod selection;
 
