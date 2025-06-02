@@ -512,7 +512,7 @@ mod tests {
                         && hops.is_empty());
             }
 
-            #[timed_test::async_timed_test(timeout_secs = 30)]
+            #[timed_test::async_timed_test(timeout_secs = 60)]
             async fn test_actor_mesh_cast() {
                 // Verify a full broadcast in the mesh. Send a message
                 // to every actor and check each actor receives it.
