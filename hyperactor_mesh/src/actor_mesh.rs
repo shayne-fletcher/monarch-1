@@ -277,7 +277,10 @@ pub(crate) mod test_util {
     // mesh test suite.
     #[derive(Debug)]
     #[hyperactor::export_spawn(
-        Cast<(String, PortRef<String>)>, Cast<GetRank>, Cast<Error>, Relay,
+        Cast<(String, PortRef<String>)>,
+        Cast<GetRank>,
+        Cast<Error>,
+        Relay,
         IndexedErasedUnbound<Cast<(String, PortRef<String>)>>,
         IndexedErasedUnbound<Cast<GetRank>>,
         IndexedErasedUnbound<Cast<Error>>,
@@ -293,8 +296,18 @@ pub(crate) mod test_util {
         }
     }
 
+    /// Request message to retrieve the actor's rank.
+    ///
+    /// The `bool` in the tuple controls the outcome of the handler:
+    /// - If `true`, the handler will send the rank and return
+    ///   `Ok(())`.
+    /// - If `false`, the handler will still send the rank, but return
+    ///   an error (`Err(...)`).
+    ///
+    /// This is useful for testing both successful and failing
+    /// responses from a single message type.
     #[derive(Debug, Serialize, Deserialize, Named, Clone)]
-    pub struct GetRank(pub PortRef<usize>);
+    pub struct GetRank(pub bool, pub PortRef<usize>);
 
     #[async_trait]
     impl Handler<Cast<GetRank>> for TestActor {
@@ -303,11 +316,12 @@ pub(crate) mod test_util {
             this: &Instance<Self>,
             Cast {
                 rank,
-                message: GetRank(reply),
+                message: GetRank(ok, reply),
                 ..
             }: Cast<GetRank>,
         ) -> Result<(), anyhow::Error> {
             reply.send(this, *rank)?;
+            anyhow::ensure!(ok, "intentional error!"); // If `!ok` exit with `Err()`.
             Ok(())
         }
     }
@@ -376,7 +390,7 @@ mod tests {
             use $crate::alloc::Allocator;
             use $crate::assign::Ranks;
             use $crate::sel_from_shape;
-            use ndslice::selection::dsl::*;
+            use $crate::sel;
             use $crate::proc_mesh::SharedSpawnable;
             use std::collections::VecDeque;
 
@@ -398,7 +412,7 @@ mod tests {
                 let actor_mesh: ActorMesh<TestActor> = proc_mesh.spawn("echo", &()).await.unwrap();
                 let (reply_handle, mut reply_receiver) = actor_mesh.open_port();
                 actor_mesh
-                    .cast(all(true_()), ("Hello".to_string(), reply_handle.bind()))
+                    .cast(sel!(*), ("Hello".to_string(), reply_handle.bind()))
                     .unwrap();
                 for _ in 0..4 {
                     assert_eq!(&reply_receiver.recv().await.unwrap(), "Hello");
@@ -417,9 +431,10 @@ mod tests {
 
                 let proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
                 let actor_mesh: ActorMesh<TestActor> = proc_mesh.spawn("echo", &()).await.unwrap();
+                let dont_simulate_error = true;
                 let (reply_handle, mut reply_receiver) = actor_mesh.open_port();
                 actor_mesh
-                    .cast(all(true_()), GetRank(reply_handle.bind()))
+                    .cast(sel!(*), GetRank(dont_simulate_error, reply_handle.bind()))
                     .unwrap();
                 let mut ranks = Ranks::new(actor_mesh.shape().slice().len());
                 while !ranks.is_full() {
@@ -431,7 +446,7 @@ mod tests {
                 actor_mesh
                     .cast(
                         sel_from_shape!(actor_mesh.shape(), replica = 0, host = 0),
-                        GetRank(reply_handle.bind()),
+                        GetRank(dont_simulate_error, reply_handle.bind()),
                     )
                     .unwrap();
                 let mut ranks = Ranks::new(8);
@@ -551,6 +566,66 @@ mod tests {
         use crate::alloc::local::LocalAllocator;
 
         actor_mesh_test_suite!(LocalAllocator);
+
+        // The intent is to emulate the behaviors of the Python
+        // interaction of T225230867 "process hangs when i send
+        // messages to a dead actor".
+        #[tracing_test::traced_test]
+        #[tokio::test]
+        async fn test_behaviors_on_actor_error() {
+            use crate::alloc::ProcStopReason;
+            use crate::proc_mesh::ProcEvent;
+            use crate::sel;
+
+            let alloc = LocalAllocator
+                .allocate(AllocSpec {
+                    shape: shape! { replica = 1  },
+                    constraints: Default::default(),
+                })
+                .await
+                .unwrap();
+
+            let stop = alloc.stopper();
+            let mut mesh = ProcMesh::allocate(alloc).await.unwrap();
+            let mut events = mesh.events().unwrap();
+
+            let actor_mesh = mesh
+                .spawn::<TestActor>("reply-then-fail", &())
+                .await
+                .unwrap();
+
+            // `GetRank` with `false` means exit with error after
+            // replying with rank.
+            let (reply_handle, mut reply_receiver) = actor_mesh.open_port();
+            actor_mesh
+                .cast(sel!(*), GetRank(false, reply_handle.bind()))
+                .unwrap();
+            let rank = reply_receiver.recv().await.unwrap();
+            assert_eq!(rank, 0);
+
+            // The above is expected to trigger a proc crash.
+            assert_matches!(
+                events.next().await.unwrap(),
+                ProcEvent::Crashed(0, reason) if reason.contains("intentional error!")
+            );
+
+            // Uncomment this to cause an infinite hang.
+            /*
+            let (reply_handle, mut reply_receiver) = actor_mesh.open_port();
+                actor_mesh
+                    .cast(sel!(*), GetRank(false, reply_handle.bind()))
+                    .unwrap();
+            let rank = reply_receiver.recv().await.unwrap();
+            */
+
+            // Stop the mesh.
+            stop();
+            assert_matches!(
+                events.next().await.unwrap(),
+                ProcEvent::Stopped(0, ProcStopReason::Stopped),
+            );
+            assert!(events.next().await.is_none());
+        }
     } // mod local
 
     mod process {
