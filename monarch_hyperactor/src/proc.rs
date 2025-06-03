@@ -268,6 +268,12 @@ impl From<ActorId> for PyActorId {
     }
 }
 
+impl From<PyActorId> for ActorId {
+    fn from(val: PyActorId) -> Self {
+        val.inner
+    }
+}
+
 #[pymethods]
 impl PyActorId {
     #[new]

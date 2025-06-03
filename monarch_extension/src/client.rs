@@ -27,8 +27,10 @@ use monarch_messages::client::ClientMessage;
 use monarch_messages::client::Exception;
 use monarch_messages::client::LogLevel;
 use monarch_messages::controller::ControllerActor;
+use monarch_messages::controller::ControllerMessage;
 use monarch_messages::controller::ControllerMessageClient;
 use monarch_messages::controller::DeviceFailure;
+use monarch_messages::controller::Ranks;
 use monarch_messages::controller::Seq;
 use monarch_messages::controller::WorkerError;
 use monarch_messages::debugger::DebuggerAction;
@@ -36,6 +38,7 @@ use monarch_messages::worker::Ref;
 use monarch_types::PyTree;
 use monarch_types::TryIntoPyObjectUnsafe;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::IntoPyDict;
 use pyo3::types::PyDict;
@@ -43,6 +46,9 @@ use pyo3::types::PyList;
 use pyo3::types::PyNone;
 use tokio::sync::Mutex;
 use torch_sys::RValue;
+
+use crate::controller::PyRanks;
+use crate::convert::convert;
 
 #[pyclass(frozen, module = "monarch._rust_bindings.monarch_extension.client")]
 struct WorkerResponse {
@@ -567,6 +573,33 @@ impl ClientActor {
     /// message.
     fn send(&self, actor_id: &PyActorId, message: &PySerialized) -> PyResult<()> {
         self.instance.blocking_lock().send(actor_id, message)
+    }
+
+    fn send_obj(
+        &self,
+        controller: &PyActorId,
+        ranks: PyRanks,
+        message: Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let ranks = match ranks {
+            PyRanks::Slice(r) => Ranks::Slice(r.into()),
+            PyRanks::SliceList(r) => {
+                if r.is_empty() {
+                    return Err(PyValueError::new_err("Send requires at least one rank"));
+                }
+                Ranks::SliceList(r.into_iter().map(|r| r.into()).collect())
+            }
+        };
+
+        let message = convert(message)?;
+        let message = Serialized::serialize(&message).map_err(|err| {
+            PyRuntimeError::new_err(format!("Failed to serialize message: {err}"))
+        })?;
+        let message = ControllerMessage::Send { ranks, message };
+        let message = PySerialized::new(&message).map_err(|err| {
+            PyRuntimeError::new_err(format!("Failed to serialize message: {err}"))
+        })?;
+        self.instance.blocking_lock().send(controller, &message)
     }
 
     /// Attach the client to a controller actor. This will block until the controller responds.

@@ -62,7 +62,7 @@ impl Node {
 }
 
 #[derive(Clone, FromPyObject)]
-enum PyRanks {
+pub enum PyRanks {
     Slice(PySlice),
     SliceList(Vec<PySlice>),
 }
@@ -87,6 +87,7 @@ impl Send {
                 Ranks::SliceList(r.into_iter().map(|r| r.into()).collect())
             }
         };
+        // println!("send: {:?}", &message.message);
         Ok(Self {
             ranks,
             message: message.to_serialized()?,
@@ -110,10 +111,11 @@ impl Send {
     }
 
     fn serialize(&self) -> PyResult<PySerialized> {
-        PySerialized::new(&ControllerMessage::Send {
+        let msg = ControllerMessage::Send {
             ranks: self.ranks.clone(),
             message: self.message.clone(),
-        })
+        };
+        PySerialized::new(&msg)
     }
 
     #[staticmethod]

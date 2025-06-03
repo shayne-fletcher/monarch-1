@@ -137,6 +137,11 @@ impl Ref {
         Self { id }
     }
 
+    #[getter]
+    fn r#ref(&self) -> u64 {
+        self.id
+    }
+
     fn __repr__(&self) -> String {
         format!("Ref({})", self.id)
     }
@@ -223,7 +228,7 @@ impl<T: Into<String>> From<T> for FunctionPath {
 impl FunctionPath {
     #[new]
     #[pyo3(signature = (*, path))]
-    fn new(path: String) -> Self {
+    pub fn new(path: String) -> Self {
         Self { path }
     }
 
@@ -270,8 +275,8 @@ impl fmt::Display for Cloudpickle {
 impl Cloudpickle {
     #[new]
     #[pyo3(signature = (*, bytes))]
-    fn new(bytes: Vec<u8>) -> PyResult<Self> {
-        Ok(Self { bytes })
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
     }
 
     fn __repr__(&self) -> String {
@@ -425,6 +430,17 @@ impl Factory {
             layout: layout.extract::<Layout>(py)?,
             device: device.extract::<Device>(py)?,
         })
+    }
+
+    #[staticmethod]
+    pub fn from_py(obj: Bound<'_, PyAny>) -> PyResult<Self> {
+        Self::new(
+            obj.py(),
+            obj.getattr("size")?.extract()?,
+            obj.getattr("dtype")?.unbind(),
+            obj.getattr("layout")?.unbind(),
+            obj.getattr("device")?.unbind(),
+        )
     }
 
     #[getter]
