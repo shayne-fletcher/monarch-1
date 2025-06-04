@@ -78,6 +78,47 @@ impl SelectionSYM for NormalizedSelection {
     }
 }
 
+impl NormalizedSelection {
+    /// Applies a transformation to each child node of the selection.
+    ///
+    /// This performs a single-layer traversal, applying `f` to each
+    /// immediate child and reconstructing the outer node with the
+    /// transformed children.
+    pub fn trav<F>(self, mut f: F) -> Self
+    where
+        F: FnMut(Self) -> Self,
+    {
+        use NormalizedSelection::*;
+
+        match self {
+            All(inner) => All(Box::new(f(*inner))),
+            First(inner) => First(Box::new(f(*inner))),
+            Any(inner) => Any(Box::new(f(*inner))),
+            Range(r, inner) => Range(r, Box::new(f(*inner))),
+            Label(labels, inner) => Label(labels, Box::new(f(*inner))),
+            Union(set) => Union(set.into_iter().map(f).collect()),
+            Intersection(set) => Intersection(set.into_iter().map(f).collect()),
+            leaf @ (True | False) => leaf,
+        }
+    }
+}
+
+/// A trait representing a single bottom-up rewrite rule on normalized
+/// selections.
+///
+/// Implementors define a transformation step applied after children
+/// have been rewritten. These rules are composed into normalization
+/// passes (see [`normalize`]) to simplify or canonicalize selection
+/// expressions.
+///
+/// This trait forms the basis for extensible normalization. Future
+/// systems may support top-down or contextual rewrites as well.
+pub trait RewriteRule {
+    /// Applies a rewrite step to a node whose children have already
+    /// been recursively rewritten.
+    fn rewrite(&self, node: NormalizedSelection) -> NormalizedSelection;
+}
+
 impl From<NormalizedSelection> for Selection {
     /// Converts the normalized form back into a standard `Selection`.
     ///
@@ -107,6 +148,66 @@ impl From<NormalizedSelection> for Selection {
             Range(r, inner) => Selection::range(r, (*inner).into()),
             Label(labels, inner) => Selection::label(labels, (*inner).into()),
         }
+    }
+}
+
+/// A normalization rule that applies simple algebraic identities.
+#[derive(Default)]
+pub struct IdentityRules;
+
+impl RewriteRule for IdentityRules {
+    // Identity rewrites:
+    //
+    // - All(All(x))           → All(x)    // idempotence
+    // - All(True)             → True      // identity
+    // - All(False)            → False     // passthrough
+    // - Intersection(True, x) → x         // identity
+    // - Intersection({x})     → x         // trivial
+    // - Intersection({})      → True      // identity
+    // - Union(False, x)       → x         // identity
+    // - Union({x})            → x         // trivial
+    // - Union({})             → False     // trivial
+    //
+    // Absorbtion rules like `Union(True, x) → x` are handled in a
+    // different rewrite.
+    fn rewrite(&self, node: NormalizedSelection) -> NormalizedSelection {
+        use NormalizedSelection::*;
+
+        match node {
+            All(inner) => match *inner {
+                All(grandchild) => All(grandchild), // All(All(x)) → All(x)
+                True => True,                       // All(True) → True
+                False => False,                     // All(False) → False
+                _ => All(inner),
+            },
+
+            Intersection(mut set) => {
+                set.remove(&True); // Intersection(True, ...)  → ...
+                match set.len() {
+                    0 => True,
+                    1 => set.into_iter().next().unwrap(), // Intersection(x) → x
+                    _ => Intersection(set),
+                }
+            }
+
+            Union(mut set) => {
+                set.remove(&False); // Union(False, ...) → ...
+                match set.len() {
+                    0 => False,
+                    1 => set.into_iter().next().unwrap(), // Union(x) → x
+                    _ => Union(set),
+                }
+            }
+
+            _ => node,
+        }
+    }
+}
+
+impl NormalizedSelection {
+    pub fn rewrite_bottom_up(self, rule: &impl RewriteRule) -> Self {
+        let mapped = self.trav(|child| child.rewrite_bottom_up(rule));
+        rule.rewrite(mapped)
     }
 }
 
@@ -142,5 +243,22 @@ mod tests {
         let expected = all(true_());
 
         assert_structurally_eq!(&reified, &expected);
+    }
+
+    #[test]
+    fn normalize_smoke_test() {
+        use crate::assert_structurally_eq;
+        use crate::selection::dsl::*;
+        use crate::selection::normalize;
+        use crate::selection::parse::parse;
+
+        // The expression (*,*) | (*,*) parses as
+        // Union(All(All(True)), All(All(True))) and normalizes all
+        // the way down to True.
+        let sel = parse("(*,*) | (*,*)").unwrap();
+        let normed = normalize(&sel);
+        let expected = true_();
+
+        assert_structurally_eq!(&normed.into(), &expected);
     }
 }
