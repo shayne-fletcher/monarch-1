@@ -11,6 +11,7 @@ use std::sync::Arc;
 use hyperactor::WorldId;
 use hyperactor_extension::alloc::PyAlloc;
 use hyperactor_mesh::alloc::Alloc;
+use hyperactor_mesh::alloc::ProcStopReason;
 use hyperactor_mesh::proc_mesh::ProcEvent;
 use hyperactor_mesh::proc_mesh::ProcEvents;
 use hyperactor_mesh::proc_mesh::ProcMesh;
@@ -87,9 +88,18 @@ impl PyProcMesh {
     /// to stderr and exit with code 1.
     async fn monitor_proc_mesh(mut events: ProcEvents, world_id: WorldId) {
         while let Some(event) = events.next().await {
-            if let ProcEvent::Crashed(rank, reason) = event {
-                eprintln!("ProcMesh {} rank {} crashed: {}", world_id, rank, reason);
-                std::process::exit(1);
+            match event {
+                // A graceful stop should not be cause for alarm, but
+                // everything else should be considered a crash.
+                ProcEvent::Stopped(_, ProcStopReason::Stopped) => continue,
+                ProcEvent::Crashed(rank, reason) => {
+                    eprintln!("ProcMesh {} rank {} crashed: {}", world_id, rank, reason);
+                    std::process::exit(1);
+                }
+                ProcEvent::Stopped(rank, reason) => {
+                    eprintln!("ProcMesh {} rank {} crashed: {}", world_id, rank, reason);
+                    std::process::exit(1);
+                }
             }
         }
     }

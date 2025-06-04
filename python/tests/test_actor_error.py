@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import importlib.resources
+import subprocess
+
 import pytest
 from monarch.actor_mesh import Actor, ActorMeshRefCallFailedException, endpoint
 
@@ -11,7 +14,7 @@ from monarch.proc_mesh import proc_mesh
 
 
 class ExceptionActor(Actor):
-    """An actor that has an endpoint which raises an exception."""
+    """An actor that has endpoints which raise exceptions or cause segfaults."""
 
     @endpoint
     async def raise_exception(self) -> None:
@@ -20,7 +23,7 @@ class ExceptionActor(Actor):
 
 
 class ExceptionActorSync(Actor):
-    """An actor that has an endpoint which raises an exception."""
+    """An actor that has endpoints which raise exceptions or cause segfaults."""
 
     @endpoint  # pyre-ignore
     def raise_exception(self) -> None:
@@ -74,3 +77,34 @@ def test_actor_exception_sync(actor_class, actor_name, num_procs):
             exception_actor.raise_exception.call_one().get()
         else:
             exception_actor.raise_exception.call().get()
+
+
+# oss_skip: importlib not pulling resource correctly in git CI, needs to be revisited
+@pytest.mark.oss_skip
+@pytest.mark.parametrize("num_procs", [1, 2])
+@pytest.mark.parametrize("sync_endpoint", [False, True])
+@pytest.mark.parametrize("sync_test_impl", [False, True])
+def test_actor_segfault(num_procs, sync_endpoint, sync_test_impl):
+    """
+    Test that segfaults in actor endpoints result in a non-zero exit code.
+    This test spawns a subprocess that will segfault and checks its exit code.
+
+    Tests both ExceptionActor and ExceptionActorSync using async API.
+    """
+    # Run the segfault test in a subprocess
+    test_bin = importlib.resources.files("monarch.python.tests").joinpath("test_bin")
+    cmd = [
+        str(test_bin),
+        f"--num-procs={num_procs}",
+        f"--sync-endpoint={sync_endpoint}",
+        f"--sync-test-impl={sync_test_impl}",
+    ]
+    process = subprocess.run(cmd, capture_output=True, timeout=60)
+    print(process.stdout.decode())
+    print(process.stderr.decode())
+
+    # Assert that the subprocess exited with a non-zero code
+    assert "I actually ran" in process.stdout.decode()
+    assert (
+        process.returncode != 0
+    ), f"Expected non-zero exit code, got {process.returncode}"

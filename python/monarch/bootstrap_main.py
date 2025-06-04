@@ -57,12 +57,15 @@ def invoke_main():
     if os.environ.get("MONARCH_PYTHON_LOG_TRACING", "1") == "1":
         logging.root.addHandler(TracingForwarder())
 
-    with (
-        importlib.resources.path("monarch", "py-spy") as pyspy,
-    ):
-        if pyspy.exists():
-            os.environ["PYSPY_BIN"] = str(pyspy)
-        # fallback to using local py-spy
+    try:
+        with (
+            importlib.resources.path("monarch", "py-spy") as pyspy,
+        ):
+            if pyspy.exists():
+                os.environ["PYSPY_BIN"] = str(pyspy)
+            # fallback to using local py-spy
+    except Exception as e:
+        logging.warning(f"Failed to set up py-spy: {e}")
 
     # Start an event loop for PythonActors to use.
     asyncio.run(main())

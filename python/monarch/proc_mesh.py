@@ -20,7 +20,7 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
 from monarch.actor_mesh import _Actor, _ActorMeshRefImpl, Actor, ActorMeshRef
 
-from monarch.python_local_mesh import _local_device_count
+from monarch.common._device_utils import _local_device_count
 from monarch.rdma import RDMAManager
 
 T = TypeVar("T")
