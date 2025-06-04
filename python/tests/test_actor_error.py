@@ -14,7 +14,7 @@ from monarch.proc_mesh import proc_mesh
 
 
 class ExceptionActor(Actor):
-    """An actor that has endpoints which raise exceptions or cause segfaults."""
+    """An actor that has endpoints which raise exceptions."""
 
     @endpoint
     async def raise_exception(self) -> None:
@@ -23,7 +23,7 @@ class ExceptionActor(Actor):
 
 
 class ExceptionActorSync(Actor):
-    """An actor that has endpoints which raise exceptions or cause segfaults."""
+    """An actor that has endpoints which raise exceptions."""
 
     @endpoint  # pyre-ignore
     def raise_exception(self) -> None:
@@ -84,7 +84,8 @@ def test_actor_exception_sync(actor_class, actor_name, num_procs):
 @pytest.mark.parametrize("num_procs", [1, 2])
 @pytest.mark.parametrize("sync_endpoint", [False, True])
 @pytest.mark.parametrize("sync_test_impl", [False, True])
-def test_actor_segfault(num_procs, sync_endpoint, sync_test_impl):
+@pytest.mark.parametrize("endpoint_name", ["cause_segfault", "cause_panic"])
+def test_actor_segfault(num_procs, sync_endpoint, sync_test_impl, endpoint_name):
     """
     Test that segfaults in actor endpoints result in a non-zero exit code.
     This test spawns a subprocess that will segfault and checks its exit code.
@@ -98,6 +99,7 @@ def test_actor_segfault(num_procs, sync_endpoint, sync_test_impl):
         f"--num-procs={num_procs}",
         f"--sync-endpoint={sync_endpoint}",
         f"--sync-test-impl={sync_test_impl}",
+        f"--endpoint-name={endpoint_name}",
     ]
     process = subprocess.run(cmd, capture_output=True, timeout=60)
     print(process.stdout.decode())
