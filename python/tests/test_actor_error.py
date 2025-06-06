@@ -81,9 +81,6 @@ def test_actor_supervision(num_procs, sync_endpoint, sync_test_impl, endpoint_na
     to exit with a non-zero code, so the only way we can test it is via a
     subprocess harness.
     """
-    if endpoint_name == "cause_panic" and sync_endpoint is False:
-        pytest.skip("TODO debug this combination")
-
     # Run the segfault test in a subprocess
     test_bin = importlib.resources.files("monarch.python.tests").joinpath("test_bin")
     cmd = [

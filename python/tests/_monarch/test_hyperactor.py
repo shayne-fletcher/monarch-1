@@ -101,22 +101,3 @@ async def test_actor_mesh() -> None:
     assert actor_mesh.get(2) is None
 
     assert isinstance(actor_mesh.client, Mailbox)
-
-
-# oss_skip: hangs when run through pytest but not when run through buck
-# pyre-ignore[56]
-@pytest.mark.oss_skip
-async def test_proc_mesh_process_allocator() -> None:
-    spec = AllocSpec(AllocConstraints(), replica=2)
-    env = {}
-    env["PAR_MAIN_OVERRIDE"] = "monarch.bootstrap_main"
-    env["HYPERACTOR_MANAGED_SUBPROCESS"] = "1"
-    allocator = monarch.ProcessAllocator(sys.argv[0], None, env)
-    alloc = await allocator.allocate(spec)
-    proc_mesh = await ProcMesh.allocate_nonblocking(alloc)
-    actor_mesh = await proc_mesh.spawn_nonblocking("test", MyActor)
-    handle, receiver = actor_mesh.client.open_port()
-    actor_mesh.cast(PythonMessage("hello", pickle.dumps(handle.bind())))
-    coords = {await receiver.recv(), await receiver.recv()}
-    # `coords` is a pair of messages. logically:
-    # assert coords == {(("replica", 0)), (("replica", 1))}

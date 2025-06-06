@@ -39,7 +39,7 @@ from typing import (
 import monarch
 from monarch import ActorFuture as Future
 
-from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
+from monarch._rust_bindings.monarch_hyperactor.actor import PanicFlag, PythonMessage
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
@@ -462,12 +462,12 @@ class _Actor:
     def __init__(self) -> None:
         self.instance: object | None = None
         self.active_requests: asyncio.Queue[asyncio.Future[object]] = asyncio.Queue()
-        self.complete_task: object | None = None
+        self.complete_task: asyncio.Task | None = None
 
     def handle(
-        self, mailbox: Mailbox, message: PythonMessage
+        self, mailbox: Mailbox, message: PythonMessage, panic_flag: PanicFlag
     ) -> Optional[Coroutine[Any, Any, Any]]:
-        return self.handle_cast(mailbox, 0, singleton_shape, message)
+        return self.handle_cast(mailbox, 0, singleton_shape, message, panic_flag)
 
     def handle_cast(
         self,
@@ -475,6 +475,7 @@ class _Actor:
         rank: int,
         shape: Shape,
         message: PythonMessage,
+        panic_flag: PanicFlag,
     ) -> Optional[Coroutine[Any, Any, Any]]:
         port = None
         try:
@@ -495,7 +496,7 @@ class _Actor:
                         port.send("result", result)
                     return None
 
-                return self.run_async(ctx, self.run_task(port, result))
+                return self.run_async(ctx, self.run_task(port, result, panic_flag))
         except Exception as e:
             traceback.print_exc()
             s = ActorMeshRefCallFailedException(e)
@@ -510,10 +511,10 @@ class _Actor:
     async def run_async(self, ctx, coroutine):
         _context.set(ctx)
         if self.complete_task is None:
-            asyncio.create_task(self._complete())
+            self.complete_task = asyncio.create_task(self._complete())
         await self.active_requests.put(create_eager_task(coroutine))
 
-    async def run_task(self, port, coroutine):
+    async def run_task(self, port, coroutine, panic_flag):
         try:
             result = await coroutine
             if port is not None:
@@ -528,6 +529,16 @@ class _Actor:
                 port.send("exception", s)
             else:
                 raise s from None
+        except BaseException as e:
+            # A BaseException can be thrown in the case of a Rust panic.
+            # In this case, we need a way to signal the panic to the Rust side.
+            # See [Panics in async endpoints]
+            try:
+                panic_flag.signal_panic(e)
+            except Exception:
+                # The channel might be closed if the Rust side has already detected the error
+                pass
+            raise
 
     async def _complete(self) -> None:
         while True:

@@ -6,6 +6,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::future::Future;
+use std::future::pending;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -22,6 +24,7 @@ use hyperactor::message::IndexedErasedUnbound;
 use hyperactor::message::Unbind;
 use hyperactor_mesh::actor_mesh::Cast;
 use monarch_types::PickledPyObject;
+use pyo3::exceptions::PyBaseException;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -32,6 +35,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_bytes::ByteBuf;
 use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 
 use crate::mailbox::PyMailbox;
 use crate::proc::InstanceWrapper;
@@ -284,6 +288,90 @@ fn get_task_locals(py: Python) -> &'static pyo3_async_runtimes::TaskLocals {
     })
 }
 
+// [Panics in async endpoints]
+// This class exists to solve a deadlock when an async endpoint calls into some
+// Rust code that panics.
+//
+// When an async endpoint is invoked and calls into Rust, the following sequence happens:
+//
+// hyperactor message -> PythonActor::handle() -> call _Actor.handle() in Python
+//   -> convert the resulting coroutine into a Rust future, but scheduled on
+//      the Python asyncio event loop (`into_future_with_locals`)
+//   -> set a callback on Python asyncio loop to ping a channel that fulfills
+//      the Rust future when the Python coroutine has finished. ('PyTaskCompleter`)
+//
+// This works fine for normal results and Python exceptions: we will take the
+// result of the callback and send it through the channel, where it will be
+// returned to the `await`er of the Rust future.
+//
+// This DOESN'T work for panics. The behavior of a panic in pyo3-bound code is
+// that it will get caught by pyo3 and re-thrown to Python as a PanicException.
+// And if that PanicException ever makes it back to Rust, it will get unwound
+// instead of passed around as a normal PyErr type.
+//
+// So:
+//   - Endpoint panics.
+//   - This panic is captured as a PanicException in Python and
+//     stored as the result of the Python asyncio task.
+//   - When the callback in `PyTaskCompleter` queries the status of the task to
+//     pass it back to the Rust awaiter, instead of getting a Result type, it
+//     just starts resumes unwinding the PanicException
+//   - This triggers a deadlock, because the whole task dies without ever
+//     pinging the response channel, and the Rust awaiter will never complete.
+//
+// We work around this by passing a side-channel to our Python task so that it,
+// in Python, can catch the PanicException and notify the Rust awaiter manually.
+// In this way we can guarantee that the awaiter will complete even if the
+// `PyTaskCompleter` callback explodes.
+#[pyclass(module = "monarch._rust_bindings.monarch_hyperactor.actor")]
+struct PanicFlag {
+    sender: Option<tokio::sync::oneshot::Sender<PyObject>>,
+}
+
+#[pymethods]
+impl PanicFlag {
+    fn signal_panic(&mut self, ex: PyObject) {
+        self.sender.take().unwrap().send(ex).unwrap();
+    }
+}
+
+// Drive `future` to completion, but listen to `side_channel` and error out if
+// there's we hear anything from it.
+async fn drive_future(
+    future: impl Future<Output = PyResult<PyObject>> + Send,
+    side_channel: oneshot::Receiver<PyObject>,
+) -> anyhow::Result<()> {
+    let err_or_never = async {
+        match side_channel.await {
+            Ok(value) => Python::with_gil(|py| -> anyhow::Result<()> {
+                let err: PyErr = value
+                    .downcast_bound::<PyBaseException>(py)
+                    .unwrap()
+                    .clone()
+                    .into();
+                match err.traceback_bound(py) {
+                    None => Err(anyhow::anyhow!("{} <no traceback available>", err)),
+                    Some(traceback) => Err(anyhow::anyhow!("{}: {}", err, traceback.format()?)),
+                }
+            }),
+            // An Err means that the sender has been dropped without sending.
+            // That's okay, it just means that the Python task has completed.
+            // In that case, just never resolve this future. We expect the other
+            // branch of the select to finish eventually.
+            Err(_) => pending().await,
+        }
+    };
+    tokio::select! {
+        result = future => {
+            result?;
+        },
+        result = err_or_never => {
+            result?;
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Handler<PythonMessage> for PythonActor {
     async fn handle(
@@ -291,13 +379,27 @@ impl Handler<PythonMessage> for PythonActor {
         this: &Instance<Self>,
         message: PythonMessage,
     ) -> anyhow::Result<()> {
+        // Create a channel for signaling panics in async endpoints.
+        // See [Panics in async endpoints].
+        let (sender, receiver) = oneshot::channel();
+
         let future = Python::with_gil(|py| -> PyResult<_> {
             let mailbox = PyMailbox {
                 inner: this.mailbox_for_py().clone(),
             };
             let awaitable = tokio::task::block_in_place(|| {
-                self.actor
-                    .call_method_bound(py, "handle", (mailbox, message), None)
+                self.actor.call_method_bound(
+                    py,
+                    "handle",
+                    (
+                        mailbox,
+                        message,
+                        PanicFlag {
+                            sender: Some(sender),
+                        },
+                    ),
+                    None,
+                )
             })?;
 
             if awaitable.is_none(py) {
@@ -309,8 +411,9 @@ impl Handler<PythonMessage> for PythonActor {
             )
             .map(Some)
         })?;
+
         if let Some(future) = future {
-            future.await?;
+            drive_future(future, receiver).await?;
         }
         Ok(())
     }
@@ -327,6 +430,10 @@ impl Handler<Cast<PythonMessage>> for PythonActor {
             shape,
         }: Cast<PythonMessage>,
     ) -> anyhow::Result<()> {
+        // Create a channel for signaling panics in async endpoints.
+        // See [Panics in async endpoints].
+        let (sender, receiver) = oneshot::channel();
+
         let future = Python::with_gil(|py| -> PyResult<_> {
             let mailbox = PyMailbox {
                 inner: this.mailbox_for_py().clone(),
@@ -336,7 +443,15 @@ impl Handler<Cast<PythonMessage>> for PythonActor {
                 self.actor.call_method_bound(
                     py,
                     "handle_cast",
-                    (mailbox, rank.0, PyShape::from(shape), message),
+                    (
+                        mailbox,
+                        rank.0,
+                        PyShape::from(shape),
+                        message,
+                        PanicFlag {
+                            sender: Some(sender),
+                        },
+                    ),
                     None,
                 )
             })?;
@@ -350,8 +465,9 @@ impl Handler<Cast<PythonMessage>> for PythonActor {
             )
             .map(Some)
         })?;
+
         if let Some(future) = future {
-            future.await?;
+            drive_future(future, receiver).await?;
         }
         Ok(())
     }
@@ -362,5 +478,6 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     hyperactor_mod.add_class::<PickledMessageClientActor>()?;
     hyperactor_mod.add_class::<PythonActorHandle>()?;
     hyperactor_mod.add_class::<PythonMessage>()?;
+    hyperactor_mod.add_class::<PanicFlag>()?;
     Ok(())
 }
