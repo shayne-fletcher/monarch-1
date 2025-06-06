@@ -7,6 +7,8 @@
 import ctypes
 import sys
 
+import click
+
 from monarch._rust_bindings.monarch_extension.panic import panicking_function
 
 from monarch.actor_mesh import Actor, endpoint
@@ -115,24 +117,25 @@ def _run_error_test(num_procs, sync_endpoint, endpoint_name):
     asyncio.run(run_test())
 
 
+@click.group()
 def main():
-    import argparse
+    pass
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--num-procs", type=int)
-    parser.add_argument("--sync-test-impl", type=bool)
-    parser.add_argument("--sync-endpoint", type=bool)
-    parser.add_argument("--endpoint-name", type=str)
-    args = parser.parse_args()
 
+@main.command("error-endpoint")
+@click.option("--num-procs", type=int, required=True)
+@click.option("--sync-test-impl", type=bool, required=True)
+@click.option("--sync-endpoint", type=bool, required=True)
+@click.option("--endpoint-name", type=str, required=True)
+def error_endpoint(num_procs, sync_test_impl, sync_endpoint, endpoint_name):
     print(
-        f"Running segfault test: {args.num_procs=} {args.sync_test_impl=} {args.sync_endpoint=}, {args.endpoint_name=}"
+        f"Running segfault test: {num_procs=} {sync_test_impl=} {sync_endpoint=}, {endpoint_name=}"
     )
 
-    if args.sync_test_impl:
-        _run_error_test_sync(args.num_procs, args.sync_endpoint, args.endpoint_name)
+    if sync_test_impl:
+        _run_error_test_sync(num_procs, sync_endpoint, endpoint_name)
     else:
-        _run_error_test(args.num_procs, args.sync_endpoint, args.endpoint_name)
+        _run_error_test(num_procs, sync_endpoint, endpoint_name)
 
 
 if __name__ == "__main__":

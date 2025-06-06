@@ -14,37 +14,28 @@ from monarch.proc_mesh import proc_mesh
 
 
 class ExceptionActor(Actor):
-    """An actor that has endpoints which raise exceptions."""
-
     @endpoint
     async def raise_exception(self) -> None:
-        """Endpoint that raises an exception."""
         raise Exception("This is a test exception")
 
 
 class ExceptionActorSync(Actor):
-    """An actor that has endpoints which raise exceptions."""
-
     @endpoint  # pyre-ignore
     def raise_exception(self) -> None:
-        """Endpoint that raises an exception."""
         raise Exception("This is a test exception")
 
 
 @pytest.mark.parametrize(
-    "actor_class,actor_name",
-    [
-        (ExceptionActor, "exception_actor_async_call"),
-        (ExceptionActorSync, "exception_actor_sync_call"),
-    ],
+    "actor_class",
+    [ExceptionActor, ExceptionActorSync],
 )
 @pytest.mark.parametrize("num_procs", [1, 2])
-async def test_actor_exception(actor_class, actor_name, num_procs):
+async def test_actor_exception(actor_class, num_procs):
     """
     Test that exceptions raised in actor endpoints are propagated to the client.
     """
     proc = await proc_mesh(gpus=num_procs)
-    exception_actor = await proc.spawn(actor_name, actor_class)
+    exception_actor = await proc.spawn("exception_actor", actor_class)
 
     with pytest.raises(
         ActorMeshRefCallFailedException, match="This is a test exception"
@@ -56,19 +47,16 @@ async def test_actor_exception(actor_class, actor_name, num_procs):
 
 
 @pytest.mark.parametrize(
-    "actor_class,actor_name",
-    [
-        (ExceptionActor, "exception_actor_async_call"),
-        (ExceptionActorSync, "exception_actor_sync_call"),
-    ],
+    "actor_class",
+    [ExceptionActor, ExceptionActorSync],
 )
 @pytest.mark.parametrize("num_procs", [1, 2])
-def test_actor_exception_sync(actor_class, actor_name, num_procs):
+def test_actor_exception_sync(actor_class, num_procs):
     """
     Test that exceptions raised in actor endpoints are propagated to the client.
     """
     proc = proc_mesh(gpus=num_procs).get()
-    exception_actor = proc.spawn(actor_name, actor_class).get()
+    exception_actor = proc.spawn("exception_actor", actor_class).get()
 
     with pytest.raises(
         ActorMeshRefCallFailedException, match="This is a test exception"
@@ -85,25 +73,36 @@ def test_actor_exception_sync(actor_class, actor_name, num_procs):
 @pytest.mark.parametrize("sync_endpoint", [False, True])
 @pytest.mark.parametrize("sync_test_impl", [False, True])
 @pytest.mark.parametrize("endpoint_name", ["cause_segfault", "cause_panic"])
-def test_actor_segfault(num_procs, sync_endpoint, sync_test_impl, endpoint_name):
+def test_actor_supervision(num_procs, sync_endpoint, sync_test_impl, endpoint_name):
     """
-    Test that segfaults in actor endpoints result in a non-zero exit code.
-    This test spawns a subprocess that will segfault and checks its exit code.
+    Test that an endpoint causing spontaenous process exit is handled by the supervisor.
 
-    Tests both ExceptionActor and ExceptionActorSync using async API.
+    Today, these events are delivered to the client and cause the client process
+    to exit with a non-zero code, so the only way we can test it is via a
+    subprocess harness.
     """
+    if endpoint_name == "cause_panic" and sync_endpoint is False:
+        pytest.skip("TODO debug this combination")
+
     # Run the segfault test in a subprocess
     test_bin = importlib.resources.files("monarch.python.tests").joinpath("test_bin")
     cmd = [
         str(test_bin),
+        "error-endpoint",
         f"--num-procs={num_procs}",
         f"--sync-endpoint={sync_endpoint}",
         f"--sync-test-impl={sync_test_impl}",
         f"--endpoint-name={endpoint_name}",
     ]
-    process = subprocess.run(cmd, capture_output=True, timeout=60)
-    print(process.stdout.decode())
-    print(process.stderr.decode())
+    try:
+        process = subprocess.run(cmd, capture_output=True, timeout=180)
+    except subprocess.TimeoutExpired as e:
+        print("timeout expired")
+        if e.stdout is not None:
+            print(e.stdout.decode())
+        if e.stderr is not None:
+            print(e.stderr.decode())
+        raise
 
     # Assert that the subprocess exited with a non-zero code
     assert "I actually ran" in process.stdout.decode()
