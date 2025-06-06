@@ -136,11 +136,12 @@ impl ProcMesh {
                         rank
                     );
                 }
+                // TODO: We should push responsibility to the allocator, which
+                // can choose to either provide a new proc or emit a
+                // ProcState::Failed to fail the whole allocation.
                 ProcState::Stopped { proc_id, reason } => {
-                    if let Some(rank) = proc_ids.unassign(proc_id.clone()) {
-                        let _ = running.remove(rank);
-                        tracing::info!("proc {} rank {}: stopped: {}", proc_id, rank, reason);
-                    }
+                    tracing::error!("allocation failed for proc_id {}: {}", proc_id, reason);
+                    return Err(AllocatorError::Other(anyhow::Error::msg(reason)));
                 }
                 ProcState::Failed {
                     world_id,

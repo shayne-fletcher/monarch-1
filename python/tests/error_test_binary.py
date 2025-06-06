@@ -138,5 +138,13 @@ def error_endpoint(num_procs, sync_test_impl, sync_endpoint, endpoint_name):
         _run_error_test(num_procs, sync_endpoint, endpoint_name)
 
 
+@main.command("error-bootstrap")
+def error_bootstrap():
+    print("I actually ran")
+    sys.stdout.flush()
+
+    proc_mesh(gpus=4, env={"MONARCH_ERROR_DURING_BOOTSTRAP_FOR_TESTING": "1"}).get()
+
+
 if __name__ == "__main__":
     main()

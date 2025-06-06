@@ -106,3 +106,32 @@ def test_actor_supervision(num_procs, sync_endpoint, sync_test_impl, endpoint_na
     assert (
         process.returncode != 0
     ), f"Expected non-zero exit code, got {process.returncode}"
+
+
+# oss_skip: importlib not pulling resource correctly in git CI, needs to be revisited
+@pytest.mark.oss_skip
+def test_proc_mesh_bootstrap_error():
+    """
+    Test that attempts to spawn a ProcMesh with a failure during bootstrap.
+    """
+    # Run the segfault test in a subprocess
+    test_bin = importlib.resources.files("monarch.python.tests").joinpath("test_bin")
+    cmd = [
+        str(test_bin),
+        "error-bootstrap",
+    ]
+    try:
+        process = subprocess.run(cmd, capture_output=True, timeout=180)
+    except subprocess.TimeoutExpired as e:
+        print("timeout expired")
+        if e.stdout is not None:
+            print(e.stdout.decode())
+        if e.stderr is not None:
+            print(e.stderr.decode())
+        raise
+
+    # Assert that the subprocess exited with a non-zero code
+    assert "I actually ran" in process.stdout.decode()
+    assert (
+        process.returncode != 0
+    ), f"Expected non-zero exit code, got {process.returncode}"

@@ -53,6 +53,9 @@ def invoke_main():
                     record.levelno,
                 )
 
+    if os.environ.get("MONARCH_ERROR_DURING_BOOTSTRAP_FOR_TESTING") == "1":
+        raise RuntimeError("Error during bootstrap for testing")
+
     # forward logs to rust tracing. Defaults to on.
     if os.environ.get("MONARCH_PYTHON_LOG_TRACING", "1") == "1":
         logging.root.addHandler(TracingForwarder())
