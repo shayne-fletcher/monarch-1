@@ -6,10 +6,7 @@
 
 import ctypes
 
-import traceback
-
 from dataclasses import dataclass
-from traceback import extract_tb, StackSummary
 from typing import cast, Dict, Optional, Tuple
 
 import torch
@@ -163,28 +160,3 @@ class RDMABuffer:
             src.numel(),
         )
         await RDMAManager.on_proc(self.proc_id).put.call_one(self.addr, offset, bytes)
-
-
-class ActorMeshRefCallFailedException(Exception):
-    """
-    Deterministic problem with the user's code.
-    For example, an OOM resulting in trying to allocate too much GPU memory, or violating
-    some invariant enforced by the various APIs.
-    """
-
-    def __init__(
-        self,
-        exception: Exception,
-        message: str = "A remote service call has failed asynchronously.",
-    ) -> None:
-        self.exception = exception
-        self.actor_mesh_ref_frames: StackSummary = extract_tb(exception.__traceback__)
-        self.message = message
-
-    def __str__(self) -> str:
-        exe = str(self.exception)
-        actor_mesh_ref_tb = "".join(traceback.format_list(self.actor_mesh_ref_frames))
-        return (
-            f"{self.message}\n"
-            f"Traceback of where the service call failed (most recent call last):\n{actor_mesh_ref_tb}{type(self.exception).__name__}: {exe}"
-        )

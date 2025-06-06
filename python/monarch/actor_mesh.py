@@ -499,7 +499,7 @@ class _Actor:
                 return self.run_async(ctx, self.run_task(port, result, panic_flag))
         except Exception as e:
             traceback.print_exc()
-            s = ActorMeshRefCallFailedException(e)
+            s = ActorError(e)
 
             # The exception is delivered to exactly one of:
             # (1) our caller, (2) our supervisor
@@ -521,7 +521,7 @@ class _Actor:
                 port.send("result", result)
         except Exception as e:
             traceback.print_exc()
-            s = ActorMeshRefCallFailedException(e)
+            s = ActorError(e)
 
             # The exception is delivered to exactly one of:
             # (1) our caller, (2) our supervisor
@@ -666,7 +666,7 @@ class ActorMeshRef(MeshTrait):
         )
 
 
-class ActorMeshRefCallFailedException(Exception):
+class ActorError(Exception):
     """
     Deterministic problem with the user's code.
     For example, an OOM resulting in trying to allocate too much GPU memory, or violating
