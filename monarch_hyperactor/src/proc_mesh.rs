@@ -24,6 +24,7 @@ use pyo3::types::PyType;
 use crate::actor_mesh::PythonActorMesh;
 use crate::mailbox::PyMailbox;
 use crate::runtime::signal_safe_block_on;
+use crate::shape::PyShape;
 
 #[pyclass(
     name = "ProcMesh",
@@ -176,6 +177,11 @@ impl PyProcMesh {
 
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!("<ProcMesh {}>", self.inner))
+    }
+
+    #[getter]
+    fn shape(&self) -> PyShape {
+        self.inner.shape().clone().into()
     }
 }
 

@@ -97,7 +97,7 @@ class RemoteProcessGroup(Referenceable):
         self._drop_ref()
 
     def size(self):
-        return self.device_mesh.numdevices(self.dims)
+        return self.device_mesh.size(self.dims)
 
     def _drop_ref(self):
         if self.ref is None:
@@ -171,21 +171,6 @@ class DeviceMesh(Referenceable, MeshTrait):
         self.exit = lambda: None
         self.ref = None
         self._active_mesh_context = None
-
-    def numdevices(self, dims: Optional[Dims] = None) -> int:
-        """
-        Returns the number of devices (total) of the subset of mesh asked for.
-        If dims is None, returns the total number of devices in the mesh.
-        """
-        if dims is None:
-            dims = self.names
-        missing_dims = set(dims) - set(self.names)
-        if missing_dims:
-            raise ValueError(f"Dimensions not found: {', '.join(missing_dims)}")
-        product = 1
-        for dim in dims:
-            product *= self.size(dim)
-        return product
 
     def define_remotely(self):
         if self.ref is None:
@@ -275,24 +260,9 @@ class DeviceMesh(Referenceable, MeshTrait):
             combined_rank += self.rank(dim)
         return combined_rank
 
-    def size(self, dim: Union[str, Sequence[str]]) -> int:
-        if isinstance(dim, str):
-            if dim not in self.names:
-                raise KeyError(f"{self} does not have dimension {repr(dim)}")
-            return self.processes.sizes[self.names.index(dim)]
-        else:
-            p = 1
-            for d in dim:
-                p *= self.size(d)
-            return p
-
     @property
     def ranks(self) -> dict[str, int]:
         return {dim: self.rank(dim) for dim in self.names}
-
-    @property
-    def sizes(self) -> dict[str, int]:
-        return dict(zip(self.names, self.processes.sizes))
 
     def process_idx(self):
         self.define_remotely()

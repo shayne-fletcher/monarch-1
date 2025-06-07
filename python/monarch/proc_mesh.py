@@ -18,9 +18,11 @@ from monarch._rust_bindings.hyperactor_extension.alloc import (  # @manual=//mon
 )
 from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
+from monarch._rust_bindings.monarch_hyperactor.shape import Shape
 from monarch.actor_mesh import _Actor, _ActorMeshRefImpl, Actor, ActorMeshRef
 
 from monarch.common._device_utils import _local_device_count
+from monarch.common.shape import MeshTrait
 from monarch.rdma import RDMAManager
 
 T = TypeVar("T")
@@ -40,11 +42,22 @@ def _allocate_blocking(alloc: Alloc) -> "ProcMesh":
     return ProcMesh(HyProcMesh.allocate_blocking(alloc))
 
 
-class ProcMesh:
+class ProcMesh(MeshTrait):
     def __init__(self, hy_proc_mesh: HyProcMesh) -> None:
         self._proc_mesh = hy_proc_mesh
         self._mailbox: Mailbox = self._proc_mesh.client
         self._rdma_manager = self._spawn_blocking("rdma_manager", RDMAManager)
+
+    @property
+    def _ndslice(self):
+        return self._proc_mesh.shape.ndslice
+
+    @property
+    def _labels(self):
+        return self._proc_mesh.shape.labels
+
+    def _new_with_shape(self, shape: Shape) -> "ProcMesh":
+        raise NotImplementedError("ProcMesh slicing is not implemeted yet.")
 
     def spawn(self, name: str, Class: Type[T], *args: Any, **kwargs: Any) -> Future[T]:
         return Future(

@@ -8,7 +8,7 @@ import itertools
 import operator
 from abc import ABC, abstractmethod
 
-from typing import Dict, Generator, Sequence, Tuple
+from typing import Dict, Generator, Sequence, Tuple, Union
 
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
 
@@ -199,6 +199,28 @@ class MeshTrait(ABC):
             new_mesh = mesh.rename(host='dp', gpu='tp')
         """
         return self.split(**{k: (v,) for k, v in kwargs.items()})
+
+    def size(self, dim: Union[None, str, Sequence[str]] = None) -> int:
+        """
+        Returns the number of elements (total) of the subset of mesh asked for.
+        If dims is None, returns the total number of devices in the mesh.
+        """
+
+        if dim is None:
+            dim = self._labels
+        if isinstance(dim, str):
+            if dim not in self._labels:
+                raise KeyError(f"{self} does not have dimension {repr(dim)}")
+            return self._ndslice.sizes[self._labels.index(dim)]
+        else:
+            p = 1
+            for d in dim:
+                p *= self.size(d)
+            return p
+
+    @property
+    def sizes(self) -> dict[str, int]:
+        return dict(zip(self._labels, self._ndslice.sizes))
 
 
 __all__ = ["NDSlice", "Shape", "MeshTrait"]
