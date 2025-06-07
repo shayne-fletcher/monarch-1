@@ -8,7 +8,7 @@
 
 from typing import final, List, Protocol
 
-from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
+from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox, PortId
 
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId, Proc, Serialized
 
@@ -97,7 +97,13 @@ class PythonMessage:
     the arguments to the method.
     """
 
-    def __init__(self, method: str, message: bytes) -> None: ...
+    def __init__(
+        self,
+        method: str,
+        message: bytes,
+        response_port: PortId | None = None,
+        rank_in_response: bool = False,
+    ) -> None: ...
     @property
     def method(self) -> str:
         """The method of the message."""
@@ -106,6 +112,16 @@ class PythonMessage:
     @property
     def message(self) -> bytes:
         """The pickled arguments."""
+        ...
+
+    @property
+    def response_port(self) -> PortId | None:
+        """The response port."""
+        ...
+
+    @property
+    def rank_in_response(self) -> bool:
+        """Whether or not to include the rank of the handling actor in the response."""
         ...
 
 @final

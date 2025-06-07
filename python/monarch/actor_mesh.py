@@ -264,9 +264,9 @@ class Endpoint(Generic[P, R]):
         return self.choose(*args, **kwargs)
 
     def call(self, *args: P.args, **kwargs: P.kwargs) -> "Future[ValueMesh[R]]":
-        p, r = port(self, kind=RankedPort)
+        p, r = port(self)
         # pyre-ignore
-        send(self, args, kwargs, port=p)
+        send(self, args, kwargs, port=p, rank_in_response=True)
 
         async def process():
             results = [None] * len(self._actor_mesh)
@@ -361,8 +361,9 @@ def send(
     endpoint: Endpoint[P, R],
     args: Tuple[Any, ...],
     kwargs: Dict[str, Any],
-    port: "Optional[Port]" = None,
+    port: "Optional[PortId]" = None,
     selection: Selection = "all",
+    rank_in_response: bool = False,
 ) -> None:
     """
     Fire-and-forget broadcast invocation of the endpoint across all actors in the mesh.
@@ -370,7 +371,9 @@ def send(
     This sends the message to all actors but does not wait for any result.
     """
     endpoint._signature.bind(None, *args, **kwargs)
-    message = PythonMessage(endpoint._name, _pickle((args, kwargs, port)))
+    message = PythonMessage(
+        endpoint._name, _pickle((args, kwargs)), port, rank_in_response
+    )
     endpoint._actor_mesh.cast(message, selection)
 
 
@@ -392,28 +395,29 @@ def endpoint(
 
 
 class Port:
-    def __init__(self, port: PortId, mailbox: Mailbox) -> None:
+    def __init__(self, port: PortId, mailbox: Mailbox, rank_in_response: bool) -> None:
         self._port = port
         self._mailbox = mailbox
+        self._rank_in_response = rank_in_response
 
     def send(self, method: str, obj: object) -> None:
+        if self._rank_in_response:
+            obj = (MonarchContext.get().point.rank, obj)
         self._mailbox.post(
             self._port,
-            PythonMessage(method, _pickle(obj)),
+            PythonMessage(method, _pickle(obj), None),
         )
 
 
 # advance lower-level API for sending messages. This is intentially
 # not part of the Endpoint API because they way it accepts arguments
 # and handles concerns is different.
-def port(
-    endpoint: Endpoint[P, R], once=False, kind=Port
-) -> Tuple["Port", "PortReceiver[R]"]:
+def port(endpoint: Endpoint[P, R], once=False) -> Tuple["PortId", "PortReceiver[R]"]:
     handle, receiver = (
         endpoint._mailbox.open_once_port() if once else endpoint._mailbox.open_port()
     )
     port_id: PortId = handle.bind()
-    return kind(port_id, endpoint._mailbox), PortReceiver(endpoint._mailbox, receiver)
+    return port_id, PortReceiver(endpoint._mailbox, receiver)
 
 
 class PortReceiver(Generic[R]):
@@ -439,8 +443,8 @@ class PortReceiver(Generic[R]):
         else:
             assert msg.method == "exception"
             if isinstance(payload, tuple):
-                # If we're receiving on a RankedPort, raise the exception and ignore the rank.
-                # pyre-ignore do something more structured here
+                # If the payload is a tuple, it's because we requested the rank
+                # to be included in the response; just ignore it.
                 raise payload[1]
             else:
                 # pyre-ignore
@@ -451,11 +455,6 @@ class PortReceiver(Generic[R]):
 
 
 singleton_shape = Shape([], NDSlice(offset=0, sizes=[], strides=[]))
-
-
-class RankedPort(Port):
-    def send(self, method: str, obj: object) -> None:
-        super().send(method, (MonarchContext.get().point.rank, obj))
 
 
 class _Actor:
@@ -477,13 +476,16 @@ class _Actor:
         message: PythonMessage,
         panic_flag: PanicFlag,
     ) -> Optional[Coroutine[Any, Any, Any]]:
-        port = None
+        port = (
+            Port(message.response_port, mailbox, message.rank_in_response)
+            if message.response_port
+            else None
+        )
         try:
-            args, kwargs, port = _unpickle(message.message, mailbox)
-
             ctx = MonarchContext(mailbox, mailbox.actor_id.proc_id, Point(rank, shape))
             _context.set(ctx)
 
+            args, kwargs = _unpickle(message.message, mailbox)
             if message.method == "__init__":
                 Class, *args = args
                 self.instance = Class(*args, **kwargs)
@@ -638,7 +640,6 @@ class ActorMeshRef(MeshTrait):
             null_func,
             self._mailbox,
         )
-        # pyre-ignore
         send(ep, (self._class, *args), kwargs)
 
     def __reduce_ex__(

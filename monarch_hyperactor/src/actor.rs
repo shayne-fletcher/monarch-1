@@ -18,6 +18,7 @@ use hyperactor::ActorId;
 use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
+use hyperactor::PortId;
 use hyperactor::message::Bind;
 use hyperactor::message::Bindings;
 use hyperactor::message::IndexedErasedUnbound;
@@ -169,6 +170,8 @@ impl PickledMessageClientActor {
 pub struct PythonMessage {
     method: String,
     message: ByteBuf,
+    response_port: Option<PortId>,
+    rank_in_response: bool,
 }
 
 impl std::fmt::Debug for PythonMessage {
@@ -198,11 +201,18 @@ impl Bind for PythonMessage {
 #[pymethods]
 impl PythonMessage {
     #[new]
-    #[pyo3(signature = (method, message))]
-    fn new(method: String, message: Vec<u8>) -> Self {
+    #[pyo3(signature = (method, message, response_port = None, rank_in_response = false))]
+    fn new(
+        method: String,
+        message: Vec<u8>,
+        response_port: Option<crate::mailbox::PyPortId>,
+        rank_in_response: bool,
+    ) -> Self {
         Self {
             method,
             message: ByteBuf::from(message),
+            response_port: response_port.map(Into::into),
+            rank_in_response,
         }
     }
 
@@ -214,6 +224,16 @@ impl PythonMessage {
     #[getter]
     fn message<'a>(&self, py: Python<'a>) -> Bound<'a, PyBytes> {
         PyBytes::new_bound(py, self.message.as_ref())
+    }
+
+    #[getter]
+    fn response_port(&self) -> Option<crate::mailbox::PyPortId> {
+        self.response_port.clone().map(Into::into)
+    }
+
+    #[getter]
+    fn rank_in_response(&self) -> bool {
+        self.rank_in_response
     }
 }
 

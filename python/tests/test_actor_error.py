@@ -18,11 +18,51 @@ class ExceptionActor(Actor):
     async def raise_exception(self) -> None:
         raise Exception("This is a test exception")
 
+    @endpoint
+    async def print_value(self, value) -> None:
+        """Endpoint that takes a value and prints it."""
+        print(f"Value received: {value}")
+        return value
+
 
 class ExceptionActorSync(Actor):
     @endpoint  # pyre-ignore
     def raise_exception(self) -> None:
         raise Exception("This is a test exception")
+
+
+class BrokenPickleClass:
+    """A class that can be configured to raise exceptions during pickling/unpickling."""
+
+    def __init__(
+        self,
+        raise_on_getstate=False,
+        raise_on_setstate=False,
+        exception_message="Pickle error",
+    ):
+        self.raise_on_getstate = raise_on_getstate
+        self.raise_on_setstate = raise_on_setstate
+        self.exception_message = exception_message
+        self.value = "test_value"
+
+    def __getstate__(self):
+        """Called when pickling the object."""
+        if self.raise_on_getstate:
+            raise RuntimeError(f"__getstate__ error: {self.exception_message}")
+        return {
+            "raise_on_getstate": self.raise_on_getstate,
+            "raise_on_setstate": self.raise_on_setstate,
+            "exception_message": self.exception_message,
+            "value": self.value,
+        }
+
+    def __setstate__(self, state):
+        """Called when unpickling the object."""
+        if state.get("raise_on_setstate", False):
+            raise RuntimeError(
+                f"__setstate__ error: {state.get('exception_message', 'Unpickle error')}"
+            )
+        self.__dict__.update(state)
 
 
 @pytest.mark.parametrize(
@@ -131,3 +171,40 @@ def test_proc_mesh_bootstrap_error():
     assert (
         process.returncode != 0
     ), f"Expected non-zero exit code, got {process.returncode}"
+
+
+@pytest.mark.parametrize("raise_on_getstate", [True, False])
+@pytest.mark.parametrize("raise_on_setstate", [True, False])
+@pytest.mark.parametrize("num_procs", [1, 2])
+async def test_broken_pickle_class(raise_on_getstate, raise_on_setstate, num_procs):
+    """
+    Test that exceptions during pickling/unpickling are properly handled.
+
+    This test creates a BrokenPickleClass instance configured to raise exceptions
+    during __getstate__ and/or __setstate__, then passes it to an ExceptionActor's
+    print_value endpoint and verifies that an ActorError is raised.
+    """
+    if not raise_on_getstate and not raise_on_setstate:
+        # Pass this test trivially
+        return
+
+    proc = await proc_mesh(gpus=num_procs)
+    exception_actor = await proc.spawn("exception_actor", ExceptionActor)
+
+    # Create a BrokenPickleClass instance configured to raise exceptions
+    broken_obj = BrokenPickleClass(
+        raise_on_getstate=raise_on_getstate,
+        raise_on_setstate=raise_on_setstate,
+        exception_message="Test pickle error",
+    )
+
+    # On the getstate path, we expect a RuntimeError to be raised locally.
+    # On the setstate path, we expect an ActorError to be raised remotely.
+    error_type = RuntimeError if raise_on_getstate else ActorError
+    error_pattern = "__getstate__ error" if raise_on_getstate else "__setstate__ error"
+
+    with pytest.raises(error_type, match=error_pattern):
+        if num_procs == 1:
+            await exception_actor.print_value.call_one(broken_obj)
+        else:
+            await exception_actor.print_value.call(broken_obj)
