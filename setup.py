@@ -140,9 +140,12 @@ if USE_TENSOR_ENGINE:
         )
     )
 
+package_name = os.environ.get("MONARCH_PACKAGE_NAME", "monarch")
+package_version = os.environ.get("MONARCH_VERSION", "0.0.1")
+
 setup(
-    name="monarch",
-    version="0.0.1",
+    name=package_name,
+    version=package_version,
     packages=find_packages(
         where="python",
         exclude=["python/tests.*", "python/tests"],
