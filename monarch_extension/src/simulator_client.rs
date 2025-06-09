@@ -6,6 +6,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#![cfg(feature = "tensor_engine")]
+
 use anyhow::anyhow;
 use hyperactor::PortId;
 use hyperactor::channel::ChannelAddr;
