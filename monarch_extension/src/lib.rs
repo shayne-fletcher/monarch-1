@@ -17,6 +17,7 @@ pub mod convert;
 #[cfg(feature = "tensor_engine")]
 mod debugger;
 #[cfg(feature = "tensor_engine")]
+mod mesh_controller;
 mod simulator_client;
 #[cfg(feature = "tensor_engine")]
 mod tensor_worker;
@@ -110,6 +111,10 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         crate::convert::register_python_bindings(&get_or_add_new_module(
             module,
             "monarch_extension.convert",
+        )?)?;
+        crate::mesh_controller::register_python_bindings(&get_or_add_new_module(
+            module,
+            "monarch_extension.mesh_controller",
         )?)?;
     }
 

@@ -50,7 +50,7 @@ use torch_sys_cuda::nccl::UniqueId;
     module = "monarch._rust_bindings.monarch_extension.tensor_worker"
 )]
 pub(crate) struct PyWorkerMessage {
-    message: WorkerMessage,
+    pub message: WorkerMessage,
 }
 
 impl PyWorkerMessage {
