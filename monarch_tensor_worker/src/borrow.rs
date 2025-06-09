@@ -16,7 +16,7 @@ use hyperactor::actor::ActorHandle;
 use hyperactor::cap;
 use hyperactor::mailbox::PortReceiver;
 use tokio::sync::Mutex;
-use torch_sys::cuda::Event;
+use torch_sys_cuda::cuda::Event;
 
 use crate::Ref;
 use crate::stream::StreamActor;

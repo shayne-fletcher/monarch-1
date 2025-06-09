@@ -16,8 +16,8 @@ use nccl_sys::cudaError_t;
 use nccl_sys::cudaSetDevice;
 use nccl_sys::cudaStream_t;
 use thiserror::Error;
+use torch_sys::CudaDevice;
 
-use crate::CudaDevice;
 use crate::bridge::ffi::{self};
 
 /// Wrapper around a CUDA stream.

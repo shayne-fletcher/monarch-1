@@ -44,9 +44,9 @@ use torch_sys::Device;
 use torch_sys::Layout;
 use torch_sys::ScalarType;
 use torch_sys::call_op::CallOpError;
-use torch_sys::nccl::NcclConfig;
-use torch_sys::nccl::ReduceOp;
-use torch_sys::nccl::UniqueId;
+use torch_sys_cuda::nccl::NcclConfig;
+use torch_sys_cuda::nccl::ReduceOp;
+use torch_sys_cuda::nccl::UniqueId;
 
 use crate::controller::ControllerActor;
 use crate::controller::Seq;

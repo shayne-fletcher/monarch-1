@@ -190,7 +190,6 @@ mod tests {
 
     use anyhow::Result;
     use pyo3::prelude::*;
-    use pyo3::types::PyDict;
 
     use super::*;
 
@@ -200,10 +199,11 @@ mod tests {
         let rval = Python::with_gil(|py| {
             // Needed to initialize torch.
             py.import_bound("torch")?;
-            let test_utils = PyModule::import_bound(py, "monarch.torch_sys.test_utils")?;
-            let globals = PyDict::new_bound(py);
-            globals.set_item("test_utils", test_utils)?;
-            let obj = py.eval_bound("test_utils.Custom()", Some(&globals), None)?;
+
+            // Define the Custom class inline
+            py.run_bound("class Custom:\n    pass", None, None)?;
+
+            let obj = py.eval_bound("Custom()", None, None)?;
             RValue::extract_bound(&obj)
         })?;
         // NOTE(agallagher): Among other things, verify this isn't accidentally

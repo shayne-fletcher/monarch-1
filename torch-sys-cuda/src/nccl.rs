@@ -18,16 +18,16 @@ use nccl_sys::*;
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
+use torch_sys::CudaDevice;
+use torch_sys::DeviceType;
+use torch_sys::ScalarType;
+use torch_sys::Tensor;
+use torch_sys::TensorCell;
+use torch_sys::factory_float_tensor;
+use torch_sys::is_float8_type;
+use torch_sys::suggest_memory_format;
 
-use crate::CudaDevice;
-use crate::DeviceType;
-use crate::ScalarType;
-use crate::Tensor;
-use crate::TensorCell;
-use crate::bridge::ffi::factory_float_tensor;
-use crate::bridge::ffi::is_float8_type;
 use crate::bridge::ffi::make_nccl_config;
-use crate::bridge::ffi::suggest_memory_format;
 use crate::cuda::CudaError;
 use crate::cuda::Stream;
 use crate::cuda::set_device;
@@ -837,13 +837,14 @@ impl Communicator {
 
 #[cfg(test)]
 mod tests {
+    use torch_sys::CudaDevice;
+    use torch_sys::DeviceIndex;
+    use torch_sys::factory_float_tensor;
+    use torch_sys::testing::allclose;
+    use torch_sys::testing::cuda_full;
+    use torch_sys::testing::stack;
+
     use super::*;
-    use crate::CudaDevice;
-    use crate::DeviceIndex;
-    use crate::bridge::ffi::allclose;
-    use crate::bridge::ffi::cuda_full;
-    use crate::bridge::ffi::factory_float_tensor;
-    use crate::bridge::ffi::stack;
     use crate::cuda::set_device;
 
     #[test]

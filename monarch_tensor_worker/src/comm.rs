@@ -43,16 +43,16 @@ use torch_sys::backend::ReduceOptions;
 use torch_sys::backend::ReduceScatterOptions;
 use torch_sys::backend::ScatterOptions;
 use torch_sys::backend::Work;
-use torch_sys::cuda::Event;
-use torch_sys::cuda::Stream;
-use torch_sys::nccl::Communicator;
-use torch_sys::nccl::NcclConfig;
-use torch_sys::nccl::NcclError;
-use torch_sys::nccl::NcclStatus;
-use torch_sys::nccl::ReduceOp;
-use torch_sys::nccl::UniqueId;
-use torch_sys::nccl::group_end;
-use torch_sys::nccl::group_start;
+use torch_sys_cuda::cuda::Event;
+use torch_sys_cuda::cuda::Stream;
+use torch_sys_cuda::nccl::Communicator;
+use torch_sys_cuda::nccl::NcclConfig;
+use torch_sys_cuda::nccl::NcclError;
+use torch_sys_cuda::nccl::NcclStatus;
+use torch_sys_cuda::nccl::ReduceOp;
+use torch_sys_cuda::nccl::UniqueId;
+use torch_sys_cuda::nccl::group_end;
+use torch_sys_cuda::nccl::group_start;
 
 /// Messages for NcclCommActor. See the underlying [`Communicator`] APIs for what
 /// these do.

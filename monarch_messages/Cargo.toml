@@ -19,6 +19,7 @@ serde = { version = "1.0.185", features = ["derive", "rc"] }
 serde_bytes = "0.11"
 thiserror = "2.0.12"
 torch-sys = { version = "0.0.0", path = "../torch-sys" }
+torch-sys-cuda = { version = "0.0.0", path = "../torch-sys-cuda" }
 tracing = { version = "0.1.41", features = ["attributes", "valuable"] }
 
 [dev-dependencies]

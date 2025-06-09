@@ -50,9 +50,9 @@ use torch_sys::Tensor;
 use torch_sys::TensorCell;
 use torch_sys::factory_empty;
 use torch_sys::factory_zeros;
-use torch_sys::nccl::NcclConfig;
-use torch_sys::nccl::ReduceOp;
-use torch_sys::nccl::UniqueId;
+use torch_sys_cuda::nccl::NcclConfig;
+use torch_sys_cuda::nccl::ReduceOp;
+use torch_sys_cuda::nccl::UniqueId;
 
 use crate::collective_coordinator::CollectiveResult;
 use crate::collective_coordinator::activate_mesh;

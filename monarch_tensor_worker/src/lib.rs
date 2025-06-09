@@ -94,9 +94,9 @@ use torch_sys::RValue;
 use torch_sys::ScalarType;
 use torch_sys::TensorCell;
 use torch_sys::factory_zeros;
-use torch_sys::nccl::NcclConfig;
-use torch_sys::nccl::ReduceOp;
-use torch_sys::nccl::UniqueId;
+use torch_sys_cuda::nccl::NcclConfig;
+use torch_sys_cuda::nccl::ReduceOp;
+use torch_sys_cuda::nccl::UniqueId;
 
 #[derive(Debug)]
 struct RemoteProcessGroupState {
@@ -270,7 +270,7 @@ impl WorkerMessageHandler for WorkerActor {
             this,
             cell,
             ReduceOp::Sum,
-            torch_sys::cuda::Stream::get_current_stream(),
+            torch_sys_cuda::cuda::Stream::get_current_stream(),
         )
         .await?;
 

@@ -54,11 +54,11 @@ use torch_sys::CudaDevice;
 use torch_sys::MultiBorrow;
 use torch_sys::RValue;
 use torch_sys::TensorCell;
-use torch_sys::cuda::Event;
-use torch_sys::cuda::Stream;
 use torch_sys::deep_clone;
 use torch_sys::factory_empty;
 use torch_sys::factory_zeros;
+use torch_sys_cuda::cuda::Event;
+use torch_sys_cuda::cuda::Stream;
 use tracing_subscriber::fmt::Subscriber;
 
 use crate::ControllerActor;
@@ -1968,8 +1968,8 @@ mod tests {
     use monarch_types::PickledPyObject;
     use timed_test::async_timed_test;
     use torch_sys::factory_float_tensor;
-    use torch_sys::nccl::UniqueId;
     use torch_sys::testing::allclose;
+    use torch_sys_cuda::nccl::UniqueId;
 
     use super::*;
     use crate::comm::CommParams;
@@ -3324,7 +3324,7 @@ mod tests {
             device: "cuda".try_into().unwrap(),
         };
 
-        let reduction = Reduction::ReduceOp(torch_sys::nccl::ReduceOp::Sum);
+        let reduction = Reduction::ReduceOp(torch_sys_cuda::nccl::ReduceOp::Sum);
 
         test_setup
             .stream_actor
