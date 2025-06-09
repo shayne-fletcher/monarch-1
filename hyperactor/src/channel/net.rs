@@ -1396,7 +1396,8 @@ pub(crate) mod unix {
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
-                        false
+                        // On non-Linux platforms, only compare pathname since no abstract names
+                        saddr.as_pathname() == oaddr.as_pathname()
                     }
                 }
                 (Self::Unbound, _) | (_, Self::Unbound) => false,
@@ -1445,8 +1446,29 @@ pub(crate) mod unix {
         }
 
         #[cfg(not(target_os = "linux"))]
-        pub fn from_abstract_name(_name: &str) -> anyhow::Result<Self> {
-            anyhow::bail!("abstract names are only supported on Linux")
+        pub fn from_abstract_name(name: &str) -> anyhow::Result<Self> {
+            // On non-Linux platforms, convert abstract names to filesystem paths
+            let name = name.strip_prefix("@").unwrap_or(name);
+            let path = Self::abstract_to_filesystem_path(name);
+            Self::from_pathname(&path.to_string_lossy())
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        fn abstract_to_filesystem_path(abstract_name: &str) -> std::path::PathBuf {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::Hash;
+            use std::hash::Hasher;
+
+            // Generate a stable hash of the abstract name for deterministic paths
+            let mut hasher = DefaultHasher::new();
+            abstract_name.hash(&mut hasher);
+            let hash = hasher.finish();
+
+            // Include process ID to prevent inter-process conflicts
+            let process_id = std::process::id();
+
+            // TODO: we just leak these. Should we do something smarter?
+            std::path::PathBuf::from(format!("/tmp/hyperactor_{}_{:x}", process_id, hash))
         }
 
         /// Pathnames may be absolute or relative.
