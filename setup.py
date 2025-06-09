@@ -24,6 +24,7 @@ from torch.utils.cpp_extension import (
 )
 
 USE_CUDA = CUDA_HOME is not None
+USE_TENSOR_ENGINE = os.environ.get("USE_TENSOR_ENGINE", "1") == "1"
 
 monarch_cpp_src = ["python/monarch/common/init.cpp"]
 
@@ -118,6 +119,27 @@ with open("requirements.txt") as f:
 with open("README.md", encoding="utf8") as f:
     readme = f.read()
 
+rust_extensions = [
+    RustExtension(
+        "monarch._rust_bindings",
+        binding=Binding.PyO3,
+        path="monarch_extension/Cargo.toml",
+        debug=False,
+        features=["tensor_engine"] if USE_TENSOR_ENGINE else [],
+        args=[] if USE_TENSOR_ENGINE else ["--no-default-features"],
+    ),
+]
+
+if USE_TENSOR_ENGINE:
+    rust_extensions.append(
+        RustExtension(
+            {"controller_bin": "monarch.monarch_controller"},
+            binding=Binding.Exec,
+            path="controller/Cargo.toml",
+            debug=False,
+        )
+    )
+
 setup(
     name="monarch",
     version="0.0.1",
@@ -144,20 +166,7 @@ setup(
             "monarch_bootstrap=monarch.bootstrap_main:invoke_main",
         ],
     },
-    rust_extensions=[
-        RustExtension(
-            "monarch._rust_bindings",
-            binding=Binding.PyO3,
-            path="monarch_extension/Cargo.toml",
-            debug=False,
-        ),
-        RustExtension(
-            {"controller_bin": "monarch.monarch_controller"},
-            binding=Binding.Exec,
-            path="controller/Cargo.toml",
-            debug=False,
-        ),
-    ],
+    rust_extensions=rust_extensions,
     cmdclass={
         "build_ext": BuildExtension.with_options(no_python_abi_suffix=True),
         "clean": Clean,
