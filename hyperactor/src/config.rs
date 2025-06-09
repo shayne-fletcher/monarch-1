@@ -40,6 +40,9 @@ pub struct Config {
     /// Number of messages after which to send an acknowledgment
     pub message_ack_every_n_messages: u64,
 
+    /// Maximum buffer size for split port messages
+    pub split_max_buffer_size: usize,
+
     /// Flag indicating if this is a managed subprocess
     pub is_managed_subprocess: bool,
 }
@@ -51,6 +54,7 @@ impl Default for Config {
             message_delivery_timeout: Duration::from_secs(30),
             message_ack_time_interval: Duration::from_millis(500),
             message_ack_every_n_messages: 1000,
+            split_max_buffer_size: 5,
             is_managed_subprocess: false,
         }
     }
@@ -89,6 +93,13 @@ impl Config {
             }
         }
 
+        // Load split max buffer size
+        if let Ok(val) = env::var("HYPERACTOR_SPLIT_MAX_BUFFER_SIZE") {
+            if let Ok(parsed) = val.parse::<usize>() {
+                config.split_max_buffer_size = parsed;
+            }
+        }
+
         // Check if this is a managed subprocess
         config.is_managed_subprocess = env::var("HYPERACTOR_MANAGED_SUBPROCESS").is_ok();
 
@@ -111,6 +122,7 @@ impl Config {
         self.message_delivery_timeout = other.message_delivery_timeout;
         self.message_ack_time_interval = other.message_ack_time_interval;
         self.message_ack_every_n_messages = other.message_ack_every_n_messages;
+        self.split_max_buffer_size = other.split_max_buffer_size;
 
         self.is_managed_subprocess = other.is_managed_subprocess;
     }
@@ -169,6 +181,11 @@ pub mod global {
     /// Get the number of messages after which to send an acknowledgment
     pub fn message_ack_every_n_messages() -> u64 {
         CONFIG.read().unwrap().message_ack_every_n_messages
+    }
+
+    /// Get the maximum buffer size for split port messages
+    pub fn split_max_buffer_size() -> usize {
+        CONFIG.read().unwrap().split_max_buffer_size
     }
 
     /// A guard that restores the original configuration when dropped

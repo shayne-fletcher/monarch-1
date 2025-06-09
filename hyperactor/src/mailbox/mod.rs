@@ -1286,16 +1286,10 @@ impl SplitPortBuffer {
     /// Push a new item to the buffer, and optionally return any items that should
     /// be flushed.
     fn push(&mut self, serialized: Serialized) -> Option<Vec<Serialized>> {
-        static HYPERACTOR_SPLIT_MAX_BUFFER_SIZE: OnceLock<usize> = OnceLock::new();
-        let limit = HYPERACTOR_SPLIT_MAX_BUFFER_SIZE.get_or_init(|| {
-            std::env::var("HYPERACTOR_SPLIT_MAX_BUFFER_SIZE")
-                .ok()
-                .and_then(|val| val.parse::<usize>().ok())
-                .unwrap_or(5)
-        });
+        let limit = crate::config::global::split_max_buffer_size();
 
         self.0.push(serialized);
-        if &self.0.len() >= limit {
+        if self.0.len() >= limit {
             Some(std::mem::take(&mut self.0))
         } else {
             None
@@ -2972,9 +2966,10 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 30)]
     async fn test_split_port_id_sum_reducer() {
-        // SAFETY: TODO: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("HYPERACTOR_SPLIT_MAX_BUFFER_SIZE", "1") };
-        set_tracing_env_filter(Level::INFO);
+        let _config_guard = crate::config::global::set_temp_config(crate::config::Config {
+            split_max_buffer_size: 1,
+            ..crate::config::Config::default()
+        });
 
         let sum_accumulator = accum::sum::<u64>();
         let reducer_typehash = sum_accumulator.reducer_typehash();
@@ -3007,7 +3002,6 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 30)]
     async fn test_split_port_id_every_n_messages() {
-        set_tracing_env_filter(Level::INFO);
         let actor = Mailbox::new(
             id!(test[0].actor),
             BoxedMailboxSender::new(PanickingMailboxSender),
