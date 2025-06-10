@@ -730,18 +730,20 @@ mod tests {
         use rand::distributions::Uniform;
 
         let rng = rand::thread_rng();
-        let uds_name: String = rng
-            .sample_iter(Uniform::new_inclusive('a', 'z'))
-            .take(10)
-            .collect();
-
         vec![
             "[::1]:0".parse().unwrap(),
             "local!0".parse().unwrap(),
             #[cfg(target_os = "linux")]
             "unix!".parse().unwrap(),
             #[cfg(target_os = "linux")]
-            format!("unix!@{}", uds_name).parse().unwrap(),
+            format!(
+                "unix!@{}",
+                rng.sample_iter(Uniform::new_inclusive('a', 'z'))
+                    .take(10)
+                    .collect::<String>()
+            )
+            .parse()
+            .unwrap(),
         ]
     }
 

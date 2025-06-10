@@ -2225,7 +2225,6 @@ mod tests {
     use std::time::Duration;
 
     use timed_test::async_timed_test;
-    use tracing::Level;
 
     use super::*;
     use crate::Actor;

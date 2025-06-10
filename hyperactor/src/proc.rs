@@ -738,7 +738,7 @@ pub struct Instance<A: Actor> {
     status_span: Mutex<tracing::Span>,
 
     /// The timestamp of when the currently active status was set.
-    last_status_change: Arc<tokio::time::Instant>,
+    _last_status_change: Arc<tokio::time::Instant>,
 }
 
 impl<A: Actor> Instance<A> {
@@ -788,7 +788,7 @@ impl<A: Actor> Instance<A> {
                 actor_id = ais,
                 name = "created"
             )),
-            last_status_change: Arc::new(start),
+            _last_status_change: Arc::new(start),
         }
     }
 
@@ -1250,7 +1250,7 @@ impl InstanceCell {
         status: watch::Receiver<ActorStatus>,
         parent: Option<InstanceCell>,
     ) -> Self {
-        let ais = actor_id.to_string();
+        let _ais = actor_id.to_string();
         let cell = Self {
             state: Arc::new(InstanceState {
                 actor_id,

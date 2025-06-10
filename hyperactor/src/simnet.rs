@@ -1078,17 +1078,11 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use rand::Rng;
-    use rand::distributions::Alphanumeric;
     use tokio::sync::Mutex;
-    use tokio::sync::oneshot;
 
     use super::*;
-    use crate::PortId;
     use crate::channel::ChannelTransport;
-    use crate::channel::Tx;
     use crate::channel::sim::SimAddr;
-    use crate::channel::sim::records;
     use crate::clock::Clock;
     use crate::clock::RealClock;
     use crate::clock::SimClock;
@@ -1194,6 +1188,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn random_abstract_addr() -> ChannelAddr {
+        use rand::Rng;
+        use rand::distributions::Alphanumeric;
+
         let random_string = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(24)
@@ -1455,6 +1452,12 @@ edges:
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_simnet_receive_external_message() {
+        use tokio::sync::oneshot;
+
+        use crate::PortId;
+        use crate::channel::Tx;
+        use crate::channel::sim::records;
+
         let proxy_addr = ChannelAddr::any(channel::ChannelTransport::Unix);
         start(
             ChannelAddr::any(ChannelTransport::Unix),
@@ -1500,6 +1503,11 @@ edges:
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_simnet_receive_operational_message() {
+        use tokio::sync::oneshot;
+
+        use crate::PortId;
+        use crate::channel::Tx;
+
         let proxy_addr = ChannelAddr::any(channel::ChannelTransport::Unix);
         let mut operational_message_rx = start(
             ChannelAddr::any(ChannelTransport::Unix),
