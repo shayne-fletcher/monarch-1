@@ -25,6 +25,7 @@ use hyperactor::message::IndexedErasedUnbound;
 use hyperactor::message::Unbind;
 use hyperactor_mesh::actor_mesh::Cast;
 use monarch_types::PickledPyObject;
+use monarch_types::SerializablePyErr;
 use pyo3::exceptions::PyBaseException;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -276,7 +277,7 @@ impl Actor for PythonActor {
     type Params = PickledPyObject;
 
     async fn new(actor_type: PickledPyObject) -> Result<Self, anyhow::Error> {
-        Ok(Python::with_gil(|py| -> PyResult<Self> {
+        Ok(Python::with_gil(|py| -> Result<Self, SerializablePyErr> {
             let unpickled = actor_type.unpickle(py)?;
             let class_type: &Bound<'_, PyType> = unpickled.downcast()?;
             let actor: PyObject = class_type.call0()?.to_object(py);
@@ -411,7 +412,7 @@ impl Handler<PythonMessage> for PythonActor {
         // See [Panics in async endpoints].
         let (sender, receiver) = oneshot::channel();
 
-        let future = Python::with_gil(|py| -> PyResult<_> {
+        let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
             let mailbox = PyMailbox {
                 inner: this.mailbox_for_py().clone(),
             };
@@ -438,6 +439,7 @@ impl Handler<PythonMessage> for PythonActor {
                 awaitable.into_bound(py),
             )
             .map(Some)
+            .map_err(|err| err.into())
         })?;
 
         if let Some(future) = future {
