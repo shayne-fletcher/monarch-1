@@ -533,7 +533,6 @@ mod tests {
 
             #[tokio::test]
             async fn test_basic() {
-                hyperactor::test_utils::tracing::set_tracing_env_filter(tracing::Level::DEBUG);
                 let alloc = $allocator
                     .allocate(AllocSpec {
                         shape: shape! { replica = 4 },

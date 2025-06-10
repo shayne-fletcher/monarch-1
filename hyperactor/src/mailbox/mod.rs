@@ -2244,7 +2244,6 @@ mod tests {
     use crate::reference::ProcId;
     use crate::reference::WorldId;
     use crate::simnet;
-    use crate::test_utils::tracing::set_tracing_env_filter;
 
     #[test]
     fn test_error() {
