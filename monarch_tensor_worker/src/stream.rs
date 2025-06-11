@@ -726,7 +726,8 @@ impl StreamActor {
             let function = function.resolve(py).map_err(|e| {
                 CallFunctionError::InvalidRemoteFunction(format!(
                     "failed to resolve function {}: {}",
-                    function, e
+                    function,
+                    SerializablePyErr::from(py, &e)
                 ))
             })?;
 

@@ -377,10 +377,7 @@ async fn drive_future(
                     .unwrap()
                     .clone()
                     .into();
-                match err.traceback_bound(py) {
-                    None => Err(anyhow::anyhow!("{} <no traceback available>", err)),
-                    Some(traceback) => Err(anyhow::anyhow!("{}: {}", err, traceback.format()?)),
-                }
+                Err(SerializablePyErr::from(py, &err).into())
             }),
             // An Err means that the sender has been dropped without sending.
             // That's okay, it just means that the Python task has completed.
@@ -463,7 +460,7 @@ impl Handler<Cast<PythonMessage>> for PythonActor {
         // See [Panics in async endpoints].
         let (sender, receiver) = oneshot::channel();
 
-        let future = Python::with_gil(|py| -> PyResult<_> {
+        let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
             let mailbox = PyMailbox {
                 inner: this.mailbox_for_py().clone(),
             };
@@ -493,6 +490,7 @@ impl Handler<Cast<PythonMessage>> for PythonActor {
                 awaitable.into_bound(py),
             )
             .map(Some)
+            .map_err(|err| err.into())
         })?;
 
         if let Some(future) = future {

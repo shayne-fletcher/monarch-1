@@ -127,7 +127,7 @@ impl SerializablePyErr {
         let mut f = inspect
             .call_method0("currentframe")
             .unwrap_or(PyNone::get_bound(py).to_owned().into_any());
-        let mut tb: Bound<'_, PyAny> = err.traceback_bound(py).unwrap().as_any().clone();
+        let mut tb: Bound<'_, PyAny> = err.traceback_bound(py).to_object(py).into_bound(py);
         while !f.is_none() {
             let lasti = f.getattr("f_lasti").unwrap();
             let lineno = f.getattr("f_lineno").unwrap();
