@@ -174,7 +174,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             actor = await proc_mesh.spawn("test_actor", TestActor)
 
             values = await actor.compute_world_size.call(
-                master_addr="::",
+                master_addr="0.0.0.0",
                 master_port=get_free_port(),
             )
 
@@ -206,10 +206,10 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             actor_b = await proc_mesh_b.spawn("actor_b", TestActor)
 
             results_a = await actor_a.compute_world_size.call(
-                master_addr="::", master_port=get_free_port()
+                master_addr="0.0.0.0", master_port=get_free_port()
             )
             results_b = await actor_b.compute_world_size.call(
-                master_addr="::", master_port=get_free_port()
+                master_addr="0.0.0.0", master_port=get_free_port()
             )
 
             self.assert_computed_world_size(results_a, 2)  # a is a 1x2 mesh
