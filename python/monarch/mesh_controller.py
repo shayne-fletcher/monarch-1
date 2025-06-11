@@ -158,7 +158,6 @@ def _worker_response_to_result(result: client.WorkerResponse) -> MessageResult:
             traceback.FrameSummary("<unknown>", None, frame)
             for frame in exc.backtrace.split("\\n")
         ]
-        logger.error(f"Worker {exc.actor_id} failed")
         return MessageResult(
             seq=result.seq,
             result=None,
@@ -169,7 +168,7 @@ def _worker_response_to_result(result: client.WorkerResponse) -> MessageResult:
                 controller_frames=None,
                 worker_frames=worker_frames,
                 source_actor_id=exc.actor_id,
-                message=f"Worker {exc.actor_id} failed",
+                message=f"Remote function in {exc.actor_id} errored.",
             ),
         )
     elif isinstance(exc, client.Failure):

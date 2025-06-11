@@ -986,7 +986,9 @@ impl StreamMessageHandler for StreamActor {
                             backtrace: format!("{err}"),
                             worker_actor_id: this.self_id().clone(),
                         };
-                        tracing::error!("{worker_error}");
+                        tracing::info!(
+                            "Propagating remote function error to client: {worker_error}"
+                        );
                         self.controller_actor
                             .remote_function_failed(this, params.seq, worker_error)
                             .await?;

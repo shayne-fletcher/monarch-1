@@ -302,7 +302,7 @@ class Client:
         self.last_processed_seq = max(self.last_processed_seq, seq)
 
         if error is not None:
-            logging.error("Received error for seq %s: %s", seq, error)
+            logging.info("Received error for seq %s: %s", seq, error)
             # We should not have set result if we have an error.
             assert result is None
             if not isinstance(error, RemoteException):
@@ -332,9 +332,7 @@ class Client:
         elif error is not None:
             # errors get reported as results even if they
             # do not have futures attached.
-            logger.warning(
-                f"Error encountered for this instruction {seq}. Proceeding forward because error is unused and unhandled. Error details:\n{error}."
-            )
+            pass
 
         # We can safely delete the seq as tracebacks have been saved to the remote failure itself.
         del self.pending_results[seq]
