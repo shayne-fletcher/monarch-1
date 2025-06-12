@@ -516,7 +516,6 @@ mod tests {
     use test_utils::*;
     use timed_test::async_timed_test;
     use tokio::time::Duration;
-    use tracing::Level;
 
     use super::*;
     use crate::ProcMesh;

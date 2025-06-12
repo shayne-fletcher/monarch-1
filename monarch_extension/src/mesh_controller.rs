@@ -14,7 +14,6 @@ use std::sync::atomic::Ordering;
 
 use controller::history;
 use hyperactor::ActorRef;
-use hyperactor_mesh::SlicedActorMesh;
 use hyperactor_mesh::actor_mesh::ActorMesh;
 use hyperactor_mesh::actor_mesh::RootActorMesh;
 use hyperactor_mesh::proc_mesh::SharedSpawnable;
@@ -35,7 +34,6 @@ use monarch_messages::worker::WorkerMessage;
 use monarch_messages::worker::WorkerParams;
 use monarch_tensor_worker::AssignRankMessage;
 use monarch_tensor_worker::WorkerActor;
-use ndslice::Shape;
 use ndslice::Slice;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

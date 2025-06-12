@@ -520,7 +520,6 @@ mod tests {
     use hyperactor_mesh::Mesh;
     use hyperactor_mesh::ProcMesh;
     use hyperactor_mesh::RootActorMesh;
-    use hyperactor_mesh::alloc::AllocConstraints;
     use hyperactor_mesh::alloc::AllocSpec;
     use hyperactor_mesh::alloc::Allocator;
     use hyperactor_mesh::alloc::LocalAllocator;
