@@ -91,6 +91,7 @@ impl SimAddr {
     }
 
     /// Creates a new directional SimAddr meant to convey a channel between two addresses.
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `SimNetError`.
     pub fn new_with_src(
         src: AddressProxyPair,
         addr: ChannelAddr,
@@ -99,6 +100,7 @@ impl SimAddr {
         Self::new_impl(Some(Box::new(src)), addr, proxy)
     }
 
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `SimNetError`.
     fn new_impl(
         src: Option<Box<AddressProxyPair>>,
         addr: ChannelAddr,
