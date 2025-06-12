@@ -20,7 +20,6 @@ use hyperactor::WorldId;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::channel::ChannelTransport;
-use hyperactor::mailbox;
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::mailbox::MailboxServerHandle;
 use hyperactor::proc::Proc;
@@ -181,9 +180,8 @@ impl Alloc for LocalAlloc {
                         }
                     };
 
-                    let handle = proc
-                        .clone()
-                        .serve(proc_rx, mailbox::monitored_return_handle());
+                    // Undeliverable messages get forwarded to the mesh agent.
+                    let handle = proc.clone().serve(proc_rx, mesh_agent.port());
 
                     self.procs.insert(
                         rank,

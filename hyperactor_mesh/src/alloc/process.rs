@@ -278,6 +278,11 @@ impl ProcessAlloc {
         })
     }
 
+    /// The "world name" assigned to this alloc.
+    pub(crate) fn name(&self) -> &ShortUuid {
+        &self.name
+    }
+
     fn index(&self, proc_id: &ProcId) -> Result<usize, anyhow::Error> {
         anyhow::ensure!(
             proc_id.world_name().parse::<ShortUuid>()? == self.name,

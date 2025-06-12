@@ -16,7 +16,6 @@ use hyperactor::channel::ChannelAddr;
 use hyperactor::channel::ChannelTransport;
 use hyperactor::channel::Rx;
 use hyperactor::channel::Tx;
-use hyperactor::mailbox;
 use hyperactor::mailbox::MailboxServer;
 use serde::Deserialize;
 use serde::Serialize;
@@ -110,9 +109,8 @@ pub async fn bootstrap() -> anyhow::Error {
                     let (proc, mesh_agent) = MeshAgent::bootstrap(proc_id.clone()).await?;
                     let (proc_addr, proc_rx) =
                         channel::serve(ChannelAddr::any(listen_transport)).await?;
-                    let handle = proc
-                        .clone()
-                        .serve(proc_rx, mailbox::monitored_return_handle());
+                    // Undeliverable messages get forwarded to the mesh agent.
+                    let handle = proc.clone().serve(proc_rx, mesh_agent.port());
                     drop(handle); // linter appeasement; it is safe to drop this future
                     tx.send(Process2Allocator(
                         bootstrap_index,
