@@ -69,6 +69,8 @@ use hyperactor::message::Unbind;
 use hyperactor::reference::ActorId;
 use hyperactor_mesh::actor_mesh::Cast;
 use itertools::Itertools;
+use monarch_hyperactor::shape::PyPoint;
+use monarch_hyperactor::shape::PyShape;
 use monarch_messages::controller::ControllerActor;
 use monarch_messages::controller::ControllerMessageClient;
 use monarch_messages::controller::Seq;
@@ -89,6 +91,9 @@ use monarch_types::PyTree;
 use ndslice::Slice;
 use pipe::PipeActor;
 use pipe::PipeParams;
+use pyo3::Py;
+use pyo3::Python;
+use pyo3::types::PyAnyMethods;
 use serde::Deserialize;
 use serde::Serialize;
 use sorted_vec::SortedVec;
@@ -253,10 +258,19 @@ impl Actor for WorkerActor {
 impl Handler<Cast<AssignRankMessage>> for WorkerActor {
     async fn handle(
         &mut self,
-        _this: &Instance<Self>,
+        this: &Instance<Self>,
         message: Cast<AssignRankMessage>,
     ) -> anyhow::Result<()> {
         self.rank = message.rank.0;
+        Python::with_gil(|py| {
+            let mesh_controller = py.import_bound("monarch.mesh_controller").unwrap();
+            let shape: PyShape = message.shape.into();
+            let shape: Py<PyShape> = Py::new(py, shape).unwrap();
+            let p: PyPoint = PyPoint::new(message.rank.0, shape);
+            mesh_controller
+                .call_method1("_initialize_env", (p, this.proc().proc_id().to_string()))
+                .unwrap();
+        });
         Ok(())
     }
 }

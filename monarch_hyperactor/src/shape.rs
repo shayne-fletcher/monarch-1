@@ -123,7 +123,7 @@ impl From<Shape> for PyShape {
     frozen
 )]
 
-struct PyPoint {
+pub struct PyPoint {
     rank: usize,
     shape: Py<PyShape>,
 }
@@ -131,7 +131,7 @@ struct PyPoint {
 #[pymethods]
 impl PyPoint {
     #[new]
-    fn new(rank: usize, shape: Py<PyShape>) -> Self {
+    pub fn new(rank: usize, shape: Py<PyShape>) -> Self {
         PyPoint { rank, shape }
     }
     fn __getitem__(&self, py: Python, label: &str) -> PyResult<usize> {
@@ -150,6 +150,19 @@ impl PyPoint {
             )))
         }
     }
+
+    fn size(&self, py: Python<'_>, label: &str) -> PyResult<usize> {
+        let shape = &self.shape.bind(py).get().inner;
+        if let Some(index) = shape.labels().iter().position(|l| l == label) {
+            Ok(shape.slice().sizes()[index])
+        } else {
+            Err(PyErr::new::<PyValueError, _>(format!(
+                "Dimension '{}' not found",
+                label
+            )))
+        }
+    }
+
     fn __len__(&self, py: Python) -> usize {
         self.shape.bind(py).get().__len__()
     }
