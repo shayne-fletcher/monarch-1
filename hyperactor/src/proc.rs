@@ -60,6 +60,7 @@ use crate::actor::Binds;
 use crate::actor::RemoteActor;
 use crate::actor::RemoteHandles;
 use crate::actor::Signal;
+use crate::actor::WeakActorHandle;
 use crate::cap;
 use crate::clock::Clock;
 use crate::clock::ClockKind;
@@ -119,6 +120,10 @@ struct ProcState {
 
     /// Keep track of all of the active actors in the proc.
     ledger: ActorLedger,
+
+    /// Registry of typed actor handles by name and type, for actor lookup.
+    /// Maps (actor_name, TypeId) to type-erased ActorHandle.
+    actor_registry: DashMap<(String, TypeId), Box<dyn Any + Send + Sync>>,
 
     /// Used by root actors to send events to the actor coordinating
     /// supervision of root actors in this proc.
@@ -323,6 +328,7 @@ impl Proc {
             forwarder,
             roots: DashMap::new(),
             ledger: ActorLedger::new(),
+            actor_registry: DashMap::new(),
             supervision_coordinator_port: OnceLock::new(),
             clock,
         }))
@@ -457,7 +463,16 @@ impl Proc {
             .ledger
             .insert(actor_id.clone(), instance.cell.downgrade())?;
 
-        instance.start(actor).await
+        let handle = instance.start(actor).await?;
+
+        // Register a weak reference to the actor handle in the registry for later lookup
+        let registry_key = (name.to_string(), TypeId::of::<A>());
+        let weak_handle = handle.downgrade();
+        self.state()
+            .actor_registry
+            .insert(registry_key, Box::new(weak_handle));
+
+        Ok(handle)
     }
 
     /// Spawn a child actor from the provided parent on this proc. The parent actor
@@ -884,6 +899,12 @@ impl<A: Actor> Instance<A> {
             Err(err) => ActorStatus::Failed(err.to_string()),
         };
 
+        // Clean up the actor registry entry for root actors
+        if self.cell.pid() == 0 {
+            let registry_key = (self.cell.actor_id().name().to_string(), TypeId::of::<A>());
+            self.proc.state().actor_registry.remove(&registry_key);
+        }
+
         let result = self.cell.maybe_unlink_parent();
         if let Some(parent) = result {
             if let Err(err) = parent.signal(Signal::ChildStopped(self.cell.pid())) {
@@ -1145,6 +1166,22 @@ impl<A: Actor> Instance<A> {
     pub fn proc(&self) -> &Proc {
         &self.proc
     }
+
+    /// Look up a root actor by name and type.
+    /// Returns `Some(ActorHandle<T>)` if a root actor with the given name exists and is of type T.
+    /// Returns `None` if no root actor with that name exists, if it's not of the expected type,
+    /// or if the actor has been dropped.
+    pub fn get<T: Actor>(&self, name: &str) -> Option<ActorHandle<T>> {
+        let registry_key = (name.to_string(), TypeId::of::<T>());
+
+        if let Some(entry) = self.proc.state().actor_registry.get(&registry_key) {
+            if let Some(weak_handle) = entry.downcast_ref::<WeakActorHandle<T>>() {
+                return weak_handle.upgrade();
+            }
+        }
+
+        None
+    }
 }
 
 impl<A: Actor> cap::sealed::CanSend for Instance<A> {
@@ -1320,7 +1357,7 @@ impl InstanceCell {
     }
 
     /// Downgrade this InstanceCell to a weak reference.
-    fn downgrade(&self) -> WeakInstanceCell {
+    pub fn downgrade(&self) -> WeakInstanceCell {
         WeakInstanceCell {
             state: Arc::downgrade(&self.state),
         }
@@ -1395,18 +1432,18 @@ impl InstanceCell {
 /// A weak version of the InstanceCell. This is used to provide cyclical
 /// linkage between actors without creating a strong reference cycle.
 #[derive(Debug, Clone)]
-struct WeakInstanceCell {
+pub struct WeakInstanceCell {
     state: Weak<InstanceState>,
 }
 
 impl WeakInstanceCell {
     /// Create a new weak instance cell that is never upgradeable.
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self { state: Weak::new() }
     }
 
     /// Upgrade this weak instance cell to a strong reference, if possible.
-    fn upgrade(&self) -> Option<InstanceCell> {
+    pub fn upgrade(&self) -> Option<InstanceCell> {
         self.state.upgrade().map(InstanceCell::wrap)
     }
 }
@@ -1538,6 +1575,7 @@ mod tests {
     use crate as hyperactor;
     use crate::HandleClient;
     use crate::Handler;
+    use crate::OncePortRef;
     use crate::clock::RealClock;
     use crate::test_utils::proc_supervison::ProcSupervisionCoordinator;
     use crate::test_utils::process_assertion::assert_termination;
@@ -1728,6 +1766,100 @@ mod tests {
             .send(TestActorMessage::Forward(second, Box::new(reply_message)))
             .unwrap();
         rx.await.unwrap();
+    }
+
+    #[derive(Debug)]
+    struct LookupTestActor {
+        found_actor: Option<ActorHandle<TestActor>>,
+    }
+
+    #[derive(Handler, HandleClient, Debug)]
+    enum LookupTestMessage {
+        ActorExists(String, #[reply] OncePortRef<bool>),
+    }
+
+    #[async_trait]
+    impl Actor for LookupTestActor {
+        type Params = ();
+
+        async fn new(_params: ()) -> Result<Self, anyhow::Error> {
+            Ok(Self { found_actor: None })
+        }
+    }
+
+    #[async_trait]
+    #[crate::forward(LookupTestMessage)]
+    impl LookupTestMessageHandler for LookupTestActor {
+        async fn actor_exists(
+            &mut self,
+            this: &Instance<Self>,
+            name: String,
+        ) -> Result<bool, anyhow::Error> {
+            self.found_actor = this.get::<TestActor>(&name);
+            Ok(self.found_actor.is_some())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_actor_lookup() {
+        let proc = Proc::local();
+        let client = proc.attach("client").unwrap();
+
+        let target_actor = proc.spawn::<TestActor>("target", ()).await.unwrap();
+        let lookup_actor = proc.spawn::<LookupTestActor>("lookup", ()).await.unwrap();
+
+        assert!(
+            lookup_actor
+                .actor_exists(&client, "target".to_string())
+                .await
+                .unwrap()
+        );
+
+        assert!(
+            !lookup_actor
+                .actor_exists(&client, "nonexistent".to_string())
+                .await
+                .unwrap()
+        );
+
+        target_actor.drain_and_stop().unwrap();
+        target_actor.await;
+
+        assert!(
+            !lookup_actor
+                .actor_exists(&client, "target".to_string())
+                .await
+                .unwrap()
+        );
+
+        lookup_actor.drain_and_stop().unwrap();
+        lookup_actor.await;
+    }
+
+    #[tokio::test]
+    async fn test_actor_registry_cleanup() {
+        let proc = Proc::local();
+
+        let initial_size = proc.state().actor_registry.len();
+
+        for i in 0..5 {
+            let actor_name = format!("temp_actor_{}", i);
+            let actor = proc.spawn::<TestActor>(&actor_name, ()).await.unwrap();
+
+            assert_eq!(proc.state().actor_registry.len(), initial_size + 1);
+
+            actor.drain_and_stop().unwrap();
+            actor.await;
+
+            assert_eq!(
+                proc.state().actor_registry.len(),
+                initial_size,
+                "Registry should be cleaned up after actor {} stops",
+                actor_name
+            );
+        }
+
+        assert_eq!(proc.state().actor_registry.len(), initial_size);
     }
 
     fn validate_link(child: &InstanceCell, parent: &InstanceCell) {

@@ -19,6 +19,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Weak;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -52,6 +53,7 @@ use crate::proc::Instance;
 use crate::proc::InstanceCell;
 use crate::proc::Ports;
 use crate::proc::Proc;
+use crate::proc::WeakInstanceCell;
 use crate::reference::ActorId;
 use crate::reference::GangId;
 use crate::reference::Index;
@@ -580,6 +582,14 @@ impl<A: Actor> ActorHandle<A> {
     pub fn bind<R: Binds<A>>(&self) -> ActorRef<R> {
         self.cell.bind(self.ports.as_ref())
     }
+
+    /// Downgrade this ActorHandle to a weak reference.
+    pub fn downgrade(&self) -> WeakActorHandle<A> {
+        WeakActorHandle {
+            cell: self.cell.downgrade(),
+            ports: Arc::downgrade(&self.ports),
+        }
+    }
 }
 
 /// IntoFuture allows users to await the handle to join it. The future
@@ -610,6 +620,43 @@ impl<A: Actor> Debug for ActorHandle<A> {
 }
 
 impl<A: Actor> Clone for ActorHandle<A> {
+    fn clone(&self) -> Self {
+        Self {
+            cell: self.cell.clone(),
+            ports: self.ports.clone(),
+        }
+    }
+}
+
+/// A weak reference to an [`ActorHandle`]. This allows holding references to actors
+/// without preventing them from being garbage collected when all strong references
+/// are dropped.
+#[derive(Debug)]
+pub struct WeakActorHandle<A: Actor> {
+    cell: WeakInstanceCell,
+    ports: Weak<Ports<A>>,
+}
+
+impl<A: Actor> WeakActorHandle<A> {
+    /// Create a new weak actor handle that is never upgradeable.
+    pub fn new() -> Self {
+        Self {
+            cell: WeakInstanceCell::new(),
+            ports: Weak::new(),
+        }
+    }
+
+    /// Upgrade this weak actor handle to a strong reference, if possible.
+    /// Returns `Some(ActorHandle<A>)` if the actor is still alive, `None` otherwise.
+    pub fn upgrade(&self) -> Option<ActorHandle<A>> {
+        match (self.cell.upgrade(), self.ports.upgrade()) {
+            (Some(cell), Some(ports)) => Some(ActorHandle::new(cell, ports)),
+            _ => None,
+        }
+    }
+}
+
+impl<A: Actor> Clone for WeakActorHandle<A> {
     fn clone(&self) -> Self {
         Self {
             cell: self.cell.clone(),
