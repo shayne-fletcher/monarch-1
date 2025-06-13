@@ -12,7 +12,7 @@
 //! and serialize/deserialize them using serde. All stored values must implement
 //! `Serialize + DeserializeOwned` to ensure the entire dictionary can be serialized.
 //!
-//! Keys are automatically registered at compile time using the `declare_attr_key!` macro and the
+//! Keys are automatically registered at compile time using the `declare_attrs!` macro and the
 //! inventory crate, eliminating the need for manual registry management.
 //!
 //! # Basic Usage
@@ -21,15 +21,19 @@
 //! use std::time::Duration;
 //!
 //! use hyperactor::attrs::Attrs;
-//! use hyperactor::attrs::declare_attr_key;
+//! use hyperactor::attrs::declare_attrs;
 //!
 //! // Declare keys with their associated types
-//! declare_attr_key!(TIMEOUT, Duration, "Request timeout");
-//! declare_attr_key!(MAX_RETRIES, u32, "Maximum retry count");
+//! declare_attrs! {
+//!    /// Request timeout
+//!    attr TIMEOUT: Duration;
+//!
+//!   /// Maximum retry count
+//!   attr MAX_RETRIES: u32 = 3;  // with default value
+//! }
 //!
 //! let mut attrs = Attrs::new();
 //! attrs.set(TIMEOUT, Duration::from_secs(30));
-//! attrs.set(MAX_RETRIES, 3);
 //!
 //! assert_eq!(attrs.get(TIMEOUT), Some(&Duration::from_secs(30)));
 //! assert_eq!(attrs.get(MAX_RETRIES), Some(&3));
@@ -43,9 +47,12 @@
 //! use std::time::Duration;
 //!
 //! use hyperactor::attrs::Attrs;
-//! use hyperactor::attrs::declare_attr_key;
+//! use hyperactor::attrs::declare_attrs;
 //!
-//! declare_attr_key!(TIMEOUT, Duration, "Request timeout");
+//! declare_attrs! {
+//!   /// Request timeout
+//!   pub attr TIMEOUT: Duration;
+//! }
 //!
 //! let mut attrs = Attrs::new();
 //! attrs.set(TIMEOUT, Duration::from_secs(30));
@@ -62,6 +69,8 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::ops::Index;
+use std::ops::IndexMut;
 
 use erased_serde::Deserializer as ErasedDeserializer;
 use erased_serde::Serialize as ErasedSerialize;
@@ -83,8 +92,6 @@ use crate::data::Named;
 pub struct AttrKeyInfo {
     /// Name of the key
     pub name: &'static str,
-    /// Description of the key
-    pub description: &'static str,
     /// Function to get the type hash of the associated value type
     pub typehash: fn() -> u64,
     /// Deserializer function that deserializes directly from any deserializer
@@ -96,21 +103,30 @@ inventory::collect!(AttrKeyInfo);
 
 /// A typed key for the attribute dictionary.
 ///
-/// Each key is associated with a specific type T and has a unique name and description.
-/// Keys are typically created using the `declare_attr_key!` macro which ensures they have
+/// Each key is associated with a specific type T and has a unique name.
+/// Keys are typically created using the `declare_attrs!` macro which ensures they have
 /// static lifetime and automatically registers them for serialization.
-pub struct Key<T> {
+pub struct Key<T: 'static> {
     name: &'static str,
-    description: &'static str,
+    default_value: Option<&'static T>,
     _phantom: PhantomData<T>,
 }
 
-impl<T: Named> Key<T> {
-    /// Creates a new key with the given name and description.
-    pub const fn new(name: &'static str, description: &'static str) -> Self {
+impl<T: Named + 'static> Key<T> {
+    /// Creates a new key with the given name.
+    pub const fn new(name: &'static str) -> Self {
         Self {
             name,
-            description,
+            default_value: None,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Creates a new key with the given name and default value reference.
+    pub const fn with_default(name: &'static str, default_value: &'static T) -> Self {
+        Self {
+            name,
+            default_value: Some(default_value),
             _phantom: PhantomData,
         }
     }
@@ -120,9 +136,14 @@ impl<T: Named> Key<T> {
         self.name
     }
 
-    /// Returns the description of this key.
-    pub fn description(&self) -> &'static str {
-        self.description
+    /// Returns a reference to the default value for this key, if one exists.
+    pub fn default(&self) -> Option<&'static T> {
+        self.default_value
+    }
+
+    /// Returns whether this key has a default value.
+    pub fn has_default(&self) -> bool {
+        self.default_value.is_some()
     }
 
     /// Returns the type hash of the associated value type.
@@ -131,14 +152,33 @@ impl<T: Named> Key<T> {
     }
 }
 
-impl<T> Clone for Key<T> {
+impl<T: 'static> Clone for Key<T> {
     fn clone(&self) -> Self {
         // Use Copy.
         *self
     }
 }
 
-impl<T> Copy for Key<T> {}
+impl<T: 'static> Copy for Key<T> {}
+
+// Enable attr[key] syntax.
+impl<T: Send + Sync + Serialize + DeserializeOwned + Named + 'static> Index<Key<T>> for Attrs {
+    type Output = T;
+
+    fn index(&self, key: Key<T>) -> &Self::Output {
+        self.get(key).unwrap()
+    }
+}
+
+// TODO: separately type keys with defaults, so that we can statically enforce that indexmut is only
+// called on keys with defaults.
+impl<T: Send + Sync + Serialize + DeserializeOwned + Named + Clone + 'static> IndexMut<Key<T>>
+    for Attrs
+{
+    fn index_mut(&mut self, key: Key<T>) -> &mut Self::Output {
+        self.get_mut(key).unwrap()
+    }
+}
 
 // Internal trait for type-erased serialization
 #[doc(hidden)]
@@ -209,7 +249,21 @@ impl Attrs {
         self.values.insert(key.name, Box::new(value));
     }
 
-    /// Get a value for the given key, returning None if not present.
+    fn maybe_set_from_default<
+        T: Send + Sync + Serialize + DeserializeOwned + Named + Clone + 'static,
+    >(
+        &mut self,
+        key: Key<T>,
+    ) {
+        if self.contains_key(key) {
+            return;
+        }
+        let Some(default) = key.default() else { return };
+        self.set(key, default.clone());
+    }
+
+    /// Get a value for the given key, returning None if not present. If the key has a default value,
+    /// that is returned instead.
     pub fn get<T: Send + Sync + Serialize + DeserializeOwned + Named + 'static>(
         &self,
         key: Key<T>,
@@ -217,13 +271,16 @@ impl Attrs {
         self.values
             .get(key.name)
             .and_then(|value| value.as_any().downcast_ref::<T>())
+            .or_else(|| key.default())
     }
 
-    /// Get a mutable reference to a value for the given key.
-    pub fn get_mut<T: Send + Sync + Serialize + DeserializeOwned + Named + 'static>(
+    /// Get a mutable reference to a value for the given key. If the key has a default value, it is
+    /// first set, and then returned as a mutable reference.
+    pub fn get_mut<T: Send + Sync + Serialize + DeserializeOwned + Named + Clone + 'static>(
         &mut self,
         key: Key<T>,
     ) -> Option<&mut T> {
+        self.maybe_set_from_default(key);
         self.values
             .get_mut(key.name)
             .and_then(|value| value.as_any_mut().downcast_mut::<T>())
@@ -263,17 +320,24 @@ impl Attrs {
 
     // Internal methods for config guard support
     /// Take a value by key name, returning the boxed value if present
-    pub(crate) fn take_value<T>(&mut self, key: Key<T>) -> Option<Box<dyn SerializableValue>> {
+    pub(crate) fn take_value<T: 'static>(
+        &mut self,
+        key: Key<T>,
+    ) -> Option<Box<dyn SerializableValue>> {
         self.values.remove(key.name)
     }
 
     /// Restore a value by key name
-    pub(crate) fn restore_value<T>(&mut self, key: Key<T>, value: Box<dyn SerializableValue>) {
+    pub(crate) fn restore_value<T: 'static>(
+        &mut self,
+        key: Key<T>,
+        value: Box<dyn SerializableValue>,
+    ) {
         self.values.insert(key.name, value);
     }
 
     /// Remove a value by key name
-    pub(crate) fn remove_value<T>(&mut self, key: &Key<T>) -> bool {
+    pub(crate) fn remove_value<T: 'static>(&mut self, key: Key<T>) -> bool {
         self.values.remove(key.name).is_some()
     }
 }
@@ -439,21 +503,27 @@ macro_rules! const_ascii_lowercase {
     }};
 }
 
-/// Declares a type-safe attribute key with a fully qualified lowercase name.
+/// Declares attribute keys using a lazy_static! style syntax.
 ///
-/// This macro creates a static key that can be used to store and retrieve values
-/// from an `Attrs` dictionary. The key name is automatically generated as a
-/// fully qualified module path in lowercase, similar to how the `Named` derive
-/// macro works.
+/// # Syntax
+///
+/// ```ignore
+/// declare_attrs! {
+///     /// Documentation for the key (default visibility).
+///     attr KEY_NAME: Type = default_value;
+///     
+///     /// Another key (default value is optional)
+///     pub attr ANOTHER_KEY: AnotherType;
+/// }
+/// ```
 ///
 /// # Arguments
 ///
-/// * `$name` - The identifier for the key constant
-/// * `$type` - The type of values this key can store
-/// * `$description` - A string literal describing the key's purpose
-///
-/// The identifier is a static, and should be spelled with uppercase letters.
-/// The corresponding attribute key name is lower cased.
+/// * Optional visibility modifier (`pub`, `pub(crate)`, etc.)
+/// * `attr` keyword (required)
+/// * Key name (identifier)
+/// * Type of values this key can store
+/// * Optional default value
 ///
 /// # Example
 ///
@@ -461,32 +531,83 @@ macro_rules! const_ascii_lowercase {
 /// use std::time::Duration;
 ///
 /// use hyperactor::attrs::Attrs;
-/// use hyperactor::attrs::declare_attr_key;
+/// use hyperactor::attrs::declare_attrs;
 ///
-/// declare_attr_key!(TIMEOUT, Duration, "Timeout for the RPC operation.");
+/// declare_attrs! {
+///     /// Timeout for RPC operations
+///     pub attr TIMEOUT: Duration = Duration::from_secs(30);
+///
+///     /// Maximum number of retry attempts (no default specified)
+///     attr MAX_RETRIES: u32;
+/// }
 ///
 /// let mut attrs = Attrs::new();
-/// attrs.set(TIMEOUT, Duration::from_secs(1));
-/// assert_eq!(attrs.get(TIMEOUT), Some(&Duration::from_secs(1)));
+/// assert_eq!(attrs.get(TIMEOUT), Some(&Duration::from_secs(30)));
+/// attrs.set(MAX_RETRIES, 5);
 /// ```
 #[macro_export]
-macro_rules! declare_attr_key {
-    ($name:ident, $type:ty, $description:literal) => {
-        #[doc = $description]
-        pub static $name: $crate::attrs::Key<$type> = {
+macro_rules! declare_attrs {
+    // Handle multiple attribute keys with optional default values
+    ($(
+        $(#[$attr:meta])*
+        $vis:vis attr $name:ident: $type:ty $(= $default:expr)?;
+    )*) => {
+        $(
+            $crate::declare_attrs! { @single $(#[$attr])* ; $vis attr $name: $type $(= $default)?; }
+        )*
+    };
+
+    // Handle single attribute key with default value
+    (@single $(#[$attr:meta])* ; $vis:vis attr $name:ident: $type:ty = $default:expr;) => {
+        // Create a static default value
+        $crate::paste! {
+            static [<$name _DEFAULT>]: $type = $default;
+        }
+
+        $(#[$attr])*
+        $vis static $name: $crate::attrs::Key<$type> = {
             const FULL_NAME: &str = concat!(std::module_path!(), "::", stringify!($name));
             const LOWER_NAME: &str = $crate::const_ascii_lowercase!(FULL_NAME);
-            $crate::attrs::Key::new(LOWER_NAME, $description)
+            $crate::paste! {
+                $crate::attrs::Key::with_default(
+                    LOWER_NAME,
+                    &[<$name _DEFAULT>]
+                )
+            }
         };
 
-        // Use the same pattern as data.rs - create a static with function pointers
+        // Register the key for serialization
         $crate::submit! {
             $crate::attrs::AttrKeyInfo {
                 name: {
                     const FULL_NAME: &str = concat!(std::module_path!(), "::", stringify!($name));
                     $crate::const_ascii_lowercase!(FULL_NAME)
                 },
-                description: $description,
+                typehash: <$type as $crate::data::Named>::typehash,
+                deserialize_erased: |deserializer| {
+                    let value: $type = erased_serde::deserialize(deserializer)?;
+                    Ok(Box::new(value) as Box<dyn $crate::attrs::SerializableValue>)
+                },
+            }
+        }
+    };
+
+    // Handle single attribute key without default value
+    (@single $(#[$attr:meta])* ; $vis:vis attr $name:ident: $type:ty;) => {
+        $(#[$attr])*
+        $vis static $name: $crate::attrs::Key<$type> = {
+            const FULL_NAME: &str = concat!(std::module_path!(), "::", stringify!($name));
+            const LOWER_NAME: &str = $crate::const_ascii_lowercase!(FULL_NAME);
+            $crate::attrs::Key::new(LOWER_NAME)
+        };
+
+        // Register the key for serialization
+        $crate::submit! {
+            $crate::attrs::AttrKeyInfo {
+                name: {
+                    const FULL_NAME: &str = concat!(std::module_path!(), "::", stringify!($name));
+                    $crate::const_ascii_lowercase!(FULL_NAME)
+                },
                 typehash: <$type as $crate::data::Named>::typehash,
                 deserialize_erased: |deserializer| {
                     let value: $type = erased_serde::deserialize(deserializer)?;
@@ -497,7 +618,7 @@ macro_rules! declare_attr_key {
     };
 }
 
-pub use declare_attr_key;
+pub use declare_attrs;
 
 #[cfg(test)]
 mod tests {
@@ -505,9 +626,11 @@ mod tests {
 
     use super::*;
 
-    declare_attr_key!(TEST_TIMEOUT, Duration, "Test timeout key");
-    declare_attr_key!(TEST_COUNT, u32, "Test count key");
-    declare_attr_key!(TEST_NAME, String, "Test name key");
+    declare_attrs! {
+        attr TEST_TIMEOUT: Duration;
+        attr TEST_COUNT: u32;
+        attr TEST_NAME: String;
+    }
 
     #[test]
     fn test_basic_operations() {
@@ -572,7 +695,6 @@ mod tests {
             TEST_TIMEOUT.name(),
             "hyperactor::attrs::tests::test_timeout"
         );
-        assert_eq!(TEST_TIMEOUT.description(), "Test timeout key");
     }
 
     #[test]
@@ -746,5 +868,36 @@ mod tests {
         // For strings, the JSON representation should be the escaped version
         // Let's check that the test string is actually present in some form
         assert!(debug_output.contains("test"));
+    }
+
+    declare_attrs! {
+        /// With default...
+        attr TIMEOUT_WITH_DEFAULT: Duration = Duration::from_secs(10);
+
+        /// Just to ensure visibilty is parsed.
+        pub(crate) attr CRATE_LOCAL_ATTR: String;
+    }
+
+    #[test]
+    fn test_defaults() {
+        assert!(TIMEOUT_WITH_DEFAULT.has_default());
+        assert!(!CRATE_LOCAL_ATTR.has_default());
+
+        assert_eq!(
+            Attrs::new().get(TIMEOUT_WITH_DEFAULT),
+            Some(&Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn test_indexing() {
+        let mut attrs = Attrs::new();
+
+        assert_eq!(attrs[TIMEOUT_WITH_DEFAULT], Duration::from_secs(10));
+        attrs[TIMEOUT_WITH_DEFAULT] = Duration::from_secs(100);
+        assert_eq!(attrs[TIMEOUT_WITH_DEFAULT], Duration::from_secs(100));
+
+        attrs.set(CRATE_LOCAL_ATTR, "test".to_string());
+        assert_eq!(attrs[CRATE_LOCAL_ATTR], "test".to_string());
     }
 }

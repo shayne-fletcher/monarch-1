@@ -102,7 +102,6 @@ pub use async_trait;
 // Re-exported to use in Named derive macro.
 #[doc(hidden)]
 pub use cityhasher;
-pub use config::Config;
 #[doc(hidden)]
 pub use dashmap; // For intern_typename!
 pub use data::Named;

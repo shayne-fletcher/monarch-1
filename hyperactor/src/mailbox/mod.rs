@@ -1286,7 +1286,7 @@ impl SplitPortBuffer {
     /// Push a new item to the buffer, and optionally return any items that should
     /// be flushed.
     fn push(&mut self, serialized: Serialized) -> Option<Vec<Serialized>> {
-        let limit = crate::config::global::split_max_buffer_size();
+        let limit = crate::config::global::get(crate::config::SPLIT_MAX_BUFFER_SIZE);
 
         self.0.push(serialized);
         if self.0.len() >= limit {

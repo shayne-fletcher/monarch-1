@@ -118,7 +118,7 @@ impl System {
             )
             .await
             .unwrap();
-        let timeout = hyperactor::config::global::message_delivery_timeout();
+        let timeout = hyperactor::config::global::get(hyperactor::config::MESSAGE_DELIVERY_TIMEOUT);
         loop {
             let result = tokio::time::timeout(timeout, proc_rx.recv()).await?;
             match result? {

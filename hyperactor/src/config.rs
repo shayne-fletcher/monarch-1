@@ -22,247 +22,107 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use crate::attrs::Attrs;
-use crate::attrs::declare_attr_key;
+use crate::attrs::declare_attrs;
 
-// Declare configuration keys using the attrs system
-declare_attr_key!(
-    CODEC_MAX_FRAME_LENGTH,
-    usize,
-    "Maximum frame length for codec"
-);
+// Declare configuration keys using the new attrs system with defaults
+declare_attrs! {
+    /// Maximum frame length for codec
+    pub attr CODEC_MAX_FRAME_LENGTH: usize = 8 * 1024 * 1024; // 8 MB
 
-declare_attr_key!(
-    MESSAGE_DELIVERY_TIMEOUT,
-    Duration,
-    "Message delivery timeout"
-);
+    /// Message delivery timeout
+    pub attr MESSAGE_DELIVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
-declare_attr_key!(
-    MESSAGE_ACK_TIME_INTERVAL,
-    Duration,
-    "Message acknowledgment interval"
-);
+    /// Message acknowledgment interval
+    pub attr MESSAGE_ACK_TIME_INTERVAL: Duration = Duration::from_millis(500);
 
-declare_attr_key!(
-    MESSAGE_ACK_EVERY_N_MESSAGES,
-    u64,
-    "Number of messages after which to send an acknowledgment"
-);
+    /// Number of messages after which to send an acknowledgment
+    pub attr MESSAGE_ACK_EVERY_N_MESSAGES: u64 = 1000;
 
-declare_attr_key!(
-    SPLIT_MAX_BUFFER_SIZE,
-    usize,
-    "Maximum buffer size for split port messages"
-);
+    /// Maximum buffer size for split port messages
+    pub attr SPLIT_MAX_BUFFER_SIZE: usize = 5;
 
-declare_attr_key!(
-    IS_MANAGED_SUBPROCESS,
-    bool,
-    "Flag indicating if this is a managed subprocess"
-);
-
-/// Configuration builder for Hyperactor.
-#[derive(Debug, Clone)]
-pub struct Config {
-    attrs: Attrs,
+    /// Flag indicating if this is a managed subprocess
+    pub attr IS_MANAGED_SUBPROCESS: bool = false;
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        let mut attrs = Attrs::new();
+/// Load configuration from environment variables
+pub fn from_env() -> Attrs {
+    let mut config = Attrs::new();
 
-        // Set default values
-        attrs.set(CODEC_MAX_FRAME_LENGTH, 8 * 1024 * 1024); // 8 MB
-        attrs.set(MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(30));
-        attrs.set(MESSAGE_ACK_TIME_INTERVAL, Duration::from_millis(500));
-        attrs.set(MESSAGE_ACK_EVERY_N_MESSAGES, 1000u64);
-        attrs.set(SPLIT_MAX_BUFFER_SIZE, 5usize);
-        attrs.set(IS_MANAGED_SUBPROCESS, false);
-
-        Self { attrs }
+    // Load codec max frame length
+    if let Ok(val) = env::var("HYPERACTOR_CODEC_MAX_FRAME_LENGTH") {
+        if let Ok(parsed) = val.parse::<usize>() {
+            config[CODEC_MAX_FRAME_LENGTH] = parsed;
+        }
     }
+
+    // Load message delivery timeout
+    if let Ok(val) = env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT_SECS") {
+        if let Ok(parsed) = val.parse::<u64>() {
+            config[MESSAGE_DELIVERY_TIMEOUT] = Duration::from_secs(parsed);
+        }
+    }
+
+    // Load message ack time interval
+    if let Ok(val) = env::var("HYPERACTOR_MESSAGE_ACK_TIME_INTERVAL_MS") {
+        if let Ok(parsed) = val.parse::<u64>() {
+            config[MESSAGE_ACK_TIME_INTERVAL] = Duration::from_millis(parsed);
+        }
+    }
+
+    // Load message ack every n messages
+    if let Ok(val) = env::var("HYPERACTOR_MESSAGE_ACK_EVERY_N_MESSAGES") {
+        if let Ok(parsed) = val.parse::<u64>() {
+            config[MESSAGE_ACK_EVERY_N_MESSAGES] = parsed;
+        }
+    }
+
+    // Load split max buffer size
+    if let Ok(val) = env::var("HYPERACTOR_SPLIT_MAX_BUFFER_SIZE") {
+        if let Ok(parsed) = val.parse::<usize>() {
+            config[SPLIT_MAX_BUFFER_SIZE] = parsed;
+        }
+    }
+
+    config[IS_MANAGED_SUBPROCESS] = env::var("HYPERACTOR_MANAGED_SUBPROCESS").is_ok();
+
+    config
 }
 
-impl Config {
-    /// Create a new configuration with default values
-    pub fn new() -> Self {
-        Self::default()
+/// Load configuration from a YAML file
+pub fn from_yaml<P: AsRef<Path>>(path: P) -> Result<Attrs, anyhow::Error> {
+    let mut file = File::open(path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(serde_yaml::from_str(&contents)?)
+}
+
+/// Save configuration to a YAML file
+pub fn to_yaml<P: AsRef<Path>>(attrs: &Attrs, path: P) -> Result<(), anyhow::Error> {
+    let yaml = serde_yaml::to_string(attrs)?;
+    std::fs::write(path, yaml)?;
+    Ok(())
+}
+
+/// Merge with another configuration, with the other taking precedence
+pub fn merge(config: &mut Attrs, other: &Attrs) {
+    if other.contains_key(CODEC_MAX_FRAME_LENGTH) {
+        config[CODEC_MAX_FRAME_LENGTH] = other[CODEC_MAX_FRAME_LENGTH];
     }
-
-    /// Load configuration from environment variables
-    pub fn from_env() -> Self {
-        let mut config = Self::default();
-
-        // Load codec max frame length
-        if let Ok(val) = env::var("HYPERACTOR_CODEC_MAX_FRAME_LENGTH") {
-            if let Ok(parsed) = val.parse::<usize>() {
-                config.attrs.set(CODEC_MAX_FRAME_LENGTH, parsed);
-            }
-        }
-
-        // Load message delivery timeout
-        if let Ok(val) = env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT_SECS") {
-            if let Ok(parsed) = val.parse::<u64>() {
-                config
-                    .attrs
-                    .set(MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(parsed));
-            }
-        }
-
-        // Load message ack time interval
-        if let Ok(val) = env::var("HYPERACTOR_MESSAGE_ACK_TIME_INTERVAL_MS") {
-            if let Ok(parsed) = val.parse::<u64>() {
-                config
-                    .attrs
-                    .set(MESSAGE_ACK_TIME_INTERVAL, Duration::from_millis(parsed));
-            }
-        }
-
-        // Load message ack every n messages
-        if let Ok(val) = env::var("HYPERACTOR_MESSAGE_ACK_EVERY_N_MESSAGES") {
-            if let Ok(parsed) = val.parse::<u64>() {
-                config.attrs.set(MESSAGE_ACK_EVERY_N_MESSAGES, parsed);
-            }
-        }
-
-        // Load split max buffer size
-        if let Ok(val) = env::var("HYPERACTOR_SPLIT_MAX_BUFFER_SIZE") {
-            if let Ok(parsed) = val.parse::<usize>() {
-                config.attrs.set(SPLIT_MAX_BUFFER_SIZE, parsed);
-            }
-        }
-
-        // Check if this is a managed subprocess
-        config.attrs.set(
-            IS_MANAGED_SUBPROCESS,
-            env::var("HYPERACTOR_MANAGED_SUBPROCESS").is_ok(),
-        );
-
-        config
+    if other.contains_key(MESSAGE_DELIVERY_TIMEOUT) {
+        config[MESSAGE_DELIVERY_TIMEOUT] = other[MESSAGE_DELIVERY_TIMEOUT];
     }
-
-    /// Load configuration from a YAML file
-    pub fn from_yaml<P: AsRef<Path>>(path: P) -> Result<Self, anyhow::Error> {
-        let mut file = File::open(path)?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
-
-        let attrs: Attrs = serde_yaml::from_str(&contents)?;
-        Ok(Self { attrs })
+    if other.contains_key(MESSAGE_ACK_TIME_INTERVAL) {
+        config[MESSAGE_ACK_TIME_INTERVAL] = other[MESSAGE_ACK_TIME_INTERVAL];
     }
-
-    /// Merge with another configuration, with the other taking precedence
-    pub fn merge(&mut self, other: &Self) {
-        // For each key in the other config, copy it to this config
-        if let Some(value) = other.attrs.get(CODEC_MAX_FRAME_LENGTH) {
-            self.attrs.set(CODEC_MAX_FRAME_LENGTH, *value);
-        }
-        if let Some(value) = other.attrs.get(MESSAGE_DELIVERY_TIMEOUT) {
-            self.attrs.set(MESSAGE_DELIVERY_TIMEOUT, *value);
-        }
-        if let Some(value) = other.attrs.get(MESSAGE_ACK_TIME_INTERVAL) {
-            self.attrs.set(MESSAGE_ACK_TIME_INTERVAL, *value);
-        }
-        if let Some(value) = other.attrs.get(MESSAGE_ACK_EVERY_N_MESSAGES) {
-            self.attrs.set(MESSAGE_ACK_EVERY_N_MESSAGES, *value);
-        }
-        if let Some(value) = other.attrs.get(SPLIT_MAX_BUFFER_SIZE) {
-            self.attrs.set(SPLIT_MAX_BUFFER_SIZE, *value);
-        }
-        if let Some(value) = other.attrs.get(IS_MANAGED_SUBPROCESS) {
-            self.attrs.set(IS_MANAGED_SUBPROCESS, *value);
-        }
+    if other.contains_key(MESSAGE_ACK_EVERY_N_MESSAGES) {
+        config[MESSAGE_ACK_EVERY_N_MESSAGES] = other[MESSAGE_ACK_EVERY_N_MESSAGES];
     }
-
-    /// Save configuration to a YAML file
-    pub fn to_yaml<P: AsRef<Path>>(&self, path: P) -> Result<(), anyhow::Error> {
-        let yaml = serde_yaml::to_string(&self.attrs)?;
-        std::fs::write(path, yaml)?;
-        Ok(())
+    if other.contains_key(SPLIT_MAX_BUFFER_SIZE) {
+        config[SPLIT_MAX_BUFFER_SIZE] = other[SPLIT_MAX_BUFFER_SIZE];
     }
-
-    /// Get the underlying attrs
-    pub fn attrs(&self) -> &Attrs {
-        &self.attrs
-    }
-
-    /// Get a mutable reference to the underlying attrs
-    pub fn attrs_mut(&mut self) -> &mut Attrs {
-        &mut self.attrs
-    }
-
-    // Convenience getter methods
-    /// Get the codec max frame length
-    pub fn codec_max_frame_length(&self) -> usize {
-        *self
-            .attrs
-            .get(CODEC_MAX_FRAME_LENGTH)
-            .unwrap_or(&(8 * 1024 * 1024))
-    }
-
-    /// Get the message delivery timeout
-    pub fn message_delivery_timeout(&self) -> Duration {
-        *self
-            .attrs
-            .get(MESSAGE_DELIVERY_TIMEOUT)
-            .unwrap_or(&Duration::from_secs(30))
-    }
-
-    /// Get the message acknowledgment time interval
-    pub fn message_ack_time_interval(&self) -> Duration {
-        *self
-            .attrs
-            .get(MESSAGE_ACK_TIME_INTERVAL)
-            .unwrap_or(&Duration::from_millis(500))
-    }
-
-    /// Get the number of messages after which to send an acknowledgment
-    pub fn message_ack_every_n_messages(&self) -> u64 {
-        *self
-            .attrs
-            .get(MESSAGE_ACK_EVERY_N_MESSAGES)
-            .unwrap_or(&1000)
-    }
-
-    /// Get the maximum buffer size for split port messages
-    pub fn split_max_buffer_size(&self) -> usize {
-        *self.attrs.get(SPLIT_MAX_BUFFER_SIZE).unwrap_or(&5)
-    }
-
-    /// Check if this is a managed subprocess
-    pub fn is_managed_subprocess(&self) -> bool {
-        *self.attrs.get(IS_MANAGED_SUBPROCESS).unwrap_or(&false)
-    }
-
-    // Convenience setter methods
-    /// Set the codec max frame length
-    pub fn set_codec_max_frame_length(&mut self, value: usize) {
-        self.attrs.set(CODEC_MAX_FRAME_LENGTH, value);
-    }
-
-    /// Set the message delivery timeout
-    pub fn set_message_delivery_timeout(&mut self, value: Duration) {
-        self.attrs.set(MESSAGE_DELIVERY_TIMEOUT, value);
-    }
-
-    /// Set the message acknowledgment time interval
-    pub fn set_message_ack_time_interval(&mut self, value: Duration) {
-        self.attrs.set(MESSAGE_ACK_TIME_INTERVAL, value);
-    }
-
-    /// Set the number of messages after which to send an acknowledgment
-    pub fn set_message_ack_every_n_messages(&mut self, value: u64) {
-        self.attrs.set(MESSAGE_ACK_EVERY_N_MESSAGES, value);
-    }
-
-    /// Set the maximum buffer size for split port messages
-    pub fn set_split_max_buffer_size(&mut self, value: usize) {
-        self.attrs.set(SPLIT_MAX_BUFFER_SIZE, value);
-    }
-
-    /// Set whether this is a managed subprocess
-    pub fn set_is_managed_subprocess(&mut self, value: bool) {
-        self.attrs.set(IS_MANAGED_SUBPROCESS, value);
+    if other.contains_key(IS_MANAGED_SUBPROCESS) {
+        config[IS_MANAGED_SUBPROCESS] = other[IS_MANAGED_SUBPROCESS];
     }
 }
 
@@ -287,10 +147,11 @@ pub mod global {
     use std::marker::PhantomData;
 
     use super::*;
+    use crate::attrs::Key;
 
     /// Global configuration instance, initialized from environment variables.
-    static CONFIG: LazyLock<Arc<RwLock<Config>>> =
-        LazyLock::new(|| Arc::new(RwLock::new(Config::from_env())));
+    static CONFIG: LazyLock<Arc<RwLock<Attrs>>> =
+        LazyLock::new(|| Arc::new(RwLock::new(from_env())));
 
     /// Acquire the global configuration lock for testing.
     ///
@@ -313,57 +174,38 @@ pub mod global {
 
     /// Initialize the global configuration from environment variables
     pub fn init_from_env() {
-        let config = Config::from_env();
+        let config = from_env();
         let mut global_config = CONFIG.write().unwrap();
         *global_config = config;
     }
 
     /// Initialize the global configuration from a YAML file
     pub fn init_from_yaml<P: AsRef<Path>>(path: P) -> Result<(), anyhow::Error> {
-        let config = Config::from_yaml(path)?;
+        let config = from_yaml(path)?;
         let mut global_config = CONFIG.write().unwrap();
         *global_config = config;
         Ok(())
     }
 
-    /// Get a reference to the global configuration
-    pub fn get() -> Arc<RwLock<Config>> {
-        CONFIG.clone()
+    /// Get a key from the global configuration. Currently only available for Copy types.
+    /// `get` assumes that the key has a default value.
+    pub fn get<
+        T: Send
+            + Sync
+            + Copy
+            + serde::Serialize
+            + serde::de::DeserializeOwned
+            + crate::data::Named
+            + 'static,
+    >(
+        key: Key<T>,
+    ) -> T {
+        *CONFIG.read().unwrap().get(key).unwrap()
     }
 
     /// Get the global attrs
     pub fn attrs() -> Attrs {
-        CONFIG.read().unwrap().attrs.clone()
-    }
-
-    /// Get the codec max frame length
-    pub fn codec_max_frame_length() -> usize {
-        CONFIG.read().unwrap().codec_max_frame_length()
-    }
-
-    /// Get the message delivery timeout
-    pub fn message_delivery_timeout() -> Duration {
-        CONFIG.read().unwrap().message_delivery_timeout()
-    }
-
-    /// Get the message acknowledgment time interval
-    pub fn message_ack_time_interval() -> Duration {
-        CONFIG.read().unwrap().message_ack_time_interval()
-    }
-
-    /// Get the number of messages after which to send an acknowledgment
-    pub fn message_ack_every_n_messages() -> u64 {
-        CONFIG.read().unwrap().message_ack_every_n_messages()
-    }
-
-    /// Get the maximum buffer size for split port messages
-    pub fn split_max_buffer_size() -> usize {
-        CONFIG.read().unwrap().split_max_buffer_size()
-    }
-
-    /// Check if this is a managed subprocess
-    pub fn is_managed_subprocess() -> bool {
-        CONFIG.read().unwrap().is_managed_subprocess()
+        CONFIG.read().unwrap().clone()
     }
 
     /// Reset the global configuration to defaults (for testing only)
@@ -372,7 +214,7 @@ pub mod global {
     /// Available in all builds to support tests in other crates.
     pub fn reset_to_defaults() {
         let mut config = CONFIG.write().unwrap();
-        *config = Config::default();
+        *config = Attrs::new();
     }
 
     /// A guard that holds the global configuration lock and provides override functionality.
@@ -404,8 +246,8 @@ pub mod global {
         ) -> ConfigValueGuard<'a, T> {
             let orig = {
                 let mut config = CONFIG.write().unwrap();
-                let orig = config.attrs.take_value(key);
-                config.attrs.set(key, value);
+                let orig = config.take_value(key);
+                config.set(key, value);
                 orig
             };
 
@@ -418,20 +260,20 @@ pub mod global {
     }
 
     /// A guard that restores a single configuration value when dropped
-    pub struct ConfigValueGuard<'a, T> {
+    pub struct ConfigValueGuard<'a, T: 'static> {
         key: crate::attrs::Key<T>,
         orig: Option<Box<dyn crate::attrs::SerializableValue>>,
         // This is here so we can hold onto a 'a lifetime.
         _phantom: PhantomData<&'a ()>,
     }
 
-    impl<T> Drop for ConfigValueGuard<'_, T> {
+    impl<T: 'static> Drop for ConfigValueGuard<'_, T> {
         fn drop(&mut self) {
             let mut config = CONFIG.write().unwrap();
             if let Some(orig) = self.orig.take() {
-                config.attrs.restore_value(self.key, orig);
+                config.restore_value(self.key, orig);
             } else {
-                config.attrs.remove_value(&self.key);
+                config.remove_value(self.key);
             }
         }
     }
@@ -443,16 +285,16 @@ mod tests {
 
     #[test]
     fn test_default_config() {
-        let config = Config::default();
-        assert_eq!(config.codec_max_frame_length(), 8 * 1024 * 1024);
-        assert_eq!(config.message_delivery_timeout(), Duration::from_secs(30));
+        let config = Attrs::new();
+        assert_eq!(config[CODEC_MAX_FRAME_LENGTH], 8 * 1024 * 1024);
+        assert_eq!(config[MESSAGE_DELIVERY_TIMEOUT], Duration::from_secs(30));
         assert_eq!(
-            config.message_ack_time_interval(),
+            config[MESSAGE_ACK_TIME_INTERVAL],
             Duration::from_millis(500)
         );
-        assert_eq!(config.message_ack_every_n_messages(), 1000);
-        assert_eq!(config.split_max_buffer_size(), 5);
-        assert!(!config.is_managed_subprocess());
+        assert_eq!(config[MESSAGE_ACK_EVERY_N_MESSAGES], 1000);
+        assert_eq!(config[SPLIT_MAX_BUFFER_SIZE], 5);
+        assert!(!config[IS_MANAGED_SUBPROCESS]);
     }
 
     #[test]
@@ -463,12 +305,12 @@ mod tests {
         // SAFETY: TODO: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::set_var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT_SECS", "60") };
 
-        let config = Config::from_env();
+        let config = from_env();
 
-        assert_eq!(config.codec_max_frame_length(), 1024);
-        assert_eq!(config.message_delivery_timeout(), Duration::from_secs(60));
+        assert_eq!(config[CODEC_MAX_FRAME_LENGTH], 1024);
+        assert_eq!(config[MESSAGE_DELIVERY_TIMEOUT], Duration::from_secs(60));
         assert_eq!(
-            config.message_ack_time_interval(),
+            config[MESSAGE_ACK_TIME_INTERVAL],
             Duration::from_millis(500)
         ); // Default value
 
@@ -481,15 +323,15 @@ mod tests {
 
     #[test]
     fn test_merge() {
-        let mut config1 = Config::default();
-        let mut config2 = Config::default();
-        config2.set_codec_max_frame_length(1024);
-        config2.set_message_delivery_timeout(Duration::from_secs(60));
+        let mut config1 = Attrs::new();
+        let mut config2 = Attrs::new();
+        config2[CODEC_MAX_FRAME_LENGTH] = 1024;
+        config2[MESSAGE_DELIVERY_TIMEOUT] = Duration::from_secs(60);
 
-        config1.merge(&config2);
+        merge(&mut config1, &config2);
 
-        assert_eq!(config1.codec_max_frame_length(), 1024);
-        assert_eq!(config1.message_delivery_timeout(), Duration::from_secs(60));
+        assert_eq!(config1[CODEC_MAX_FRAME_LENGTH], 1024);
+        assert_eq!(config1[MESSAGE_DELIVERY_TIMEOUT], Duration::from_secs(60));
     }
 
     #[test]
@@ -499,27 +341,90 @@ mod tests {
         // Reset global config to defaults to avoid interference from other tests
         global::reset_to_defaults();
 
-        assert_eq!(global::codec_max_frame_length(), 8 * 1024 * 1024);
-
-        // Temporarily modify the configuration using the new lock/override API
+        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 8 * 1024 * 1024);
         {
             let _guard = config.override_key(CODEC_MAX_FRAME_LENGTH, 1024);
-            assert_eq!(global::codec_max_frame_length(), 1024);
+            assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024);
         }
+        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 8 * 1024 * 1024);
 
-        // Check that the original configuration is restored
-        assert_eq!(global::codec_max_frame_length(), 8 * 1024 * 1024);
-
-        // Temporarily modify the configuration using the RAII pattern
         {
             let _guard = config.override_key(CODEC_MAX_FRAME_LENGTH, 1024);
-            assert_eq!(global::codec_max_frame_length(), 1024);
+            assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024);
 
             // The configuration will be automatically restored when _guard goes out of scope
         }
 
-        // Check that the original configuration is restored
-        assert_eq!(global::codec_max_frame_length(), 8 * 1024 * 1024);
+        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_defaults() {
+        // Test that empty config now returns defaults via get_or_default
+        let config = Attrs::new();
+
+        // Verify that the config is empty (no values explicitly set)
+        assert!(config.is_empty());
+
+        // But getters should still return the defaults from the keys
+        assert_eq!(config[CODEC_MAX_FRAME_LENGTH], 8 * 1024 * 1024);
+        assert_eq!(config[MESSAGE_DELIVERY_TIMEOUT], Duration::from_secs(30));
+        assert_eq!(
+            config[MESSAGE_ACK_TIME_INTERVAL],
+            Duration::from_millis(500)
+        );
+        assert_eq!(config[MESSAGE_ACK_EVERY_N_MESSAGES], 1000);
+        assert_eq!(config[SPLIT_MAX_BUFFER_SIZE], 5);
+        assert!(!config[IS_MANAGED_SUBPROCESS]);
+
+        // Verify the keys have defaults
+        assert!(CODEC_MAX_FRAME_LENGTH.has_default());
+        assert!(MESSAGE_DELIVERY_TIMEOUT.has_default());
+        assert!(MESSAGE_ACK_TIME_INTERVAL.has_default());
+        assert!(MESSAGE_ACK_EVERY_N_MESSAGES.has_default());
+        assert!(SPLIT_MAX_BUFFER_SIZE.has_default());
+        assert!(IS_MANAGED_SUBPROCESS.has_default());
+
+        // Verify we can get defaults directly from keys
+        assert_eq!(CODEC_MAX_FRAME_LENGTH.default(), Some(&(8 * 1024 * 1024)));
+        assert_eq!(
+            MESSAGE_DELIVERY_TIMEOUT.default(),
+            Some(&Duration::from_secs(30))
+        );
+        assert_eq!(
+            MESSAGE_ACK_TIME_INTERVAL.default(),
+            Some(&Duration::from_millis(500))
+        );
+        assert_eq!(MESSAGE_ACK_EVERY_N_MESSAGES.default(), Some(&1000));
+        assert_eq!(SPLIT_MAX_BUFFER_SIZE.default(), Some(&5));
+        assert_eq!(IS_MANAGED_SUBPROCESS.default(), Some(&false));
+    }
+
+    #[test]
+    fn test_serialization_only_includes_set_values() {
+        let mut config = Attrs::new();
+
+        // Initially empty, serialization should be empty
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert_eq!(serialized, "{}");
+
+        config[CODEC_MAX_FRAME_LENGTH] = 1024;
+
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(serialized.contains("codec_max_frame_length"));
+        assert!(!serialized.contains("message_delivery_timeout")); // Default not serialized
+
+        // Deserialize back
+        let restored_config: Attrs = serde_json::from_str(&serialized).unwrap();
+
+        // Custom value should be preserved
+        assert_eq!(restored_config[CODEC_MAX_FRAME_LENGTH], 1024);
+
+        // Defaults should still work for other values
+        assert_eq!(
+            restored_config[MESSAGE_DELIVERY_TIMEOUT],
+            Duration::from_secs(30)
+        );
     }
 
     #[test]
@@ -530,30 +435,42 @@ mod tests {
         global::reset_to_defaults();
 
         // Test the new lock/override API for individual config values
-        assert_eq!(global::codec_max_frame_length(), 8 * 1024 * 1024);
-        assert_eq!(global::message_delivery_timeout(), Duration::from_secs(30));
+        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 8 * 1024 * 1024);
+        assert_eq!(
+            global::get(MESSAGE_DELIVERY_TIMEOUT),
+            Duration::from_secs(30)
+        );
 
         // Test single value override
         {
             let _guard = config.override_key(CODEC_MAX_FRAME_LENGTH, 2048);
-            assert_eq!(global::codec_max_frame_length(), 2048);
-            assert_eq!(global::message_delivery_timeout(), Duration::from_secs(30)); // Unchanged
+            assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 2048);
+            assert_eq!(
+                global::get(MESSAGE_DELIVERY_TIMEOUT),
+                Duration::from_secs(30)
+            ); // Unchanged
         }
 
         // Values should be restored after guard is dropped
-        assert_eq!(global::codec_max_frame_length(), 8 * 1024 * 1024);
+        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 8 * 1024 * 1024);
 
         // Test multiple overrides
         {
             let _guard1 = config.override_key(CODEC_MAX_FRAME_LENGTH, 4096);
             let _guard2 = config.override_key(MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(60));
 
-            assert_eq!(global::codec_max_frame_length(), 4096);
-            assert_eq!(global::message_delivery_timeout(), Duration::from_secs(60));
+            assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 4096);
+            assert_eq!(
+                global::get(MESSAGE_DELIVERY_TIMEOUT),
+                Duration::from_secs(60)
+            );
         }
 
         // All values should be restored
-        assert_eq!(global::codec_max_frame_length(), 8 * 1024 * 1024);
-        assert_eq!(global::message_delivery_timeout(), Duration::from_secs(30));
+        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 8 * 1024 * 1024);
+        assert_eq!(
+            global::get(MESSAGE_DELIVERY_TIMEOUT),
+            Duration::from_secs(30)
+        );
     }
 }

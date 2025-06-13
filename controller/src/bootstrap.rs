@@ -563,7 +563,7 @@ async fn create_world(
     tracing::info!("created new worker world {}", worker_world_id);
 
     // Wait for all the worker procs to join the worker world.
-    let timeout = hyperactor::config::global::message_delivery_timeout();
+    let timeout = hyperactor::config::global::get(hyperactor::config::MESSAGE_DELIVERY_TIMEOUT);
     tracing::info!("waiting for worker world {} to be alive", worker_world_id);
     loop {
         let snapshot = tokio::time::timeout(timeout, async {

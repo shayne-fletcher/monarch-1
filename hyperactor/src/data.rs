@@ -93,6 +93,12 @@ impl_basic!(f32);
 impl_basic!(f64);
 impl_basic!(String);
 
+impl Named for &'static str {
+    fn typename() -> &'static str {
+        "&str"
+    }
+}
+
 impl Named for std::time::Duration {
     fn typename() -> &'static str {
         "std::time::Duration"

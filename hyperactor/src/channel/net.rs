@@ -66,7 +66,6 @@ use crate::RemoteMessage;
 use crate::clock::Clock;
 use crate::clock::RealClock;
 use crate::config;
-use crate::config::global::message_delivery_timeout;
 
 /// Use to prevent [futures::Stream] objects using the wrong next() method by
 /// accident. Bascially, we want to use [tokio_stream::StreamExt::next] since it
@@ -167,7 +166,7 @@ fn deserialize_ack(data: BytesMut) -> Result<u64, usize> {
 
 fn build_codec() -> LengthDelimitedCodec {
     LengthDelimitedCodec::builder()
-        .max_frame_length(config::global::codec_max_frame_length())
+        .max_frame_length(config::global::get(config::CODEC_MAX_FRAME_LENGTH))
         .new_codec()
 }
 
@@ -230,7 +229,9 @@ impl<M: RemoteMessage> NetTx<M> {
             fn is_expired(&self) -> bool {
                 match self.deque.front() {
                     None => false,
-                    Some((_, _, since, _)) => since.elapsed() > message_delivery_timeout(),
+                    Some((_, _, since, _)) => {
+                        since.elapsed() > config::global::get(config::MESSAGE_DELIVERY_TIMEOUT)
+                    }
                 }
             }
 
@@ -341,7 +342,7 @@ impl<M: RemoteMessage> NetTx<M> {
             fn is_expired(&self) -> bool {
                 matches!(
                     self.0.front(),
-                    Some((_, _, received_at, _)) if received_at.elapsed() > message_delivery_timeout()
+                    Some((_, _, received_at, _)) if received_at.elapsed() > config::global::get(config::MESSAGE_DELIVERY_TIMEOUT)
                 )
             }
 
@@ -352,7 +353,10 @@ impl<M: RemoteMessage> NetTx<M> {
                 match self.0.front() {
                     Some((_, _, received_at, _)) => {
                         RealClock
-                            .sleep_until(received_at.clone() + message_delivery_timeout())
+                            .sleep_until(
+                                received_at.clone()
+                                    + config::global::get(config::MESSAGE_DELIVERY_TIMEOUT),
+                            )
                             .await
                     }
                     None => std::future::pending::<()>().await,
@@ -463,7 +467,7 @@ impl<M: RemoteMessage> NetTx<M> {
                                 "session {}.{}: failed to receive ack within timeout {} secs; link is currently connected",
                                 link.dest(),
                                 session_id,
-                                message_delivery_timeout().as_secs(),
+                                config::global::get(config::MESSAGE_DELIVERY_TIMEOUT).as_secs(),
                             );
                             (State::Closing(Deliveries{outbox, unacked}), Conn::Connected { sink, stream })
                         }
@@ -585,7 +589,7 @@ impl<M: RemoteMessage> NetTx<M> {
                             "session {}.{}: failed to receive ack within timeout {} secs; link is currently broken",
                             link.dest(),
                             session_id,
-                            message_delivery_timeout().as_secs(),
+                            config::global::get(config::MESSAGE_DELIVERY_TIMEOUT).as_secs(),
                         );
                         (
                             State::Closing(Deliveries { outbox, unacked }),
@@ -891,8 +895,8 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
         use anyhow::Context;
         let mut last_ack_time = RealClock.now();
 
-        let ack_time_interval = config::global::message_ack_time_interval();
-        let ack_msg_interval = config::global::message_ack_every_n_messages();
+        let ack_time_interval = config::global::get(config::MESSAGE_ACK_TIME_INTERVAL);
+        let ack_msg_interval = config::global::get(config::MESSAGE_ACK_EVERY_N_MESSAGES);
 
         loop {
             tokio::select! {
