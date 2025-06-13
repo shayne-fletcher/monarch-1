@@ -744,13 +744,12 @@ mod tests {
 
                 let name = alloc.name().to_string();
                 let mesh = ProcMesh::allocate(alloc).await.unwrap();
-                let actor_mesh = mesh.spawn::<TestActor>("foo", &()).await.unwrap();
-                let unmonitored_reply_to = actor_mesh.open_port::<usize>().0.bind();
-                let (undeliverable_messages, mut undeliverable_rx) = actor_mesh.open_port::<Undeliverable<MessageEnvelope>>();
+                let unmonitored_reply_to = mesh.client().open_port::<usize>().0.bind();
+                let (undeliverable_messages, mut undeliverable_rx) = mesh.client().open_port::<Undeliverable<MessageEnvelope>>();
                 undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
                 // Send a message to a non-existent actor (the proc however exists).
-                let bad_actor = ActorRef::<TestActor>::attest(ActorId(ProcId(WorldId(name.clone()), 0), "foo".into(), 1));
+                let bad_actor = ActorRef::<TestActor>::attest(ActorId(ProcId(WorldId(name.clone()), 0), "foo".into(), 0));
                 bad_actor.send(mesh.client(), GetRank(true, unmonitored_reply_to)).unwrap();
 
                 // The message will be returned!
