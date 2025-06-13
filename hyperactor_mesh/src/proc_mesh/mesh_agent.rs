@@ -32,12 +32,14 @@ use hyperactor::actor::remote::Remote;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::mailbox::BoxedMailboxSender;
+use hyperactor::mailbox::DeliveryError;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::IntoBoxedMailboxSender;
 use hyperactor::mailbox::MailboxClient;
 use hyperactor::mailbox::MailboxSender;
 use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::Undeliverable;
+use hyperactor::mailbox::UndeliverableMessageError;
 use hyperactor::proc::Proc;
 use hyperactor::supervision::ActorSupervisionEvent;
 use serde::Deserialize;
@@ -139,18 +141,16 @@ impl Actor for MeshAgent {
         tracing::info!("took charge of a message not delivered: {}", envelope);
 
         let sender = envelope.sender().clone();
-        let return_port = PortRef::<Undeliverable<MessageEnvelope>>::attest_message_port(&sender);
-        match return_port.send(this, undelivered) {
-            Ok(()) => (),
-            Err(err) => {
-                // TODO: Consider what behavior we want in this case.
-                tracing::error!(
-                    "attempt to return {} an undeliverable message failed: {}",
-                    sender,
-                    err
-                );
-            }
+        if this.self_id() == &sender {
+            anyhow::bail!(UndeliverableMessageError::delivery_failure(envelope));
         }
+
+        let mut envelope = envelope.clone();
+        let return_port = PortRef::attest_message_port(&sender);
+        return_port.send(this, undelivered).map_err(|err| {
+            envelope.try_set_error(DeliveryError::BrokenLink(format!("send failure: {err}")));
+            UndeliverableMessageError::return_failure(&envelope)
+        })?;
 
         Ok(())
     }
