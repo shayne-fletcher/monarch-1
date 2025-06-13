@@ -172,7 +172,7 @@ pub struct PythonMessage {
     method: String,
     message: ByteBuf,
     response_port: Option<PortId>,
-    rank_in_response: bool,
+    rank: Option<usize>,
 }
 
 impl std::fmt::Debug for PythonMessage {
@@ -209,18 +209,18 @@ impl Bind for PythonMessage {
 #[pymethods]
 impl PythonMessage {
     #[new]
-    #[pyo3(signature = (method, message, response_port = None, rank_in_response = false))]
+    #[pyo3(signature = (method, message, response_port, rank))]
     fn new(
         method: String,
         message: Vec<u8>,
         response_port: Option<crate::mailbox::PyPortId>,
-        rank_in_response: bool,
+        rank: Option<usize>,
     ) -> Self {
         Self {
             method,
             message: ByteBuf::from(message),
             response_port: response_port.map(Into::into),
-            rank_in_response,
+            rank,
         }
     }
 
@@ -240,8 +240,8 @@ impl PythonMessage {
     }
 
     #[getter]
-    fn rank_in_response(&self) -> bool {
-        self.rank_in_response
+    fn rank(&self) -> Option<usize> {
+        return self.rank;
     }
 }
 
@@ -521,7 +521,7 @@ mod tests {
             method: "test".to_string(),
             message: ByteBuf::from(vec![1, 2, 3]),
             response_port: Some(id!(world[0].client[0][123])),
-            rank_in_response: false,
+            rank: None,
         };
         {
             let unbound = message.clone().unbind().unwrap();

@@ -8,7 +8,7 @@
 
 import abc
 
-from typing import final, List, Protocol
+from typing import final, List, Optional, Protocol
 
 from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox, PortId
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId, Proc, Serialized
@@ -103,8 +103,8 @@ class PythonMessage:
         self,
         method: str,
         message: bytes,
-        response_port: PortId | None = None,
-        rank_in_response: bool = False,
+        response_port: Optional[PortId],
+        rank: int | None,
     ) -> None: ...
     @property
     def method(self) -> str:
@@ -122,8 +122,8 @@ class PythonMessage:
         ...
 
     @property
-    def rank_in_response(self) -> bool:
-        """Whether or not to include the rank of the handling actor in the response."""
+    def rank(self) -> Optional[int]:
+        """If this message is a response, the rank of the actor in the original broadcast that send the request."""
         ...
 
 @final
