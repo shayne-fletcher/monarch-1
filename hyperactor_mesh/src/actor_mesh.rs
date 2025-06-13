@@ -593,6 +593,36 @@ mod tests {
             }
 
             #[tokio::test]
+            async fn test_ping_pong() {
+                use hyperactor::test_utils::pingpong::PingPongActor;
+                use hyperactor::test_utils::pingpong::PingPongMessage;
+                use hyperactor::test_utils::pingpong::PingPongActorParams;
+
+                let alloc = $allocator
+                    .allocate(AllocSpec {
+                        shape: shape! { replica = 2  },
+                        constraints: Default::default(),
+                    })
+                    .await
+                    .unwrap();
+                let mesh = ProcMesh::allocate(alloc).await.unwrap();
+
+                let (undeliverable_msg_tx, _) = mesh.client().open_port();
+                let ping_pong_actor_params = PingPongActorParams::new(undeliverable_msg_tx.bind(), None);
+                let actor_mesh: RootActorMesh<PingPongActor> = mesh
+                    .spawn::<PingPongActor>("ping-pong", &ping_pong_actor_params)
+                    .await
+                    .unwrap();
+
+                let ping: ActorRef<PingPongActor> = actor_mesh.get(0).unwrap();
+                let pong: ActorRef<PingPongActor> = actor_mesh.get(1).unwrap();
+                let (done_tx, done_rx) = mesh.client().open_once_port();
+                ping.send(mesh.client(), PingPongMessage(4, pong.clone(), done_tx.bind())).unwrap();
+
+                assert!(done_rx.recv().await.unwrap());
+            }
+
+            #[tokio::test]
             async fn test_cast() {
                 let alloc = $allocator
                     .allocate(AllocSpec {
