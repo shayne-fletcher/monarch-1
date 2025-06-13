@@ -25,6 +25,7 @@ dashmap = { version = "5.5.3", features = ["rayon", "serde"] }
 derivative = "2.2"
 dns-lookup = "1.0"
 enum-as-inner = "0.6.0"
+erased-serde = "0.3.27"
 futures = { version = "0.3.30", features = ["async-await", "compat"] }
 hostname = "0.3"
 hyperactor_macros = { version = "0.0.0", path = "../hyperactor_macros" }

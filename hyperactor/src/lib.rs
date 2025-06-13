@@ -69,6 +69,7 @@
 
 pub mod accum;
 pub mod actor;
+pub mod attrs;
 pub mod cap;
 pub mod channel;
 pub mod checkpoint;
