@@ -8,6 +8,7 @@ import asyncio
 import operator
 import os
 import re
+import threading
 from types import ModuleType
 from unittest.mock import AsyncMock, patch
 
@@ -549,3 +550,44 @@ async def test_debug() -> None:
 
         with pytest.raises(monarch.actor_mesh.ActorError, match="ValueError: bad rank"):
             await fut
+
+
+class TLSActor(Actor):
+    """An actor that manages thread-local state."""
+
+    def __init__(self):
+        self.local = threading.local()
+        self.local.value = 0
+
+    @endpoint
+    def increment(self):
+        self.local.value += 1
+
+    @endpoint
+    async def increment_async(self):
+        self.local.value += 1
+
+    @endpoint
+    def get(self):
+        return self.local.value
+
+    @endpoint
+    async def get_async(self):
+        return self.local.value
+
+
+async def test_actor_tls() -> None:
+    """Test that thread-local state is respected."""
+    pm = await proc_mesh(gpus=1)
+    am = await pm.spawn("tls", TLSActor)
+    await am.increment.call_one()
+    # TODO(suo): TLS is NOT preserved across async/sync endpoints, because currently
+    # we run async endpoints on a different thread than sync ones.
+    # Will fix this in a followup diff.
+
+    # await am.increment_async.call_one()
+    await am.increment.call_one()
+    # await am.increment_async.call_one()
+
+    assert 2 == await am.get.call_one()
+    # assert 4 == await am.get_async.call_one()

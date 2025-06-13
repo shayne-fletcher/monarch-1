@@ -36,8 +36,11 @@ use pyo3::types::PyType;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_bytes::ByteBuf;
+use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tracing::span::Id;
 
 use crate::mailbox::PyMailbox;
 use crate::proc::InstanceWrapper;
@@ -283,6 +286,56 @@ impl Actor for PythonActor {
 
             Ok(Self { actor })
         })?)
+    }
+
+    /// Specialize spawn_server_task for PythonActor, because we want to run the stream on a
+    /// dedicated OS thread. We do this to guarantee tha all Python code is
+    /// executed on the same thread, since often Python code uses thread-local
+    /// state or otherwise assumes that it is called only from a single thread.
+    fn spawn_server_task<F>(future: F) -> JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let (join_tx, join_rx) = tokio::sync::oneshot::channel();
+        // It is important that we spawn a standalone thread for the work here,
+        // as opposed to using `spawn_blocking` to spawn a tokio-managed thread.
+        // This is because the worker stream may call uninterruptible FFI code
+        // that can deadlock (CUDA, NCCL).
+        // If we use a tokio-managed blocking thread, then runtime teardown will
+        // try to wait for tasks on that thread to reach an await point, and
+        // hang forever.
+        let builder = std::thread::Builder::new().name("python-actor".to_string());
+        let _thread_handle = builder.spawn(move || {
+            // Spawn a new thread with a single-threaded tokio runtime to run the
+            // actor loop.  We avoid the current-threaded runtime, so that we can
+            // use `block_in_place` for nested async-to-sync-to-async flows.
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_io()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                tokio::task::block_in_place(|| {
+                    // Allow e.g. destructing py objects on this thread, which
+                    // can happen at shutdown when the a stream actors env map
+                    // for rvalues is dropped (e.g. P1673311499).
+                    // https://github.com/PyO3/pyo3/discussions/3499
+                    Python::with_gil(|py| {
+                        py.allow_threads(|| {
+                            let result = Handle::current().block_on(future);
+                            if join_tx.send(result).is_err() {
+                                panic!("could not send join result")
+                            }
+                        })
+                    })
+                })
+            })
+        });
+
+        // In order to bridge the synchronous join handle with the async world,
+        // smuggle the result through a channel.
+        tokio::spawn(async move { join_rx.await.unwrap() })
     }
 }
 
