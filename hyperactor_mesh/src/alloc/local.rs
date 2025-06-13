@@ -216,6 +216,10 @@ impl Alloc for LocalAlloc {
                     let Some(mut proc_to_stop) = self.procs.remove(&rank) else {
                         continue;
                     };
+
+                    // Stop serving the mailbox.
+                    proc_to_stop.handle.stop();
+
                     if let Err(err) = proc_to_stop
                         .proc
                         .destroy_and_wait(Duration::from_millis(10), None)
