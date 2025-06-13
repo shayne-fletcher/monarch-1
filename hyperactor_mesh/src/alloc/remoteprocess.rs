@@ -1406,10 +1406,11 @@ mod test {
     #[timed_test::async_timed_test(timeout_secs = 15)]
     async fn test_upstream_closed() {
         // Use temporary config for this test
-        let _guard = hyperactor::config::global::set_temp_config(hyperactor::config::Config {
-            message_delivery_timeout: Duration::from_secs(1),
-            ..Default::default()
-        });
+        let config = hyperactor::config::global::lock();
+        let _guard = config.override_key(
+            hyperactor::config::MESSAGE_DELIVERY_TIMEOUT,
+            Duration::from_secs(1),
+        );
 
         hyperactor_telemetry::initialize_logging();
         let serve_addr = ChannelAddr::any(ChannelTransport::Unix);
@@ -1583,10 +1584,11 @@ mod test_alloc {
     #[async_timed_test(timeout_secs = 60)]
     async fn test_alloc_simple() {
         // Use temporary config for this test
-        let _guard = hyperactor::config::global::set_temp_config(hyperactor::config::Config {
-            message_delivery_timeout: Duration::from_secs(1),
-            ..Default::default()
-        });
+        let config = hyperactor::config::global::lock();
+        let _guard = config.override_key(
+            hyperactor::config::MESSAGE_DELIVERY_TIMEOUT,
+            Duration::from_secs(1),
+        );
         hyperactor_telemetry::initialize_logging();
 
         let spec = AllocSpec {
@@ -1703,10 +1705,11 @@ mod test_alloc {
     #[async_timed_test(timeout_secs = 60)]
     async fn test_alloc_host_failure() {
         // Use temporary config for this test
-        let _guard = hyperactor::config::global::set_temp_config(hyperactor::config::Config {
-            message_delivery_timeout: Duration::from_secs(1),
-            ..Default::default()
-        });
+        let config = hyperactor::config::global::lock();
+        let _guard = config.override_key(
+            hyperactor::config::MESSAGE_DELIVERY_TIMEOUT,
+            Duration::from_secs(1),
+        );
         hyperactor_telemetry::initialize_logging();
 
         let spec = AllocSpec {

@@ -210,7 +210,7 @@ impl Attrs {
     }
 
     /// Get a value for the given key, returning None if not present.
-    pub fn get<T: Send + Sync + Serialize + DeserializeOwned + Named + Clone + 'static>(
+    pub fn get<T: Send + Sync + Serialize + DeserializeOwned + Named + 'static>(
         &self,
         key: Key<T>,
     ) -> Option<&T> {
@@ -238,7 +238,7 @@ impl Attrs {
         self.values.remove(key.name).is_some()
     }
 
-    /// Returns true if the dictionary contains a value for the given key.
+    /// Checks if the given key exists in the dictionary.
     pub fn contains_key<T: Send + Sync + Serialize + DeserializeOwned + Named + 'static>(
         &self,
         key: Key<T>,
@@ -259,6 +259,22 @@ impl Attrs {
     /// Clear all key-value pairs from the dictionary.
     pub fn clear(&mut self) {
         self.values.clear();
+    }
+
+    // Internal methods for config guard support
+    /// Take a value by key name, returning the boxed value if present
+    pub(crate) fn take_value<T>(&mut self, key: Key<T>) -> Option<Box<dyn SerializableValue>> {
+        self.values.remove(key.name)
+    }
+
+    /// Restore a value by key name
+    pub(crate) fn restore_value<T>(&mut self, key: Key<T>, value: Box<dyn SerializableValue>) {
+        self.values.insert(key.name, value);
+    }
+
+    /// Remove a value by key name
+    pub(crate) fn remove_value<T>(&mut self, key: &Key<T>) -> bool {
+        self.values.remove(key.name).is_some()
     }
 }
 

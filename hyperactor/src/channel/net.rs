@@ -1804,7 +1804,6 @@ mod tests {
     use tokio::io::DuplexStream;
 
     use super::*;
-    use crate::Config;
 
     fn unused_return_channel<M>() -> oneshot::Sender<M> {
         oneshot::channel().0
@@ -1913,11 +1912,9 @@ mod tests {
     async fn test_tcp_message_size() {
         let default_size_in_bytes = 100 * 1024 * 1024;
         // Use temporary config for this test
-        let _guard = config::global::set_temp_config(crate::Config {
-            message_delivery_timeout: Duration::from_secs(1),
-            codec_max_frame_length: default_size_in_bytes,
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard1 = config.override_key(config::MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(1));
+        let _guard2 = config.override_key(config::CODEC_MAX_FRAME_LENGTH, default_size_in_bytes);
 
         let (addr, mut rx) = tcp::serve::<String>("[::1]:0".parse().unwrap())
             .await
@@ -1946,10 +1943,8 @@ mod tests {
     #[async_timed_test(timeout_secs = 60)]
     async fn test_tcp_reconnect() {
         // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_ack_every_n_messages: 1,
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard = config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 1);
         let socket_addr: SocketAddr = "[::1]:0".parse().unwrap();
         let (local_addr, mut rx1) = tcp::serve::<u64>(socket_addr).await.unwrap();
         let local_socket = match local_addr {
@@ -2387,10 +2382,8 @@ mod tests {
     #[async_timed_test(timeout_secs = 60)]
     async fn test_persistent_server_session() {
         // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_ack_every_n_messages: 1,
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard = config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 1);
         async fn verify_ack(
             framed: &mut Framed<DuplexStream, LengthDelimitedCodec>,
             expected_last: u64,
@@ -2481,12 +2474,9 @@ mod tests {
     }
 
     #[async_timed_test(timeout_secs = 60)]
-    async fn test_ack_from_server_sesssion() {
-        // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_ack_every_n_messages: 1,
-            ..Default::default()
-        });
+    async fn test_ack_from_server_session() {
+        let config = config::global::lock();
+        let _guard = config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 1);
         let manager = SessionManager::new();
         let session_id = 123;
 
@@ -2547,10 +2537,8 @@ mod tests {
         let link = MockLink::<u64>::fail_connects();
         let tx = NetTx::<u64>::new(link);
         // Override the default (1m) for the purposes of this test.
-        let _guard = config::global::set_temp_config(Config {
-            message_delivery_timeout: Duration::from_secs(1),
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard = config.override_key(config::MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(1));
         let mut tx_receiver = tx.status().clone();
         let (return_channel, _return_receiver) = oneshot::channel();
         tx.try_post(123, return_channel).unwrap();
@@ -2801,10 +2789,8 @@ mod tests {
 
     async fn verify_ack_exceeded_limit(disconnect_before_ack: bool) {
         // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_delivery_timeout: Duration::from_secs(2),
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard = config.override_key(config::MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(2));
 
         let link: MockLink<u64> = MockLink::<u64>::new();
         let disconnect_signal = link.disconnect_signal().clone();
@@ -2925,23 +2911,22 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 60)]
     async fn test_ack_every_n_messages() {
-        // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_ack_every_n_messages: 600,
-            message_ack_time_interval: Duration::from_millis(1000000),
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard_message_ack = config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 600);
+        let _guard_time_interval =
+            config.override_key(config::MESSAGE_ACK_TIME_INTERVAL, Duration::from_secs(1000));
         sparse_ack().await;
     }
 
     #[async_timed_test(timeout_secs = 60)]
     async fn test_ack_every_time_interval() {
-        // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_ack_every_n_messages: 100000000,
-            message_ack_time_interval: Duration::from_millis(500),
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard_message_ack =
+            config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 100000000);
+        let _guard_time_interval = config.override_key(
+            config::MESSAGE_ACK_TIME_INTERVAL,
+            Duration::from_millis(500),
+        );
         sparse_ack().await;
     }
 
@@ -3006,11 +2991,10 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 300)]
     async fn test_tcp_throughput() {
-        // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_delivery_timeout: Duration::from_secs(300),
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard =
+            config.override_key(config::MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(300));
+
         let socket_addr: SocketAddr = "[::1]:0".parse().unwrap();
         let (local_addr, mut rx) = tcp::serve::<String>(socket_addr).await.unwrap();
 

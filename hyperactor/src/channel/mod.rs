@@ -759,12 +759,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_send() {
+        let config = crate::config::global::lock();
+
         // Use temporary config for this test
-        let _guard = crate::config::global::set_temp_config(crate::config::Config {
-            message_delivery_timeout: Duration::from_secs(1),
-            message_ack_every_n_messages: 1,
-            ..Default::default()
-        });
+        let _guard1 = config.override_key(
+            crate::config::MESSAGE_DELIVERY_TIMEOUT,
+            Duration::from_secs(1),
+        );
+        let _guard2 = config.override_key(crate::config::MESSAGE_ACK_EVERY_N_MESSAGES, 1);
         for addr in addrs() {
             let (listen_addr, mut rx) = crate::channel::serve::<i32>(addr).await.unwrap();
             let tx = crate::channel::dial(listen_addr).unwrap();

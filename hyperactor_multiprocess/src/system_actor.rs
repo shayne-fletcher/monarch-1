@@ -107,7 +107,7 @@ pub struct WorldSnapshot {
 
 impl WorldSnapshot {
     fn from_world_filtered(world: &World, filter: &SystemSnapshotFilter) -> Self {
-        let state = WorldSnapshot {
+        WorldSnapshot {
             host_procs: world.state.host_map.keys().map(|h| &h.0).cloned().collect(),
             procs: world
                 .state
@@ -117,8 +117,7 @@ impl WorldSnapshot {
                 .collect(),
             status: world.state.status.clone(),
             labels: world.labels.clone(),
-        };
-        state
+        }
     }
 }
 
@@ -2008,9 +2007,7 @@ mod tests {
                 proc_id: proc_id_1.clone(),
                 proc_health: ProcStatus::Alive,
                 failed_actors: [(actor_id.clone(), ActorStatus::Failed("Actor failed".into()))]
-                    .iter()
-                    .cloned()
-                    .collect(),
+                    .to_vec(),
             },
             &clock,
         );
@@ -2608,10 +2605,11 @@ mod tests {
         use crate::supervision::ProcSupervisor;
 
         // Use temporary config for this test
-        let _guard = hyperactor::config::global::set_temp_config(hyperactor::config::Config {
-            message_delivery_timeout: Duration::from_secs(1),
-            ..Default::default()
-        });
+        let config = hyperactor::config::global::lock();
+        let _guard = config.override_key(
+            hyperactor::config::MESSAGE_DELIVERY_TIMEOUT,
+            Duration::from_secs(1),
+        );
 
         // Serve a system. Undeliverable messages encountered by the
         // mailbox server are returned to the system actor.

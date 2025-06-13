@@ -1347,10 +1347,11 @@ mod tests {
         use hyperactor::test_utils::pingpong::PingPongMessage;
 
         // Use temporary config for this test
-        let _guard = hyperactor::config::global::set_temp_config(hyperactor::config::Config {
-            message_delivery_timeout: Duration::from_secs(1),
-            ..Default::default()
-        });
+        let config = hyperactor::config::global::lock();
+        let _guard = config.override_key(
+            hyperactor::config::MESSAGE_DELIVERY_TIMEOUT,
+            Duration::from_secs(1),
+        );
 
         // Serve a system.
         let server_handle = System::serve(
