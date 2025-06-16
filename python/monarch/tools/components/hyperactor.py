@@ -25,6 +25,7 @@ def proc_mesh(
     meshes: list[str] = _DEFAULT_MESHES,
     env: Optional[dict[str, str]] = None,
     port: int = mesh_spec.DEFAULT_REMOTE_ALLOCATOR_PORT,
+    program: str = "monarch_bootstrap",  # installed with monarch wheel (as console script)
 ) -> specs.AppDef:
     """
     Args:
@@ -33,6 +34,7 @@ def proc_mesh(
         meshes: list of mesh specs of the form "{name}:{num_hosts}:{host_type}"
         env: environment variables to be passed to the main command (e.g. ENV1=v1,ENV2=v2,ENV3=v3)
         port: the port that the remote process allocator runs on (must be reachable from the client)
+        program: path to the binary that the remote process allocator spawns on an allocation request
     """
 
     appdef = specs.AppDef(name)
@@ -41,11 +43,10 @@ def proc_mesh(
         mesh_role = specs.Role(
             name=mesh.name,
             image=image,
-            entrypoint="process_allocator",  # 'cargo install monarch_hyperactor' to get this binary
+            entrypoint="process_allocator",  # run "cargo install monarch_hyperactor" to get this binary
             args=[
-                "mesh-worker",
                 f"--port={port}",
-                "--program=monarch_bootstrap",  # installed with monarch wheel (as console script)
+                f"--program={program}",
             ],
             num_replicas=mesh.num_hosts,
             resource=specs.resource(h=mesh.host_type),
