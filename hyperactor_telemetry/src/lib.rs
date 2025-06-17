@@ -453,7 +453,7 @@ pub fn initialize_logging() {
             tracing::debug!("logging already initialized for this process: {}", err);
         }
         let exec_id = env::execution_id();
-        tracing::info!(
+        tracing::debug!(
             target: "execution",
             execution_id = exec_id,
             environment = %Env::current(),
