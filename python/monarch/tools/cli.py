@@ -112,7 +112,7 @@ class InfoCmd:
                 file=sys.stderr,
             )
         else:
-            json.dump(server_spec.to_json(), fp=sys.stdout)
+            json.dump(server_spec.to_json(), indent=2, fp=sys.stdout)
 
 
 class KillCmd:
