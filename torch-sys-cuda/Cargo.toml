@@ -19,7 +19,7 @@ torch-sys = { version = "0.0.0", path = "../torch-sys" }
 
 [build-dependencies]
 cxx-build = "1.0.119"
-pyo3-build-config = "0.22.6"
+pyo3-build-config = "0.24.2"
 
 [features]
 cuda = []
