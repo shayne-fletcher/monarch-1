@@ -138,7 +138,7 @@ impl Actor for MeshAgent {
         undelivered: Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
         let Undeliverable(ref envelope) = undelivered;
-        tracing::info!("took charge of a message not delivered: {}", envelope);
+        tracing::debug!("took charge of a message not delivered: {}", envelope);
 
         let sender = envelope.sender().clone();
         if this.self_id() == &sender {
