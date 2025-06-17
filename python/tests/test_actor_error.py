@@ -4,11 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import asyncio
 import importlib.resources
 import subprocess
 
 import pytest
-from monarch.actor_mesh import Actor, ActorError, endpoint
+from monarch.actor_mesh import Actor, ActorError, endpoint, send
 
 from monarch.proc_mesh import proc_mesh
 
@@ -128,6 +129,7 @@ def test_actor_supervision(num_procs, sync_endpoint, sync_test_impl, endpoint_na
         f"--endpoint-name={endpoint_name}",
     ]
     try:
+        print("running cmd", " ".join(cmd))
         process = subprocess.run(cmd, capture_output=True, timeout=180)
     except subprocess.TimeoutExpired as e:
         print("timeout expired")
@@ -157,6 +159,7 @@ def test_proc_mesh_bootstrap_error():
         "error-bootstrap",
     ]
     try:
+        print("running cmd", " ".join(cmd))
         process = subprocess.run(cmd, capture_output=True, timeout=180)
     except subprocess.TimeoutExpired as e:
         print("timeout expired")
@@ -208,3 +211,30 @@ async def test_broken_pickle_class(raise_on_getstate, raise_on_setstate, num_pro
             await exception_actor.print_value.call_one(broken_obj)
         else:
             await exception_actor.print_value.call(broken_obj)
+
+
+# oss_skip: importlib not pulling resource correctly in git CI, needs to be revisited
+@pytest.mark.oss_skip
+async def test_exception_after_wait_unmonitored():
+    # Run the test in a subprocess
+    test_bin = importlib.resources.files("monarch.python.tests").joinpath("test_bin")
+    cmd = [
+        str(test_bin),
+        "error-unmonitored",
+    ]
+    try:
+        print("running cmd", " ".join(cmd))
+        process = subprocess.run(cmd, capture_output=True, timeout=180)
+    except subprocess.TimeoutExpired as e:
+        print("timeout expired")
+        if e.stdout is not None:
+            print(e.stdout.decode())
+        if e.stderr is not None:
+            print(e.stderr.decode())
+        raise
+
+    # Assert that the subprocess exited with a non-zero code
+    assert "I actually ran" in process.stdout.decode()
+    assert (
+        process.returncode != 0
+    ), f"Expected non-zero exit code, got {process.returncode}"
