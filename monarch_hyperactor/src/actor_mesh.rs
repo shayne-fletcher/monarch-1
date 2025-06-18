@@ -19,6 +19,7 @@ use crate::actor::PythonActor;
 use crate::actor::PythonMessage;
 use crate::mailbox::PyMailbox;
 use crate::proc::PyActorId;
+use crate::proc_mesh::Keepalive;
 use crate::shape::PyShape;
 
 #[pyclass(
@@ -28,6 +29,7 @@ use crate::shape::PyShape;
 pub struct PythonActorMesh {
     pub(super) inner: Arc<RootActorMesh<'static, PythonActor>>,
     pub(super) client: PyMailbox,
+    pub(super) _keepalive: Keepalive,
 }
 
 #[pymethods]

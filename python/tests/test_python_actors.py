@@ -9,6 +9,7 @@ import operator
 import os
 import re
 import threading
+import time
 from types import ModuleType
 from unittest.mock import AsyncMock, patch
 
@@ -389,6 +390,16 @@ def test_rust_binding_modules_correct() -> None:
                 assert value.__module__ == path
 
     check(bindings, "monarch._rust_bindings")
+
+
+def test_proc_mesh_liveness() -> None:
+    mesh = proc_mesh(gpus=2).get()
+    counter = mesh.spawn("counter", Counter, 1).get()
+    del mesh
+    # Give some time for the mesh to have been shut down.
+    # (It only would if there were a bug.)
+    time.sleep(0.5)
+    counter.value.call().get()
 
 
 two_gpu = pytest.mark.skipif(

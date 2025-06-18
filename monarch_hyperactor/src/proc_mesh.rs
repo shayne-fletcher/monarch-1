@@ -32,7 +32,7 @@ use crate::shape::PyShape;
 )]
 pub struct PyProcMesh {
     pub inner: Arc<ProcMesh>,
-    monitor: tokio::task::JoinHandle<()>,
+    keepalive: Keepalive,
 }
 fn allocate_proc_mesh<'py>(py: Python<'py>, alloc: &PyAlloc) -> PyResult<Bound<'py, PyAny>> {
     let alloc = match alloc.take() {
@@ -80,7 +80,7 @@ impl PyProcMesh {
         ));
         Self {
             inner: Arc::new(proc_mesh),
-            monitor,
+            keepalive: Keepalive::new(monitor),
         }
     }
 
@@ -98,12 +98,6 @@ impl PyProcMesh {
                 }
             }
         }
-    }
-}
-
-impl Drop for PyProcMesh {
-    fn drop(&mut self) {
-        self.monitor.abort();
     }
 }
 
@@ -135,6 +129,7 @@ impl PyProcMesh {
     ) -> PyResult<Bound<'py, PyAny>> {
         let pickled_type = PickledPyObject::pickle(actor.as_any())?;
         let proc_mesh = Arc::clone(&self.inner);
+        let keepalive = self.keepalive.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let actor_mesh = proc_mesh.spawn(&name, &pickled_type).await?;
             let python_actor_mesh = PythonActorMesh {
@@ -142,6 +137,7 @@ impl PyProcMesh {
                 client: PyMailbox {
                     inner: proc_mesh.client().clone(),
                 },
+                _keepalive: keepalive,
             };
             Ok(Python::with_gil(|py| python_actor_mesh.into_py(py)))
         })
@@ -155,6 +151,7 @@ impl PyProcMesh {
     ) -> PyResult<PyObject> {
         let pickled_type = PickledPyObject::pickle(actor.as_any())?;
         let proc_mesh = Arc::clone(&self.inner);
+        let keepalive = self.keepalive.clone();
         signal_safe_block_on(py, async move {
             let actor_mesh = proc_mesh.spawn(&name, &pickled_type).await?;
             let python_actor_mesh = PythonActorMesh {
@@ -162,6 +159,7 @@ impl PyProcMesh {
                 client: PyMailbox {
                     inner: proc_mesh.client().clone(),
                 },
+                _keepalive: keepalive,
             };
             Ok(Python::with_gil(|py| python_actor_mesh.into_py(py)))
         })?
@@ -181,6 +179,32 @@ impl PyProcMesh {
     #[getter]
     fn shape(&self) -> PyShape {
         self.inner.shape().clone().into()
+    }
+}
+
+/// A keepalive token that aborts a task only after the last clone
+/// of the token is dropped.
+#[derive(Clone, Debug)]
+pub(crate) struct Keepalive {
+    /// The function of this field is to maintain a reference to the
+    /// state.
+    _state: Arc<KeepaliveState>,
+}
+
+impl Keepalive {
+    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            _state: Arc::new(KeepaliveState(handle)),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct KeepaliveState(tokio::task::JoinHandle<()>);
+
+impl Drop for KeepaliveState {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

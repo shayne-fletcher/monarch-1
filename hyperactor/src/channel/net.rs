@@ -1186,7 +1186,7 @@ where
             }
 
             _ = parent_cancel_token.cancelled() => {
-                tracing::info!("recieved parent token cancellation");
+                tracing::info!("received parent token cancellation");
                 break Ok(());
             }
 
