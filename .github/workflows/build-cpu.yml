@@ -1,0 +1,33 @@
+name: Build CPU
+
+on:
+  workflow_call:
+
+concurrency:
+  group: build-cpu-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-cpu:
+    name: Build CPU - No Tensor Engine
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: 4xlarge
+            runs-on: linux.4xlarge
+    with:
+      timeout: 60
+      runner: ${{ matrix.runs-on }}
+      submodules: recursive
+      upload-artifact: monarch-cpu-${{ github.sha }}
+      script: |
+        # Source common setup functions
+        source scripts/common-setup.sh
+
+        # Setup build environment (conda + system deps + rust + build deps)
+        setup_build_environment
+
+        # Build monarch (No tensor engine, CPU version)
+        USE_TENSOR_ENGINE=0 python setup.py bdist_wheel

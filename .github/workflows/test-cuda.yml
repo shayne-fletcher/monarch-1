@@ -1,0 +1,52 @@
+name: Test CUDA
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: 'Wheel artifact name from build workflow'
+        required: true
+        type: string
+
+concurrency:
+  group: test-cuda-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-cuda:
+    name: Test CUDA (cuda12.6-py3.10)
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: 4xlargegpu
+            runs-on: linux.g5.4xlarge.nvidia.gpu
+            torch-spec: '--pre torch --index-url https://download.pytorch.org/whl/nightly/cu126'
+            gpu-arch-type: "cuda"
+            gpu-arch-version: "12.6"
+    with:
+      timeout: 60
+      runner: ${{ matrix.runs-on }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      submodules: recursive
+      download-artifact: ${{ inputs.artifact-name }}
+      script: |
+        # Source common setup functions
+        source scripts/common-setup.sh
+
+        # Setup test environment
+        setup_test_environment
+
+        # Install cargo binaries
+        mkdir cargo_bin && mv ${RUNNER_ARTIFACT_DIR}/cargo_bin/* cargo_bin
+        chmod +x cargo_bin/process_allocator
+        export PATH=$(pwd)/cargo_bin:$PATH
+
+        # Install the built wheel from artifact
+        install_wheel_from_artifact
+
+        # Run CUDA tests
+        LC_ALL=C pytest python/tests/ -s -v -m "not oss_skip" -n auto
+        python python/tests/test_mock_cuda.py
