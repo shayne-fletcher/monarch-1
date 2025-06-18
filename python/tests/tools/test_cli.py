@@ -68,12 +68,14 @@ class TestCli(unittest.TestCase):
     "trainer": {
       "host_type": "gpu.medium",
       "hosts": 4,
-      "gpus": 2
+      "gpus": 2,
+      "hostnames": []
     },
     "generator": {
       "host_type": "gpu.small",
       "hosts": 16,
-      "gpus": 1
+      "gpus": 1,
+      "hostnames": []
     }
   }
 }

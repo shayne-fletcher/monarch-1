@@ -82,7 +82,11 @@ class TestMeshSpec(unittest.TestCase):
 
     def test_mesh_spec_can_dump_as_json(self) -> None:
         mesh_spec = MeshSpec(
-            name="trainer", num_hosts=4, host_type="gpu.medium", gpus=2
+            name="trainer",
+            num_hosts=4,
+            host_type="gpu.medium",
+            gpus=2,
+            hostnames=["n0", "n1", "n2", "n3"],
         )
         expected = """
 {
@@ -90,7 +94,13 @@ class TestMeshSpec(unittest.TestCase):
   "num_hosts": 4,
   "host_type": "gpu.medium",
   "gpus": 2,
-  "port": 26600
+  "port": 26600,
+  "hostnames": [
+    "n0",
+    "n1",
+    "n2",
+    "n3"
+  ]
 }
 """
         self.assertEqual(expected.strip("\n"), json.dumps(asdict(mesh_spec), indent=2))

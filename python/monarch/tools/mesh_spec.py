@@ -6,7 +6,7 @@
 
 # pyre-strict
 import string
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from torchx import specs
@@ -29,6 +29,7 @@ class MeshSpec:
     host_type: str
     gpus: int
     port: int = DEFAULT_REMOTE_ALLOCATOR_PORT
+    hostnames: list[str] = field(default_factory=list)
 
 
 def _tag(mesh_name: str, tag_template: str) -> str:
@@ -84,6 +85,10 @@ class ServerSpec:
     state: specs.AppState
     meshes: list[MeshSpec]
 
+    @property
+    def is_running(self) -> bool:
+        return self.state == specs.AppState.RUNNING
+
     def get_mesh_spec(self, mesh_name: str) -> MeshSpec:
         for mesh_spec in self.meshes:
             if mesh_spec.name == mesh_name:
@@ -115,6 +120,7 @@ class ServerSpec:
                     "host_type": mesh.host_type,
                     "hosts": mesh.num_hosts,
                     "gpus": mesh.gpus,
+                    "hostnames": mesh.hostnames,
                 }
                 for mesh in self.meshes
             },

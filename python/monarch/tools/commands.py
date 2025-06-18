@@ -9,7 +9,10 @@
 import argparse
 import functools
 import inspect
+import logging
 import os
+import time
+from datetime import timedelta
 from typing import Any, Callable, Mapping, Optional, Union
 
 from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/config/meta:defaults
@@ -18,11 +21,12 @@ from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/con
 )
 
 from monarch.tools.mesh_spec import mesh_spec_from_metadata, ServerSpec
-
 from torchx.runner import Runner
-from torchx.specs import AppDef, AppDryRunInfo, CfgVal
+from torchx.specs import AppDef, AppDryRunInfo, AppState, CfgVal
 from torchx.specs.builders import parse_args
 from torchx.util.types import decode, decode_optional
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 def torchx_runner() -> Runner:
@@ -165,13 +169,71 @@ def info(server_handle: str) -> Optional[ServerSpec]:
         if appdef is None:
             return None
 
+    # host status grouped by mesh (role) names
+    replica_status = {r.role: r.replicas for r in status.roles}
+
     mesh_specs = []
     for role in appdef.roles:
         spec = mesh_spec_from_metadata(appdef, role.name)
         assert spec is not None, "cannot be 'None' since we iterate over appdef's roles"
+
+        # null-guard since some schedulers do not fill replica_status
+        if host_status := replica_status.get(role.name):
+            spec.hostnames = [h.hostname for h in host_status]
+
         mesh_specs.append(spec)
 
     return ServerSpec(name=appdef.name, state=status.state, meshes=mesh_specs)
+
+
+_5_SECONDS = timedelta(seconds=5)
+
+
+async def server_ready(
+    server_handle: str, check_interval: timedelta = _5_SECONDS
+) -> Optional[ServerSpec]:
+    """Waits until the server's job is in RUNNING state to returns the server spec.
+    Returns `None` if the server does not exist.
+
+    NOTE: Certain fields such as `hostnames` is only filled (and valid) when the server is RUNNING.
+
+    Usage:
+
+    .. code-block:: python
+
+        server_info = await server_ready("slurm:///123")
+        if not server_info:
+            print(f"Job does not exist")
+        else:
+            if server_info.is_running:
+                for mesh in server_info.meshes:
+                    connect_to(mesh.hostnames)
+            else:
+                print(f"Job in {server_info.state} state. Hostnames are not available")
+
+    """
+
+    while True:
+        server_spec = info(server_handle)
+
+        if not server_spec:  # server not found
+            return None
+
+        if server_spec.state <= AppState.PENDING:  # UNSUBMITTED or SUBMITTED or PENDING
+            # NOTE: TorchX currently does not have async APIs so need to loop-on-interval
+            # TODO maybe inverse exponential backoff instead of constant interval?
+            check_interval_seconds = check_interval.total_seconds()
+            logger.info(
+                "waiting for %s to be %s (current: %s), will check again in %g seconds...",
+                server_handle,
+                AppState.RUNNING,
+                server_spec.state,
+                check_interval_seconds,
+            )
+            time.sleep(check_interval_seconds)
+            continue
+        else:
+            return server_spec
 
 
 def kill(server_handle: str) -> None:

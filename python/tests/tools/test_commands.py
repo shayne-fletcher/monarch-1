@@ -7,10 +7,11 @@
 # pyre-strict
 
 import unittest
+from datetime import timedelta
 from unittest import mock
 
 from monarch.tools import commands
-from monarch.tools.commands import component_args_from_cli
+from monarch.tools.commands import component_args_from_cli, server_ready
 
 from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/config/meta:defaults
     defaults,
@@ -101,3 +102,78 @@ class TestCommands(unittest.TestCase):
             ),
             commands.info("slurm:///job-id"),
         )
+
+
+UNUSED = "__UNUSED__"
+_5_MS = timedelta(milliseconds=5)
+
+
+def server(state: AppState) -> ServerSpec:
+    mesh_x = MeshSpec(name="x", num_hosts=2, host_type=UNUSED, gpus=-1)
+    mesh_y = MeshSpec(name="y", num_hosts=4, host_type=UNUSED, gpus=-1)
+    meshes = [mesh_x, mesh_y]
+
+    if state == AppState.RUNNING:
+        for mesh in meshes:
+            mesh.hostnames = [f"node{i}" for i in range(mesh.num_hosts)]
+
+    return ServerSpec(name=UNUSED, state=state, meshes=meshes)
+
+
+class TestCommandsAsync(unittest.IsolatedAsyncioTestCase):
+    async def test_server_ready_server_does_not_exist(self) -> None:
+        with mock.patch(
+            "monarch.tools.commands.info",
+            return_value=None,
+        ):
+            server_info = await server_ready("slurm:///123", check_interval=_5_MS)
+            self.assertIsNone(server_info)
+
+    async def test_server_ready_pending_to_running(self) -> None:
+        with mock.patch(
+            "monarch.tools.commands.info",
+            side_effect=[
+                server(AppState.UNSUBMITTED),
+                server(AppState.SUBMITTED),
+                server(AppState.PENDING),
+                server(AppState.PENDING),
+                server(AppState.RUNNING),
+                server(AppState.CANCELLED),
+            ],
+        ) as mock_info:
+            server_info = await server_ready("slurm:///123", check_interval=_5_MS)
+
+            self.assertIsNotNone(server_info)
+            self.assertTrue(server_info.is_running)
+            self.assertEqual(server_info.state, AppState.RUNNING)
+
+            mesh_x = server_info.get_mesh_spec("x")
+            mesh_y = server_info.get_mesh_spec("y")
+            self.assertListEqual(mesh_x.hostnames, ["node0", "node1"])
+            self.assertListEqual(mesh_y.hostnames, ["node0", "node1", "node2", "node3"])
+
+            mock_info.assert_called()
+            # called 5 times, once for UNSUBMITTED, SUBMITTED, PENDING, PENDING, and RUNNING
+            self.assertEqual(mock_info.call_count, 5)
+
+    async def test_server_ready_pending_to_terminal(self) -> None:
+        for terminal_state in [AppState.SUCCEEDED, AppState.FAILED, AppState.CANCELLED]:
+            with self.subTest(terminal_state=terminal_state):
+                with mock.patch(
+                    "monarch.tools.commands.info",
+                    side_effect=[
+                        server(AppState.SUBMITTED),
+                        server(AppState.PENDING),
+                        server(AppState.PENDING),
+                        server(terminal_state),
+                    ],
+                ) as mock_info:
+                    server_info = await server_ready(
+                        "slurm:///123",
+                        check_interval=_5_MS,
+                    )
+
+                    self.assertIsNotNone(server_info)
+                    self.assertEqual(server_info.state, terminal_state)
+                    mock_info.assert_called()
+                    self.assertEqual(mock_info.call_count, 4)
