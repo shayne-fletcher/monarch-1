@@ -74,7 +74,7 @@ class RemoteAllocInitializer(abc.ABC):
     """
 
     @abc.abstractmethod
-    async def initialize_alloc(self) -> list[str]:
+    async def initialize_alloc(self, match_labels: dict[str, str]) -> list[str]:
         """
         Return the addresses of the servers that should be used to allocate processes
         for the proc mesh. The addresses should be running hyperactor's RemoteProcessAllocator.
@@ -87,6 +87,10 @@ class RemoteAllocInitializer(abc.ABC):
         NOTE: Although this method is currently called once at the initialization of the Allocator,
             in the future this method can be called multiple times and should return the current set of
             addresses that are eligible to handle allocation requests.
+
+        Arguments:
+        - `match_labels`: The match labels specified in `AllocSpec.AllocConstraints`. Initializer implementations
+            can read specific labels for matching a set of hosts that will service `allocate()` requests.
 
         """
         ...
@@ -102,7 +106,8 @@ class StaticRemoteAllocInitializer(RemoteAllocInitializer):
         super().__init__()
         self.addrs: list[str] = list(addrs)
 
-    async def initialize_alloc(self) -> list[str]:
+    async def initialize_alloc(self, match_labels: dict[str, str]) -> list[str]:
+        _ = match_labels  # Suppress unused variable warning
         return list(self.addrs)
 
 

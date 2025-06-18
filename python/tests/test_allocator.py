@@ -116,8 +116,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             used to test that the state of the initializer is preserved across calls to allocate()
             """
 
-            async def initialize_alloc(self) -> list[str]:
-                alloc = await super().initialize_alloc()
+            async def initialize_alloc(self, match_labels: dict[str, str]) -> list[str]:
+                alloc = await super().initialize_alloc(match_labels)
                 self.addrs.pop(-1)
                 return alloc
 
@@ -142,7 +142,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
         class EmptyAllocInitializer(StaticRemoteAllocInitializer):
             """test initializer that returns an empty list of addresses"""
 
-            async def initialize_alloc(self) -> list[str]:
+            async def initialize_alloc(self, match_labels: dict[str, str]) -> list[str]:
+                _ = match_labels  # Suppress unused variable warning
                 return []
 
         empty_initializer = EmptyAllocInitializer()

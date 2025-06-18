@@ -18,6 +18,7 @@ use hyperactor::channel::ChannelAddr;
 use hyperactor::channel::ChannelTransport;
 use hyperactor_extension::alloc::PyAlloc;
 use hyperactor_extension::alloc::PyAllocSpec;
+use hyperactor_mesh::alloc::AllocConstraints;
 use hyperactor_mesh::alloc::AllocSpec;
 use hyperactor_mesh::alloc::Allocator;
 use hyperactor_mesh::alloc::AllocatorError;
@@ -152,15 +153,11 @@ impl PyProcessAllocator {
 pub struct PyRemoteProcessAllocInitializer {
     // instance of a Python subclass of `monarch._rust_bindings.monarch_hyperactor.alloc.RemoteProcessAllocInitializer`.
     py_inner: Py<PyAny>,
+
+    // allocation constraints passed onto the allocator's allocate call and passed along to python initializer.
+    constraints: AllocConstraints,
 }
 
-impl Clone for PyRemoteProcessAllocInitializer {
-    fn clone(&self) -> Self {
-        Self {
-            py_inner: Python::with_gil(|py| Py::clone_ref(&self.py_inner, py)),
-        }
-    }
-}
 impl PyRemoteProcessAllocInitializer {
     /// calls the initializer's `initialize_alloc()` as implemented in python
     ///
@@ -169,8 +166,12 @@ impl PyRemoteProcessAllocInitializer {
     ///   `monarch/python/monarch/_rust_bindings/monarch_hyperactor/alloc.pyi`
     async fn py_initialize_alloc(&self) -> PyResult<Vec<String>> {
         // call the function as implemented in python
+        let args = (&self.constraints.match_labels,);
         let future = Python::with_gil(|py| -> PyResult<_> {
-            let coroutine = self.py_inner.bind(py).call_method0("initialize_alloc")?;
+            let coroutine = self
+                .py_inner
+                .bind(py)
+                .call_method1("initialize_alloc", args)?;
             pyo3_async_runtimes::tokio::into_future(coroutine)
         })?;
 
@@ -221,24 +222,33 @@ impl RemoteProcessAllocInitializer for PyRemoteProcessAllocInitializer {
     module = "monarch._rust_bindings.monarch_hyperactor.alloc",
     subclass
 )]
-#[derive(Clone)]
 pub struct PyRemoteAllocator {
-    // IMPORTANT: other than the `initializer` this struct should not hold any non-trivially
-    //   clonable data (e.g. such that the Clone derive-attribute would not work).
-    //   This allows us to avoid having yet-another-wrapper for PyRemoteAllocator since
-    //   PyRemoteProcessAllocInitializer is already a wrapper and its wrapped Py<PyAny> is
-    //   shared by reference.
     world_id: String,
-    initializer: PyRemoteProcessAllocInitializer,
+    initializer: Py<PyAny>,
     heartbeat_interval: Duration,
 }
 
+impl Clone for PyRemoteAllocator {
+    fn clone(&self) -> Self {
+        Self {
+            world_id: self.world_id.clone(),
+            initializer: Python::with_gil(|py| Py::clone_ref(&self.initializer, py)),
+            heartbeat_interval: self.heartbeat_interval.clone(),
+        }
+    }
+}
 #[async_trait]
 impl Allocator for PyRemoteAllocator {
     type Alloc = RemoteProcessAlloc;
 
     async fn allocate(&mut self, spec: AllocSpec) -> Result<Self::Alloc, AllocatorError> {
-        let initializer = self.initializer.clone();
+        let py_inner = Python::with_gil(|py| Py::clone_ref(&self.initializer, py));
+        let constraints = spec.constraints.clone();
+        let initializer = PyRemoteProcessAllocInitializer {
+            py_inner,
+            constraints,
+        };
+
         let (transport, port) = initializer
             .get_transport_and_port()
             .await
@@ -272,9 +282,7 @@ impl PyRemoteAllocator {
     ) -> PyResult<Self> {
         Ok(Self {
             world_id,
-            initializer: PyRemoteProcessAllocInitializer {
-                py_inner: initializer,
-            },
+            initializer,
             heartbeat_interval,
         })
     }
