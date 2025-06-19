@@ -9,7 +9,7 @@ license = "BSD-3-Clause"
 links = "torch"
 
 [dependencies]
-anyhow = "1.0.95"
+anyhow = "1.0.98"
 async-trait = "0.1.86"
 atomic_refcell = "0.1.13"
 cxx = "1.0.119"

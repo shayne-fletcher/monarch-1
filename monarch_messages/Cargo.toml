@@ -8,7 +8,7 @@ edition = "2021"
 license = "BSD-3-Clause"
 
 [dependencies]
-anyhow = "1.0.95"
+anyhow = "1.0.98"
 derive_more = { version = "1.0.0", features = ["full"] }
 enum-as-inner = "0.6.0"
 hyperactor = { version = "0.0.0", path = "../hyperactor" }

@@ -10,7 +10,7 @@ repository = "https://github.com/pytorch-labs/monarch/"
 license = "BSD-3-Clause"
 
 [dependencies]
-anyhow = "1.0.95"
+anyhow = "1.0.98"
 enum-as-inner = "0.6.0"
 itertools = "0.14.0"
 nom = "8"

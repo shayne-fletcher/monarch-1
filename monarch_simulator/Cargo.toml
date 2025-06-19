@@ -12,7 +12,7 @@ name = "monarch_simulator"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.95"
+anyhow = "1.0.98"
 async-trait = "0.1.86"
 clap = { version = "4.5.38", features = ["derive", "env", "string", "unicode", "wrap_help"] }
 controller = { version = "0.0.0", path = "../controller" }
