@@ -6,13 +6,12 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-//! Based on the "Parallel Sieve of Eratosthenes" described by Leroy
-//! and Didier in ["UNIX System Programming in
-//! OCaml"](https://ocaml.github.io/ocamlunix/ocamlunix.pdf).
-//! Implements a [Sieve of
+//! Based on "Parallel Sieve of Eratosthenes" from Xavier Leroy
+//! and Didier Remy in ["UNIX SYSTEM PROGRAMMING IN OCAML"](https://ocaml.github.io/ocamlunix/ocamlunix.pdf).
+//! This program illustrates a [Sieve of
 //! Eratosthenes](https://en.wikipedia.org/wiki/Sieve_of_Eratosthenes)
-//! using dynamically spawned actors to filter candidates
-//! concurrently.
+//! using dynamically spawned actors to concurrently filter candidates.
+
 use std::process::ExitCode;
 
 use anyhow::Result;
@@ -58,7 +57,12 @@ pub struct SieveParams {
 /// Filters candidates divisible by `prime`. Forwards survivors to
 /// `next`. Spawns a new child when a new prime is discovered.
 #[derive(Debug)]
-#[hyperactor::export_spawn(NextNumber)]
+#[hyperactor::export(
+        spawn = true,
+        handlers = [
+          NextNumber,
+        ],
+    )]
 pub struct SieveActor {
     /// Prime used for filtering.
     prime: u64,
