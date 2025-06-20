@@ -1305,8 +1305,7 @@ impl cap::sealed::CanSplitPort for Mailbox {
 #[derive(Debug)]
 pub struct PortHandle<M: Message> {
     mailbox: Mailbox,
-    // TEMPORARY until we remove hardcoded port IDs
-    pub(crate) port_index: u64,
+    port_index: u64,
     sender: UnboundedPortSender<M>,
     // We would like this to be a Arc<OnceLock<PortRef<M>>>, but we cannot
     // write down the type PortRef<M> (M: Message), even though we cannot
