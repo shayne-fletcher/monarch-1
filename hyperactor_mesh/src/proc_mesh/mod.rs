@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use hyperactor::Actor;
 use hyperactor::ActorRef;
 use hyperactor::Mailbox;
+use hyperactor::Named;
 use hyperactor::RemoteMessage;
 use hyperactor::WorldId;
 use hyperactor::actor::RemoteActor;
@@ -28,7 +29,9 @@ use hyperactor::mailbox::BoxedMailboxSender;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxRouter;
 use hyperactor::mailbox::MailboxServer;
+use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::PortReceiver;
+use hyperactor::mailbox::Undeliverable;
 use hyperactor::proc::Proc;
 use hyperactor::reference::ProcId;
 use hyperactor::reference::Reference;
@@ -75,6 +78,7 @@ pub struct ProcMesh {
     #[allow(dead_code)] // will be used in subsequent diff
     client_proc: Proc,
     client: Mailbox,
+    client_undeliverable_receiver: Option<PortReceiver<Undeliverable<MessageEnvelope>>>,
     comm_actors: Vec<ActorRef<CommActor>>,
 }
 
@@ -201,9 +205,13 @@ impl ProcMesh {
         let supervisor = client_proc.attach("supervisor")?;
         let (supervison_port, supervision_events) = supervisor.open_port();
 
-        // Now, configure the full mesh, so that the local agents are wired up to
-        // our router.
+        // Now, configure the full mesh, so that the local agents are
+        // wired up to our router. Bind an undeliverable message port
+        // in the client and return the port receiver.
         let client = client_proc.attach("client")?;
+        let (undeliverable_messages, client_undeliverable_receiver) =
+            client.open_port::<Undeliverable<MessageEnvelope>>();
+        undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
         // Map of procs -> channel addresses
         let address_book: HashMap<_, _> = running
@@ -285,6 +293,7 @@ impl ProcMesh {
                 .collect(),
             client_proc,
             client,
+            client_undeliverable_receiver: Some(client_undeliverable_receiver),
             comm_actors,
         })
     }
@@ -369,6 +378,22 @@ impl ProcMesh {
     /// A client used to communicate with any member of this mesh.
     pub fn client(&self) -> &Mailbox {
         &self.client
+    }
+
+    /// Returns a mutable reference to the client mailbox's
+    /// undeliverable message port receiver.
+    ///
+    /// This allows the caller to extract the
+    /// `PortReceiver<Undeliverable<MessageEnvelope>>` by calling
+    /// `.take()` on the returned `Option`, transferring ownership of
+    /// the receiver.
+    ///
+    /// Typically used to access the port bound by
+    /// `ProcMesh::allocate`.
+    pub fn client_undeliverable_receiver(
+        &mut self,
+    ) -> &mut Option<PortReceiver<Undeliverable<MessageEnvelope>>> {
+        &mut self.client_undeliverable_receiver
     }
 
     pub fn client_proc(&self) -> &Proc {

@@ -86,6 +86,7 @@ use std::task::Poll;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use dashmap::DashSet;
 use dashmap::mapref::entry::Entry;
 use serde::Deserialize;
 use serde::Serialize;
@@ -1082,6 +1083,33 @@ impl Mailbox {
         MailboxError::new(self.state.actor_id.clone(), err)
     }
 
+    /// Look up the `UnboundedPortSender` for the port associated with
+    /// the message type `M`, as defined by `<M as Named>::port()`.
+    ///
+    /// This performs a dynamic downcast to recover the original
+    /// sender type. Returns `None` if the port is not bound or if the
+    /// type does not match.
+    ///
+    /// # Panics
+    /// Panics if the port is bound but the stored `port_id` does not
+    /// match the expected one.
+    pub(crate) fn lookup_sender<M: RemoteMessage>(&self) -> Option<UnboundedPortSender<M>> {
+        let port_index = M::port();
+        self.state.ports.get(&port_index).and_then(|boxed| {
+            boxed
+                .as_any()
+                .downcast_ref::<UnboundedSender<M>>()
+                .map(|s| {
+                    assert_eq!(
+                        s.port_id,
+                        self.actor_id().port_id(port_index),
+                        "port_id mismatch in downcasted UnboundedSender"
+                    );
+                    s.sender.clone()
+                })
+        })
+    }
+
     fn bind<M: RemoteMessage>(&self, handle: &PortHandle<M>) -> PortRef<M> {
         assert_eq!(
             handle.mailbox.actor_id(),
@@ -1208,10 +1236,35 @@ impl MailboxSender for Mailbox {
     }
 }
 
+// Tracks mailboxes that have emitted a `CanSend::post` warning due to
+// missing an `Undeliverable<MessageEnvelope>` binding. In this
+// context, mailboxes are few and long-lived; unbounded growth is not
+// a realistic concern.
+static CAN_SEND_WARNED_MAILBOXES: OnceLock<DashSet<ActorId>> = OnceLock::new();
+
 impl cap::sealed::CanSend for Mailbox {
     fn post(&self, dest: PortId, data: Serialized) {
+        let return_handle = self
+            .lookup_sender::<Undeliverable<MessageEnvelope>>()
+            .map_or_else(
+                || {
+                    let actor_id = self.actor_id();
+                    if CAN_SEND_WARNED_MAILBOXES
+                        .get_or_init(DashSet::new)
+                        .insert(actor_id.clone()) {
+                        let bt = std::backtrace::Backtrace::capture();
+                        tracing::warn!(
+                            actor_id = ?actor_id,
+                            backtrace = ?bt,
+                            "mailbox attempted to post a message without binding Undeliverable<MessageEnvelope>"
+                        );
+                    }
+                    monitored_return_handle()
+                },
+                |sender| PortHandle::new(self.clone(), self.state.allocate_port(), sender),
+            );
         let envelope = MessageEnvelope::new(self.actor_id().clone(), dest, data);
-        MailboxSender::post(self, envelope, monitored_return_handle());
+        MailboxSender::post(self, envelope, return_handle);
     }
 }
 
@@ -1591,6 +1644,13 @@ pub struct SerializedSenderError {
 ///   - It abstracts over [`Port`]s and [`OncePort`]s, by dynamically tracking the
 ///     validity of the underlying port.
 trait SerializedSender: Send + Sync {
+    /// Enables downcasting from `&dyn SerializedSender` to concrete
+    /// types.
+    ///
+    /// Used by `Mailbox::lookup_sender` to downcast to
+    /// `&UnboundedSender<M>` via `Any::downcast_ref`.
+    fn as_any(&self) -> &dyn Any;
+
     /// Send a serialized message. SerializedSender will deserialize the
     /// message (failing if it fails to deserialize), and then send the
     /// resulting message on the underlying port.
@@ -1602,7 +1662,7 @@ trait SerializedSender: Send + Sync {
 }
 
 /// A sender to an M-typed unbounded port.
-enum UnboundedPortSender<M: Message> {
+pub(crate) enum UnboundedPortSender<M: Message> {
     /// Send directly to the mpsc queue.
     Mpsc(mpsc::UnboundedSender<M>),
     /// Use the provided function to enqueue the item.
@@ -1674,6 +1734,10 @@ impl<M: Message> Clone for UnboundedSender<M> {
 }
 
 impl<M: RemoteMessage> SerializedSender for UnboundedSender<M> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn send_serialized(&self, serialized: Serialized) -> Result<bool, SerializedSenderError> {
         match serialized.deserialized() {
             Ok(message) => {
@@ -1756,6 +1820,10 @@ impl<M: Message> Clone for OnceSender<M> {
 }
 
 impl<M: RemoteMessage> SerializedSender for OnceSender<M> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn send_serialized(&self, serialized: Serialized) -> Result<bool, SerializedSenderError> {
         match serialized.deserialized() {
             Ok(message) => self.send_once(message).map_err(|e| SerializedSenderError {
@@ -1780,6 +1848,10 @@ struct UntypedUnboundedSender {
 }
 
 impl SerializedSender for UntypedUnboundedSender {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn send_serialized(&self, serialized: Serialized) -> Result<bool, SerializedSenderError> {
         (self.sender)(serialized).map_err(|(data, err)| SerializedSenderError {
             data,

@@ -541,7 +541,6 @@ mod tests {
     use hyperactor::ProcId;
     use hyperactor::WorldId;
     use hyperactor::id;
-    use hyperactor::mailbox::MessageEnvelope;
     use hyperactor::mailbox::Undeliverable;
     use hyperactor::message::Bind;
     use hyperactor::message::Unbind;
@@ -821,12 +820,12 @@ mod tests {
                     .unwrap();
 
                 let name = alloc.name().to_string();
-                let mesh = ProcMesh::allocate(alloc).await.unwrap();
-                let unmonitored_reply_to = mesh.client().open_port::<usize>().0.bind();
-                let (undeliverable_messages, mut undeliverable_rx) = mesh.client().open_port::<Undeliverable<MessageEnvelope>>();
-                undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
+                let mut mesh = ProcMesh::allocate(alloc).await.unwrap();
+                let mut undeliverable_rx = mesh.client_undeliverable_receiver().take()
+                    .expect("client_undeliverable_receiver should be available");
 
                 // Send a message to a non-existent actor (the proc however exists).
+                let unmonitored_reply_to = mesh.client().open_port::<usize>().0.bind();
                 let bad_actor = ActorRef::<TestActor>::attest(ActorId(ProcId(WorldId(name.clone()), 0), "foo".into(), 0));
                 bad_actor.send(mesh.client(), GetRank(true, unmonitored_reply_to)).unwrap();
 
@@ -870,10 +869,12 @@ mod tests {
             let monkey = alloc.chaos_monkey();
             let mut mesh = ProcMesh::allocate(alloc).await.unwrap();
             let mut events = mesh.events().unwrap();
+            let mut undeliverable_msg_rx = mesh.client_undeliverable_receiver().take().unwrap();
 
-            let (undeliverable_msg_tx, mut undeliverable_msg_rx) = mesh.client().open_port();
-            let ping_pong_actor_params =
-                PingPongActorParams::new(undeliverable_msg_tx.bind(), None);
+            let ping_pong_actor_params = PingPongActorParams::new(
+                PortRef::attest_message_port(mesh.client().actor_id()),
+                None,
+            );
             let actor_mesh: RootActorMesh<PingPongActor> = mesh
                 .spawn::<PingPongActor>("ping-pong", &ping_pong_actor_params)
                 .await
