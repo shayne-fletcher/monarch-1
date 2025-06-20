@@ -15,7 +15,7 @@ Note: Monarch is currently only supported on Linux systems
 
 ## Installation
 
-`pip install torchmonarch`
+`pip install torchmonarch-nightly`
 
 or manually
 
