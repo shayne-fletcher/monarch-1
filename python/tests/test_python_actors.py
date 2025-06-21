@@ -33,6 +33,11 @@ from monarch.future import ActorFuture
 from monarch.proc_mesh import local_proc_mesh, proc_mesh
 from monarch.rdma import RDMABuffer
 
+needs_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
+)
+
 
 class Counter(Actor):
     def __init__(self, v: int):
@@ -113,6 +118,7 @@ class ParameterClient(Actor):
         return self.buffer
 
 
+@needs_cuda
 async def test_proc_mesh_rdma():
     proc = await proc_mesh(gpus=1)
     server = await proc.spawn("server", ParameterServer)
@@ -281,6 +287,7 @@ class GeneratorActor(Actor):
         ), f"{torch.sum(self.generator.weight.data)=}, {self.step=}"
 
 
+@needs_cuda
 async def test_gpu_trainer_generator():
     trainer_proc = await proc_mesh(gpus=1)
     gen_proc = await proc_mesh(gpus=1)
@@ -310,6 +317,7 @@ async def test_sync_actor():
     assert r == 5
 
 
+@needs_cuda
 def test_gpu_trainer_generator_sync() -> None:
     trainer_proc = proc_mesh(gpus=1).get()
     gen_proc = proc_mesh(gpus=1).get()
