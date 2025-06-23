@@ -17,3 +17,6 @@ python/monarch/monarch_controller
 # Rust stuff
 target/
 Cargo.lock
+
+# mdbook output
+books/hyperactor-book/book/**
