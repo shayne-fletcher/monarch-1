@@ -18,6 +18,7 @@ from typing import Generator, Optional
 from unittest import mock
 
 import cloudpickle
+import pytest
 
 import torch
 import torch.distributed as dist
@@ -258,6 +259,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             ):
                 await allocator.allocate(AllocSpec(AllocConstraints(), host=1, gpu=1))
 
+    @pytest.mark.oss_skip  # pyre-ignore[56] TODO T228752279
     async def test_torchx_remote_alloc_initializer_no_match_label_1_mesh(self) -> None:
         server = ServerSpec(
             name="__UNUSED__",
@@ -290,6 +292,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assert_computed_world_size(results, 4)  # 1x4 mesh
 
+    @pytest.mark.oss_skip  # pyre-ignore[56] TODO T228752279
     async def test_torchx_remote_alloc_initializer_with_match_label(self) -> None:
         server = ServerSpec(
             name="__UNUSED__",
