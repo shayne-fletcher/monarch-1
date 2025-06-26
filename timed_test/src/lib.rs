@@ -64,6 +64,8 @@ pub fn async_timed_test(attr: TokenStream, input: TokenStream) -> TokenStream {
     let fn_attrs = &input_fn.attrs;
     let fn_vis = &input_fn.vis;
     let sig = &input_fn.sig;
+    let fn_name = &sig.ident;
+    let output = &sig.output;
 
     if sig.asyncness.is_none() {
         return TokenStream::from(
@@ -72,18 +74,43 @@ pub fn async_timed_test(attr: TokenStream, input: TokenStream) -> TokenStream {
     }
 
     let output = quote! {
-        // Use the multithread runtime so that a hanging task will not block the
-        // timeout from firing.
-        #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+        #[test]
         #(#fn_attrs)*
-        #fn_vis #sig {
-            use tokio::time::{timeout, Duration};
+        #fn_vis fn #fn_name() #output {
+            use tokio::runtime::Runtime;
+            use std::sync::mpsc::{channel, RecvTimeoutError};
+            use std::thread;
+            use std::time::Duration;
 
-            let test_future = async #fn_block;
+            let (result_tx, result_rx) = channel();
 
-            match timeout(Duration::from_secs(#timeout_secs), test_future).await {
-                Ok(result) => result,
-                Err(_) => panic!("test timed out after {} seconds", #timeout_secs),
+            // Create a separate thread to drive the test runtime. This is to
+            // ensure that even if the runtime gets stuck somehow, we will still
+            // be able to enforce the timeout.
+            thread::spawn(move || {
+                let test_rt = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(8)
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    test_rt.block_on(async #fn_block)
+                }));
+                let _ = result_tx.send(result);
+            });
+
+            // Wait with timeout - guaranteed to fire independently of test runtime
+            match result_rx.recv_timeout(Duration::from_secs(#timeout_secs)) {
+                Ok(result) => match result {
+                    Ok(test_result) => test_result,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                },
+                Err(RecvTimeoutError::Timeout) => {
+                    panic!("test timed out after {} seconds", #timeout_secs);
+                },
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("test thread panicked without sending result");
+                }
             }
         }
     };

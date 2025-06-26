@@ -10,11 +10,28 @@ use timed_test::async_timed_test;
 
 #[async_timed_test(timeout_secs = 5)]
 async fn good() {
+    #[allow(clippy::disallowed_methods)]
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 }
 
 #[async_timed_test(timeout_secs = 1)]
 #[should_panic]
 async fn bad() {
+    #[allow(clippy::disallowed_methods)]
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+}
+
+#[async_timed_test(timeout_secs = 1)]
+#[should_panic]
+async fn very_bad() {
+    loop {
+        #[allow(clippy::disallowed_methods)]
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+#[async_timed_test(timeout_secs = 60)]
+#[should_panic]
+async fn panics_correctly() {
+    panic!();
 }
