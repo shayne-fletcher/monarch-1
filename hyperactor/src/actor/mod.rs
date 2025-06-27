@@ -19,7 +19,6 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Weak;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -54,7 +53,6 @@ use crate::proc::Instance;
 use crate::proc::InstanceCell;
 use crate::proc::Ports;
 use crate::proc::Proc;
-use crate::proc::WeakInstanceCell;
 use crate::reference::ActorId;
 use crate::reference::GangId;
 use crate::reference::Index;
@@ -569,14 +567,6 @@ impl<A: Actor> ActorHandle<A> {
     pub fn bind<R: Binds<A>>(&self) -> ActorRef<R> {
         self.cell.bind(self.ports.as_ref())
     }
-
-    /// Downgrade this ActorHandle to a weak reference.
-    pub fn downgrade(&self) -> WeakActorHandle<A> {
-        WeakActorHandle {
-            cell: self.cell.downgrade(),
-            ports: Arc::downgrade(&self.ports),
-        }
-    }
 }
 
 /// IntoFuture allows users to await the handle to join it. The future
@@ -607,43 +597,6 @@ impl<A: Actor> Debug for ActorHandle<A> {
 }
 
 impl<A: Actor> Clone for ActorHandle<A> {
-    fn clone(&self) -> Self {
-        Self {
-            cell: self.cell.clone(),
-            ports: self.ports.clone(),
-        }
-    }
-}
-
-/// A weak reference to an [`ActorHandle`]. This allows holding references to actors
-/// without preventing them from being garbage collected when all strong references
-/// are dropped.
-#[derive(Debug)]
-pub struct WeakActorHandle<A: Actor> {
-    cell: WeakInstanceCell,
-    ports: Weak<Ports<A>>,
-}
-
-impl<A: Actor> WeakActorHandle<A> {
-    /// Create a new weak actor handle that is never upgradeable.
-    pub fn new() -> Self {
-        Self {
-            cell: WeakInstanceCell::new(),
-            ports: Weak::new(),
-        }
-    }
-
-    /// Upgrade this weak actor handle to a strong reference, if possible.
-    /// Returns `Some(ActorHandle<A>)` if the actor is still alive, `None` otherwise.
-    pub fn upgrade(&self) -> Option<ActorHandle<A>> {
-        match (self.cell.upgrade(), self.ports.upgrade()) {
-            (Some(cell), Some(ports)) => Some(ActorHandle::new(cell, ports)),
-            _ => None,
-        }
-    }
-}
-
-impl<A: Actor> Clone for WeakActorHandle<A> {
     fn clone(&self) -> Self {
         Self {
             cell: self.cell.clone(),
@@ -1045,5 +998,50 @@ mod tests {
         myref.port().send(&test.client, "bar".to_string()).unwrap();
         test.sync().await;
         assert_eq!(test.get_values(), (321u64, "bar".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_ref_alias() {
+        let test = MultiValuesTest::new().await;
+
+        test.send(123u64);
+        test.send("foo".to_string());
+
+        hyperactor::alias!(MyActorAlias, u64, String);
+
+        let myref: ActorRef<MyActorAlias> = test.handle.bind();
+        myref.port().send(&test.client, "biz".to_string()).unwrap();
+        myref.port().send(&test.client, 999u64).unwrap();
+
+        test.sync().await;
+        assert_eq!(test.get_values(), (999u64, "biz".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_actor_handle_downcast() {
+        #[derive(Debug)]
+        struct NothingActor;
+
+        #[async_trait]
+        impl Actor for NothingActor {
+            type Params = ();
+
+            async fn new(_: ()) -> Result<Self, anyhow::Error> {
+                Ok(Self)
+            }
+        }
+
+        // Just test that we can round-trip the handle through a downcast.
+
+        let proc = Proc::local();
+        let handle = proc.spawn::<NothingActor>("nothing", ()).await.unwrap();
+        let cell = handle.cell();
+
+        // Invalid actor doesn't succeed.
+        assert!(cell.downcast_handle::<EchoActor>().is_none());
+
+        let handle = cell.downcast_handle::<NothingActor>().unwrap();
+        handle.drain_and_stop().unwrap();
+        handle.await;
     }
 }

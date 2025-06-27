@@ -39,6 +39,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate as hyperactor;
+use crate::Actor;
+use crate::ActorHandle;
 use crate::Named;
 use crate::RemoteHandles;
 use crate::RemoteMessage;
@@ -650,6 +652,16 @@ impl<A: RemoteActor> ActorRef<A> {
     /// Convert this actor reference into its corresponding actor ID.
     pub fn into_actor_id(self) -> ActorId {
         self.actor_id
+    }
+
+    /// Attempt to downcast this reference into a (local) actor handle.
+    /// This will only succeed when the referenced actor is in the same
+    /// proc as the caller.
+    pub fn downcast_handle(&self, cap: &impl cap::CanResolveActorRef) -> Option<ActorHandle<A>>
+    where
+        A: Actor,
+    {
+        cap.resolve_actor_ref(self)
     }
 }
 
