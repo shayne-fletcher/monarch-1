@@ -20,3 +20,5 @@ Cargo.lock
 
 # mdbook output
 books/hyperactor-book/book/**
+
+CLAUDE.md
