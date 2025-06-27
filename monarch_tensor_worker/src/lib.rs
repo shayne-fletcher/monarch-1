@@ -2381,7 +2381,6 @@ mod tests {
                 .arg(format!("--bootstrap-addr={system_addr}"))
                 .arg(format!("--world-id={world_id}"))
                 .arg(format!("--proc-id={proc_id}"))
-                .env("HYPERACTOR_MANAGED_SUBPROCESS", "1")
                 .stdout(Stdio::piped())
                 .stdin(Stdio::piped())
                 .kill_on_drop(true)

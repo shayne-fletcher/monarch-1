@@ -194,7 +194,6 @@ class Bootstrap:
         fake_call(lambda: 0)
 
         env = os.environ.copy()
-        env["HYPERACTOR_MANAGED_SUBPROCESS"] = "1"
         self.env: dict[str, str] = env
 
         self._mesh_world_state: Dict[MeshWorld, Optional[DeviceMesh]] = mesh_world_state

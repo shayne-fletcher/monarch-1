@@ -202,7 +202,6 @@ def _initialize_env(worker_point: Point, proc_id: str) -> None:
         num_worker_procs = len(worker_point.shape)
         process_env = {
             **worker_env,
-            "HYPERACTOR_MANAGED_SUBPROCESS": "1",
             "CUDA_VISIBLE_DEVICES": str(local_rank),
             "NCCL_HOSTID": f"{proc_id}_host_{worker_rank // gpus_per_host}",
             # This is needed to avoid a hard failure in ncclx when we do not

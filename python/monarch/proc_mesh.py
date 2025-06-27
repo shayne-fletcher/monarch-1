@@ -269,7 +269,6 @@ async def proc_mesh_nonblocking(
     env = env or {}
     cmd, args, base_env = _get_bootstrap_args()
     env.update(base_env)
-    env["HYPERACTOR_MANAGED_SUBPROCESS"] = "1"
     allocator = monarch.ProcessAllocator(cmd, args, env)
     alloc = await allocator.allocate(spec)
     return await ProcMesh.from_alloc(alloc)
@@ -284,7 +283,6 @@ def proc_mesh_blocking(
     env = env or {}
     cmd, args, base_env = _get_bootstrap_args()
     env.update(base_env)
-    env["HYPERACTOR_MANAGED_SUBPROCESS"] = "1"
     allocator = monarch.ProcessAllocator(cmd, args, env)
     alloc = allocator.allocate(spec).get()
     return ProcMesh.from_alloc(alloc).get()

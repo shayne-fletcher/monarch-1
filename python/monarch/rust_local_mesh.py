@@ -117,9 +117,7 @@ class ControllerParams(NamedTuple):
     fail_on_worker_timeout: bool
 
 
-_PROC_ENV = {
-    "HYPERACTOR_MANAGED_SUBPROCESS": str(1),
-}
+_PROC_ENV: dict[str, str] = {}
 
 
 def get_controller_main() -> tuple[Path, dict[str, str]]:
@@ -988,7 +986,6 @@ class Bootstrap:
             raise ValueError(f"Unknown socket type: {socket_type}")
 
         env = os.environ.copy()
-        env["HYPERACTOR_MANAGED_SUBPROCESS"] = "1"
         self.env: dict[str, str] = env
 
         # Launch a single system globally
