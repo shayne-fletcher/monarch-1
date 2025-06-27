@@ -968,7 +968,7 @@ impl MailboxSender for MailboxClient {
 /// [`Port`]s associated with the mailbox.
 #[derive(Clone, Debug)]
 pub struct Mailbox {
-    state: Arc<State>,
+    inner: Arc<State>,
 }
 
 impl Mailbox {
@@ -976,20 +976,20 @@ impl Mailbox {
     /// forwarder for external destinations.
     pub fn new(actor_id: ActorId, forwarder: BoxedMailboxSender) -> Self {
         Self {
-            state: Arc::new(State::new(actor_id, forwarder)),
+            inner: Arc::new(State::new(actor_id, forwarder)),
         }
     }
 
     /// Create a new detached mailbox associated with the provided actor ID.
     pub fn new_detached(actor_id: ActorId) -> Self {
         Self {
-            state: Arc::new(State::new(actor_id, BOXED_PANICKING_MAILBOX_SENDER.clone())),
+            inner: Arc::new(State::new(actor_id, BOXED_PANICKING_MAILBOX_SENDER.clone())),
         }
     }
 
     /// The actor id associated with this mailbox.
     pub fn actor_id(&self) -> &ActorId {
-        &self.state.actor_id
+        &self.inner.actor_id
     }
 
     /// Open a new port that accepts M-typed messages. The returned
@@ -997,23 +997,18 @@ impl Mailbox {
     /// returned receiver should only be retained by the actor responsible
     /// for processing the delivered messages.
     pub fn open_port<M: Message>(&self) -> (PortHandle<M>, PortReceiver<M>) {
-        let port_index = self.state.allocate_port();
+        let port_index = self.inner.allocate_port();
         let (sender, receiver) = mpsc::unbounded_channel::<M>();
-        let port_id = PortId(self.state.actor_id.clone(), port_index);
+        let port_id = PortId(self.inner.actor_id.clone(), port_index);
         tracing::trace!(
             name = "open_port",
             "opening port for {} at {}",
-            self.state.actor_id,
+            self.inner.actor_id,
             port_id
         );
         (
             PortHandle::new(self.clone(), port_index, UnboundedPortSender::Mpsc(sender)),
-            PortReceiver::new(
-                receiver,
-                port_id,
-                /*coalesce=*/ false,
-                self.state.clone(),
-            ),
+            PortReceiver::new(receiver, port_id, /*coalesce=*/ false, self.clone()),
         )
     }
 
@@ -1028,9 +1023,9 @@ impl Mailbox {
         A::Update: Message,
         A::State: Message + Default + Clone,
     {
-        let port_index = self.state.allocate_port();
+        let port_index = self.inner.allocate_port();
         let (sender, receiver) = mpsc::unbounded_channel::<A::State>();
-        let port_id = PortId(self.state.actor_id.clone(), port_index);
+        let port_id = PortId(self.inner.actor_id.clone(), port_index);
         let state = Mutex::new(A::State::default());
         let reducer_spec = accum.reducer_spec();
         let enqueue = move |_, update: A::Update| {
@@ -1047,12 +1042,7 @@ impl Mailbox {
                 bound: Arc::new(OnceLock::new()),
                 reducer_spec,
             },
-            PortReceiver::new(
-                receiver,
-                port_id,
-                /*coalesce=*/ true,
-                self.state.clone(),
-            ),
+            PortReceiver::new(receiver, port_id, /*coalesce=*/ true, self.clone()),
         )
     }
 
@@ -1065,7 +1055,7 @@ impl Mailbox {
     ) -> PortHandle<M> {
         PortHandle {
             mailbox: self.clone(),
-            port_index: self.state.allocate_port(),
+            port_index: self.inner.allocate_port(),
             sender: UnboundedPortSender::Func(Arc::new(enqueue)),
             bound: Arc::new(OnceLock::new()),
             reducer_spec: None,
@@ -1076,8 +1066,8 @@ impl Mailbox {
     /// returned port may be used to send a single message; ditto the
     /// receiver may receive a single message.
     pub fn open_once_port<M: Message>(&self) -> (OncePortHandle<M>, OncePortReceiver<M>) {
-        let port_index = self.state.allocate_port();
-        let port_id = PortId(self.state.actor_id.clone(), port_index);
+        let port_index = self.inner.allocate_port();
+        let port_id = PortId(self.inner.actor_id.clone(), port_index);
         let (sender, receiver) = oneshot::channel::<M>();
         (
             OncePortHandle {
@@ -1089,13 +1079,13 @@ impl Mailbox {
             OncePortReceiver {
                 receiver: Some(receiver),
                 port_id,
-                state: self.state.clone(),
+                mailbox: self.clone(),
             },
         )
     }
 
     fn error(&self, err: MailboxErrorKind) -> MailboxError {
-        MailboxError::new(self.state.actor_id.clone(), err)
+        MailboxError::new(self.inner.actor_id.clone(), err)
     }
 
     /// Look up the `UnboundedPortSender` for the port associated with
@@ -1110,7 +1100,7 @@ impl Mailbox {
     /// match the expected one.
     pub(crate) fn lookup_sender<M: RemoteMessage>(&self) -> Option<UnboundedPortSender<M>> {
         let port_index = M::port();
-        self.state.ports.get(&port_index).and_then(|boxed| {
+        self.inner.ports.get(&port_index).and_then(|boxed| {
             boxed
                 .as_any()
                 .downcast_ref::<UnboundedSender<M>>()
@@ -1135,7 +1125,7 @@ impl Mailbox {
         // TODO: don't even allocate a port until the port is bound. Possibly
         // have handles explicitly staged (unbound, bound).
         let port_id = self.actor_id().port_id(handle.port_index);
-        match self.state.ports.entry(handle.port_index) {
+        match self.inner.ports.entry(handle.port_index) {
             Entry::Vacant(entry) => {
                 entry.insert(Box::new(UnboundedSender::new(
                     handle.sender.clone(),
@@ -1156,7 +1146,7 @@ impl Mailbox {
         );
 
         let port_id = self.actor_id().port_id(port_index);
-        match self.state.ports.entry(port_index) {
+        match self.inner.ports.entry(port_index) {
             Entry::Vacant(entry) => {
                 entry.insert(Box::new(UnboundedSender::new(
                     handle.sender.clone(),
@@ -1169,7 +1159,7 @@ impl Mailbox {
 
     fn bind_once<M: RemoteMessage>(&self, handle: OncePortHandle<M>) {
         let port_id = handle.port_id().clone();
-        match self.state.ports.entry(handle.port_index) {
+        match self.inner.ports.entry(handle.port_index) {
             Entry::Vacant(entry) => {
                 entry.insert(Box::new(OnceSender::new(handle.sender, port_id.clone())));
             }
@@ -1184,7 +1174,7 @@ impl Mailbox {
             "port does not belong to mailbox"
         );
 
-        match self.state.ports.entry(port_id.index()) {
+        match self.inner.ports.entry(port_id.index()) {
             Entry::Vacant(entry) => {
                 entry.insert(Box::new(sender));
             }
@@ -1218,11 +1208,11 @@ impl MailboxSender for Mailbox {
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) {
         tracing::trace!(name = "post", "posting message to {}", envelope.dest);
-        if envelope.dest().actor_id() != &self.state.actor_id {
-            return self.state.forwarder.post(envelope, return_handle);
+        if envelope.dest().actor_id() != &self.inner.actor_id {
+            return self.inner.forwarder.post(envelope, return_handle);
         }
 
-        match self.state.ports.entry(envelope.dest().index()) {
+        match self.inner.ports.entry(envelope.dest().index()) {
             Entry::Vacant(_) => envelope.undeliverable(
                 DeliveryError::Unroutable("port not bound in mailbox".to_string()),
                 return_handle,
@@ -1292,7 +1282,7 @@ impl cap::sealed::CanSend for Mailbox {
                     }
                     monitored_return_handle()
                 },
-                |sender| PortHandle::new(self.clone(), self.state.allocate_port(), sender),
+                |sender| PortHandle::new(self.clone(), self.inner.allocate_port(), sender),
             );
         let envelope = MessageEnvelope::new(self.actor_id().clone(), dest, data, headers);
         MailboxSender::post(self, envelope, return_handle);
@@ -1336,7 +1326,7 @@ impl cap::sealed::CanSplitPort for Mailbox {
             );
         }
 
-        let port_index = self.state.allocate_port();
+        let port_index = self.inner.allocate_port();
         let split_port = self.actor_id().port_id(port_index);
         let mailbox = self.clone();
         let reducer = reducer_spec
@@ -1538,7 +1528,7 @@ pub struct PortReceiver<M> {
     coalesce: bool,
     /// State is used to remove the port from service when the receiver
     /// is dropped.
-    state: Arc<State>,
+    mailbox: Mailbox,
 }
 
 impl<M> PortReceiver<M> {
@@ -1546,13 +1536,13 @@ impl<M> PortReceiver<M> {
         receiver: mpsc::UnboundedReceiver<M>,
         port_id: PortId,
         coalesce: bool,
-        state: Arc<State>,
+        mailbox: Mailbox,
     ) -> Self {
         Self {
             receiver,
             port_id,
             coalesce,
-            state,
+            mailbox,
         }
     }
 
@@ -1622,7 +1612,7 @@ impl<M> Drop for PortReceiver<M> {
         // MARIUS: do we need to tombstone these? or should we
         // error out if we have removed the receiver before serializing the port ref?
         // ("no longer live")?
-        self.state.ports.remove(&self.port());
+        self.mailbox.inner.ports.remove(&self.port());
     }
 }
 
@@ -1631,9 +1621,9 @@ pub struct OncePortReceiver<M> {
     receiver: Option<oneshot::Receiver<M>>,
     port_id: PortId,
 
-    /// State is used to remove the port from service when the receiver
+    /// Mailbox is used to remove the port from service when the receiver
     /// is dropped.
-    state: Arc<State>,
+    mailbox: Mailbox,
 }
 
 impl<M> OncePortReceiver<M> {
@@ -1666,7 +1656,7 @@ impl<M> Drop for OncePortReceiver<M> {
         // MARIUS: do we need to tombstone these? or should we
         // error out if we have removed the receiver before serializing the port ref?
         // ("no longer live")?
-        self.state.ports.remove(&self.port());
+        self.mailbox.inner.ports.remove(&self.port());
     }
 }
 
@@ -2815,7 +2805,9 @@ mod tests {
                 receiver,
                 port_id: dummy_port_id,
                 coalesce,
-                state: Arc::new(dummy_state),
+                mailbox: Mailbox {
+                    inner: Arc::new(dummy_state),
+                },
             };
             (sender, receiver)
         }

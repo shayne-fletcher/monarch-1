@@ -99,7 +99,9 @@ static NEXT_LOCAL_RANK: AtomicUsize = AtomicUsize::new(0);
 ///
 /// Procs are also responsible for maintaining the local supervision hierarchy.
 #[derive(Clone, Debug)]
-pub struct Proc(Arc<ProcState>);
+pub struct Proc {
+    inner: Arc<ProcState>,
+}
 
 #[derive(Debug)]
 struct ProcState {
@@ -274,27 +276,27 @@ impl ActorLedger {
 
         ActorTreeSnapshot {
             pid: cell.actor_id().pid(),
-            type_name: cell.state.actor_type.type_name().to_string(),
+            type_name: cell.inner.actor_type.type_name().to_string(),
             status: cell.status().borrow().clone(),
             stats: ActorStats {
-                num_processed_messages: cell.state.num_processed_messages.load(Ordering::SeqCst),
+                num_processed_messages: cell.inner.num_processed_messages.load(Ordering::SeqCst),
             },
             handlers: cell
-                .state
+                .inner
                 .exported_named_ports
                 .iter()
                 .map(|entry| (*entry.key(), entry.value().to_string()))
                 .collect(),
             children,
             events: cell
-                .state
+                .inner
                 .recording
                 .tail()
                 .into_iter()
                 .map(Event::from)
                 .collect(),
             spans: cell
-                .state
+                .inner
                 .recording
                 .stacks()
                 .into_iter()
@@ -321,16 +323,18 @@ impl Proc {
         forwarder: BoxedMailboxSender,
         clock: ClockKind,
     ) -> Self {
-        Self(Arc::new(ProcState {
-            proc_id,
-            proc_muxer: MailboxMuxer::new(),
-            forwarder,
-            roots: DashMap::new(),
-            ledger: ActorLedger::new(),
-            instances: DashMap::new(),
-            supervision_coordinator_port: OnceLock::new(),
-            clock,
-        }))
+        Self {
+            inner: Arc::new(ProcState {
+                proc_id,
+                proc_muxer: MailboxMuxer::new(),
+                forwarder,
+                roots: DashMap::new(),
+                ledger: ActorLedger::new(),
+                instances: DashMap::new(),
+                supervision_coordinator_port: OnceLock::new(),
+                clock,
+            }),
+        }
     }
 
     /// Set the supervision coordinator's port for this proc. Return Err if it is
@@ -382,12 +386,12 @@ impl Proc {
     /// Shared sender used by the proc to forward messages to remote
     /// destinations.
     pub fn forwarder(&self) -> &BoxedMailboxSender {
-        &self.0.forwarder
+        &self.inner.forwarder
     }
 
     /// Convenience accessor for state.
     fn state(&self) -> &ProcState {
-        self.0.as_ref()
+        self.inner.as_ref()
     }
 
     /// The proc's clock.
@@ -647,11 +651,11 @@ struct WeakProc(Weak<ProcState>);
 
 impl WeakProc {
     fn new(proc: &Proc) -> Self {
-        Self(Arc::downgrade(&proc.0))
+        Self(Arc::downgrade(&proc.inner))
     }
 
     fn upgrade(&self) -> Option<Proc> {
-        self.0.upgrade().map(Proc)
+        self.0.upgrade().map(|inner| Proc { inner })
     }
 }
 
@@ -896,7 +900,7 @@ impl<A: Actor> Instance<A> {
             A::spawn_server_task(panic_handler::with_backtrace_tracking(self.serve(actor)));
         tracing::debug!("{}: spawned with {:?}", actor_id, actor_task_handle);
         instance_cell
-            .state
+            .inner
             .actor_task_handle
             .set(actor_task_handle)
             .unwrap_or_else(|_| panic!("{}: task handle store failed", actor_id));
@@ -1061,7 +1065,7 @@ impl<A: Actor> Instance<A> {
                 }
             }
             self.cell
-                .state
+                .inner
                 .num_processed_messages
                 .fetch_add(1, Ordering::SeqCst);
         }
@@ -1217,7 +1221,7 @@ impl<A: Actor> cap::sealed::CanResolveActorRef for Instance<A> {
         actor_ref: &ActorRef<R>,
     ) -> Option<ActorHandle<R>> {
         self.proc
-            .0
+            .inner
             .instances
             .get(actor_ref.actor_id())?
             .upgrade()?
@@ -1248,7 +1252,7 @@ impl ActorType {
 /// InstanceCell is reference counted and cloneable.
 #[derive(Clone, Debug)]
 pub struct InstanceCell {
-    state: Arc<InstanceState>,
+    inner: Arc<InstanceState>,
 }
 
 #[derive(Debug)]
@@ -1303,7 +1307,7 @@ impl InstanceState {
     fn maybe_unlink_parent(&self) -> Option<InstanceCell> {
         let result = self.parent.upgrade();
         if let Some(parent) = &result {
-            parent.state.unlink(self);
+            parent.inner.unlink(self);
         }
         result
     }
@@ -1330,7 +1334,7 @@ impl InstanceCell {
     ) -> Self {
         let _ais = actor_id.to_string();
         let cell = Self {
-            state: Arc::new(InstanceState {
+            inner: Arc::new(InstanceState {
                 actor_id: actor_id.clone(),
                 actor_type,
                 proc: proc.clone(),
@@ -1347,38 +1351,40 @@ impl InstanceCell {
             }),
         };
         cell.maybe_link_parent();
-        proc.0.instances.insert(actor_id, cell.downgrade());
+        proc.inner
+            .instances
+            .insert(actor_id.clone(), cell.downgrade());
         cell
     }
 
-    fn wrap(state: Arc<InstanceState>) -> Self {
-        Self { state }
+    fn wrap(inner: Arc<InstanceState>) -> Self {
+        Self { inner }
     }
 
     /// The actor's ID.
     pub(crate) fn actor_id(&self) -> &ActorId {
-        &self.state.actor_id
+        &self.inner.actor_id
     }
 
     /// The actor's PID.
     pub(crate) fn pid(&self) -> Index {
-        self.state.actor_id.pid()
+        self.inner.actor_id.pid()
     }
 
     /// The actor's join handle.
     pub(crate) fn actor_task_handle(&self) -> Option<&JoinHandle<()>> {
-        self.state.actor_task_handle.get()
+        self.inner.actor_task_handle.get()
     }
 
     /// The instance's status observer.
     pub(crate) fn status(&self) -> &watch::Receiver<ActorStatus> {
-        &self.state.status
+        &self.inner.status
     }
 
     /// Send a signal to the actor.
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `ActorError`.
     pub fn signal(&self, signal: Signal) -> Result<(), ActorError> {
-        self.state.signal.send(signal).map_err(ActorError::from)
+        self.inner.signal.send(signal).map_err(ActorError::from)
     }
 
     /// Used by this actor's children to send a supervision event to this actor.
@@ -1390,7 +1396,7 @@ impl InstanceCell {
     /// cannot be delivered upstream. It is the upstream's responsibility to
     /// detect and handle crashes.
     pub fn send_supervision_event_or_crash(&self, event: ActorSupervisionEvent) {
-        if let Err(err) = self.state.supervision_port.send(event) {
+        if let Err(err) = self.inner.supervision_port.send(event) {
             tracing::error!(
                 "{}: failed to send supervision event to actor: {:?}. Crash the process.",
                 self.actor_id(),
@@ -1404,25 +1410,25 @@ impl InstanceCell {
     /// Downgrade this InstanceCell to a weak reference.
     pub fn downgrade(&self) -> WeakInstanceCell {
         WeakInstanceCell {
-            state: Arc::downgrade(&self.state),
+            inner: Arc::downgrade(&self.inner),
         }
     }
 
     /// Link this instance to a new child.
     fn link(&self, child: InstanceCell) {
         assert_eq!(self.actor_id().proc_id(), child.actor_id().proc_id());
-        self.state.children.insert(child.pid(), child);
+        self.inner.children.insert(child.pid(), child);
     }
 
     /// Unlink this instance from a child.
     fn unlink(&self, child: &InstanceCell) {
         assert_eq!(self.actor_id().proc_id(), child.actor_id().proc_id());
-        self.state.children.remove(&child.pid());
+        self.inner.children.remove(&child.pid());
     }
 
     /// Link this instance to its parent, if it has one.
     fn maybe_link_parent(&self) {
-        if let Some(parent) = self.state.parent.upgrade() {
+        if let Some(parent) = self.inner.parent.upgrade() {
             parent.link(self.clone());
         }
     }
@@ -1430,28 +1436,28 @@ impl InstanceCell {
     /// Unlink this instance from its parent, if it has one. If it was unlinked,
     /// the parent is returned.
     fn maybe_unlink_parent(&self) -> Option<InstanceCell> {
-        self.state.maybe_unlink_parent()
+        self.inner.maybe_unlink_parent()
     }
 
     /// Get parent instance cell, if it exists.
     fn get_parent_cell(&self) -> Option<InstanceCell> {
-        self.state.parent.upgrade()
+        self.inner.parent.upgrade()
     }
 
     /// Return an iterator over this instance's children. This may deadlock if the
     /// caller already holds a reference to any item in map.
     fn child_iter(&self) -> impl Iterator<Item = RefMulti<'_, Index, InstanceCell>> {
-        self.state.children.iter()
+        self.inner.children.iter()
     }
 
     /// The number of children this instance has.
     fn child_count(&self) -> usize {
-        self.state.children.len()
+        self.inner.children.len()
     }
 
     /// Get a child by its PID.
     fn get_child(&self, pid: Index) -> Option<InstanceCell> {
-        self.state.children.get(&pid).map(|child| child.clone())
+        self.inner.children.get(&pid).map(|child| child.clone())
     }
 
     /// This is temporary so that we can share binding code between handle and instance.
@@ -1462,7 +1468,7 @@ impl InstanceCell {
         ports.bind::<Signal>();
         // TODO: consider sharing `ports.bound` directly.
         for entry in ports.bound.iter() {
-            self.state
+            self.inner
                 .exported_named_ports
                 .insert(*entry.key(), entry.value());
         }
@@ -1471,7 +1477,7 @@ impl InstanceCell {
 
     /// Attempt to downcast this cell to a concrete actor handle.
     pub(crate) fn downcast_handle<A: Actor>(&self) -> Option<ActorHandle<A>> {
-        let ports = Arc::clone(&self.state.ports).downcast::<Ports<A>>().ok()?;
+        let ports = Arc::clone(&self.inner.ports).downcast::<Ports<A>>().ok()?;
         Some(ActorHandle::new(self.clone(), ports))
     }
 }
@@ -1484,7 +1490,7 @@ impl Drop for InstanceState {
                 self.actor_id
             );
         }
-        if self.proc.0.instances.remove(&self.actor_id).is_none() {
+        if self.proc.inner.instances.remove(&self.actor_id).is_none() {
             tracing::error!("instance {} was dropped but not in proc", self.actor_id);
         }
     }
@@ -1494,18 +1500,18 @@ impl Drop for InstanceState {
 /// linkage between actors without creating a strong reference cycle.
 #[derive(Debug, Clone)]
 pub struct WeakInstanceCell {
-    state: Weak<InstanceState>,
+    inner: Weak<InstanceState>,
 }
 
 impl WeakInstanceCell {
     /// Create a new weak instance cell that is never upgradeable.
     pub fn new() -> Self {
-        Self { state: Weak::new() }
+        Self { inner: Weak::new() }
     }
 
     /// Upgrade this weak instance cell to a strong reference, if possible.
     pub fn upgrade(&self) -> Option<InstanceCell> {
-        self.state.upgrade().map(InstanceCell::wrap)
+        self.inner.upgrade().map(InstanceCell::wrap)
     }
 }
 
@@ -1915,11 +1921,11 @@ mod tests {
     fn validate_link(child: &InstanceCell, parent: &InstanceCell) {
         assert_eq!(child.actor_id().proc_id(), parent.actor_id().proc_id());
         assert_eq!(
-            child.state.parent.upgrade().unwrap().actor_id(),
+            child.inner.parent.upgrade().unwrap().actor_id(),
             parent.actor_id()
         );
         assert_matches!(
-            parent.state.children.get(&child.pid()),
+            parent.inner.children.get(&child.pid()),
             Some(node) if node.actor_id() == child.actor_id()
         );
     }
@@ -1970,17 +1976,17 @@ mod tests {
         // Supervision tree is constructed correctly.
         validate_link(third.cell(), second.cell());
         validate_link(second.cell(), first.cell());
-        assert!(first.cell().state.parent.upgrade().is_none());
+        assert!(first.cell().inner.parent.upgrade().is_none());
 
         // Supervision tree is torn down correctly.
         third.drain_and_stop().unwrap();
         third.await;
-        assert!(second.cell().state.children.is_empty());
+        assert!(second.cell().inner.children.is_empty());
         validate_link(second.cell(), first.cell());
 
         second.drain_and_stop().unwrap();
         second.await;
-        assert!(first.cell().state.children.is_empty());
+        assert!(first.cell().inner.children.is_empty());
     }
 
     #[tokio::test]
@@ -2575,7 +2581,7 @@ mod tests {
 
             LoggingActor::wait(&handle).await;
 
-            let events = handle.cell().state.recording.tail();
+            let events = handle.cell().inner.recording.tail();
             assert_eq!(events.len(), 3);
             assert_eq!(events[0].json_value(), json!({ "message": "hello world" }));
             assert_eq!(
@@ -2588,7 +2594,7 @@ mod tests {
                 let barriers = Arc::new((Barrier::new(2), Barrier::new(2)));
                 handle.send(Arc::clone(&barriers)).unwrap();
                 barriers.0.wait().await;
-                let stacks = handle.cell().state.recording.stacks();
+                let stacks = handle.cell().inner.recording.stacks();
                 barriers.1.wait().await;
                 stacks
             };
