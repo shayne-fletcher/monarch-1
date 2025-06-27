@@ -936,29 +936,24 @@ impl Alloc for RemoteProcessAlloc {
             }
 
             break match update {
-                Some(ProcState::Created { proc_id, coords }) => {
-                    match self.project_proc_into_global_shape(&proc_id, &coords) {
-                        Ok(global_coords) => {
-                            tracing::debug!(
-                                "reprojected coords: {:?} -> {:?}",
-                                coords,
-                                global_coords
-                            );
-                            Some(ProcState::Created {
-                                proc_id,
-                                coords: global_coords,
-                            })
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "failed to project coords for proc: {}: {}",
-                                proc_id,
-                                e
-                            );
-                            None
-                        }
+                Some(ProcState::Created {
+                    proc_id,
+                    coords,
+                    pid,
+                }) => match self.project_proc_into_global_shape(&proc_id, &coords) {
+                    Ok(global_coords) => {
+                        tracing::debug!("reprojected coords: {:?} -> {:?}", coords, global_coords);
+                        Some(ProcState::Created {
+                            proc_id,
+                            coords: global_coords,
+                            pid,
+                        })
                     }
-                }
+                    Err(e) => {
+                        tracing::error!("failed to project coords for proc: {}: {}", proc_id, e);
+                        None
+                    }
+                },
 
                 Some(ProcState::Failed {
                     world_id: _,
@@ -1059,10 +1054,13 @@ mod test {
         for i in 0..alloc_len {
             let proc_id = format!("test[{}]", i).parse().unwrap();
             let coords = shape.slice().coordinates(i).unwrap();
-            alloc
-                .expect_next()
-                .times(1)
-                .return_once(|| Some(ProcState::Created { proc_id, coords }));
+            alloc.expect_next().times(1).return_once(|| {
+                Some(ProcState::Created {
+                    proc_id,
+                    coords,
+                    pid: 0,
+                })
+            });
         }
         for i in 0..alloc_len {
             let proc_id = format!("test[{}]", i).parse().unwrap();
@@ -1155,7 +1153,11 @@ mod test {
         while i < alloc_len {
             let m = rx.recv().await.unwrap();
             match m {
-                RemoteProcessProcStateMessage::Update(ProcState::Created { proc_id, coords }) => {
+                RemoteProcessProcStateMessage::Update(ProcState::Created {
+                    proc_id,
+                    coords,
+                    ..
+                }) => {
                     let expected_proc_id = format!("test[{}]", i).parse().unwrap();
                     let expected_coords = spec.shape.slice().coordinates(i).unwrap();
                     assert_eq!(proc_id, expected_proc_id);
@@ -1660,7 +1662,9 @@ mod test_alloc {
             let proc_state = alloc.next().await.unwrap();
             tracing::debug!("test got message: {:?}", proc_state);
             match proc_state {
-                ProcState::Created { proc_id, coords } => {
+                ProcState::Created {
+                    proc_id, coords, ..
+                } => {
                     procs.insert(proc_id);
                     proc_coords.insert(coords);
                 }
@@ -1904,7 +1908,9 @@ mod test_alloc {
             let proc_state = alloc.next().await.unwrap();
             tracing::debug!("test got message: {:?}", proc_state);
             match proc_state {
-                ProcState::Created { proc_id, coords } => {
+                ProcState::Created {
+                    proc_id, coords, ..
+                } => {
                     procs.insert(proc_id);
                     proc_coords.insert(coords);
                 }

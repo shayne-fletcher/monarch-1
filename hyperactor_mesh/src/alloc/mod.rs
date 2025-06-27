@@ -96,6 +96,8 @@ pub enum ProcState {
         proc_id: ProcId,
         /// Its assigned coordinates (in the alloc's shape).
         coords: Vec<usize>,
+        /// The system process ID of the created child process.
+        pid: u32,
     },
     /// A proc was started.
     Running {
@@ -130,16 +132,21 @@ pub enum ProcState {
 impl fmt::Display for ProcState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ProcState::Created { proc_id, coords } => {
+            ProcState::Created {
+                proc_id,
+                coords,
+                pid,
+            } => {
                 write!(
                     f,
-                    "{}: created at ({})",
+                    "{}: created at ({}) with PID {}",
                     proc_id,
                     coords
                         .iter()
                         .map(|c| c.to_string())
                         .collect::<Vec<_>>()
-                        .join(",")
+                        .join(","),
+                    pid
                 )
             }
             ProcState::Running { proc_id, addr, .. } => {
@@ -334,7 +341,9 @@ pub(crate) mod testing {
         let mut running = HashSet::new();
         while running.len() != 4 {
             match alloc.next().await.unwrap() {
-                ProcState::Created { proc_id, coords } => {
+                ProcState::Created {
+                    proc_id, coords, ..
+                } => {
                     procs.insert(proc_id, coords);
                 }
                 ProcState::Running { proc_id, .. } => {

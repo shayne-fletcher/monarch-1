@@ -108,7 +108,9 @@ impl ProcMesh {
             };
 
             match state {
-                ProcState::Created { proc_id, coords } => {
+                ProcState::Created {
+                    proc_id, coords, ..
+                } => {
                     let rank = shape
                         .slice()
                         .location(&coords)

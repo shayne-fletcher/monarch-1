@@ -329,22 +329,29 @@ impl ProcessAlloc {
                     description: message,
                 })
             }
-            Ok(mut process) => match self.ranks.assign(index) {
-                Err(_index) => {
-                    tracing::info!("could not assign rank to {}", proc_id);
-                    let _ = process.kill().await;
-                    None
+            Ok(mut process) => {
+                let pid = process.id().unwrap_or(0);
+                match self.ranks.assign(index) {
+                    Err(_index) => {
+                        tracing::info!("could not assign rank to {}", proc_id);
+                        let _ = process.kill().await;
+                        None
+                    }
+                    Ok(rank) => {
+                        let (handle, monitor) = Child::monitored(process);
+                        self.children.spawn(async move { (index, monitor.await) });
+                        self.active.insert(index, handle);
+                        // Adjust for shape slice offset for non-zero shapes (sub-shapes).
+                        let rank = rank + self.spec.shape.slice().offset();
+                        let coords = self.spec.shape.slice().coordinates(rank).unwrap();
+                        Some(ProcState::Created {
+                            proc_id,
+                            coords,
+                            pid,
+                        })
+                    }
                 }
-                Ok(rank) => {
-                    let (handle, monitor) = Child::monitored(process);
-                    self.children.spawn(async move { (index, monitor.await) });
-                    self.active.insert(index, handle);
-                    // Adjust for shape slice offset for non-zero shapes (sub-shapes).
-                    let rank = rank + self.spec.shape.slice().offset();
-                    let coords = self.spec.shape.slice().coordinates(rank).unwrap();
-                    Some(ProcState::Created { proc_id, coords })
-                }
-            },
+            }
         }
     }
 

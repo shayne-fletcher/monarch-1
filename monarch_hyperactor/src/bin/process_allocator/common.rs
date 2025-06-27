@@ -139,12 +139,12 @@ mod tests {
         while created_ranks.len() < world_size || stopped_ranks.len() < world_size {
             let proc_state = alloc.next().await.unwrap();
             match proc_state {
-                alloc::ProcState::Created { proc_id, coords: _ } => {
+                alloc::ProcState::Created { proc_id, .. } => {
                     // alloc.next() will keep creating procs and incrementing rank id
                     // so we mod the rank by world_size to map it to its logical rank
                     created_ranks.insert(proc_id.rank() % world_size);
                 }
-                alloc::ProcState::Stopped { proc_id, reason: _ } => {
+                alloc::ProcState::Stopped { proc_id, .. } => {
                     stopped_ranks.insert(proc_id.rank() % world_size);
                 }
                 _ => {}
