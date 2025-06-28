@@ -1088,17 +1088,7 @@ impl Mailbox {
         MailboxError::new(self.inner.actor_id.clone(), err)
     }
 
-    /// Look up the `UnboundedPortSender` for the port associated with
-    /// the message type `M`, as defined by `<M as Named>::port()`.
-    ///
-    /// This performs a dynamic downcast to recover the original
-    /// sender type. Returns `None` if the port is not bound or if the
-    /// type does not match.
-    ///
-    /// # Panics
-    /// Panics if the port is bound but the stored `port_id` does not
-    /// match the expected one.
-    pub(crate) fn lookup_sender<M: RemoteMessage>(&self) -> Option<UnboundedPortSender<M>> {
+    fn lookup_sender<M: RemoteMessage>(&self) -> Option<UnboundedPortSender<M>> {
         let port_index = M::port();
         self.inner.ports.get(&port_index).and_then(|boxed| {
             boxed
@@ -1113,6 +1103,12 @@ impl Mailbox {
                     s.sender.clone()
                 })
         })
+    }
+
+    /// Retrieve the bound undeliverable message port handle.
+    pub fn bound_return_handle(&self) -> Option<PortHandle<Undeliverable<MessageEnvelope>>> {
+        self.lookup_sender::<Undeliverable<MessageEnvelope>>()
+            .map(|sender| PortHandle::new(self.clone(), self.inner.allocate_port(), sender))
     }
 
     fn bind<M: RemoteMessage>(&self, handle: &PortHandle<M>) -> PortRef<M> {
@@ -1265,25 +1261,22 @@ static CAN_SEND_WARNED_MAILBOXES: OnceLock<DashSet<ActorId>> = OnceLock::new();
 
 impl cap::sealed::CanSend for Mailbox {
     fn post(&self, dest: PortId, headers: Attrs, data: Serialized) {
-        let return_handle = self
-            .lookup_sender::<Undeliverable<MessageEnvelope>>()
-            .map_or_else(
-                || {
-                    let actor_id = self.actor_id();
-                    if CAN_SEND_WARNED_MAILBOXES
-                        .get_or_init(DashSet::new)
-                        .insert(actor_id.clone()) {
-                        let bt = std::backtrace::Backtrace::capture();
-                        tracing::warn!(
-                            actor_id = ?actor_id,
-                            backtrace = ?bt,
-                            "mailbox attempted to post a message without binding Undeliverable<MessageEnvelope>"
-                        );
-                    }
-                    monitored_return_handle()
-                },
-                |sender| PortHandle::new(self.clone(), self.inner.allocate_port(), sender),
-            );
+        let return_handle = self.bound_return_handle().unwrap_or_else(|| {
+            let actor_id = self.actor_id();
+            if CAN_SEND_WARNED_MAILBOXES
+                .get_or_init(DashSet::new)
+                .insert(actor_id.clone())
+            {
+                let bt = std::backtrace::Backtrace::capture();
+                tracing::warn!(
+                    actor_id = ?actor_id,
+                    backtrace = ?bt,
+                    "mailbox attempted to post a message without binding Undeliverable<MessageEnvelope>"
+                );
+            }
+            monitored_return_handle()
+        });
+
         let envelope = MessageEnvelope::new(self.actor_id().clone(), dest, data, headers);
         MailboxSender::post(self, envelope, return_handle);
     }
@@ -1697,7 +1690,7 @@ trait SerializedSender: Send + Sync {
 }
 
 /// A sender to an M-typed unbounded port.
-pub(crate) enum UnboundedPortSender<M: Message> {
+enum UnboundedPortSender<M: Message> {
     /// Send directly to the mpsc queue.
     Mpsc(mpsc::UnboundedSender<M>),
     /// Use the provided function to enqueue the item.
