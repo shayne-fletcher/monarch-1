@@ -130,6 +130,15 @@ class PythonMessage:
         """If this message is a response, the rank of the actor in the original broadcast that send the request."""
         ...
 
+class UndeliverableMessageEnvelope:
+    """
+    An envelope representing a message that could not be delivered.
+
+    This object is opaque; its contents are not accessible from Python.
+    """
+
+    ...
+
 @final
 class PythonActorHandle:
     """

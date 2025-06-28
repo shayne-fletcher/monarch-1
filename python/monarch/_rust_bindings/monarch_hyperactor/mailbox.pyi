@@ -8,7 +8,10 @@
 
 from typing import final, Generic, Protocol
 
-from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
+from monarch._rust_bindings.monarch_hyperactor.actor import (
+    PythonMessage,
+    UndeliverableMessageEnvelope,
+)
 
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 
@@ -82,6 +85,18 @@ class PortReceiver:
         ...
 
 @final
+class UndeliverablePortReceiver:
+    """
+    A receiver to which undeliverable message envelopes are sent.
+    """
+    async def recv(self) -> UndeliverableMessageEnvelope:
+        """Receive a single undeliverable message from the port's sender."""
+        ...
+    def blocking_recv(self) -> UndeliverableMessageEnvelope:
+        """Receive a single undeliverable message from the port's sender."""
+        ...
+
+@final
 class OncePortHandle:
     """
     A variant of PortHandle that can only send a single message.
@@ -152,6 +167,15 @@ class Mailbox:
         """
         Post a message to the provided actor. It will be handled using the handle_cast
         endpoint as if the destination was `rank` of `shape`.
+        """
+        ...
+
+    def undeliverable_receiver(self) -> UndeliverablePortReceiver:
+        """
+        Open a port to receive undeliverable messages.
+
+        This may only be called at most once per mailbox. Calling it
+        more than once may panic due to the port already being bound.
         """
         ...
 
