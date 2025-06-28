@@ -149,7 +149,7 @@ fn main() {
             "-I{}",
             python_include_dir.clone().unwrap().display()
         ))
-        .clang_arg("-std=c++20")
+        .clang_arg("-std=gnu++20")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .allowlist_type("c10::MemoryFormat")
         .allowlist_type("c10::ScalarType")

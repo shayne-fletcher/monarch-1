@@ -151,7 +151,7 @@ fn main() {
     CFG.include_prefix = "monarch/torch-sys-cuda";
     let _builder = cxx_build::bridge("src/bridge.rs")
         .file("src/bridge.cpp")
-        .std("c++20")
+        .flag("-std=gnu++20")
         .includes(&libtorch_include_dirs)
         .include(python_include.unwrap())
         .include(python_include_dir.unwrap())

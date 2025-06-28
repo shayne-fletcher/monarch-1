@@ -80,7 +80,11 @@ fn python_env_dirs() -> (Option<String>, Option<String>) {
 
 fn main() {
     let mut builder = bindgen::Builder::default()
+        // Parse nccl.h as C++ with -std=gnu++20.
         .header("src/nccl.h")
+        .clang_arg("-x")
+        .clang_arg("c++")
+        .clang_arg("-std=gnu++20")
         .clang_arg(format!("-I{}/include", find_cuda_home().unwrap()))
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         // Communicator creation and management
