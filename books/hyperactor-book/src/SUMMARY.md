@@ -8,6 +8,17 @@
   - [`#[derive(Named)]`](macros/named.md)
   - [`#[export]`](macros/export.md)
   - [`#[forward]`](macros/forward.md)
+- [References](references/index.md)
+  - [Syntax](references/syntax.md)
+  - [WorldId](references/world_id.md)
+  - [ProcId](references/proc_id.md)
+  - [ActorId](references/actor_id.md)
+  - [PortId](references/port_id.md)
+  - [GangId](references/gang_id.md)
+  - [Reference](references/reference.md)
+  <!-- - [Typed References](references/typed_refs.md) -->
+  <!-- - [Gangs](references/gangs.md) -->
+  <!-- - [Bindings](references/bindings.md) -->
 - [Mailboxes and Routers](mailboxes/index.md)
   - [Ports](mailboxes/ports.md)
   - [MailboxSender](mailboxes/mailbox_sender.md)
