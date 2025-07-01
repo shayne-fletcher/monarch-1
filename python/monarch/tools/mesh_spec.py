@@ -122,6 +122,12 @@ class ServerSpec:
     name: str
     state: specs.AppState
     meshes: list[MeshSpec]
+    scheduler: str
+    namespace: str = ""
+
+    @property
+    def server_handle(self) -> str:
+        return f"{self.scheduler}://{self.namespace}/{self.name}"
 
     @property
     def is_running(self) -> bool:
@@ -152,6 +158,7 @@ class ServerSpec:
 
         return {
             "name": self.name,
+            "server_handle": self.server_handle,
             "state": self.state.name,
             "meshes": {
                 mesh.name: {

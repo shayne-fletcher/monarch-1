@@ -48,6 +48,7 @@ class TestCli(unittest.TestCase):
         job_name = "imaginary-test-job"
         mock_cmd_info.return_value = ServerSpec(
             name=job_name,
+            scheduler="slurm",
             state=AppState.RUNNING,
             meshes=[
                 MeshSpec(name="trainer", num_hosts=4, host_type="gpu.medium", gpus=2),
@@ -63,6 +64,7 @@ class TestCli(unittest.TestCase):
             expected = """
 {
   "name": "imaginary-test-job",
+  "server_handle": "slurm:///imaginary-test-job",
   "state": "RUNNING",
   "meshes": {
     "trainer": {

@@ -172,6 +172,7 @@ class ServerSpecTest(unittest.TestCase):
     def get_test_server_spec(self) -> ServerSpec:
         return ServerSpec(
             name="monarch-foo-1a2b3c",
+            scheduler="slurm",
             state=specs.AppState.RUNNING,
             meshes=[
                 MeshSpec(name="trainer", num_hosts=4, host_type="gpu.medium", gpus=2),

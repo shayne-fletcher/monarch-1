@@ -49,6 +49,7 @@ from torchx.specs import AppState
 _100_MILLISECONDS = timedelta(milliseconds=100)
 
 SERVER_READY = "monarch.tools.commands.server_ready"
+UNUSED = "__UNUSED__"
 
 
 class TestActor(Actor):
@@ -244,7 +245,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
         # but there are more than 1 mesh (hence ambiguous which mesh to allocate on)
 
         server = ServerSpec(
-            name="__UNUSED__",
+            name=UNUSED,
+            scheduler=UNUSED,
             state=AppState.RUNNING,
             meshes=[MeshSpec(name="x", num_hosts=1), MeshSpec(name="y", num_hosts=1)],
         )
@@ -262,7 +264,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
     @pytest.mark.oss_skip  # pyre-ignore[56] TODO T228752279
     async def test_torchx_remote_alloc_initializer_no_match_label_1_mesh(self) -> None:
         server = ServerSpec(
-            name="__UNUSED__",
+            name=UNUSED,
+            scheduler=UNUSED,
             state=AppState.RUNNING,
             meshes=[
                 MeshSpec(
@@ -295,7 +298,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
     @pytest.mark.oss_skip  # pyre-ignore[56] TODO T228752279
     async def test_torchx_remote_alloc_initializer_with_match_label(self) -> None:
         server = ServerSpec(
-            name="__UNUSED__",
+            name=UNUSED,
+            scheduler=UNUSED,
             state=AppState.RUNNING,
             meshes=[
                 MeshSpec(
@@ -338,6 +342,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
 
         server = ServerSpec(
             name="test",
+            scheduler=UNUSED,
             state=AppState.RUNNING,
             meshes=[
                 MeshSpec(
