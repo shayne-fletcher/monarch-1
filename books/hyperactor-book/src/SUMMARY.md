@@ -1,6 +1,13 @@
 # Summary
 
 - [Introduction](./introduction.md)
+- [Macros](macros/index.md)
+  - [`#[derive(Handler)]`](macros/handler.md)
+  - [`#[derive(HandleClient)]`](macros/handle_client.md)
+  - [`#[derive(RefClient)]`](macros/ref_client.md)
+  - [`#[derive(Named)]`](macros/named.md)
+  - [`#[export]`](macros/export.md)
+  - [`#[forward]`](macros/forward.md)
 - [Mailboxes and Routers](mailboxes/index.md)
   - [Ports](mailboxes/ports.md)
   - [MailboxSender](mailboxes/mailbox_sender.md)
