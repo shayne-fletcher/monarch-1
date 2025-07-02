@@ -15,6 +15,8 @@ import unittest
 from pathlib import Path
 from typing import Any, Generator
 
+import pytest
+
 from monarch.code_sync.auto_reload import AutoReloader, SysAuditImportHook
 
 
@@ -40,6 +42,7 @@ def importable_workspace() -> Generator[Path, Any, Any]:
 
 
 class TestAutoReloader(unittest.TestCase):
+    @pytest.mark.oss_skip  # pyre-ignore[56] TODO T229709067
     def test_source_change(self):
         with importable_workspace() as workspace:
             reloader = AutoReloader(workspace)
