@@ -26,8 +26,12 @@ use hyperactor::PortRef;
 use hyperactor::WorldId;
 use hyperactor::data::Serialized;
 use hyperactor::mailbox::DeliveryError;
+use hyperactor::mailbox::MailboxSender;
+use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::Undeliverable;
+use hyperactor::mailbox::UndeliverableMailboxSender;
 use hyperactor::mailbox::UndeliverableMessageError;
+use hyperactor::mailbox::monitored_return_handle;
 use hyperactor::reference::UnboundPort;
 use ndslice::Slice;
 use ndslice::selection::routing::RoutingFrame;
@@ -199,7 +203,10 @@ impl Actor for CommActor {
             return Ok(());
         }
 
-        unreachable!()
+        // 3. A return of an undeliverable message was itself returned.
+        UndeliverableMailboxSender
+            .post(message_envelope, /*unused */ monitored_return_handle());
+        Ok(())
     }
 }
 
