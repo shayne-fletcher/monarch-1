@@ -44,13 +44,13 @@ impl Named for ShoppingListActor {
     }
 }
 ```
-If `spawn = true`, the macro also emtis:
+If `spawn = true`, the macro also emits:
 ```rust
-impl RemotableActor for ShoppingListActor {
-    fn gspawn(...) -> ...
-}
+impl RemotableActor for ShoppingListActor {}
 ```
-Along with a registration into inventory:
+This enables remote spawning via the default `gspawn` provided by a blanket implementation.
+
+It also registers the actor into inventory:
 ```
 inventory::submit!(SpawnableActor {
     name: ...,
