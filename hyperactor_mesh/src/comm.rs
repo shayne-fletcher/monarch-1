@@ -83,8 +83,8 @@ struct ReceiveState {
 pub struct CommActor {
     /// Each world will use its own seq num from this caster.
     send_seq: HashMap<Slice, usize>,
-    /// Each world/caster uses its own stream.
-    recv_state: HashMap<(Slice, ActorId), ReceiveState>,
+    /// Each sender is a unique stream.
+    recv_state: HashMap<ActorId, ReceiveState>,
 
     /// The comm actor's mode.
     mode: CommActorMode,
@@ -340,13 +340,12 @@ impl Handler<ForwardMessage> for CommActor {
 
         // Resolve/dedup routing frames.
         let rank = self.mode.self_rank(this.self_id());
-        let slice = dests[0].slice.as_ref().clone();
         let (deliver_here, next_steps) =
             ndslice::selection::routing::resolve_routing(rank, dests, &mut |_| {
                 panic!("Choice encountered in CommActor routing")
             })?;
 
-        let recv_state = self.recv_state.entry((slice, sender.clone())).or_default();
+        let recv_state = self.recv_state.entry(sender.clone()).or_default();
         match recv_state.seq.cmp(&last_seq) {
             // We got the expected next message to deliver to this host.
             Ordering::Equal => {

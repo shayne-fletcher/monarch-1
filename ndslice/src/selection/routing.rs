@@ -421,7 +421,7 @@ impl RoutingFrame {
                 }
 
                 use rand::Rng;
-                let mut rng = rand::thread_rng();
+                let mut rng: rand::prelude::ThreadRng = rand::thread_rng();
                 let i = rng.gen_range(0..size);
                 let mut coord = self.here.clone();
                 coord[self.dim] = i;
