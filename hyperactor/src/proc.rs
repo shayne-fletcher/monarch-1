@@ -1065,7 +1065,7 @@ impl<A: Actor> Instance<A> {
                             if let Some(child) = result {
                                 self.cell.unlink(&child);
                             } else {
-                                tracing::warn!("received signal for unknown child pid {}", pid);
+                                tracing::debug!("received signal for unknown child pid {}", pid);
                             }
                         },
                     }
