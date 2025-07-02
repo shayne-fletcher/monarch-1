@@ -556,7 +556,7 @@ enum PyArg<'a> {
 }
 
 /// Serialize into a `PyObject`.
-impl<'py> TryIntoPyObjectUnsafe<'py, PyAny> for &PyArg<'py> {
+impl<'a, 'py> TryIntoPyObjectUnsafe<'py, PyAny> for &PyArg<'a> {
     unsafe fn try_to_object_unsafe(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match self {
             // SAFETY: This inherits the unsafety of `rvalue_to_ivalue` (see comment
