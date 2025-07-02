@@ -69,7 +69,7 @@ async fn serve(inp: impl AsyncBufRead + Unpin, mut outp: impl AsyncWrite + Unpin
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    hyperactor::initialize();
+    hyperactor::initialize_with_current_runtime();
 
     match BootstrapCommand::try_parse()? {
         BootstrapCommand::Run(cmd) => controller::bootstrap::run(cmd)?.await??,

@@ -190,7 +190,7 @@ impl<M: RemoteMessage> NetTx<M> {
             dest,
             status,
         };
-        crate::init::RUNTIME.spawn(Self::run(link, receiver, notify));
+        crate::init::get_runtime().spawn(Self::run(link, receiver, notify));
         tx
     }
 

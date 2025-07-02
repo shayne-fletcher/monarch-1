@@ -6,30 +6,45 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-//! Utilities for launching hyperactor processes.
-
-use std::sync::LazyLock;
 use std::sync::OnceLock;
 
 use crate::clock::ClockKind;
 use crate::panic_handler;
 
-/// A global runtime used in binding async and sync code. Do not use for executing long running or
+/// A global runtime handle used for spawning tasks. Do not use for executing long running or
 /// compute intensive tasks.
-pub(crate) static RUNTIME: LazyLock<tokio::runtime::Runtime> =
-    LazyLock::new(|| tokio::runtime::Runtime::new().expect("failed to create global runtime"));
+static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+/// Get a handle to the global runtime.
+///
+/// Panics if the runtime has not been initialized *and* the caller is not in an
+/// async context.
+pub(crate) fn get_runtime() -> tokio::runtime::Handle {
+    match RUNTIME.get() {
+        Some(handle) => handle.clone(),
+        None => tokio::runtime::Handle::current(),
+    }
+}
 
 /// Initialize the Hyperactor runtime. Specifically:
 /// - Set up panic handling, so that we get consistent panic stack traces in Actors.
 /// - Initialize logging defaults.
-pub fn initialize() {
-    static INITIALIZED: OnceLock<()> = OnceLock::new();
-    INITIALIZED.get_or_init(|| {
-        panic_handler::set_panic_hook();
-        hyperactor_telemetry::initialize_logging(ClockKind::default());
-        #[cfg(target_os = "linux")]
-        linux::initialize();
-    });
+/// - Store the provided tokio runtime handle for use by the hyperactor system.
+pub fn initialize(handle: tokio::runtime::Handle) {
+    RUNTIME
+        .set(handle)
+        .expect("hyperactor::initialize must only be called once");
+
+    panic_handler::set_panic_hook();
+    hyperactor_telemetry::initialize_logging(ClockKind::default());
+    #[cfg(target_os = "linux")]
+    linux::initialize();
+}
+
+/// Initialize the Hyperactor runtime using the current tokio runtime handle.
+pub fn initialize_with_current_runtime() {
+    let handle = tokio::runtime::Handle::current();
+    initialize(handle);
 }
 
 #[cfg(target_os = "linux")]

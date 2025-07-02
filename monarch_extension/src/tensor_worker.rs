@@ -26,6 +26,7 @@ use hyperactor::data::Serialized;
 use hyperactor::reference::ActorId;
 use monarch_hyperactor::ndslice::PySlice;
 use monarch_hyperactor::proc::PyActorId;
+use monarch_hyperactor::runtime::get_tokio_runtime;
 use monarch_messages::wire_value::WireValue;
 use monarch_messages::wire_value::func_call_args_to_wire_values;
 use monarch_messages::worker::*;
@@ -1386,22 +1387,17 @@ fn worker_main(py: Python<'_>) -> PyResult<()> {
             BinaryArgs::Pipe => bootstrap_pipe(),
             BinaryArgs::WorkerServer { rd, wr } => {
                 worker_server(
+                    get_tokio_runtime(),
                     // SAFETY: Raw FD passed in from parent.
                     BufReader::new(File::from(unsafe { OwnedFd::from_raw_fd(rd) })),
                     // SAFETY: Raw FD passed in from parent.
                     File::from(unsafe { OwnedFd::from_raw_fd(wr) }),
                 )
             }
-            BinaryArgs::Worker(args) => {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()?;
-                rt.block_on(async move {
-                    hyperactor::initialize();
-                    let _ = bootstrap_worker_proc(args).await?.await;
-                    Ok(())
-                })
-            }
+            BinaryArgs::Worker(args) => get_tokio_runtime().block_on(async move {
+                let _ = bootstrap_worker_proc(args).await?.await;
+                Ok(())
+            }),
         }
         .map_err(|err: anyhow::Error| PyRuntimeError::new_err(err.to_string()))
     })

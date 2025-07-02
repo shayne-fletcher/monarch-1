@@ -97,7 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_main_impl() -> Result<(), anyhow::Error> {
-        hyperactor::initialize();
+        hyperactor::initialize_with_current_runtime();
 
         let serve_address = ChannelAddr::any(ChannelTransport::Unix);
         let program = String::from("/bin/date"); // date is usually a unix built-in command

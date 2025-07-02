@@ -18,7 +18,7 @@ use hyperactor::channel::ChannelAddr;
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    hyperactor::initialize();
+    hyperactor::initialize_with_current_runtime();
 
     let bind = args
         .addr

@@ -78,10 +78,6 @@ pub(crate) enum Allocator2Process {
 /// Use [`bootstrap_or_die`] to implement this behavior directly.
 pub async fn bootstrap() -> anyhow::Error {
     pub async fn go() -> Result<(), anyhow::Error> {
-        // This ensures, among other things, that we correctly exit child processes
-        // when the parent dies.
-        hyperactor::initialize();
-
         let bootstrap_addr: ChannelAddr = std::env::var(BOOTSTRAP_ADDR_ENV)
             .map_err(|err| anyhow::anyhow!("read `{}`: {}", BOOTSTRAP_ADDR_ENV, err))?
             .parse()?;

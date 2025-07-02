@@ -37,7 +37,7 @@ const TITLE: &str = r#"
 #[tokio::main]
 async fn main() -> Result<ExitCode> {
     eprintln!("{}", TITLE);
-    hyperactor::initialize();
+    hyperactor::initialize_with_current_runtime();
     let args = Args::parse();
 
     let system_addr = args.system_addr.clone();

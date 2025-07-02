@@ -63,7 +63,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
 async fn run() -> Result<(), anyhow::Error> {
     let args = Cli::parse();
-    hyperactor::initialize();
+    hyperactor::initialize_with_current_runtime();
 
     match args.command {
         Command::Serve(command) => Ok(command.run().await?),

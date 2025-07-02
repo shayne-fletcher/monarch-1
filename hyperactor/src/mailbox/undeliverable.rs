@@ -63,7 +63,7 @@ pub fn monitored_return_handle() -> PortHandle<Undeliverable<MessageEnvelope>> {
         // Don't reuse `return_handle` for `h`: else it will never get
         // dropped and the task will never return.
         let (h, _) = new_undeliverable_port();
-        crate::init::RUNTIME.spawn(async move {
+        crate::init::get_runtime().spawn(async move {
             while let Ok(Undeliverable(mut envelope)) = rx.recv().await {
                 envelope.try_set_error(DeliveryError::BrokenLink(
                     "message returned to undeliverable port".to_string(),
