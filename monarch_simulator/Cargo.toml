@@ -20,7 +20,7 @@ dashmap = { version = "5.5.3", features = ["rayon", "serde"] }
 futures = { version = "0.3.30", features = ["async-await", "compat"] }
 hyperactor = { version = "0.0.0", path = "../hyperactor" }
 hyperactor_multiprocess = { version = "0.0.0", path = "../hyperactor_multiprocess" }
-lazy_static = { version = "1.5", features = ["spin_no_std"], default-features = false }
+lazy_static = "1.5"
 monarch_messages = { version = "0.0.0", path = "../monarch_messages" }
 monarch_tensor_worker = { version = "0.0.0", path = "../monarch_tensor_worker" }
 monarch_types = { version = "0.0.0", path = "../monarch_types" }
