@@ -680,6 +680,7 @@ impl ProxyHandle {
             tokio::spawn(async move {
                 'outer: loop {
                     // timeout the wait to enable stop signal checking at least every 100ms.
+                    #[allow(clippy::disallowed_methods)]
                     if let Ok(Ok(msg)) = timeout(Duration::from_millis(100), rx.recv()).await {
                         let proxy_message: ProxyMessage = msg.deserialized().unwrap();
                         let event: Box<dyn Event> = match proxy_message.dest_addr {

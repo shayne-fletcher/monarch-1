@@ -793,6 +793,7 @@ mod tests {
             .unwrap();
 
         // TODO: Fix this receiver hanging issue in T200423722.
+        #[allow(clippy::disallowed_methods)]
         let res: Result<Result<bool, MailboxError>, tokio::time::error::Elapsed> =
             timeout(Duration::from_secs(5), local_receiver.recv()).await;
         assert!(res.is_err());

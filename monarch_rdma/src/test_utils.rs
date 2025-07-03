@@ -127,10 +127,10 @@ pub mod test_utils {
                 let parsed_idx = idx
                     .parse::<usize>()
                     .expect("Device index is not a valid integer");
-                let device_str1 = (backend.to_string(), parsed_idx.to_string());
+                let _device_str1 = (backend.to_string(), parsed_idx.to_string());
             } else {
                 assert!(devices.0 == "cpu");
-                let device_str1 = (devices.0.to_string(), 0);
+                let _device_str1 = (devices.0.to_string(), 0);
             }
 
             if let Some((backend, idx)) = devices.1.split_once(':') {
@@ -138,10 +138,10 @@ pub mod test_utils {
                 let parsed_idx = idx
                     .parse::<usize>()
                     .expect("Device index is not a valid integer");
-                let device_str1 = (backend.to_string(), parsed_idx.to_string());
+                let _device_str1 = (backend.to_string(), parsed_idx.to_string());
             } else {
                 assert!(devices.1 == "cpu");
-                let device_str2 = (devices.1.to_string(), 0);
+                let _device_str2 = (devices.1.to_string(), 0);
             }
 
             let alloc_1 = LocalAllocator
@@ -187,10 +187,9 @@ pub mod test_utils {
                 unsafe {
                     cu_check!(cuda_sys::cuInit(0));
 
-                    let mut dptr: cuda_sys::CUdeviceptr = unsafe { std::mem::zeroed() };
-                    let mut handle: cuda_sys::CUmemGenericAllocationHandle =
-                        unsafe { std::mem::zeroed() };
-                    let mut padded_size: usize = 0;
+                    let mut dptr: cuda_sys::CUdeviceptr = std::mem::zeroed();
+                    let mut handle: cuda_sys::CUmemGenericAllocationHandle = std::mem::zeroed();
+                    let /*mut*/ padded_size: usize;
 
                     let mut device: cuda_sys::CUdevice = std::mem::zeroed();
                     cu_check!(cuda_sys::cuDeviceGet(&mut device, device_str.1));
@@ -272,8 +271,8 @@ pub mod test_utils {
                 }
             }
 
-            let buffer1 = vec![0u8; buffer_size].into_boxed_slice();
-            let buffer2 = vec![0u8; buffer_size].into_boxed_slice();
+            let _buffer1 = vec![0u8; buffer_size].into_boxed_slice();
+            let _buffer2 = vec![0u8; buffer_size].into_boxed_slice();
             // Fill buffer1 with test data
             if device_str1.0 == "cuda" {
                 let mut temp_buffer = vec![0u8; buffer_size].into_boxed_slice();
