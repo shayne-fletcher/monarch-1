@@ -13,5 +13,7 @@ This chapter introduces the actor system in hyperactor. We'll cover:
 - The [`RemoteActor`](./remote_actor.md) marker trait for remotely referencable types
 - The [`Binds`](./binds.md) trait for wiring exported ports to reference types
 - The [`RemoteHandles`](./remote_handles.md) trait for associating message types with a reference
+- The [`ActorHandle`](./actor_handle.md) type for referencing and communicating with running actors
+- [Actor Lifecycle](./lifecycle.md), including `Signal` and `ActorStatus`
 
-Actors are always instantiated with parameters and bound to a mailbox, enabling them to participate in reliable message-passing systems. Supervision, checkpointing, and references all build upon this core abstraction.
+Actors are instantiated with parameters and bound to mailboxes, enabling reliable message-passing. The runtime builds upon this foundation to support supervision, checkpointing, and remote interaction via typed references.
