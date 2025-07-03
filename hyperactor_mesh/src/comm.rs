@@ -27,7 +27,6 @@ use hyperactor::WorldId;
 use hyperactor::data::Serialized;
 use hyperactor::mailbox::DeliveryError;
 use hyperactor::mailbox::MailboxSender;
-use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::Undeliverable;
 use hyperactor::mailbox::UndeliverableMailboxSender;
 use hyperactor::mailbox::UndeliverableMessageError;

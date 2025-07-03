@@ -51,6 +51,7 @@ async fn test_process_allocator_child_cleanup() {
 
     // Read events until we have enough running children
     loop {
+        #[allow(clippy::disallowed_methods)]
         match timeout(Duration::from_secs(30), reader.next_line()).await {
             Ok(Ok(Some(line))) => {
                 if let Ok(proc_state) = serde_json::from_str::<ProcState>(&line) {
@@ -117,6 +118,7 @@ async fn test_process_allocator_child_cleanup() {
         .expect("Failed to kill parent process");
 
     // Wait for the parent to be killed
+    #[allow(clippy::disallowed_methods)]
     let wait_result = timeout(Duration::from_secs(5), child.wait()).await;
     match wait_result {
         Ok(Ok(status)) => eprintln!("Parent process exited with status: {:?}", status),
