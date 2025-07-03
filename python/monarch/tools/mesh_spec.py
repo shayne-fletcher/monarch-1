@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from monarch.tools.network import get_sockaddr
 from torchx import specs
+from torchx.specs.api import is_terminal
 
 DEFAULT_REMOTE_ALLOCATOR_PORT = 26600
 
@@ -132,6 +133,53 @@ class ServerSpec:
     @property
     def is_running(self) -> bool:
         return self.state == specs.AppState.RUNNING
+
+    def host0(self, mesh_name: str) -> str:
+        """The hostname of the first node in the given mesh.
+        The return value of this method can be used to set `MASTER_ADDR` env var for torch.distributed.
+
+        NOTE: the state of this server must be RUNNING for this method to return a valid value.
+
+        Usage:
+
+        .. code-block::python
+            from monarch.tools.commands import get_or_create
+
+            server_info = await get_or_create(...)
+            assert server_info.is_running
+
+            # allocate proc mesh -> create actor (code omitted for brevity)...
+
+            trainer_actor.call(
+                MASTER_ADDR=server_info.host0("trainer") # trainer mesh's 1st host
+                MASTER_PORT=29500,
+                ...
+            )
+
+        NOTE: The ordering of the hostnames is exactly the same as what comes back from the underlying
+        scheduler's `describe_job` or `list_*` API. Please find the exact semantics in the
+        respective scheduler's implementation in https://github.com/pytorch/torchx/tree/main/torchx/schedulers.
+        """
+        mesh_spec = self.get_mesh_spec(mesh_name)
+        if self.is_running:
+            # hostnames are only valid when the server is RUNNING
+            if not mesh_spec.hostnames:
+                raise RuntimeError(f"{self.server_handle} does not have any hosts")
+            return mesh_spec.hostnames[0]
+        elif self.state in [specs.AppState.SUBMITTED, specs.AppState.PENDING]:
+            raise RuntimeError(
+                f"{self.server_handle} is {self.state}."
+                f" Use `monarch.tools.commands.server_ready()` to wait for the server to be {specs.AppState.RUNNING}"
+            )
+        elif is_terminal(self.state):
+            raise RuntimeError(
+                f"{self.server_handle} is {self.state}."
+                " Use `monarch.tools.commands.get_or_create()` to create a new server"
+            )
+        else:
+            raise RuntimeError(
+                f"{self.server_handle} is in an invalid state: {self.state}. Please report this as a bug"
+            )
 
     def get_mesh_spec(self, mesh_name: str) -> MeshSpec:
         for mesh_spec in self.meshes:

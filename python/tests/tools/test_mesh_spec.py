@@ -180,6 +180,17 @@ class ServerSpecTest(unittest.TestCase):
             ],
         )
 
+    def test_server_handle(self) -> None:
+        unused = specs.AppState.RUNNING
+
+        server = ServerSpec(name="foo", scheduler="slurm", meshes=[], state=unused)
+        self.assertEqual("slurm:///foo", server.server_handle)
+
+        server = ServerSpec(
+            name="foo", scheduler="slurm", namespace="prod", meshes=[], state=unused
+        )
+        self.assertEqual("slurm://prod/foo", server.server_handle)
+
     def test_get_mesh_spec(self) -> None:
         server_spec = self.get_test_server_spec()
         mesh_spec = server_spec.get_mesh_spec("trainer")
@@ -196,3 +207,55 @@ class ServerSpecTest(unittest.TestCase):
             r"Mesh: 'worker' not found in job: monarch-foo-1a2b3c. Try one of: \['trainer', 'generator'\]",
         ):
             server_spec.get_mesh_spec("worker")
+
+    def _1_mesh_2_host_server_spec(self, state: specs.AppState) -> ServerSpec:
+        return ServerSpec(
+            name="foo",
+            scheduler="slurm",
+            meshes=[
+                MeshSpec(
+                    name="trainer",
+                    num_hosts=2,
+                    hostnames=["compute-node-0", "compute-node-1"],
+                )
+            ],
+            state=state,
+        )
+
+    def test_node0(self) -> None:
+        server = self._1_mesh_2_host_server_spec(specs.AppState.RUNNING)
+        self.assertEqual("compute-node-0", server.host0("trainer"))
+
+    def test_node0_server_in_terminal_state(self) -> None:
+        for terminal_state in [
+            specs.AppState.FAILED,
+            specs.AppState.SUCCEEDED,
+            specs.AppState.CANCELLED,
+        ]:
+            with self.subTest(terminal_state=terminal_state):
+                server = self._1_mesh_2_host_server_spec(terminal_state)
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"Use `monarch.tools.commands.get_or_create\(\)` to create a new server",
+                ):
+                    server.host0("trainer")
+
+    def test_node0_server_in_pending_state(self) -> None:
+        for pending_state in [specs.AppState.SUBMITTED, specs.AppState.PENDING]:
+            with self.subTest(pending_state=pending_state):
+                server = self._1_mesh_2_host_server_spec(pending_state)
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"Use `monarch.tools.commands.server_ready\(\)` to wait for the server to be RUNNING",
+                ):
+                    server.host0("trainer")
+
+    def test_node0_server_in_illegal_tate(self) -> None:
+        for illegal_state in [specs.AppState.UNSUBMITTED, specs.AppState.UNKNOWN]:
+            with self.subTest(illegal_state=illegal_state):
+                server = self._1_mesh_2_host_server_spec(illegal_state)
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"Please report this as a bug",
+                ):
+                    server.host0("trainer")
