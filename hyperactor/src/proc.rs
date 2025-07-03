@@ -1338,17 +1338,15 @@ impl InstanceState {
     /// Unlink this instance from its parent, if it has one. If it was unlinked,
     /// the parent is returned.
     fn maybe_unlink_parent(&self) -> Option<InstanceCell> {
-        let result = self.parent.upgrade();
-        if let Some(parent) = &result {
-            parent.inner.unlink(self);
-        }
-        result
+        self.parent
+            .upgrade()
+            .filter(|parent| parent.inner.unlink(self))
     }
 
     /// Unlink this instance from a child.
-    fn unlink(&self, child: &InstanceState) {
+    fn unlink(&self, child: &InstanceState) -> bool {
         assert_eq!(self.actor_id.proc_id(), child.actor_id.proc_id());
-        self.children.remove(&child.actor_id.pid());
+        self.children.remove(&child.actor_id.pid()).is_some()
     }
 }
 
