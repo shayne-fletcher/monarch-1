@@ -359,7 +359,9 @@ pub fn structurally_equal(a: &Selection, b: &Selection) -> bool {
 /// structure. It is designed to improve over time as additional
 /// rewrites (e.g., flattening, simplification) are introduced.
 pub fn normalize(sel: &Selection) -> NormalizedSelection {
-    let rule = normal::FlatteningRules.then(normal::IdentityRules);
+    let rule = normal::FlatteningRules
+        .then(normal::IdentityRules)
+        .then(normal::AbsorbtionRules);
     sel.fold::<normal::NormalizedSelection>()
         .rewrite_bottom_up(&rule)
 }

@@ -272,6 +272,42 @@ impl RewriteRule for FlatteningRules {
     }
 }
 
+/// A normalization rule that applies absorption laws for unions and
+/// intersections.
+///
+/// A union containing `True` always evaluates to `True`, and an
+/// intersection containing `False` always evaluates to `False`.
+#[derive(Default)]
+pub struct AbsorbtionRules;
+
+impl RewriteRule for AbsorbtionRules {
+    // Absorption rewrites:
+    //
+    // - Union(..., True, ...) → True
+    // - Intersection(..., False, ...) → False
+    fn rewrite(&self, node: NormalizedSelection) -> NormalizedSelection {
+        use NormalizedSelection::*;
+
+        match node {
+            Union(set) => {
+                if set.contains(&True) {
+                    True // Union(..., True, ...) → True
+                } else {
+                    Union(set)
+                }
+            }
+            Intersection(set) => {
+                if set.contains(&False) {
+                    False // Intersection(..., False, ...) → False
+                } else {
+                    Intersection(set)
+                }
+            }
+            other => other,
+        }
+    }
+}
+
 impl NormalizedSelection {
     pub fn rewrite_bottom_up(self, rule: &impl RewriteRule) -> Self {
         let mapped = self.trav(|child| child.rewrite_bottom_up(rule));
@@ -395,4 +431,32 @@ mod tests {
             panic!("Expected Intersection, got {:?}", result);
         }
     }
+}
+
+#[test]
+fn test_absorbtion_rules() {
+    use NormalizedSelection::*;
+
+    // Union(True, Any(True)) should absorb to True
+    let union_case = {
+        let mut set = BTreeSet::new();
+        set.insert(True);
+        set.insert(Any(Box::new(True)));
+        Union(set)
+    };
+
+    let rule = AbsorbtionRules;
+    let result = rule.rewrite(union_case);
+    assert_eq!(result, True);
+
+    // Intersection(False, All(True)) should absorb to False
+    let intersection_case = {
+        let mut set = BTreeSet::new();
+        set.insert(False);
+        set.insert(All(Box::new(True)));
+        Intersection(set)
+    };
+
+    let result = rule.rewrite(intersection_case);
+    assert_eq!(result, False);
 }
