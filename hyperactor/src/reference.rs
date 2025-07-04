@@ -1130,6 +1130,62 @@ fn chop<'a>(mut s: &'a str, delims: &'a [&'a str]) -> impl Iterator<Item = &'a s
     })
 }
 
+/// GangRefs are typed references to gangs.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Hash, Ord)]
+pub struct GangRef<A: RemoteActor> {
+    gang_id: GangId,
+    phantom: PhantomData<A>,
+}
+
+impl<A: RemoteActor> GangRef<A> {
+    /// Return an ActorRef corresponding with the provided rank in
+    /// this gang.  Does not check the validity of the rank, so the
+    /// returned identifier is not guaranteed to refer to a valid rank.
+    pub fn rank(&self, rank: Index) -> ActorRef<A> {
+        let GangRef {
+            gang_id: GangId(world_id, name),
+            ..
+        } = self;
+        ActorRef::attest(ActorId(ProcId(world_id.clone(), rank), name.clone(), 0))
+    }
+
+    /// Return the gang ID.
+    pub fn gang_id(&self) -> &GangId {
+        &self.gang_id
+    }
+}
+
+impl<A: RemoteActor> Clone for GangRef<A> {
+    fn clone(&self) -> Self {
+        Self {
+            gang_id: self.gang_id.clone(),
+            phantom: PhantomData,
+        }
+    }
+}
+
+// TODO: remove, replace with attest
+impl<A: RemoteActor> From<GangId> for GangRef<A> {
+    fn from(gang_id: GangId) -> Self {
+        Self {
+            gang_id,
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<A: RemoteActor> From<GangRef<A>> for GangId {
+    fn from(gang_ref: GangRef<A>) -> Self {
+        gang_ref.gang_id
+    }
+}
+
+impl<'a, A: RemoteActor> From<&'a GangRef<A>> for &'a GangId {
+    fn from(gang_ref: &'a GangRef<A>) -> Self {
+        &gang_ref.gang_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rand::seq::SliceRandom;
