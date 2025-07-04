@@ -7,7 +7,7 @@ Each message type that an actor can handle must be declared by implementing this
 ```rust
 #[async_trait]
 pub trait Handler<M>: Actor {
-    async fn handle(&mut self, this: &Context<Self>, message: M) -> Result<(), anyhow::Error>;
+    async fn handle(&mut self, cx: &Context<Self>, message: M) -> Result<(), anyhow::Error>;
 }
 ```
 
@@ -32,7 +32,7 @@ This is a marker implementation indicating that all actors can receive `Signal`.
 impl<A: Actor> Handler<Signal> for A {
     async fn handle(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         _message: Signal,
     ) -> Result<(), anyhow::Error> {
         unimplemented!("signal handler should not be called directly")
@@ -51,7 +51,7 @@ where
 {
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         msg: IndexedErasedUnbound<M>,
     ) -> anyhow::Result<()> {
         let message = msg.downcast()?.bind()?;
