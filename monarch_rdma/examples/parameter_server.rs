@@ -129,7 +129,7 @@ impl Actor for ParameterServerActor {
 
     async fn handle_supervision_event(
         &mut self,
-        _this: &Instance<Self>,
+        _cx: &Instance<Self>,
         _event: &ActorSupervisionEvent,
     ) -> Result<bool, anyhow::Error> {
         tracing::error!("parameterServerActor supervision event: {:?}", _event);
@@ -159,13 +159,13 @@ impl Handler<PsGetBuffers> for ParameterServerActor {
     /// Returns RdmaBuffers for weights data and gradients data. Creates handles if necessary.
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         PsGetBuffers(rank, reply): PsGetBuffers,
     ) -> Result<(), anyhow::Error> {
         if self.weights_handle.is_none() {
             let addr = self.weights_data.as_ptr() as usize;
             let size = self.weights_data.len();
-            let weights_handle = self.owner_ref.request_buffer(this, addr, size).await?;
+            let weights_handle = self.owner_ref.request_buffer(cx, addr, size).await?;
             self.weights_handle = Some(weights_handle);
         }
         let weights_handle = self
@@ -179,12 +179,12 @@ impl Handler<PsGetBuffers> for ParameterServerActor {
             std::collections::hash_map::Entry::Vacant(e) => {
                 let addr = self.grad_buffer_data[rank].as_ptr() as usize;
                 let size = self.grad_buffer_data[rank].len();
-                let grad_buffer_handle = self.owner_ref.request_buffer(this, addr, size).await?;
+                let grad_buffer_handle = self.owner_ref.request_buffer(cx, addr, size).await?;
                 e.insert(grad_buffer_handle.clone());
                 grad_buffer_handle
             }
         };
-        reply.send(this, (weights_handle.clone(), grad_buffer_handle.clone()))?;
+        reply.send(cx, (weights_handle.clone(), grad_buffer_handle.clone()))?;
         Ok(())
     }
 }
@@ -194,7 +194,7 @@ impl Handler<PsUpdate> for ParameterServerActor {
     /// Updates the parameter server's weights, given data in the gradients buffers. Gradients are wiped afterwards.
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         PsUpdate(reply): PsUpdate,
     ) -> Result<(), anyhow::Error> {
         for grad in self.grad_buffer_data.iter_mut() {
@@ -204,7 +204,7 @@ impl Handler<PsUpdate> for ParameterServerActor {
             grad.fill(0);
         }
         println!("[parameter server actor] updated");
-        reply.send(this, true)?;
+        reply.send(cx, true)?;
         Ok(())
     }
 }
@@ -258,7 +258,7 @@ impl Actor for WorkerActor {
 
     async fn handle_supervision_event(
         &mut self,
-        _this: &Instance<Self>,
+        _cx: &Instance<Self>,
         _event: &ActorSupervisionEvent,
     ) -> Result<bool, anyhow::Error> {
         tracing::error!("workerActor supervision event: {:?}", _event);
@@ -300,14 +300,14 @@ impl Handler<WorkerInit> for WorkerActor {
     /// 2) assigning the associated rdma manager
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         WorkerInit(ps_ref, rdma_managers): WorkerInit,
     ) -> Result<(), anyhow::Error> {
-        let (rank, _) = this.cast_info()?;
+        let (rank, _) = cx.cast_info()?;
 
         println!("[worker_actor_{}] initializing", rank);
 
-        let client = this.mailbox_for_py();
+        let client = cx.mailbox_for_py();
         let (handle, receiver) = client.open_once_port::<(RdmaBuffer, RdmaBuffer)>();
         ps_ref.send(client, PsGetBuffers(rank, handle.bind()))?;
         let (ps_weights_handle, ps_grad_handle) = receiver.recv().await?;
@@ -333,10 +333,10 @@ impl Handler<WorkerStep> for WorkerActor {
     /// 3) resetting the gradient to 0
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         WorkerStep(reply): WorkerStep,
     ) -> Result<(), anyhow::Error> {
-        let (rank, _) = this.cast_info()?;
+        let (rank, _) = cx.cast_info()?;
 
         for (grad_value, weight) in self
             .local_gradients
@@ -360,19 +360,19 @@ impl Handler<WorkerStep> for WorkerActor {
             .expect("worker_actor should be initialized");
         let mut lbuffer = owner_ref
             .request_buffer(
-                this,
+                cx,
                 self.local_gradients.as_ptr() as usize,
                 self.local_gradients.len(),
             )
             .await?;
 
         lbuffer
-            .read_into(this.mailbox_for_py(), ps_grad_handle.clone(), 5)
+            .read_into(cx.mailbox_for_py(), ps_grad_handle.clone(), 5)
             .await?;
 
         self.local_gradients.fill(0);
 
-        reply.send(this, true)?;
+        reply.send(cx, true)?;
         Ok(())
     }
 }
@@ -382,10 +382,10 @@ impl Handler<WorkerUpdate> for WorkerActor {
     /// Pulls weights from the parameter server to the worker
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         WorkerUpdate(reply): WorkerUpdate,
     ) -> Result<(), anyhow::Error> {
-        let (rank, _) = this.cast_info()?;
+        let (rank, _) = cx.cast_info()?;
 
         println!(
             "[worker_actor_{}] pulling new weights from parameter server (before: {:?})",
@@ -396,7 +396,7 @@ impl Handler<WorkerUpdate> for WorkerActor {
             .as_ref()
             .expect("Rmda Manager should have been initialized")
             .request_buffer(
-                this,
+                cx,
                 self.weights_data.as_ptr() as usize,
                 self.weights_data.len(),
             )
@@ -407,9 +407,9 @@ impl Handler<WorkerUpdate> for WorkerActor {
             .as_ref()
             .expect("worker_actor should be initialized");
         lbuffer
-            .write_from(this.mailbox_for_py(), ps_weights_handle.clone(), 5)
+            .write_from(cx.mailbox_for_py(), ps_weights_handle.clone(), 5)
             .await?;
-        reply.send(this, true)?;
+        reply.send(cx, true)?;
         Ok(())
     }
 }
@@ -417,8 +417,8 @@ impl Handler<WorkerUpdate> for WorkerActor {
 #[async_trait]
 impl Handler<Log> for WorkerActor {
     /// Logs the worker's weights
-    async fn handle(&mut self, this: &Context<Self>, _: Log) -> Result<(), anyhow::Error> {
-        let (rank, _) = this.cast_info()?;
+    async fn handle(&mut self, cx: &Context<Self>, _: Log) -> Result<(), anyhow::Error> {
+        let (rank, _) = cx.cast_info()?;
         println!("[worker_actor_{}] weights: {:?}", rank, self.weights_data);
         Ok(())
     }

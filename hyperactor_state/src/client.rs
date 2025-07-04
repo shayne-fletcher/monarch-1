@@ -54,7 +54,7 @@ impl Actor for ClientActor {
 impl ClientMessageHandler for ClientActor {
     async fn push_logs(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         logs: Vec<GenericStateObject>,
     ) -> Result<(), anyhow::Error> {
         self.sender.send(logs).await?;

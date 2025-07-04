@@ -185,13 +185,13 @@ impl Actor for RsyncActor {
 impl Handler<Connect> for RsyncActor {
     async fn handle(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         message: Connect,
     ) -> Result<(), anyhow::Error> {
         let (mut local, mut stream) = try_join!(
             async { Ok(TcpStream::connect(self.daemon.addr()).await?) },
             async {
-                let (rd, wr) = accept(this, message).await?;
+                let (rd, wr) = accept(cx, message).await?;
                 anyhow::Ok(tokio::io::join(rd, wr))
             }
         )?;

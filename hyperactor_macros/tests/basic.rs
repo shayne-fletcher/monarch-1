@@ -108,7 +108,7 @@ impl Actor for GenericArgActor {
 #[async_trait]
 #[forward(GenericArgMessage<usize>)]
 impl GenericArgMessageHandler<usize> for GenericArgActor {
-    async fn variant(&mut self, _this: &Context<Self>, _val: usize) -> Result<()> {
+    async fn variant(&mut self, _cx: &Context<Self>, _val: usize) -> Result<()> {
         Ok(())
     }
 }

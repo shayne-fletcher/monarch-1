@@ -1191,15 +1191,15 @@ impl Actor for SystemActor {
         })
     }
 
-    async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
+    async fn init(&mut self, cx: &Instance<Self>) -> Result<(), anyhow::Error> {
         // Start to periodically check the unhealthy worlds.
-        this.self_message_with_delay(MaintainWorldHealth {}, Duration::from_secs(0))?;
+        cx.self_message_with_delay(MaintainWorldHealth {}, Duration::from_secs(0))?;
         Ok(())
     }
 
     async fn handle_undeliverable_message(
         &mut self,
-        _this: &Instance<Self>,
+        _cx: &Instance<Self>,
         Undeliverable(envelope): Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
         let to = envelope.dest().clone();
@@ -1255,7 +1255,7 @@ impl Actor for SystemActor {
 impl SystemMessageHandler for SystemActor {
     async fn join(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         world_id: WorldId,
         proc_id: ProcId,
         proc_message_port: PortRef<ProcMessage>,
@@ -1288,7 +1288,7 @@ impl SystemMessageHandler for SystemActor {
                     failed_actors: Vec::new(),
                 },
                 lifecycle_mode.clone(),
-                this.clock(),
+                cx.clock(),
             );
         }
 
@@ -1342,7 +1342,7 @@ impl SystemMessageHandler for SystemActor {
 
     async fn upsert_world(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         world_id: WorldId,
         shape: Shape,
         num_procs_per_host: usize,
@@ -1364,9 +1364,9 @@ impl SystemMessageHandler for SystemActor {
                             status: if world.state.procs.len() < world.scheduler_params.num_procs()
                                 || !self
                                     .supervision_state
-                                    .is_world_healthy(&world_id, this.clock())
+                                    .is_world_healthy(&world_id, cx.clock())
                             {
-                                WorldStatus::Unhealthy(this.clock().system_time_now())
+                                WorldStatus::Unhealthy(cx.clock().system_time_now())
                             } else {
                                 WorldStatus::Live
                             },
@@ -1398,7 +1398,7 @@ impl SystemMessageHandler for SystemActor {
                     WorldState {
                         host_map: HashMap::new(),
                         procs: HashMap::new(),
-                        status: WorldStatus::Unhealthy(this.clock().system_time_now()),
+                        status: WorldStatus::Unhealthy(cx.clock().system_time_now()),
                     },
                     num_procs_per_host,
                     env,
@@ -1413,7 +1413,7 @@ impl SystemMessageHandler for SystemActor {
 
     async fn snapshot(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         filter: SystemSnapshotFilter,
     ) -> Result<SystemSnapshot, anyhow::Error> {
         let world_snapshots = self
@@ -1435,7 +1435,7 @@ impl SystemMessageHandler for SystemActor {
 
     async fn stop(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         worlds: Option<Vec<WorldId>>,
         proc_timeout: Duration,
         reply_port: OncePortRef<()>,
@@ -1454,8 +1454,8 @@ impl SystemMessageHandler for SystemActor {
 
         // If there's no worlds left to stop, shutdown now.
         if self.worlds.is_empty() && self.shutting_down {
-            this.stop()?;
-            reply_port.send(this, ())?;
+            cx.stop()?;
+            reply_port.send(cx, ())?;
             return Ok(());
         }
 
@@ -1532,9 +1532,9 @@ impl SystemMessageHandler for SystemActor {
             // As a result, we set the reply to a handle port, so that reply
             // can be processed as a separate message. See Handler<ProcStopResult>
             // for how the received reply is further processed.
-            let reply_to = this.port::<ProcStopResult>().bind().into_once();
+            let reply_to = cx.port::<ProcStopResult>().bind().into_once();
             port.send(
-                this,
+                cx,
                 ProcMessage::Stop {
                     timeout: proc_timeout,
                     reply_to,
@@ -1548,16 +1548,16 @@ impl SystemMessageHandler for SystemActor {
         };
 
         // Schedule a message to stop the system actor itself.
-        this.self_message_with_delay(stop_msg, Duration::from_secs(8))?;
+        cx.self_message_with_delay(stop_msg, Duration::from_secs(8))?;
 
-        reply_port.send(this, ())?;
+        reply_port.send(cx, ())?;
         Ok(())
     }
 }
 
 #[async_trait]
 impl Handler<MaintainWorldHealth> for SystemActor {
-    async fn handle(&mut self, this: &Context<Self>, _: MaintainWorldHealth) -> anyhow::Result<()> {
+    async fn handle(&mut self, cx: &Context<Self>, _: MaintainWorldHealth) -> anyhow::Result<()> {
         // TODO: this needn't be async
 
         // Find the world with the oldest unhealthy time so we can schedule the next check.
@@ -1571,7 +1571,7 @@ impl Handler<MaintainWorldHealth> for SystemActor {
 
             let Some(state) = self
                 .supervision_state
-                .get_world_with_failures(&world.world_id, this.clock())
+                .get_world_with_failures(&world.world_id, cx.clock())
             else {
                 tracing::debug!("world {} does not have failures, skipping.", world.world_id);
                 continue;
@@ -1616,8 +1616,8 @@ impl Handler<MaintainWorldHealth> for SystemActor {
                 );
 
                 // The proc has expired heartbeating and it manages the lifecycle of system, schedule system stop
-                let (tx, _) = this.open_once_port::<()>();
-                this.port().send(SystemMessage::Stop {
+                let (tx, _) = cx.open_once_port::<()>();
+                cx.port().send(SystemMessage::Stop {
                     worlds: None,
                     proc_timeout: Duration::from_secs(5),
                     reply_port: tx.bind(),
@@ -1625,7 +1625,7 @@ impl Handler<MaintainWorldHealth> for SystemActor {
             }
 
             if world.state.status == WorldStatus::Live {
-                world.state.status = WorldStatus::Unhealthy(this.clock().system_time_now());
+                world.state.status = WorldStatus::Unhealthy(cx.clock().system_time_now());
             }
 
             match &world.state.status {
@@ -1661,7 +1661,7 @@ impl Handler<MaintainWorldHealth> for SystemActor {
                 }
             }
         }
-        this.self_message_with_delay(MaintainWorldHealth {}, next_check_delay)?;
+        cx.self_message_with_delay(MaintainWorldHealth {}, next_check_delay)?;
 
         Ok(())
     }
@@ -1671,13 +1671,13 @@ impl Handler<MaintainWorldHealth> for SystemActor {
 impl Handler<ProcSupervisionMessage> for SystemActor {
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         msg: ProcSupervisionMessage,
     ) -> anyhow::Result<()> {
         match msg {
             ProcSupervisionMessage::Update(state, reply_port) => {
-                self.supervision_state.report(state, this.clock());
-                let _ = reply_port.send(this, ());
+                self.supervision_state.report(state, cx.clock());
+                let _ = reply_port.send(cx, ());
             }
         }
         Ok(())
@@ -1688,16 +1688,16 @@ impl Handler<ProcSupervisionMessage> for SystemActor {
 impl Handler<WorldSupervisionMessage> for SystemActor {
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         msg: WorldSupervisionMessage,
     ) -> anyhow::Result<()> {
         match msg {
             WorldSupervisionMessage::State(world_id, reply_port) => {
                 let world_state = self
                     .supervision_state
-                    .get_world_with_failures(&world_id, this.clock());
+                    .get_world_with_failures(&world_id, cx.clock());
                 // TODO: handle potential undeliverable message return
-                let _ = reply_port.send(this, world_state);
+                let _ = reply_port.send(cx, world_state);
             }
         }
         Ok(())
@@ -1708,7 +1708,7 @@ impl Handler<WorldSupervisionMessage> for SystemActor {
 // messages. Can be remove after T214365263 is implemented.
 #[async_trait]
 impl Handler<ProcStopResult> for SystemActor {
-    async fn handle(&mut self, this: &Context<Self>, msg: ProcStopResult) -> anyhow::Result<()> {
+    async fn handle(&mut self, cx: &Context<Self>, msg: ProcStopResult) -> anyhow::Result<()> {
         fn stopping_proc_msg<'a>(sprocs: impl Iterator<Item = &'a ProcId>) -> String {
             let sprocs = sprocs.collect::<Vec<_>>();
             if sprocs.is_empty() {
@@ -1756,7 +1756,7 @@ impl Handler<ProcStopResult> for SystemActor {
         }
 
         if self.shutting_down && self.worlds.is_empty() {
-            this.stop()?;
+            cx.stop()?;
         }
 
         Ok(())
@@ -1767,7 +1767,7 @@ impl Handler<ProcStopResult> for SystemActor {
 impl Handler<SystemStopMessage> for SystemActor {
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         message: SystemStopMessage,
     ) -> anyhow::Result<()> {
         match message {
@@ -1794,7 +1794,7 @@ impl Handler<SystemStopMessage> for SystemActor {
                     );
                 }
 
-                this.stop()?;
+                cx.stop()?;
             }
         }
         Ok(())

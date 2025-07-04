@@ -319,7 +319,7 @@ impl ProcMesh {
     }
 
     async fn spawn_on_procs<A: Actor + RemoteActor>(
-        this: &(impl cap::CanSend + cap::CanOpenPort),
+        cx: &(impl cap::CanSend + cap::CanOpenPort),
         agents: impl IntoIterator<Item = ActorRef<MeshAgent>> + '_,
         actor_name: &str,
         params: &A::Params,
@@ -333,12 +333,12 @@ impl ProcMesh {
             .ok_or(anyhow::anyhow!("actor not registered"))?
             .to_string();
 
-        let (completed_handle, mut completed_receiver) = mailbox::open_port(this);
+        let (completed_handle, mut completed_receiver) = mailbox::open_port(cx);
         let mut n = 0;
         for agent in agents {
             agent
                 .gspawn(
-                    this,
+                    cx,
                     actor_type.clone(),
                     actor_name.to_string(),
                     bincode::serialize(params)?,

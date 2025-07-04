@@ -85,7 +85,7 @@ impl Actor for SimControllerActor {
 impl ControllerMessageHandler for SimControllerActor {
     async fn attach(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         client_actor: ActorRef<ClientActor>,
     ) -> Result<(), anyhow::Error> {
         self.client_actor_ref
@@ -95,7 +95,7 @@ impl ControllerMessageHandler for SimControllerActor {
 
     async fn node(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         _seq: Seq,
         _uses: Vec<Ref>,
         _defs: Vec<Ref>,
@@ -106,20 +106,20 @@ impl ControllerMessageHandler for SimControllerActor {
 
     async fn send(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         ranks: Ranks,
         message: Serialized,
     ) -> Result<(), anyhow::Error> {
         tracing::info!("controller send to ranks {:?}: {}", ranks, message);
         self.worker_actor_ref
             .port::<WorkerMessage>()
-            .send_serialized(this, message, Attrs::new());
+            .send_serialized(cx, message, Attrs::new());
         Ok(())
     }
 
     async fn remote_function_failed(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         _seq: Seq,
         _error: WorkerError,
     ) -> Result<(), anyhow::Error> {
@@ -128,7 +128,7 @@ impl ControllerMessageHandler for SimControllerActor {
 
     async fn status(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         seq: Seq,
         _worker_actor_id: ActorId,
         controller: bool,
@@ -143,7 +143,7 @@ impl ControllerMessageHandler for SimControllerActor {
         let result = self.history.remove(&seq).unwrap();
         let client = self.client_actor_ref.get().unwrap();
         if let Err(e) = client
-            .result(this, seq.clone(), Some(Ok(result.unwrap())))
+            .result(cx, seq.clone(), Some(Ok(result.unwrap())))
             .await
         {
             tracing::error!("controller failed to send result: {:?}", e);
@@ -153,7 +153,7 @@ impl ControllerMessageHandler for SimControllerActor {
 
     async fn fetch_result(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         seq: Seq,
         result: Result<Serialized, WorkerError>,
     ) -> Result<(), anyhow::Error> {
@@ -167,13 +167,13 @@ impl ControllerMessageHandler for SimControllerActor {
         Ok(())
     }
 
-    async fn check_supervision(&mut self, _this: &Context<Self>) -> Result<(), anyhow::Error> {
+    async fn check_supervision(&mut self, _cx: &Context<Self>) -> Result<(), anyhow::Error> {
         Ok(())
     }
 
     async fn drop_refs(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         _refs: Vec<Ref>,
     ) -> Result<(), anyhow::Error> {
         Ok(())
@@ -181,7 +181,7 @@ impl ControllerMessageHandler for SimControllerActor {
 
     async fn debugger_message(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         _debugger_actor_id: ActorId,
         _action: DebuggerAction,
     ) -> Result<(), anyhow::Error> {
@@ -191,7 +191,7 @@ impl ControllerMessageHandler for SimControllerActor {
     #[cfg(test)]
     async fn get_first_incomplete_seqs_unit_tests_only(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
     ) -> Result<Vec<Seq>, anyhow::Error> {
         Ok(vec![])
     }
@@ -199,7 +199,7 @@ impl ControllerMessageHandler for SimControllerActor {
     #[cfg(not(test))]
     async fn get_first_incomplete_seqs_unit_tests_only(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
     ) -> Result<Vec<Seq>, anyhow::Error> {
         unimplemented!("get_first_incomplete_seqs_unit_tests_only is only for unit tests")
     }

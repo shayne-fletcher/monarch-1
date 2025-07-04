@@ -438,11 +438,11 @@ pub(crate) mod test_util {
     impl Handler<GetRank> for TestActor {
         async fn handle(
             &mut self,
-            this: &Context<Self>,
+            cx: &Context<Self>,
             GetRank(ok, reply): GetRank,
         ) -> Result<(), anyhow::Error> {
-            let (rank, _) = this.cast_info()?;
-            reply.send(this, rank)?;
+            let (rank, _) = cx.cast_info()?;
+            reply.send(cx, rank)?;
             anyhow::ensure!(ok, "intentional error!"); // If `!ok` exit with `Err()`.
             Ok(())
         }
@@ -453,13 +453,9 @@ pub(crate) mod test_util {
 
     #[async_trait]
     impl Handler<Echo> for TestActor {
-        async fn handle(
-            &mut self,
-            this: &Context<Self>,
-            message: Echo,
-        ) -> Result<(), anyhow::Error> {
+        async fn handle(&mut self, cx: &Context<Self>, message: Echo) -> Result<(), anyhow::Error> {
             let Echo(message, reply_port) = message;
-            reply_port.send(this, message)?;
+            reply_port.send(cx, message)?;
             Ok(())
         }
     }
@@ -471,7 +467,7 @@ pub(crate) mod test_util {
     impl Handler<Error> for TestActor {
         async fn handle(
             &mut self,
-            _this: &Context<Self>,
+            _cx: &Context<Self>,
             Error(error): Error,
         ) -> Result<(), anyhow::Error> {
             Err(anyhow::anyhow!("{}", error))
@@ -485,12 +481,12 @@ pub(crate) mod test_util {
     impl Handler<Relay> for TestActor {
         async fn handle(
             &mut self,
-            this: &Context<Self>,
+            cx: &Context<Self>,
             Relay(count, mut hops): Relay,
         ) -> Result<(), anyhow::Error> {
             ensure!(!hops.is_empty(), "relay must have at least one hop");
             let next = hops.pop_front().unwrap();
-            next.send(this, Relay(count + 1, hops))?;
+            next.send(cx, Relay(count + 1, hops))?;
             Ok(())
         }
     }

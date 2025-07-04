@@ -68,23 +68,23 @@ impl Actor for ShoppingListActor {
 #[async_trait]
 #[hyperactor::forward(ShoppingList)]
 impl ShoppingListHandler for ShoppingListActor {
-    async fn add(&mut self, _this: &Context<Self>, item: String) -> Result<(), anyhow::Error> {
+    async fn add(&mut self, _cx: &Context<Self>, item: String) -> Result<(), anyhow::Error> {
         eprintln!("insert {}", item);
         self.0.insert(item);
         Ok(())
     }
 
-    async fn remove(&mut self, _this: &Context<Self>, item: String) -> Result<(), anyhow::Error> {
+    async fn remove(&mut self, _cx: &Context<Self>, item: String) -> Result<(), anyhow::Error> {
         eprintln!("remove {}", item);
         self.0.remove(&item);
         Ok(())
     }
 
-    async fn exists(&mut self, _this: &Context<Self>, item: String) -> Result<bool, anyhow::Error> {
+    async fn exists(&mut self, _cx: &Context<Self>, item: String) -> Result<bool, anyhow::Error> {
         Ok(self.0.contains(&item))
     }
 
-    async fn list(&mut self, _this: &Context<Self>) -> Result<Vec<String>, anyhow::Error> {
+    async fn list(&mut self, _cx: &Context<Self>) -> Result<Vec<String>, anyhow::Error> {
         Ok(self.0.iter().cloned().collect())
     }
 }

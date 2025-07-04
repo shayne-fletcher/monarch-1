@@ -83,14 +83,14 @@ impl Actor for PingPongActor {
     // their senders.
     async fn handle_undeliverable_message(
         &mut self,
-        this: &Instance<Self>,
+        cx: &Instance<Self>,
         undelivered: crate::mailbox::Undeliverable<crate::mailbox::MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
         // Forward this undelivered message to the port ref given on
         // construction.
         self.params
             .undeliverable_port_ref
-            .send(this, undelivered)
+            .send(cx, undelivered)
             .unwrap();
 
         // For the purposes of testing we don't return `Err` here as
@@ -108,7 +108,7 @@ impl Handler<PingPongMessage> for PingPongActor {
     /// It also panics if TTL == 66 for testing purpose.
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         PingPongMessage(ttl, pong_actor, done_port): PingPongMessage,
     ) -> anyhow::Result<()> {
         // PingPongActor sends the messages back and forth. When it's ttl = 0, it will stop.
@@ -117,13 +117,13 @@ impl Handler<PingPongMessage> for PingPongActor {
             anyhow::bail!("PingPong handler encountered an Error");
         }
         if ttl == 0 {
-            done_port.send(this, true)?;
+            done_port.send(cx, true)?;
         } else {
             if let Some(delay) = self.params.delay {
                 RealClock.sleep(delay).await;
             }
-            let next_message = PingPongMessage(ttl - 1, this.bind(), done_port);
-            pong_actor.send(this, next_message)?;
+            let next_message = PingPongMessage(ttl - 1, cx.bind(), done_port);
+            pong_actor.send(cx, next_message)?;
         }
         Ok(())
     }

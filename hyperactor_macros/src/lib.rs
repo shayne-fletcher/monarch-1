@@ -485,17 +485,13 @@ fn parse_message_enum(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
 /// #[async_trait]
 /// #[hyperactor::forward(ShoppingList)]
 /// impl ShoppingListHandler for ShoppingListActor {
-///     async fn add(&mut self, _this: &Context<Self>, item: String) -> Result<(), anyhow::Error> {
+///     async fn add(&mut self, _cx: &Context<Self>, item: String) -> Result<(), anyhow::Error> {
 ///         eprintln!("insert {}", item);
 ///         self.0.insert(item);
 ///         Ok(())
 ///     }
 ///
-///     async fn remove(
-///         &mut self,
-///         _this: &Context<Self>,
-///         item: String,
-///     ) -> Result<(), anyhow::Error> {
+///     async fn remove(&mut self, _cx: &Context<Self>, item: String) -> Result<(), anyhow::Error> {
 ///         eprintln!("remove {}", item);
 ///         self.0.remove(&item);
 ///         Ok(())
@@ -503,13 +499,13 @@ fn parse_message_enum(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
 ///
 ///     async fn exists(
 ///         &mut self,
-///         _this: &Context<Self>,
+///         _cx: &Context<Self>,
 ///         item: String,
 ///     ) -> Result<bool, anyhow::Error> {
 ///         Ok(self.0.contains(&item))
 ///     }
 ///
-///     async fn list(&mut self, _this: &Context<Self>) -> Result<Vec<String>, anyhow::Error> {
+///     async fn list(&mut self, _cx: &Context<Self>) -> Result<Vec<String>, anyhow::Error> {
 ///         Ok(self.0.iter().cloned().collect())
 ///     }
 /// }
@@ -611,7 +607,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                 let log_message = quote! {
                         hyperactor::metrics::MESSAGES_RECEIVED.add(1, hyperactor::kv_pairs!(
                             "rpc" => "call",
-                            "actor_id" => this.self_id().to_string(),
+                            "actor_id" => cx.self_id().to_string(),
                             "message_type" => stringify!(#enum_name),
                             "variant" => stringify!(#variant_name_snake),
                         ));
@@ -621,7 +617,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                     #[doc = "The generated handler method for this enum variant."]
                     async fn #variant_name_snake(
                         &mut self,
-                        this: &hyperactor::Context<Self>,
+                        cx: &hyperactor::Context<Self>,
                         #(#arg_names: #arg_types),*)
                         -> Result<#return_type, hyperactor::anyhow::Error>;
                 });
@@ -637,7 +633,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
 
                 let (reply_port_arg, _) = message.reply_port_arg().unwrap();
                 let constructor = variant.constructor();
-                let construct_result_future = quote! { use hyperactor::Message; let result = self.#variant_name_snake(this, #(#arg_names),*).await?; };
+                let construct_result_future = quote! { use hyperactor::Message; let result = self.#variant_name_snake(cx, #(#arg_names),*).await?; };
                 if *reply_port_is_handle {
                     match_arms.push(quote! {
                         #constructor => {
@@ -655,7 +651,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                             // TODO: should we propagate this error (to supervision), or send it back as an "RPC error"?
                             // This would require Result<Result<..., in order to handle RPC errors.
                             #construct_result_future
-                            #reply_port_arg.send(this, result).map_err(hyperactor::anyhow::Error::from)
+                            #reply_port_arg.send(cx, result).map_err(hyperactor::anyhow::Error::from)
                         }
                     });
                 }
@@ -678,7 +674,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                 let log_message = quote! {
                         hyperactor::metrics::MESSAGES_RECEIVED.add(1, hyperactor::kv_pairs!(
                             "rpc" => "call",
-                            "actor_id" => this.self_id().to_string(),
+                            "actor_id" => cx.self_id().to_string(),
                             "message_type" => stringify!(#enum_name),
                             "variant" => stringify!(#variant_name_snake),
                         ));
@@ -689,7 +685,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                     #[doc = "The generated handler method for this enum variant."]
                     async fn #variant_name_snake(
                         &mut self,
-                        this: &hyperactor::Context<Self>,
+                        cx: &hyperactor::Context<Self>,
                         #(#arg_names: #arg_types),*)
                         -> Result<(), hyperactor::anyhow::Error>;
                 });
@@ -708,7 +704,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                 match_arms.push(quote! {
                     #constructor => {
                         #log_message
-                        self.#variant_name_snake(this, #(#arg_names),*).await
+                        self.#variant_name_snake(cx, #(#arg_names),*).await
                     },
                 });
             }
@@ -727,7 +723,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
             #[doc = "Handle the next message."]
             async fn handle(
                 &mut self,
-                this: &hyperactor::Context<Self>,
+                cx: &hyperactor::Context<Self>,
                 message: #name #ty_generics,
             ) -> hyperactor::anyhow::Result<()>  {
                  // Dispatch based on message type.
@@ -990,10 +986,10 @@ pub fn forward(attr: TokenStream, item: TokenStream) -> TokenStream {
         impl hyperactor::Handler<#message_type> for #self_type {
             async fn handle(
                 &mut self,
-                this: &hyperactor::Context<Self>,
+                cx: &hyperactor::Context<Self>,
                 message: #message_type,
             ) -> hyperactor::anyhow::Result<()> {
-                <Self as #trait_name>::handle(self, this, message).await
+                <Self as #trait_name>::handle(self, cx, message).await
             }
         }
     };

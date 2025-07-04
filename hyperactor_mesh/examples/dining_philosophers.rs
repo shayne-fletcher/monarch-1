@@ -107,20 +107,20 @@ impl PhilosopherActor {
         (left, right)
     }
 
-    async fn request_chopsticks(&mut self, this: &Instance<Self>) -> Result<()> {
+    async fn request_chopsticks(&mut self, cx: &Instance<Self>) -> Result<()> {
         let (left, right) = self.chopstick_indices();
         self.waiter
             .get()
             .ok_or(anyhow::anyhow!("uninitialized waiter port"))?
             .send(
-                this,
+                cx,
                 WaiterMessage::RequestChopsticks((self.rank, left, right)),
             )?;
         self.chopsticks = (ChopstickStatus::Requested, ChopstickStatus::Requested);
         Ok(())
     }
 
-    async fn release_chopsticks(&mut self, this: &Instance<Self>) -> Result<()> {
+    async fn release_chopsticks(&mut self, cx: &Instance<Self>) -> Result<()> {
         let (left, right) = self.chopstick_indices();
         eprintln!(
             "philosopher {} releasing chopsticks, {} and {}",
@@ -129,7 +129,7 @@ impl PhilosopherActor {
         self.waiter
             .get()
             .ok_or(anyhow::anyhow!("uninitialized waiter port"))?
-            .send(this, WaiterMessage::ReleaseChopsticks((left, right)))?;
+            .send(cx, WaiterMessage::ReleaseChopsticks((left, right)))?;
         self.chopsticks = (ChopstickStatus::None, ChopstickStatus::None);
         Ok(())
     }
@@ -139,15 +139,15 @@ impl PhilosopherActor {
 impl Handler<PhilosopherMessage> for PhilosopherActor {
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         message: PhilosopherMessage,
     ) -> Result<(), anyhow::Error> {
-        let (rank, _) = this.cast_info()?;
+        let (rank, _) = cx.cast_info()?;
         self.rank = rank;
         match message {
             PhilosopherMessage::Start(waiter) => {
                 self.waiter.set(waiter)?;
-                self.request_chopsticks(this).await?;
+                self.request_chopsticks(cx).await?;
             }
             PhilosopherMessage::GrantChopstick(chopstick) => {
                 eprintln!("philosopher {} granted chopstick {}", self.rank, chopstick);
@@ -161,8 +161,8 @@ impl Handler<PhilosopherMessage> for PhilosopherActor {
                 }
                 if self.chopsticks == (ChopstickStatus::Granted, ChopstickStatus::Granted) {
                     eprintln!("philosopher {} starts dining", self.rank);
-                    self.release_chopsticks(this).await?;
-                    self.request_chopsticks(this).await?;
+                    self.release_chopsticks(cx).await?;
+                    self.request_chopsticks(cx).await?;
                 }
             }
         }

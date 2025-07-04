@@ -130,10 +130,10 @@ pub trait Actor: Sized + Send + Debug + 'static {
     /// Default undeliverable message handling behavior.
     async fn handle_undeliverable_message(
         &mut self,
-        this: &Instance<Self>,
+        cx: &Instance<Self>,
         Undeliverable(envelope): Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
-        assert_eq!(envelope.sender(), this.self_id());
+        assert_eq!(envelope.sender(), cx.self_id());
 
         anyhow::bail!(UndeliverableMessageError::delivery_failure(&envelope));
     }
@@ -143,18 +143,14 @@ pub trait Actor: Sized + Send + Debug + 'static {
 #[async_trait]
 pub trait Handler<M>: Actor {
     /// Handle the next M-typed message.
-    async fn handle(&mut self, this: &Context<Self>, message: M) -> Result<(), anyhow::Error>;
+    async fn handle(&mut self, cx: &Context<Self>, message: M) -> Result<(), anyhow::Error>;
 }
 
 /// We provide this handler to indicate that actors can handle the [`Signal`] message.
 /// Its actual handler is implemented by the runtime.
 #[async_trait]
 impl<A: Actor> Handler<Signal> for A {
-    async fn handle(
-        &mut self,
-        _this: &Context<Self>,
-        _message: Signal,
-    ) -> Result<(), anyhow::Error> {
+    async fn handle(&mut self, _cx: &Context<Self>, _message: Signal) -> Result<(), anyhow::Error> {
         unimplemented!("signal handler should not be called directly")
     }
 }
@@ -165,10 +161,10 @@ impl<A: Actor> Handler<Signal> for A {
 impl<A: Actor> Handler<Undeliverable<MessageEnvelope>> for A {
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         message: Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
-        self.handle_undeliverable_message(this, message).await
+        self.handle_undeliverable_message(cx, message).await
     }
 }
 
@@ -182,11 +178,11 @@ where
 {
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         msg: IndexedErasedUnbound<M>,
     ) -> anyhow::Result<()> {
         let message = msg.downcast()?.bind()?;
-        Handler::handle(self, this, message).await
+        Handler::handle(self, cx, message).await
     }
 }
 
@@ -655,13 +651,9 @@ mod tests {
 
     #[async_trait]
     impl Handler<u64> for EchoActor {
-        async fn handle(
-            &mut self,
-            this: &Context<Self>,
-            message: u64,
-        ) -> Result<(), anyhow::Error> {
+        async fn handle(&mut self, cx: &Context<Self>, message: u64) -> Result<(), anyhow::Error> {
             let Self(port) = self;
-            port.send(this, message)?;
+            port.send(cx, message)?;
             Ok(())
         }
     }
@@ -764,7 +756,7 @@ mod tests {
     impl Handler<OncePortHandle<bool>> for InitActor {
         async fn handle(
             &mut self,
-            _this: &Context<Self>,
+            _cx: &Context<Self>,
             port: OncePortHandle<bool>,
         ) -> Result<(), anyhow::Error> {
             port.send(self.0)?;
@@ -807,9 +799,9 @@ mod tests {
 
     #[async_trait]
     impl Handler<u64> for CheckpointActor {
-        async fn handle(&mut self, this: &Context<Self>, value: u64) -> Result<(), anyhow::Error> {
+        async fn handle(&mut self, cx: &Context<Self>, value: u64) -> Result<(), anyhow::Error> {
             self.sum += value;
-            self.port.send(this, self.sum)?;
+            self.port.send(cx, self.sum)?;
             Ok(())
         }
     }
@@ -873,8 +865,6 @@ mod tests {
         }
     }
 
-    impl MultiValuesTest {}
-
     #[derive(Debug)]
     #[hyperactor::export(handlers = [u64, String])]
     struct MultiActor(MultiValues);
@@ -890,11 +880,7 @@ mod tests {
 
     #[async_trait]
     impl Handler<u64> for MultiActor {
-        async fn handle(
-            &mut self,
-            _this: &Context<Self>,
-            message: u64,
-        ) -> Result<(), anyhow::Error> {
+        async fn handle(&mut self, _cx: &Context<Self>, message: u64) -> Result<(), anyhow::Error> {
             let mut vals = self.0.lock().unwrap();
             vals.0 = message;
             Ok(())
@@ -905,7 +891,7 @@ mod tests {
     impl Handler<String> for MultiActor {
         async fn handle(
             &mut self,
-            _this: &Context<Self>,
+            _cx: &Context<Self>,
             message: String,
         ) -> Result<(), anyhow::Error> {
             let mut vals = self.0.lock().unwrap();
@@ -918,7 +904,7 @@ mod tests {
     impl Handler<OncePortHandle<bool>> for MultiActor {
         async fn handle(
             &mut self,
-            _this: &Context<Self>,
+            _cx: &Context<Self>,
             message: OncePortHandle<bool>,
         ) -> Result<(), anyhow::Error> {
             message.send(true).unwrap();

@@ -363,7 +363,7 @@ impl Drop for PipeActor {
 impl PipeMessageHandler for PipeActor {
     async fn send_value(
         &mut self,
-        _this: &hyperactor::Context<Self>,
+        _cx: &hyperactor::Context<Self>,
         val: Result<PyTree<RValue>, WorkerError>,
     ) -> Result<()> {
         // TODO(agallagher): Propagate failures and use a timeout and handle worker errors?
@@ -375,7 +375,7 @@ impl PipeMessageHandler for PipeActor {
         Ok(())
     }
 
-    async fn recv_value(&mut self, _this: &hyperactor::Context<Self>) -> Result<PyTree<RValue>> {
+    async fn recv_value(&mut self, _cx: &hyperactor::Context<Self>) -> Result<PyTree<RValue>> {
         // TODO(agallagher): Propagate failures and use a timeout?
         tokio::select! {
             res = self.handle.wait() => bail!("pipe server exited: {:?}", res),

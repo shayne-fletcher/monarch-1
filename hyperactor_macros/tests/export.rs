@@ -54,8 +54,8 @@ struct TestMessage(String);
 
 #[async_trait]
 impl Handler<TestMessage> for TestActor {
-    async fn handle(&mut self, this: &Context<Self>, msg: TestMessage) -> anyhow::Result<()> {
-        self.forward_port.send(this, msg.0)?;
+    async fn handle(&mut self, cx: &Context<Self>, msg: TestMessage) -> anyhow::Result<()> {
+        self.forward_port.send(cx, msg.0)?;
         Ok(())
     }
 }
@@ -71,24 +71,24 @@ impl<T: Named> Named for MyGeneric<T> {
 
 #[async_trait]
 impl Handler<()> for TestActor {
-    async fn handle(&mut self, this: &Context<Self>, _msg: ()) -> anyhow::Result<()> {
-        self.forward_port.send(this, "()".to_string())?;
+    async fn handle(&mut self, cx: &Context<Self>, _msg: ()) -> anyhow::Result<()> {
+        self.forward_port.send(cx, "()".to_string())?;
         Ok(())
     }
 }
 
 #[async_trait]
 impl Handler<MyGeneric<()>> for TestActor {
-    async fn handle(&mut self, this: &Context<Self>, _msg: MyGeneric<()>) -> anyhow::Result<()> {
-        self.forward_port.send(this, "MyGeneric<()>".to_string())?;
+    async fn handle(&mut self, cx: &Context<Self>, _msg: MyGeneric<()>) -> anyhow::Result<()> {
+        self.forward_port.send(cx, "MyGeneric<()>".to_string())?;
         Ok(())
     }
 }
 
 #[async_trait]
 impl Handler<u64> for TestActor {
-    async fn handle(&mut self, this: &Context<Self>, msg: u64) -> anyhow::Result<()> {
-        self.forward_port.send(this, format!("u64: {msg}"))?;
+    async fn handle(&mut self, cx: &Context<Self>, msg: u64) -> anyhow::Result<()> {
+        self.forward_port.send(cx, format!("u64: {msg}"))?;
         Ok(())
     }
 }

@@ -161,7 +161,7 @@ mod tests {
 
     #[async_trait]
     impl Handler<()> for MyActor {
-        async fn handle(&mut self, _this: &Context<Self>, _message: ()) -> anyhow::Result<()> {
+        async fn handle(&mut self, _cx: &Context<Self>, _message: ()) -> anyhow::Result<()> {
             unimplemented!()
         }
     }

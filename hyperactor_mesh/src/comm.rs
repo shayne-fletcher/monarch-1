@@ -168,7 +168,7 @@ impl Actor for CommActor {
     // This is an override of the default actor behavior.
     async fn handle_undeliverable_message(
         &mut self,
-        this: &Instance<Self>,
+        cx: &Instance<Self>,
         undelivered: hyperactor::mailbox::Undeliverable<hyperactor::mailbox::MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
         let Undeliverable(mut message_envelope) = undelivered;
@@ -180,7 +180,7 @@ impl Actor for CommActor {
             let sender = message.sender();
             let return_port = PortRef::attest_message_port(sender);
             return_port
-                .send(this, Undeliverable(message_envelope.clone()))
+                .send(cx, Undeliverable(message_envelope.clone()))
                 .map_err(|err| {
                     message_envelope
                         .try_set_error(DeliveryError::BrokenLink(format!("send failure: {err}")));
@@ -193,7 +193,7 @@ impl Actor for CommActor {
         if let Some(sender) = message_envelope.headers().get(CAST_ORIGINATING_SENDER) {
             let return_port = PortRef::attest_message_port(sender);
             return_port
-                .send(this, Undeliverable(message_envelope.clone()))
+                .send(cx, Undeliverable(message_envelope.clone()))
                 .map_err(|err| {
                     message_envelope
                         .try_set_error(DeliveryError::BrokenLink(format!("send failure: {err}")));
@@ -212,18 +212,18 @@ impl Actor for CommActor {
 impl CommActor {
     /// Forward the message to the comm actor on the given peer rank.
     fn forward(
-        this: &Instance<Self>,
+        cx: &Instance<Self>,
         mode: &CommActorMode,
         rank: usize,
         message: ForwardMessage,
     ) -> Result<()> {
-        let child = mode.peer_for_rank(this.self_id(), rank)?;
-        child.send(this, message)?;
+        let child = mode.peer_for_rank(cx.self_id(), rank)?;
+        child.send(cx, message)?;
         Ok(())
     }
 
     fn handle_message(
-        this: &Context<Self>,
+        cx: &Context<Self>,
         mode: &CommActorMode,
         deliver_here: bool,
         next_steps: HashMap<usize, Vec<RoutingFrame>>,
@@ -238,7 +238,7 @@ impl CommActor {
         message
             .data_mut()
             .visit_mut::<UnboundPort>(|UnboundPort(port_id, reducer_spec)| {
-                let split = port_id.split(this, reducer_spec.clone())?;
+                let split = port_id.split(cx, reducer_spec.clone())?;
 
                 #[cfg(test)]
                 tests::collect_split_port(port_id, &split, deliver_here);
@@ -249,17 +249,17 @@ impl CommActor {
 
         // Deliver message here, if necessary.
         if deliver_here {
-            let mut headers = this.headers().clone();
+            let mut headers = cx.headers().clone();
             set_cast_info_on_headers(
                 &mut headers,
-                mode.self_rank(this.self_id()),
+                mode.self_rank(cx.self_id()),
                 message.shape().clone(),
                 message.sender().clone(),
             );
             // TODO(pzhang) split reply ports so children can reply to this comm
             // actor instead of parent.
-            this.post(
-                this.self_id()
+            cx.post(
+                cx.self_id()
                     .proc_id()
                     .actor_id(message.dest_port().actor_name(), 0)
                     .port_id(message.dest_port().port()),
@@ -274,7 +274,7 @@ impl CommActor {
             .map(|(peer, dests)| {
                 let last_seq = last_seqs.entry(peer).or_default();
                 Self::forward(
-                    this,
+                    cx,
                     mode,
                     peer,
                     ForwardMessage {
@@ -296,7 +296,7 @@ impl CommActor {
 
 #[async_trait]
 impl Handler<CommActorMode> for CommActor {
-    async fn handle(&mut self, _this: &Context<Self>, mode: CommActorMode) -> Result<()> {
+    async fn handle(&mut self, _cx: &Context<Self>, mode: CommActorMode) -> Result<()> {
         self.mode = mode;
         Ok(())
     }
@@ -305,7 +305,7 @@ impl Handler<CommActorMode> for CommActor {
 // TODO(T218630526): reliable casting for mutable topology
 #[async_trait]
 impl Handler<CastMessage> for CommActor {
-    async fn handle(&mut self, this: &Context<Self>, cast_message: CastMessage) -> Result<()> {
+    async fn handle(&mut self, cx: &Context<Self>, cast_message: CastMessage) -> Result<()> {
         // Always forward the message to the root rank of the slice, casting starts from there.
         let slice = cast_message.dest.slice.clone();
         let selection = cast_message.dest.selection.clone();
@@ -318,12 +318,12 @@ impl Handler<CastMessage> for CommActor {
         let last_seq = *seq;
         *seq += 1;
         Self::forward(
-            this,
+            cx,
             &self.mode,
             rank,
             ForwardMessage {
                 dests: vec![frame],
-                sender: this.self_id().clone(),
+                sender: cx.self_id().clone(),
                 message: cast_message.message,
                 seq: *seq,
                 last_seq,
@@ -335,7 +335,7 @@ impl Handler<CastMessage> for CommActor {
 
 #[async_trait]
 impl Handler<ForwardMessage> for CommActor {
-    async fn handle(&mut self, this: &Context<Self>, fwd_message: ForwardMessage) -> Result<()> {
+    async fn handle(&mut self, cx: &Context<Self>, fwd_message: ForwardMessage) -> Result<()> {
         let ForwardMessage {
             sender,
             dests,
@@ -345,7 +345,7 @@ impl Handler<ForwardMessage> for CommActor {
         } = fwd_message;
 
         // Resolve/dedup routing frames.
-        let rank = self.mode.self_rank(this.self_id());
+        let rank = self.mode.self_rank(cx.self_id());
         let (deliver_here, next_steps) =
             ndslice::selection::routing::resolve_routing(rank, dests, &mut |_| {
                 panic!("Choice encountered in CommActor routing")
@@ -357,7 +357,7 @@ impl Handler<ForwardMessage> for CommActor {
             Ordering::Equal => {
                 // We got an in-order operation, so handle it now.
                 Self::handle_message(
-                    this,
+                    cx,
                     &self.mode,
                     deliver_here,
                     next_steps,
@@ -378,7 +378,7 @@ impl Handler<ForwardMessage> for CommActor {
                 }) = recv_state.buffer.remove(&recv_state.seq)
                 {
                     Self::handle_message(
-                        this,
+                        cx,
                         &self.mode,
                         deliver_here,
                         next_steps,
@@ -489,8 +489,8 @@ pub mod test_utils {
 
     #[async_trait]
     impl Handler<TestMessage> for TestActor {
-        async fn handle(&mut self, this: &Context<Self>, msg: TestMessage) -> anyhow::Result<()> {
-            self.forward_port.send(this, msg)?;
+        async fn handle(&mut self, cx: &Context<Self>, msg: TestMessage) -> anyhow::Result<()> {
+            self.forward_port.send(cx, msg)?;
             Ok(())
         }
     }

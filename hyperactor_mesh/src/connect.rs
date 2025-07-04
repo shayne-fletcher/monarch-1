@@ -276,10 +276,10 @@ mod tests {
     impl Handler<Connect> for EchoActor {
         async fn handle(
             &mut self,
-            this: &Context<Self>,
+            cx: &Context<Self>,
             message: Connect,
         ) -> Result<(), anyhow::Error> {
-            let (mut rd, mut wr) = accept(this, message).await?;
+            let (mut rd, mut wr) = accept(cx, message).await?;
             tokio::io::copy(&mut rd, &mut wr).await?;
             wr.shutdown().await?;
             Ok(())

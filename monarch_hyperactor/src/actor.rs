@@ -399,16 +399,16 @@ impl PanicFlag {
 
 #[async_trait]
 impl Handler<PythonMessage> for PythonActor {
-    async fn handle(&mut self, this: &Context<Self>, message: PythonMessage) -> anyhow::Result<()> {
+    async fn handle(&mut self, cx: &Context<Self>, message: PythonMessage) -> anyhow::Result<()> {
         let mailbox = PyMailbox {
-            inner: this.mailbox_for_py().clone(),
+            inner: cx.mailbox_for_py().clone(),
         };
         // Create a channel for signaling panics in async endpoints.
         // See [Panics in async endpoints].
         let (sender, receiver) = oneshot::channel();
 
         let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
-            let awaitable = match this.maybe_cast_info() {
+            let awaitable = match cx.maybe_cast_info() {
                 Some((rank, shape)) => self.actor.call_method(
                     py,
                     "handle_cast",
@@ -445,8 +445,8 @@ impl Handler<PythonMessage> for PythonActor {
         })?;
 
         // Spawn a child actor to await the Python handler method.
-        let handler = AsyncEndpointTask::spawn(this, ()).await?;
-        handler.run(this, PythonTask::new(future), receiver).await?;
+        let handler = AsyncEndpointTask::spawn(cx, ()).await?;
+        handler.run(cx, PythonTask::new(future), receiver).await?;
         Ok(())
     }
 }
@@ -505,7 +505,7 @@ impl Actor for AsyncEndpointTask {
 impl AsyncEndpointInvocationHandler for AsyncEndpointTask {
     async fn run(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         task: PythonTask,
         side_channel: oneshot::Receiver<PyObject>,
     ) -> anyhow::Result<()> {
@@ -546,7 +546,7 @@ impl AsyncEndpointInvocationHandler for AsyncEndpointTask {
         result?;
 
         // Stop this actor now that its job is done.
-        this.stop()?;
+        cx.stop()?;
         Ok(())
     }
 }

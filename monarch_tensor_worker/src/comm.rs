@@ -215,7 +215,7 @@ impl Actor for NcclCommActor {
 impl CommMessageHandler for NcclCommActor {
     async fn all_reduce(
         &mut self,
-        _this: &hyperactor::Context<Self>,
+        _cx: &hyperactor::Context<Self>,
         tensor: TensorCell,
         op: ReduceOp,
         stream: Stream,
@@ -228,7 +228,7 @@ impl CommMessageHandler for NcclCommActor {
 
     async fn all_to_all_single(
         &mut self,
-        _this: &hyperactor::Context<Self>,
+        _cx: &hyperactor::Context<Self>,
         output: TensorCell,
         input: TensorCell,
         stream: Stream,
@@ -241,7 +241,7 @@ impl CommMessageHandler for NcclCommActor {
 
     async fn split_all(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         nccl_config: Option<NcclConfig>,
     ) -> Result<ActorHandle<NcclCommActor>> {
         let comm = self.comm.clone();
@@ -250,12 +250,12 @@ impl CommMessageHandler for NcclCommActor {
             .await
             .unwrap()?;
 
-        NcclCommActor::spawn(this, CommParams::FromComm(Arc::new(Mutex::new(split_comm)))).await
+        NcclCommActor::spawn(cx, CommParams::FromComm(Arc::new(Mutex::new(split_comm)))).await
     }
 
     async fn split_from(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         ranks: Vec<i32>,
         nccl_config: Option<NcclConfig>,
     ) -> Result<Option<ActorHandle<NcclCommActor>>> {
@@ -267,7 +267,7 @@ impl CommMessageHandler for NcclCommActor {
 
         match split_comm {
             Some(split_comm) => Ok(Some(
-                NcclCommActor::spawn(this, CommParams::FromComm(Arc::new(Mutex::new(split_comm))))
+                NcclCommActor::spawn(cx, CommParams::FromComm(Arc::new(Mutex::new(split_comm))))
                     .await?,
             )),
             None => Ok(None),
@@ -276,7 +276,7 @@ impl CommMessageHandler for NcclCommActor {
 
     async fn broadcast(
         &mut self,
-        _this: &hyperactor::Context<Self>,
+        _cx: &hyperactor::Context<Self>,
         tensor: TensorCell,
         root: i32,
         stream: Stream,
@@ -287,11 +287,7 @@ impl CommMessageHandler for NcclCommActor {
         .await
     }
 
-    async fn barrier(
-        &mut self,
-        _this: &hyperactor::Context<Self>,
-        stream: Stream,
-    ) -> Result<Event> {
+    async fn barrier(&mut self, _cx: &hyperactor::Context<Self>, stream: Stream) -> Result<Event> {
         self.collective("barrier".into(), stream.clone(), move |comm| {
             comm.lock().barrier(&stream)
         })
@@ -300,7 +296,7 @@ impl CommMessageHandler for NcclCommActor {
 
     async fn reduce(
         &mut self,
-        _this: &hyperactor::Context<Self>,
+        _cx: &hyperactor::Context<Self>,
         tensor: TensorCell,
         op: ReduceOp,
         root: i32,
@@ -314,7 +310,7 @@ impl CommMessageHandler for NcclCommActor {
 
     async fn all_gather(
         &mut self,
-        _this: &hyperactor::Context<Self>,
+        _cx: &hyperactor::Context<Self>,
         output: Vec<TensorCell>,
         input: TensorCell,
         stream: Stream,
@@ -327,7 +323,7 @@ impl CommMessageHandler for NcclCommActor {
 
     async fn all_gather_into_tensor(
         &mut self,
-        _this: &hyperactor::Context<Self>,
+        _cx: &hyperactor::Context<Self>,
         output: TensorCell,
         input: TensorCell,
         stream: Stream,
@@ -342,7 +338,7 @@ impl CommMessageHandler for NcclCommActor {
 
     async fn reduce_scatter_tensor(
         &mut self,
-        _this: &hyperactor::Context<Self>,
+        _cx: &hyperactor::Context<Self>,
         output: TensorCell,
         input: TensorCell,
         op: ReduceOp,
@@ -361,7 +357,7 @@ impl CommMessageHandler for NcclCommActor {
 
     async fn send(
         &mut self,
-        _this: &hyperactor::Context<Self>,
+        _cx: &hyperactor::Context<Self>,
         tensor: TensorCell,
         dst: i32,
         stream: Stream,
@@ -375,7 +371,7 @@ impl CommMessageHandler for NcclCommActor {
 
     async fn recv(
         &mut self,
-        _this: &hyperactor::Context<Self>,
+        _cx: &hyperactor::Context<Self>,
         tensor: TensorCell,
         src: i32,
         stream: Stream,
@@ -389,7 +385,7 @@ impl CommMessageHandler for NcclCommActor {
 
     async fn group(
         &mut self,
-        _this: &hyperactor::Context<Self>,
+        _cx: &hyperactor::Context<Self>,
         messages: Vec<CommMessage>,
         stream: Stream,
     ) -> Result<Event> {

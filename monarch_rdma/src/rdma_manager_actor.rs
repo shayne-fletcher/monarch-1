@@ -141,7 +141,7 @@ impl Actor for RdmaManagerActor {
 
     async fn handle_supervision_event(
         &mut self,
-        _this: &Instance<Self>,
+        _cx: &Instance<Self>,
         _event: &ActorSupervisionEvent,
     ) -> Result<bool, anyhow::Error> {
         tracing::error!("rdmaManagerActor supervision event: {:?}", _event);
@@ -170,13 +170,13 @@ impl RdmaManagerMessageHandler for RdmaManagerActor {
     ///   the registered memory region's details. On failure, returns an error.
     async fn request_buffer(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         addr: usize,
         size: usize,
     ) -> Result<RdmaBuffer, anyhow::Error> {
         let mr = self.domain.register_buffer(addr, size)?;
         Ok(RdmaBuffer {
-            owner: this.bind().clone(),
+            owner: cx.bind().clone(),
             mr_id: mr.id,
             addr: mr.addr,
             size: mr.size,
@@ -200,7 +200,7 @@ impl RdmaManagerMessageHandler for RdmaManagerActor {
     /// * `Result<(), anyhow::Error>` - On success, returns `Ok(())`. On failure, returns an error.
     async fn release_buffer(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         buffer: RdmaBuffer,
     ) -> Result<(), anyhow::Error> {
         self.domain
@@ -226,19 +226,19 @@ impl RdmaManagerMessageHandler for RdmaManagerActor {
     ///   On failure, returns an error.
     async fn request_queue_pair(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         remote: ActorRef<RdmaManagerActor>,
     ) -> Result<RdmaQueuePair, anyhow::Error> {
-        if !self.is_connected(this, remote.clone()).await? {
-            self.initialize_qp(this, remote.clone()).await?;
-            remote.initialize_qp(this, this.bind().clone()).await?;
+        if !self.is_connected(cx, remote.clone()).await? {
+            self.initialize_qp(cx, remote.clone()).await?;
+            remote.initialize_qp(cx, cx.bind().clone()).await?;
 
-            let remote_endpoint = remote.connection_info(this, this.bind().clone()).await?;
-            self.connect(this, remote.clone(), remote_endpoint).await?;
+            let remote_endpoint = remote.connection_info(cx, cx.bind().clone()).await?;
+            self.connect(cx, remote.clone(), remote_endpoint).await?;
 
-            let local_endpoint = self.connection_info(this, remote.clone()).await?;
+            let local_endpoint = self.connection_info(cx, remote.clone()).await?;
             remote
-                .connect(this, this.bind().clone(), local_endpoint)
+                .connect(cx, cx.bind().clone(), local_endpoint)
                 .await?;
         }
         let qp = self
@@ -259,7 +259,7 @@ impl RdmaManagerMessageHandler for RdmaManagerActor {
     /// * `other` - The ActorRef of the remote actor to connect with
     async fn initialize_qp(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         other: ActorRef<RdmaManagerActor>,
     ) -> Result<bool, anyhow::Error> {
         let key = other.actor_id().clone();
@@ -282,7 +282,7 @@ impl RdmaManagerMessageHandler for RdmaManagerActor {
     /// * `bool` - Returns true if connected, false otherwise.
     async fn is_connected(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         other: ActorRef<RdmaManagerActor>,
     ) -> Result<bool, anyhow::Error> {
         tracing::debug!("checking if connected with {:?}", other);
@@ -304,7 +304,7 @@ impl RdmaManagerMessageHandler for RdmaManagerActor {
     /// * `endpoint` - Connection information needed to establish the RDMA connection
     async fn connect(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         other: ActorRef<RdmaManagerActor>,
         endpoint: RdmaQpInfo,
     ) -> Result<(), anyhow::Error> {
@@ -329,7 +329,7 @@ impl RdmaManagerMessageHandler for RdmaManagerActor {
     /// * `RdmaQpInfo` - Connection information needed for the RDMA connection
     async fn connection_info(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         other: ActorRef<RdmaManagerActor>,
     ) -> Result<RdmaQpInfo, anyhow::Error> {
         tracing::debug!("getting connection info with {:?}", other);

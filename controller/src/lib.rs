@@ -149,9 +149,9 @@ impl Actor for ControllerActor {
         })
     }
 
-    async fn init(&mut self, this: &hyperactor::Instance<Self>) -> Result<(), anyhow::Error> {
+    async fn init(&mut self, cx: &hyperactor::Instance<Self>) -> Result<(), anyhow::Error> {
         self.comm_actor_ref.send(
-            this,
+            cx,
             CommActorMode::ImplicitWithWorldId(self.worker_gang_ref.gang_id().world_id().clone()),
         )?;
         Ok(())
@@ -213,12 +213,12 @@ impl ControllerActor {
     // M = self.worker_progress_check_interval
     async fn request_status_if_needed(
         &mut self,
-        this: &Context<'_, Self>,
+        cx: &Context<'_, Self>,
     ) -> Result<(), anyhow::Error> {
         if let Some((expected_seq, ..)) = self.history.deadline(
             self.operations_per_worker_progress_request,
             self.operation_timeout,
-            this.clock(),
+            cx.clock(),
         ) {
             if self.last_controller_request_status.is_none_or(
                 |(last_requested_seq, last_requested_time)| {
@@ -232,7 +232,7 @@ impl ControllerActor {
             ) {
                 // Send to all workers.
                 self.send(
-                    this,
+                    cx,
                     Ranks::Slice(
                         ndslice::Slice::new(0, vec![self.history.world_size()], vec![1]).unwrap(),
                     ),
@@ -245,7 +245,7 @@ impl ControllerActor {
                 .await?;
 
                 self.last_controller_request_status =
-                    Some((expected_seq.clone(), this.clock().now()));
+                    Some((expected_seq.clone(), cx.clock().now()));
             }
         }
 
@@ -260,7 +260,7 @@ struct CheckWorkerProgress;
 impl Handler<CheckWorkerProgress> for ControllerActor {
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         _check_worker_progress: CheckWorkerProgress,
     ) -> Result<(), anyhow::Error> {
         let client = self.client()?;
@@ -268,10 +268,10 @@ impl Handler<CheckWorkerProgress> for ControllerActor {
         if let Some((expected_seq, deadline, reported)) = self.history.deadline(
             self.operations_per_worker_progress_request,
             self.operation_timeout,
-            this.clock(),
+            cx.clock(),
         ) {
             if !reported
-                && this.clock().now() > deadline
+                && cx.clock().now() > deadline
                 && expected_seq >= self.history.min_incomplete_seq_reported()
             {
                 let timed_out_ranks = self
@@ -297,7 +297,7 @@ impl Handler<CheckWorkerProgress> for ControllerActor {
                     self.operation_timeout.as_secs()
                 );
                 if client
-                    .log(this, LogLevel::Warn, message.clone())
+                    .log(cx, LogLevel::Warn, message.clone())
                     .await
                     .is_ok()
                 {
@@ -307,7 +307,7 @@ impl Handler<CheckWorkerProgress> for ControllerActor {
                 if self.fail_on_worker_timeout {
                     client
                         .result(
-                            this,
+                            cx,
                             expected_seq,
                             Some(Err(Exception::Failure(DeviceFailure {
                                 actor_id: self.worker_gang_ref.rank(failed_rank).actor_id().clone(),
@@ -318,10 +318,10 @@ impl Handler<CheckWorkerProgress> for ControllerActor {
                         .await?;
                 }
             }
-            self.request_status_if_needed(this).await?;
+            self.request_status_if_needed(cx).await?;
         }
 
-        this.self_message_with_delay(CheckWorkerProgress, self.worker_progress_check_interval)?;
+        cx.self_message_with_delay(CheckWorkerProgress, self.worker_progress_check_interval)?;
         Ok(())
     }
 }
@@ -360,7 +360,7 @@ fn slice_to_selection(slice: Slice) -> Selection {
 impl ControllerMessageHandler for ControllerActor {
     async fn attach(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         client_actor: ActorRef<ClientActor>,
     ) -> Result<(), anyhow::Error> {
         tracing::debug!("attaching client actor {}", client_actor);
@@ -369,17 +369,17 @@ impl ControllerMessageHandler for ControllerActor {
             .map_err(|actor_ref| anyhow::anyhow!("client actor {} already attached", actor_ref))?;
 
         // Trigger periodical checking of supervision status and worker progress.
-        this.self_message_with_delay(
+        cx.self_message_with_delay(
             ControllerMessage::CheckSupervision {},
             self.supervision_query_interval,
         )?;
-        this.self_message_with_delay(CheckWorkerProgress, self.worker_progress_check_interval)?;
+        cx.self_message_with_delay(CheckWorkerProgress, self.worker_progress_check_interval)?;
         Ok(())
     }
 
     async fn node(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         seq: Seq,
         defs: Vec<Ref>,
         uses: Vec<Ref>,
@@ -387,16 +387,16 @@ impl ControllerMessageHandler for ControllerActor {
         let failures = self.history.add_invocation(seq, uses, defs);
         let client = self.client()?;
         for (seq, failure) in failures {
-            let _ = client.result(this, seq, failure).await;
+            let _ = client.result(cx, seq, failure).await;
         }
-        self.request_status_if_needed(this).await?;
+        self.request_status_if_needed(cx).await?;
 
         Ok(())
     }
 
     async fn drop_refs(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         refs: Vec<Ref>,
     ) -> Result<(), anyhow::Error> {
         self.history.delete_invocations_for_refs(refs);
@@ -405,7 +405,7 @@ impl ControllerMessageHandler for ControllerActor {
 
     async fn send(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         ranks: Ranks,
         message: Serialized,
     ) -> Result<(), anyhow::Error> {
@@ -423,7 +423,7 @@ impl ControllerMessageHandler for ControllerActor {
             }),
         };
         let message = CastMessageEnvelope::from_serialized(
-            this.self_id().clone(),
+            cx.self_id().clone(),
             DestinationPort::new::<WorkerActor, WorkerMessage>(
                 // This is awkward, but goes away entirely with meshes.
                 self.worker_gang_ref
@@ -442,7 +442,7 @@ impl ControllerMessageHandler for ControllerActor {
             .reshape_with_limit(Limit::from(CASTING_FANOUT_SIZE));
 
         self.comm_actor_ref.send(
-            this,
+            cx,
             CastMessage {
                 dest: Uslice {
                     // TODO: pass both slice and selection from client side
@@ -457,20 +457,20 @@ impl ControllerMessageHandler for ControllerActor {
 
     async fn remote_function_failed(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         seq: Seq,
         error: WorkerError,
     ) -> Result<(), anyhow::Error> {
         let rank = error.worker_actor_id.rank();
         self.history
             .propagate_exception(seq, Exception::Error(seq, seq, error.clone()));
-        mark_worker_complete_and_propagate_exceptions(self, this, rank, &seq).await?;
+        mark_worker_complete_and_propagate_exceptions(self, cx, rank, &seq).await?;
         Ok(())
     }
 
     async fn status(
         &mut self,
-        _this: &Context<Self>,
+        cx: &Context<Self>,
         seq: Seq,
         worker_actor_id: ActorId,
         controller: bool,
@@ -480,14 +480,14 @@ impl ControllerMessageHandler for ControllerActor {
         if controller {
             self.history.update_deadline_tracking(rank, seq);
         } else {
-            mark_worker_complete_and_propagate_exceptions(self, _this, rank, &seq).await?;
+            mark_worker_complete_and_propagate_exceptions(self, cx, rank, &seq).await?;
         }
         Ok(())
     }
 
     async fn fetch_result(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         seq: Seq,
         result: Result<Serialized, WorkerError>,
     ) -> Result<(), anyhow::Error> {
@@ -495,11 +495,11 @@ impl ControllerMessageHandler for ControllerActor {
         Ok(())
     }
 
-    async fn check_supervision(&mut self, this: &Context<Self>) -> Result<(), anyhow::Error> {
+    async fn check_supervision(&mut self, cx: &Context<Self>) -> Result<(), anyhow::Error> {
         let gang_id: GangId = self.worker_gang_ref.clone().into();
         let world_state = self
             .system_supervision_actor_ref
-            .state(this, gang_id.world_id().clone())
+            .state(cx, gang_id.world_id().clone())
             .await?;
 
         if let Some(world_state) = world_state {
@@ -545,7 +545,7 @@ impl ControllerMessageHandler for ControllerActor {
                 tracing::error!("Sending failure to client: {exc:?}");
                 // Seq does not matter as the client will raise device error immediately before setting the results.
                 self.client()?
-                    .result(this, Seq::default(), Some(Err(exc)))
+                    .result(cx, Seq::default(), Some(Err(exc)))
                     .await?;
                 tracing::error!("Failure successfully sent to client");
 
@@ -554,7 +554,7 @@ impl ControllerMessageHandler for ControllerActor {
         }
 
         // Schedule the next supervision check.
-        this.self_message_with_delay(
+        cx.self_message_with_delay(
             ControllerMessage::CheckSupervision {},
             self.supervision_query_interval,
         )?;
@@ -563,19 +563,19 @@ impl ControllerMessageHandler for ControllerActor {
 
     async fn debugger_message(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         debugger_actor_id: ActorId,
         action: DebuggerAction,
     ) -> Result<(), anyhow::Error> {
         self.client()?
-            .debugger_message(this, debugger_actor_id, action)
+            .debugger_message(cx, debugger_actor_id, action)
             .await
     }
 
     #[cfg(test)]
     async fn get_first_incomplete_seqs_unit_tests_only(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
     ) -> Result<Vec<Seq>, anyhow::Error> {
         Ok(self.history.first_incomplete_seqs().to_vec())
     }
@@ -583,7 +583,7 @@ impl ControllerMessageHandler for ControllerActor {
     #[cfg(not(test))]
     async fn get_first_incomplete_seqs_unit_tests_only(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
     ) -> Result<Vec<Seq>, anyhow::Error> {
         unimplemented!("get_first_incomplete_seqs_unit_tests_only is only for unit tests")
     }
@@ -1798,7 +1798,7 @@ mod tests {
     impl PanickingMessageHandler for PanickingActor {
         async fn panic(
             &mut self,
-            _this: &Context<Self>,
+            _cx: &Context<Self>,
             err_msg: String,
         ) -> Result<(), anyhow::Error> {
             panic!("{}", err_msg);

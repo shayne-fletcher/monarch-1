@@ -81,7 +81,7 @@ impl Actor for ProcSupervisionCoordinator {
 impl Handler<ActorSupervisionEvent> for ProcSupervisionCoordinator {
     async fn handle(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         msg: ActorSupervisionEvent,
     ) -> anyhow::Result<()> {
         tracing::debug!("in handler, handling supervision event");

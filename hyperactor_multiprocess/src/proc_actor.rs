@@ -560,7 +560,7 @@ impl ProcActor {
 impl MailboxAdminMessageHandler for ProcActor {
     async fn update_address(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         proc_id: ProcId,
         addr: ChannelAddr,
     ) -> Result<(), anyhow::Error> {
@@ -571,13 +571,13 @@ impl MailboxAdminMessageHandler for ProcActor {
                 addr: addr.clone()
             }
         );
-        let forwarder = this.proc().forwarder();
+        let forwarder = cx.proc().forwarder();
         if let Some(router) = forwarder.downcast_ref::<DialMailboxRouter>() {
             router.bind(proc_id.into(), addr);
         } else {
             tracing::warn!(
                 "proc {} received update_address but does not use a DialMailboxRouter",
-                this.proc().proc_id()
+                cx.proc().proc_id()
             );
         }
 
@@ -588,19 +588,19 @@ impl MailboxAdminMessageHandler for ProcActor {
 #[async_trait]
 #[hyperactor::forward(ProcMessage)]
 impl ProcMessageHandler for ProcActor {
-    async fn joined(&mut self, _this: &Context<Self>) -> Result<(), anyhow::Error> {
+    async fn joined(&mut self, _cx: &Context<Self>) -> Result<(), anyhow::Error> {
         self.state = ProcState::Joined;
         let _ = self.params.state_watch.send(self.state.clone());
         Ok(())
     }
 
-    async fn state(&mut self, _this: &Context<Self>) -> Result<ProcState, anyhow::Error> {
+    async fn state(&mut self, _cx: &Context<Self>) -> Result<ProcState, anyhow::Error> {
         Ok(self.state.clone())
     }
 
     async fn spawn(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         actor_type: String,
         actor_name: String,
         params_data: Data,
@@ -612,13 +612,13 @@ impl ProcMessageHandler for ProcActor {
             .await?;
 
         // Signal that the actor has joined:
-        status_port.send(this, self.rank())?;
+        status_port.send(cx, self.rank())?;
         Ok(())
     }
 
     async fn spawn_proc(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         env: Environment,
         world_id: WorldId,
         proc_ids: Vec<ProcId>,
@@ -671,13 +671,13 @@ impl ProcMessageHandler for ProcActor {
         Ok(())
     }
 
-    async fn update_supervision(&mut self, this: &Context<Self>) -> Result<(), anyhow::Error> {
+    async fn update_supervision(&mut self, cx: &Context<Self>) -> Result<(), anyhow::Error> {
         // Delay for next supervision update with some jitter.
         let delay = jitter(self.params.supervision_update_interval);
 
         // Only start updating supervision after the proc is joined.
         if self.state != ProcState::Joined {
-            this.self_message_with_delay(ProcMessage::UpdateSupervision(), delay)?;
+            cx.self_message_with_delay(ProcMessage::UpdateSupervision(), delay)?;
             return Ok(());
         }
 
@@ -689,17 +689,17 @@ impl ProcMessageHandler for ProcActor {
             failed_actors: Vec::new(),
         };
 
-        match this
+        match cx
             .clock()
             .timeout(
                 // TODO: make the timeout configurable
                 Duration::from_secs(10),
-                self.params.supervisor_actor_ref.update(this, msg),
+                self.params.supervisor_actor_ref.update(cx, msg),
             )
             .await
         {
             Ok(_) => {
-                self.last_successful_supervision_update = this.clock().system_time_now();
+                self.last_successful_supervision_update = cx.clock().system_time_now();
             }
             Err(_) => {}
         }
@@ -716,11 +716,11 @@ impl ProcMessageHandler for ProcActor {
             );
             // System actor is not responsive to supervision update, it is likely dead. Stop this proc.
             // TODO: make the timeout configurable
-            self.stop(this, Duration::from_secs(5)).await?;
+            self.stop(cx, Duration::from_secs(5)).await?;
         } else {
             // Schedule the next supervision update with some jitter.
             let delay = jitter(self.params.supervision_update_interval);
-            this.self_message_with_delay(ProcMessage::UpdateSupervision(), delay)?;
+            cx.self_message_with_delay(ProcMessage::UpdateSupervision(), delay)?;
         }
 
         Ok(())
@@ -728,13 +728,13 @@ impl ProcMessageHandler for ProcActor {
 
     async fn stop(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         timeout: Duration,
     ) -> Result<ProcStopResult, anyhow::Error> {
         tracing::info!("stopping proc {}", self.params.proc.proc_id());
         self.params
             .proc
-            .destroy_and_wait(timeout, Some(this.self_id()))
+            .destroy_and_wait(timeout, Some(cx.self_id()))
             .await
             .map(|(stopped, aborted)| {
                 tracing::info!("stopped proc {}", self.params.proc.proc_id());
@@ -746,19 +746,19 @@ impl ProcMessageHandler for ProcActor {
             })
     }
 
-    async fn snapshot(&mut self, _this: &Context<Self>) -> Result<ProcSnapshot, anyhow::Error> {
+    async fn snapshot(&mut self, _cx: &Context<Self>) -> Result<ProcSnapshot, anyhow::Error> {
         let state = self.state.clone();
         let actors = self.params.proc.ledger_snapshot();
         Ok(ProcSnapshot { state, actors })
     }
 
-    async fn local_addr(&mut self, _this: &Context<Self>) -> Result<ChannelAddr, anyhow::Error> {
+    async fn local_addr(&mut self, _cx: &Context<Self>) -> Result<ChannelAddr, anyhow::Error> {
         Ok(self.params.local_addr.clone())
     }
 
     async fn py_spy_dump(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         config: PySpyConfig,
     ) -> Result<StackTrace, anyhow::Error> {
         let pid = std::process::id() as i32;
@@ -787,7 +787,7 @@ impl ProcMessageHandler for ProcActor {
 impl Handler<ActorSupervisionEvent> for ProcActor {
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         event: ActorSupervisionEvent,
     ) -> anyhow::Result<()> {
         let message = ProcSupervisionState {
@@ -797,10 +797,7 @@ impl Handler<ActorSupervisionEvent> for ProcActor {
             proc_health: ProcStatus::Alive,
             failed_actors: Vec::from([event.into_inner()]),
         };
-        self.params
-            .supervisor_actor_ref
-            .update(this, message)
-            .await?;
+        self.params.supervisor_actor_ref.update(cx, message).await?;
         Ok(())
     }
 }
@@ -964,15 +961,11 @@ mod tests {
     #[async_trait]
     #[forward(TestActorMessage)]
     impl TestActorMessageHandler for TestActor {
-        async fn increment(
-            &mut self,
-            _this: &Context<Self>,
-            num: u64,
-        ) -> Result<u64, anyhow::Error> {
+        async fn increment(&mut self, _cx: &Context<Self>, num: u64) -> Result<u64, anyhow::Error> {
             Ok(num + 1)
         }
 
-        async fn fail(&mut self, _this: &Context<Self>, err: String) -> Result<(), anyhow::Error> {
+        async fn fail(&mut self, _cx: &Context<Self>, err: String) -> Result<(), anyhow::Error> {
             Err(anyhow::anyhow!(err))
         }
     }
@@ -1030,7 +1023,7 @@ mod tests {
 
     #[async_trait]
     impl Handler<u64> for SleepActor {
-        async fn handle(&mut self, _this: &Context<Self>, message: u64) -> anyhow::Result<()> {
+        async fn handle(&mut self, _cx: &Context<Self>, message: u64) -> anyhow::Result<()> {
             let duration = message;
             RealClock.sleep(Duration::from_secs(duration)).await;
             Ok(())

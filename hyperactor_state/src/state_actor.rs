@@ -65,7 +65,7 @@ impl Actor for StateActor {
 impl StateMessageHandler for StateActor {
     async fn push_logs(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         logs: Vec<GenericStateObject>,
     ) -> Result<(), anyhow::Error> {
         for (subscriber, (_, remote_client)) in self.subscribers.iter() {
@@ -76,7 +76,7 @@ impl StateMessageHandler for StateActor {
 
     async fn subscribe_logs(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         addr: ChannelAddr,
         client_actor_ref: ActorRef<ClientActor>,
     ) -> Result<(), anyhow::Error> {

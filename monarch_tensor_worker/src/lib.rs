@@ -263,10 +263,10 @@ impl Actor for WorkerActor {
 impl Handler<AssignRankMessage> for WorkerActor {
     async fn handle(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         _: AssignRankMessage,
     ) -> anyhow::Result<()> {
-        let (rank, shape) = this.cast_info()?;
+        let (rank, shape) = cx.cast_info()?;
         self.rank = rank;
         self.respond_with_python_message = true;
         Python::with_gil(|py| {
@@ -275,7 +275,7 @@ impl Handler<AssignRankMessage> for WorkerActor {
             let shape: Py<PyShape> = Py::new(py, shape).unwrap();
             let p: PyPoint = PyPoint::new(rank, shape);
             mesh_controller
-                .call_method1("_initialize_env", (p, this.proc().proc_id().to_string()))
+                .call_method1("_initialize_env", (p, cx.proc().proc_id().to_string()))
                 .unwrap();
         });
         Ok(())
@@ -294,14 +294,14 @@ pub enum AssignRankMessage {
 impl WorkerMessageHandler for WorkerActor {
     async fn backend_network_init(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         unique_id: UniqueId,
     ) -> Result<()> {
         let device = self
             .device
             .expect("tried to init backend network on a non-CUDA worker");
         let comm = NcclCommActor::spawn(
-            this,
+            cx,
             CommParams::New {
                 device,
                 unique_id,
@@ -315,7 +315,7 @@ impl WorkerMessageHandler for WorkerActor {
         let cell = TensorCell::new(tensor);
 
         comm.all_reduce(
-            this,
+            cx,
             cell,
             ReduceOp::Sum,
             torch_sys_cuda::cuda::Stream::get_current_stream(),
@@ -340,13 +340,13 @@ impl WorkerMessageHandler for WorkerActor {
         for _ in 0..sorted_streams.len() {
             // Do the split in this event loop, to provide a deterministic
             // order.
-            splits.push(comm.split_all(this, None).await?);
+            splits.push(comm.split_all(cx, None).await?);
         }
         let _: Vec<()> = try_join_all(
             sorted_streams
                 .into_iter()
                 .zip(splits.into_iter())
-                .map(|(stream, split)| stream.init_comm(this, split)),
+                .map(|(stream, split)| stream.init_comm(cx, split)),
         )
         .await?;
 
@@ -357,7 +357,7 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn backend_network_point_to_point_init(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         from_stream: StreamRef,
         to_stream: StreamRef,
     ) -> Result<()> {
@@ -371,7 +371,7 @@ impl WorkerMessageHandler for WorkerActor {
             .comm
             .as_ref()
             .context("tried to call Reduce before BackendNetworkInit")?;
-        let comm = global_comm.split_all(this, None).await?;
+        let comm = global_comm.split_all(cx, None).await?;
         self.send_recv_comms
             .insert((from_stream, to_stream), Arc::new(comm));
         Ok(())
@@ -379,11 +379,11 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn call_function(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         params: CallFunctionParams,
     ) -> Result<()> {
         let stream = self.try_get_stream(params.stream)?.clone();
-        self.maybe_add_stream_to_recording(this, params.stream)
+        self.maybe_add_stream_to_recording(cx, params.stream)
             .await?;
 
         let device_meshes = if params.function.as_torch_op().is_some() {
@@ -420,7 +420,7 @@ impl WorkerMessageHandler for WorkerActor {
         }
 
         stream
-            .call_function(this, params, device_meshes, remote_process_groups)
+            .call_function(cx, params, device_meshes, remote_process_groups)
             .await?;
 
         Ok(())
@@ -428,23 +428,23 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn command_group(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         params: Vec<WorkerMessage>,
     ) -> Result<()> {
         for msg in params {
-            WorkerMessageHandler::handle(self, this, msg).await?;
+            WorkerMessageHandler::handle(self, cx, msg).await?;
         }
         Ok(())
     }
 
     async fn create_stream(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         result: StreamRef,
         creation_mode: StreamCreationMode,
     ) -> Result<()> {
         let handle: ActorHandle<StreamActor> = StreamActor::spawn(
-            this,
+            cx,
             StreamParams {
                 world_size: self.world_size,
                 rank: self.rank,
@@ -462,7 +462,7 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn create_device_mesh(
         &mut self,
-        _this: &hyperactor::Context<Self>,
+        _cx: &hyperactor::Context<Self>,
         result: Ref,
         names: Vec<String>,
         ranks: Slice,
@@ -476,7 +476,7 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn create_remote_process_group(
         &mut self,
-        _this: &hyperactor::Context<Self>,
+        _cx: &hyperactor::Context<Self>,
         result: Ref,
         device_mesh: Ref,
         dims: Vec<String>,
@@ -496,28 +496,27 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn borrow_create(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         result: Ref,
         borrow_id: u64,
         tensor_ref: Ref,
         from_stream: StreamRef,
         to_stream: StreamRef,
     ) -> Result<()> {
-        self.maybe_add_stream_to_recording(this, from_stream)
-            .await?;
-        self.maybe_add_stream_to_recording(this, to_stream).await?;
+        self.maybe_add_stream_to_recording(cx, from_stream).await?;
+        self.maybe_add_stream_to_recording(cx, to_stream).await?;
         let from_stream = self.try_get_stream(from_stream)?.clone();
         let to_stream = self.try_get_stream(to_stream)?.clone();
 
         let borrow =
-            Borrow::create(this, borrow_id, tensor_ref, result, from_stream, to_stream).await?;
+            Borrow::create(cx, borrow_id, tensor_ref, result, from_stream, to_stream).await?;
         self.borrows.insert(borrow_id, borrow);
         Ok(())
     }
 
     async fn borrow_first_use(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         borrow: u64,
     ) -> Result<()> {
         let borrow = self
@@ -525,44 +524,32 @@ impl WorkerMessageHandler for WorkerActor {
             .get_mut(&borrow)
             .ok_or_else(|| anyhow!("invalid borrow id: {:#?}", borrow))?;
 
-        borrow.first_use(this).await?;
+        borrow.first_use(cx).await?;
         Ok(())
     }
 
-    async fn borrow_last_use(
-        &mut self,
-        this: &hyperactor::Context<Self>,
-        borrow: u64,
-    ) -> Result<()> {
+    async fn borrow_last_use(&mut self, cx: &hyperactor::Context<Self>, borrow: u64) -> Result<()> {
         let borrow = self
             .borrows
             .get_mut(&borrow)
             .ok_or_else(|| anyhow::anyhow!("invalid borrow id: {:#?}", borrow))?;
 
-        borrow.last_use(this).await?;
+        borrow.last_use(cx).await?;
         Ok(())
     }
 
-    async fn borrow_drop(
-        &mut self,
-        this: &hyperactor::Context<Self>,
-        borrow_id: u64,
-    ) -> Result<()> {
+    async fn borrow_drop(&mut self, cx: &hyperactor::Context<Self>, borrow_id: u64) -> Result<()> {
         let borrow = self
             .borrows
             .get_mut(&borrow_id)
             .ok_or_else(|| anyhow::anyhow!("invalid borrow id: {:#?}", borrow_id))?;
 
-        borrow.drop(this).await?;
+        borrow.drop(cx).await?;
         self.borrows.remove(&borrow_id);
         Ok(())
     }
 
-    async fn delete_refs(
-        &mut self,
-        this: &hyperactor::Context<Self>,
-        refs: Vec<Ref>,
-    ) -> Result<()> {
+    async fn delete_refs(&mut self, cx: &hyperactor::Context<Self>, refs: Vec<Ref>) -> Result<()> {
         // Fan the delete message to all streams.
         // Check for errors.
         // TODO: this blocks forward progress of the the actor loop while we
@@ -572,7 +559,7 @@ impl WorkerMessageHandler for WorkerActor {
         let _: Vec<()> = try_join_all(
             self.streams
                 .values()
-                .map(|s| s.delete_refs(this, refs.clone())),
+                .map(|s| s.delete_refs(cx, refs.clone())),
         )
         .await?;
         Ok(())
@@ -580,7 +567,7 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn request_status(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         seq: Seq,
         controller: bool,
     ) -> Result<()> {
@@ -591,15 +578,15 @@ impl WorkerMessageHandler for WorkerActor {
         let _: Vec<()> = try_join_all(
             self.streams
                 .values()
-                .map(|stream| stream.request_status(this)),
+                .map(|stream| stream.request_status(cx)),
         )
         .await?;
 
         ControllerMessageClient::status(
             &self.controller_actor,
-            this,
+            cx,
             seq.next(),
-            this.self_id().clone(),
+            cx.self_id().clone(),
             controller,
         )
         .await?;
@@ -608,7 +595,7 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn reduce(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         result: Ref,
         local_tensor: Ref,
         factory: Factory,
@@ -620,7 +607,7 @@ impl WorkerMessageHandler for WorkerActor {
         in_place: bool,
         out: Option<Ref>,
     ) -> Result<()> {
-        self.maybe_add_stream_to_recording(this, stream_ref).await?;
+        self.maybe_add_stream_to_recording(cx, stream_ref).await?;
 
         // Sort for stable indexing.
         let dims = SortedVec::from_unsorted(dims);
@@ -638,7 +625,7 @@ impl WorkerMessageHandler for WorkerActor {
 
         stream
             .reduce(
-                this,
+                cx,
                 comm,
                 size.try_into()?,
                 result,
@@ -656,7 +643,7 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn create_pipe(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         result: Ref,
         // TODO(agallagher): This is used in the python impl to name the socket
         // path to use for comms, but we don't currently use a named socket.
@@ -687,7 +674,7 @@ impl WorkerMessageHandler for WorkerActor {
                     .get(&device_mesh)
                     .ok_or_else(|| CallFunctionError::RefNotFound(device_mesh))?;
                 let pipe = PipeActor::spawn(
-                    this,
+                    cx,
                     PipeParams {
                         function,
                         max_messages,
@@ -708,7 +695,7 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn send_tensor(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         result: Ref,
         from_ranks: Slice,
         to_ranks: Slice,
@@ -751,10 +738,10 @@ impl WorkerMessageHandler for WorkerActor {
             );
         };
 
-        self.maybe_add_stream_to_recording(this, stream_ref).await?;
+        self.maybe_add_stream_to_recording(cx, stream_ref).await?;
 
         stream
-            .send_tensor(this, result, from_rank, to_rank, tensor, factory, comm)
+            .send_tensor(cx, result, from_rank, to_rank, tensor, factory, comm)
             .await?;
 
         Ok(())
@@ -762,7 +749,7 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn exit(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         error: Option<(Option<ActorId>, String)>,
     ) -> Result<()> {
         for (_, stream) in self.streams.drain() {
@@ -789,7 +776,7 @@ impl WorkerMessageHandler for WorkerActor {
                     actor_id,
                     reason
                 );
-                if *this.self_id() == actor_id {
+                if *cx.self_id() == actor_id {
                     self_error_exit_code
                 } else {
                     peer_error_exit_code
@@ -806,13 +793,13 @@ impl WorkerMessageHandler for WorkerActor {
             tracing::info!("stopping the worker process, exit code: {}", exit_code);
             std::process::exit(exit_code);
         }
-        this.stop()?;
+        cx.stop()?;
         Ok(())
     }
 
     async fn send_value(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         seq: Seq,
         destination: Option<Ref>,
         mutates: Vec<Ref>,
@@ -850,9 +837,9 @@ impl WorkerMessageHandler for WorkerActor {
         // or back to the controller if not.
         stream
             .send_value(
-                this,
+                cx,
                 seq,
-                this.self_id().clone(),
+                cx.self_id().clone(),
                 mutates,
                 function,
                 args,
@@ -865,7 +852,7 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn split_comm(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         dims: Vec<String>,
         device_mesh: Ref,
         stream_ref: StreamRef,
@@ -894,7 +881,7 @@ impl WorkerMessageHandler for WorkerActor {
                 let size = ranks_for_group.len();
                 let split_comm = global_comm
                     .split_from(
-                        this,
+                        cx,
                         ranks_for_group
                             .into_iter()
                             .map(|v| v.clone().try_into())
@@ -908,7 +895,7 @@ impl WorkerMessageHandler for WorkerActor {
             None => {
                 // This rank is not in the group to be split off. We still need to
                 // participate in the commSplit call, however.
-                global_comm.split_from(this, vec![], config).await?;
+                global_comm.split_from(cx, vec![], config).await?;
             }
         }
         Ok(())
@@ -916,7 +903,7 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn split_comm_for_process_group(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         remote_process_group_ref: Ref,
         stream_ref: StreamRef,
         config: Option<NcclConfig>,
@@ -949,7 +936,7 @@ impl WorkerMessageHandler for WorkerActor {
                 let ranks_for_group = device_mesh.get_ranks_for_dim_slice(&state.dims)?;
                 let split_comm = global_comm
                     .split_from(
-                        this,
+                        cx,
                         ranks_for_group
                             .into_iter()
                             .map(|v| v.clone().try_into())
@@ -963,7 +950,7 @@ impl WorkerMessageHandler for WorkerActor {
             None => {
                 // This rank is not in the group to be split off. We still need to
                 // participate in the commSplit call, however.
-                global_comm.split_from(this, vec![], config).await?;
+                global_comm.split_from(cx, vec![], config).await?;
             }
         }
         Ok(())
@@ -971,13 +958,13 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn pipe_recv(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         _seq: Seq,
         results: Vec<Option<Ref>>,
         pipe: Ref,
         stream: StreamRef,
     ) -> Result<()> {
-        self.maybe_add_stream_to_recording(this, stream).await?;
+        self.maybe_add_stream_to_recording(cx, stream).await?;
 
         // Get a port for the pipe
         let pipe = match self.pipes.get(&pipe) {
@@ -992,37 +979,37 @@ impl WorkerMessageHandler for WorkerActor {
         let stream = self.try_get_stream(stream)?;
 
         // Push result into the stream.
-        stream.set_value(this, results, pipe).await
+        stream.set_value(cx, results, pipe).await
     }
 
     async fn set_ref_unit_tests_only(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         reference: Ref,
         value: WireValue,
         stream: StreamRef,
     ) -> Result<()> {
         let stream = self.try_get_stream(stream)?;
 
-        stream.set_ref_unit_tests_only(this, reference, value).await
+        stream.set_ref_unit_tests_only(cx, reference, value).await
     }
 
     async fn get_ref_unit_tests_only(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         ref_id: Ref,
         stream: StreamRef,
     ) -> Result<Option<Result<WireValue, ValueError>>> {
         let stream = self.try_get_stream(stream)?;
         Ok(stream
-            .get_ref_unit_tests_only(this, ref_id.clone())
+            .get_ref_unit_tests_only(cx, ref_id.clone())
             .await?
             .map(|o| Ok(o?)))
     }
 
     async fn define_recording(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         result: Ref,
         _nresults: usize,
         _nformals: usize,
@@ -1085,7 +1072,7 @@ impl WorkerMessageHandler for WorkerActor {
         };
 
         for command in commands {
-            WorkerMessageHandler::handle(self, this, command).await?;
+            WorkerMessageHandler::handle(self, cx, command).await?;
         }
 
         match self.recordings.get(&result).unwrap() {
@@ -1093,7 +1080,7 @@ impl WorkerMessageHandler for WorkerActor {
             Recording::CompleteRecording { streams, .. } => {
                 for stream in streams {
                     self.try_get_stream(*stream)?
-                        .finalize_recording(this, result)
+                        .finalize_recording(cx, result)
                         .await?;
                 }
             }
@@ -1105,35 +1092,35 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn recording_formal(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         result: Ref,
         argument_index: usize,
         stream: StreamRef,
     ) -> Result<()> {
         ensure!(self.defining_recording.is_some());
-        self.maybe_add_stream_to_recording(this, stream).await?;
+        self.maybe_add_stream_to_recording(cx, stream).await?;
         self.try_get_stream(stream)?
-            .recording_formal(this, result, argument_index)
+            .recording_formal(cx, result, argument_index)
             .await
     }
 
     async fn recording_result(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         result: Ref,
         output_index: usize,
         stream: StreamRef,
     ) -> Result<()> {
         ensure!(self.defining_recording.is_some());
-        self.maybe_add_stream_to_recording(this, stream).await?;
+        self.maybe_add_stream_to_recording(cx, stream).await?;
         self.try_get_stream(stream)?
-            .recording_result(this, result, output_index)
+            .recording_result(cx, result, output_index)
             .await
     }
 
     async fn call_recording(
         &mut self,
-        this: &hyperactor::Context<Self>,
+        cx: &hyperactor::Context<Self>,
         seq: Seq,
         recording: Ref,
         results: Vec<Ref>,
@@ -1157,7 +1144,7 @@ impl WorkerMessageHandler for WorkerActor {
                     .into_iter()
                     .map(|stream| {
                         stream.call_recording(
-                            this,
+                            cx,
                             seq,
                             recording_ref,
                             results.clone(),

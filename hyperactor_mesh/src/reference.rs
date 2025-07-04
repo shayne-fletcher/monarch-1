@@ -232,15 +232,15 @@ mod tests {
     impl Handler<MeshPingPongMessage> for MeshPingPongActor {
         async fn handle(
             &mut self,
-            this: &Context<Self>,
+            cx: &Context<Self>,
             MeshPingPongMessage(ttl, sender_mesh, done_tx): MeshPingPongMessage,
         ) -> Result<(), anyhow::Error> {
             if ttl == 0 {
-                done_tx.send(this, true)?;
+                done_tx.send(cx, true)?;
                 return Ok(());
             }
             let msg = MeshPingPongMessage(ttl - 1, self.mesh_ref.clone(), done_tx);
-            sender_mesh.cast(this, sel!(?), msg)?;
+            sender_mesh.cast(cx, sel!(?), msg)?;
             Ok(())
         }
     }

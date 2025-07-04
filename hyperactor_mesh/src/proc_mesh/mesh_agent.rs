@@ -135,20 +135,20 @@ impl Actor for MeshAgent {
     // This is an override of the default actor behavior.
     async fn handle_undeliverable_message(
         &mut self,
-        this: &Instance<Self>,
+        cx: &Instance<Self>,
         undelivered: Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
         let Undeliverable(ref envelope) = undelivered;
         tracing::debug!("took charge of a message not delivered: {}", envelope);
 
         let sender = envelope.sender().clone();
-        if this.self_id() == &sender {
+        if cx.self_id() == &sender {
             anyhow::bail!(UndeliverableMessageError::delivery_failure(envelope));
         }
 
         let mut envelope = envelope.clone();
         let return_port = PortRef::attest_message_port(&sender);
-        return_port.send(this, undelivered).map_err(|err| {
+        return_port.send(cx, undelivered).map_err(|err| {
             envelope.try_set_error(DeliveryError::BrokenLink(format!("send failure: {err}")));
             UndeliverableMessageError::return_failure(&envelope)
         })?;
@@ -162,7 +162,7 @@ impl Actor for MeshAgent {
 impl MeshAgentMessageHandler for MeshAgent {
     async fn configure(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         rank: usize,
         forwarder: ChannelAddr,
         supervisor: PortRef<ActorSupervisionEvent>,
@@ -181,7 +181,7 @@ impl MeshAgentMessageHandler for MeshAgent {
 
         if self.sender.configure(router.into_boxed()) {
             self.rank = Some(rank);
-            configured.send(this, rank)?;
+            configured.send(cx, rank)?;
         } else {
             tracing::error!("tried to reconfigure mesh agent");
         }
@@ -190,7 +190,7 @@ impl MeshAgentMessageHandler for MeshAgent {
 
     async fn gspawn(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         actor_type: String,
         actor_name: String,
         params_data: Data,
@@ -203,7 +203,7 @@ impl MeshAgentMessageHandler for MeshAgent {
         let rank = self
             .rank
             .ok_or_else(|| anyhow::anyhow!("tried to spawn on unconfigured proc"))?;
-        status_port.send(this, (rank, actor_id))?;
+        status_port.send(cx, (rank, actor_id))?;
         Ok(())
     }
 }
@@ -212,15 +212,15 @@ impl MeshAgentMessageHandler for MeshAgent {
 impl Handler<ActorSupervisionEvent> for MeshAgent {
     async fn handle(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         event: ActorSupervisionEvent,
     ) -> anyhow::Result<()> {
         if let Some(supervisor) = &self.supervisor {
-            supervisor.send(this, event)?;
+            supervisor.send(cx, event)?;
         } else {
             tracing::error!(
                 "proc {}: could not propagate supervision event {:?}: crashing",
-                this.self_id().proc_id(),
+                cx.self_id().proc_id(),
                 event
             );
 
