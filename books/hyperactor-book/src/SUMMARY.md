@@ -30,6 +30,8 @@
   - [RemoteActor](actors/remote_actor.md)
   - [Binds](actors/binds.md)
   - [RemoteHandles](actors/remote_handles.md)
+  - [ActorHandle](actors/actor_handle.md)
+  - [Actor Lifecycle](actors/actor_lifecycle.md)
 - [Macros](macros/index.md)
   - [`#[derive(Handler)]`](macros/handler.md)
   - [`#[derive(HandleClient)]`](macros/handle_client.md)
