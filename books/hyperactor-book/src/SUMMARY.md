@@ -9,9 +9,7 @@
   - [PortId](references/port_id.md)
   - [GangId](references/gang_id.md)
   - [Reference](references/reference.md)
-  <!-- - [Typed References](references/typed_refs.md) -->
-  <!-- - [Gangs](references/gangs.md) -->
-  <!-- - [Bindings](references/bindings.md) -->
+  - [Typed References](references/typed_refs.md)
 - [Mailboxes and Routers](mailboxes/index.md)
   - [Ports](mailboxes/ports.md)
   - [MailboxSender](mailboxes/mailbox_sender.md)

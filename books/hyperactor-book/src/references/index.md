@@ -21,6 +21,4 @@ In this section, we’ll cover:
   - [`PortId`](port_id.md)
   - [`GangId`](gang_id.md)
 - The [Reference](reference.md), which unifies all reference variants
-<!-- - [Typed references](typed_refs.md) used in APIs: `ActorRef<A>`, `PortRef<M>`, and `OncePortRef<M>` -->
-<!-- - The semantics of [gangs](gangs.md), which represent replicated actors across ranks -->
-<!-- - How references participate in [bindings](bindings.md) and serialization -->
+  - [Typed references](typed_refs.md) used in APIs: `ActorRef<A>`, `PortRef<M>`, and `OncePortRef<M>`
