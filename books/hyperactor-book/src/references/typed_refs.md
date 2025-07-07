@@ -7,8 +7,8 @@ Typed references are strongly typed wrappers over raw identifiers like `ActorId`
 There are three main typed reference types:
 
 - [`ActorRef<A>`](#actorrefa): A typed reference to an actor implementing the `RemoteActor` trait.
-- [`PortRef<M>`](#portrefm): A reference to a reusable mailbox port for messages of type `M`.
-- [`OncePortRef<M>`](#onceportrefm): A reference to a one-shot port for receiving a single response of type `M`.
+- [`PortRef<M>`](#portrefm): A reference to a reusable mailbox port for messages of type `M` implementing the `RemoteMessage` trait.
+- [`OncePortRef<M>`](#onceportrefm): A reference to a one-shot port for receiving a single response of type `M` implementing the `RemoteMessage` trait.
 
 These types are used as parameters in messages, return values from bindings, and components of the routing system.
 
@@ -21,6 +21,8 @@ These types are used as parameters in messages, return values from bindings, and
 ```rust
 let actor_ref: ActorRef<MyActor> = ActorRef::attest(actor_id);
 ```
+
+> **Note**: While `ActorRef::attest` can be used to construct a reference from an `ActorId`, it should generally be avoided. Instead, prefer using the `ActorRef` returned from `ActorHandle::bind()`, which guarantees that the actor is actually running and bound to a mailbox. `attest` is unsafe in the sense that it bypasses that guarantee.
 
 Unlike `ActorHandle<A>`, an `ActorRef` is just a reference — it doesn’t guarantee that the actor is currently running. It's primarily used for routing and type-safe messaging across `Proc`s.
 
@@ -48,8 +50,9 @@ This allows the port to be sent across the network or passed into other messages
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct PortRef<M: Message> {
+pub struct PortRef<M: RemoteMessage> {
     port_id: PortId,
+    reducer_spec: Option<ReducerSpec>,
     phantom: PhantomData<M>,
 }
 ```
