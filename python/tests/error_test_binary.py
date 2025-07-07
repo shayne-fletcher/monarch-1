@@ -48,6 +48,13 @@ class ErrorActor(Actor):
         await asyncio.sleep(0.1)
         raise RuntimeError("oh noez")
 
+    @endpoint
+    async def get_pid(self) -> int:
+        """Endpoint that returns the process PID."""
+        import os
+
+        return os.getpid()
+
 
 class ErrorActorSync(Actor):
     """An actor that has endpoints cause segfaults."""
@@ -79,8 +86,7 @@ def _run_error_test_sync(num_procs, sync_endpoint, endpoint_name):
     error_actor = proc.spawn("error_actor", actor_class).get()
 
     # This output is checked in the test to make sure that the process actually got here
-    print("I actually ran")
-    sys.stdout.flush()
+    print("Started function error_test", flush=True)
 
     if endpoint_name == "cause_segfault":
         endpoint = error_actor.cause_segfault
@@ -110,8 +116,7 @@ def _run_error_test(num_procs, sync_endpoint, endpoint_name):
         error_actor = await proc.spawn("error_actor", actor_class)
 
         # This output is checked in the test to make sure that the process actually got here
-        print("I actually ran")
-        sys.stdout.flush()
+        print("Started function error_test", flush=True)
 
         if endpoint_name == "cause_segfault":
             endpoint = error_actor.cause_segfault
@@ -153,15 +158,13 @@ def error_endpoint(num_procs, sync_test_impl, sync_endpoint, endpoint_name):
 
 @main.command("error-bootstrap")
 def error_bootstrap():
-    print("I actually ran")
-    sys.stdout.flush()
+    print("Started function error_bootstrap", flush=True)
 
     proc_mesh(gpus=4, env={"MONARCH_ERROR_DURING_BOOTSTRAP_FOR_TESTING": "1"}).get()
 
 
 async def _error_unmonitored():
-    print("I actually ran")
-    sys.stdout.flush()
+    print("Started function _error_unmonitored", flush=True)
 
     proc = await proc_mesh(gpus=1)
     actor = await proc.spawn("error_actor", ErrorActor)
@@ -202,6 +205,42 @@ async def _error_unmonitored():
 @main.command("error-unmonitored")
 def error_unmonitored():
     asyncio.run(_error_unmonitored())
+
+
+async def _error_cleanup():
+    """Test function that spawns an 8 process procmesh and calls an endpoint that returns a normal exception."""
+    print("Started function _error_cleanup() for parent process", flush=True)
+
+    # Spawn an 8 process procmesh
+    proc = await proc_mesh(gpus=8)
+    error_actor = await proc.spawn("error_actor", ErrorActor)
+
+    print("Procmesh spawned, collecting child PIDs from actors", flush=True)
+
+    # Get PIDs from all actor processes
+    try:
+        # Call get_pid endpoint on all actors to collect their PIDs
+        pids = await error_actor.get_pid.call()
+        child_pids = [str(pid) for _, pid in pids]
+        print(f"CHILD_PIDS: {','.join(child_pids)}", flush=True)
+    except Exception as e:
+        print(f"Error getting child PIDs from actors: {e}", flush=True)
+
+    print("About to call endpoint that raises exception", flush=True)
+
+    # Call an endpoint that raises a normal exception
+    try:
+        await error_actor.await_then_error.call()
+    except Exception as e:
+        print(f"Expected exception caught: {e}", flush=True)
+        # Re-raise to cause the process to exit with non-zero code
+        raise
+
+
+@main.command("error-cleanup")
+def error_cleanup():
+    """Command that spawns an 8 process procmesh and calls an endpoint that returns a normal exception."""
+    asyncio.run(_error_cleanup())
 
 
 if __name__ == "__main__":
