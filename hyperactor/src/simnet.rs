@@ -44,6 +44,7 @@ use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tokio::time::timeout;
 
+use crate as hyperactor; // for macros
 use crate::ActorId;
 use crate::Mailbox;
 use crate::Named;
@@ -516,7 +517,7 @@ impl SpawnMesh {
 
 /// An OperationalMessage is a message to control the simulator to do tasks such as
 /// spawning or killing actors.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Named)]
 pub enum OperationalMessage {
     /// Kill the world with given world_id.
     KillWorld(String),
@@ -524,12 +525,6 @@ pub enum OperationalMessage {
     SpawnMesh(SpawnMesh),
     /// Update training script state.
     SetTrainingScriptState(TrainingScriptState),
-}
-
-impl Named for OperationalMessage {
-    fn typename() -> &'static str {
-        "OperationalMessage"
-    }
 }
 
 /// Message Event that can be sent to the simulator.
@@ -575,7 +570,7 @@ impl Event for SimOperation {
 /// src to dst if addr field exists.
 /// Or handle the payload in the message field if addr field is None, indicating that
 /// this is a self-handlable message.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Named)]
 pub struct ProxyMessage {
     sender_addr: Option<AddressProxyPair>,
     dest_addr: Option<AddressProxyPair>,
@@ -594,12 +589,6 @@ impl ProxyMessage {
             dest_addr,
             data,
         }
-    }
-}
-
-impl Named for ProxyMessage {
-    fn typename() -> &'static str {
-        "ProxyMessage"
     }
 }
 

@@ -19,7 +19,7 @@ pub struct StateMetadata {
     pub kind: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Named)]
 pub struct StateObject<S, T> {
     metadata: StateMetadata,
     spec: S,
@@ -37,11 +37,11 @@ impl<S, T> StateObject<S, T> {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Named)]
 pub struct LogSpec;
 
 #[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Named)]
 pub struct LogState {
     /// A monotonically increasing sequence number.
     seq: usize,
@@ -99,10 +99,3 @@ pub trait State: Serialize + for<'de> Deserialize<'de> {}
 
 impl Spec for LogSpec {}
 impl State for LogState {}
-
-// Implement Named for StateObject<LogSpec, LogState> to support serialization
-impl Named for StateObject<LogSpec, LogState> {
-    fn typename() -> &'static str {
-        "hyperactor_state::object::StateObject<LogSpec, LogState>"
-    }
-}

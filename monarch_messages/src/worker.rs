@@ -496,7 +496,6 @@ pub enum StreamCreationMode {
 /// The kinds of errors that a CallFunction message can return with.
 // TODO(agallagher): We should move most variants out into `ValueError`.
 #[derive(Error, Debug, Named)]
-#[named(dump = false)]
 pub enum CallFunctionError {
     #[error("ref not found: {0}")]
     RefNotFound(Ref),

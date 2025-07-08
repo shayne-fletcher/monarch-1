@@ -1059,7 +1059,6 @@ pub fn named_derive(input: TokenStream) -> TokenStream {
     let mut typename = quote! {
         concat!(std::module_path!(), "::", stringify!(#struct_name))
     };
-    let mut dump = true;
 
     for attr in &input.attrs {
         if attr.path().is_ident("named") {
@@ -1073,14 +1072,18 @@ pub fn named_derive(input: TokenStream) -> TokenStream {
                         ..
                     }) = item
                     {
-                        if path.is_ident("dump") {
-                            if let Lit::Bool(lit_bool) = expr_lit.lit {
-                                dump = lit_bool.value;
-                            }
-                        } else if path.is_ident("name") {
+                        if path.is_ident("name") {
                             if let Lit::Str(name) = expr_lit.lit {
                                 typename = quote! { #name };
                             }
+                        } else {
+                            return TokenStream::from(
+                                syn::Error::new_spanned(
+                                    path,
+                                    "unsupported attribute (only `name` is supported)",
+                                )
+                                .to_compile_error(),
+                            );
                         }
                     }
                 }
@@ -1088,15 +1091,47 @@ pub fn named_derive(input: TokenStream) -> TokenStream {
         }
     }
 
-    let cached_typehash = Ident::new(
-        &format!("{}_CACHED_TYPEHASH", struct_name).to_case(Case::UpperSnake),
-        Span::call_site(),
-    );
+    // Extract type parameters and add Named bounds
+    let type_params: Vec<_> = input.generics.type_params().collect();
+    let has_generics = !type_params.is_empty();
 
-    let dumper = if dump {
-        quote! { Some(<#struct_name as hyperactor::data::NamedDumpable>::dump) }
+    // Create a version of generics with Named bounds for the impl block
+    let mut generics_with_bounds = input.generics.clone();
+    if has_generics {
+        for param in generics_with_bounds.type_params_mut() {
+            param
+                .bounds
+                .push(syn::parse_quote!(hyperactor::data::Named));
+        }
+    }
+    let (impl_generics_with_bounds, _, _) = generics_with_bounds.split_for_impl();
+
+    // Generate typename implementation based on whether we have generics
+    let (typename_impl, typehash_impl) = if has_generics {
+        // Create format string with placeholders for each generic parameter
+        let placeholders = vec!["{}"; type_params.len()].join(", ");
+        let placeholders_format_string = format!("<{}>", placeholders);
+        let format_string = quote! { concat!(std::module_path!(), "::", stringify!(#struct_name), #placeholders_format_string) };
+
+        let type_param_idents: Vec<_> = type_params.iter().map(|p| &p.ident).collect();
+        (
+            quote! {
+                hyperactor::data::intern_typename!(Self, #format_string, #(#type_param_idents),*)
+            },
+            quote! {
+                hyperactor::cityhasher::hash(Self::typename())
+            },
+        )
     } else {
-        quote! { None }
+        (
+            typename,
+            quote! {
+                static TYPEHASH: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+                    hyperactor::cityhasher::hash(<#struct_name as hyperactor::data::Named>::typename())
+                });
+                *TYPEHASH
+            },
+        )
     };
 
     // Generate 'arm' for enums only.
@@ -1122,28 +1157,14 @@ pub fn named_derive(input: TokenStream) -> TokenStream {
         _ => quote! {},
     };
 
+    let (_, ty_generics, where_clause) = input.generics.split_for_impl();
     // Ideally we would compute the has directly in the macro itself, however, we don't
     // have access to the fully expanded pathname here as we use the intrinsic std::module_path!() macro.
     let expanded = quote! {
-        static #cached_typehash: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
-            hyperactor::cityhasher::hash(<#struct_name as hyperactor::data::Named>::typename())
-        });
-
-        impl hyperactor::data::Named for #struct_name {
-            fn typename() -> &'static str { #typename }
-            fn typehash() -> u64 { *#cached_typehash }
+        impl #impl_generics_with_bounds hyperactor::data::Named for #struct_name #ty_generics #where_clause {
+            fn typename() -> &'static str { #typename_impl }
+            fn typehash() -> u64 { #typehash_impl }
             #arm_impl
-        }
-
-        hyperactor::submit! {
-            hyperactor::data::TypeInfo {
-                typename: <#struct_name as hyperactor::data::Named>::typename,
-                typehash: <#struct_name as hyperactor::data::Named>::typehash,
-                typeid: <#struct_name as hyperactor::data::Named>::typeid,
-                port: <#struct_name as hyperactor::data::Named>::port,
-                dump: #dumper,
-                arm_unchecked: <#struct_name as hyperactor::data::Named>::arm_unchecked,
-            }
         }
     };
 
@@ -1321,6 +1342,7 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
+        // TODO: just use Named derive directly here.
         impl hyperactor::data::Named for #data_type_name {
             fn typename() -> &'static str { concat!(std::module_path!(), "::", stringify!(#data_type_name)) }
         }
@@ -1375,7 +1397,6 @@ pub fn alias(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         #[doc = "The generated alias struct."]
         #[derive(Debug, Named)]
-        #[named(dump = false)]
         pub struct #alias;
         impl hyperactor::actor::RemoteActor for #alias {}
 
@@ -1610,7 +1631,7 @@ where
 ///     field0: u64,
 ///     field1: MyReply,
 ///     #[binding(include)]
-///     field2: PortRef<MyReply>,
+/// nnnn     field2: PortRef<MyReply>,
 ///     field3: bool,
 ///     #[binding(include)]
 ///     field4: hyperactor::PortRef<u64>,

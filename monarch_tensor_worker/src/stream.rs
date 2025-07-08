@@ -113,7 +113,6 @@ enum RecordingState {
 /// Messages handled by the stream. Generally these are stream-local versions of
 /// [`crate::WorkerMessage`].
 #[derive(Handler, HandleClient, Debug, Named)]
-#[named(dump = false)]
 pub enum StreamMessage {
     CallFunction(
         CallFunctionParams,

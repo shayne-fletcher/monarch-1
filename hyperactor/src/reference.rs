@@ -591,7 +591,7 @@ impl FromStr for ActorId {
 }
 
 /// ActorRefs are typed references to actors.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Named)]
 pub struct ActorRef<A: RemoteActor> {
     pub(crate) actor_id: ActorId,
     phantom: PhantomData<A>,
@@ -709,12 +709,6 @@ impl<A: RemoteActor> Hash for ActorRef<A> {
     }
 }
 
-impl<A: RemoteActor + 'static> Named for ActorRef<A> {
-    fn typename() -> &'static str {
-        crate::data::intern_typename!(Self, "hyperactor::ActorRef<{}>", A)
-    }
-}
-
 /// Port ids identify [`crate::mailbox::Port`]s of an actor.
 ///
 /// TODO: consider moving [`crate::mailbox::Port`] to `PortRef` in this
@@ -799,7 +793,7 @@ impl fmt::Display for PortId {
 
 /// A reference to a remote port. All messages passed through
 /// PortRefs will be serialized.
-#[derive(Debug, Serialize, Deserialize, Derivative)]
+#[derive(Debug, Serialize, Deserialize, Derivative, Named)]
 #[derivative(PartialEq, Eq, PartialOrd, Hash, Ord)]
 pub struct PortRef<M: RemoteMessage> {
     port_id: PortId,
@@ -914,12 +908,6 @@ impl<M: RemoteMessage> Clone for PortRef<M> {
 impl<M: RemoteMessage> fmt::Display for PortRef<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.port_id, f)
-    }
-}
-
-impl<M: RemoteMessage> Named for PortRef<M> {
-    fn typename() -> &'static str {
-        crate::data::intern_typename!(Self, "hyperactor::mailbox::PortRef<{}>", M)
     }
 }
 

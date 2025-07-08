@@ -12,10 +12,11 @@ use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
 
+use crate as hyperactor; // for macros
 use crate::ActorId;
 use crate::Message;
+use crate::Named;
 use crate::PortId;
-use crate::RemoteMessage;
 use crate::actor::ActorStatus;
 use crate::id;
 use crate::mailbox::DeliveryError;
@@ -28,16 +29,8 @@ use crate::supervision::ActorSupervisionEvent;
 
 /// An undeliverable `M`-typed message (in practice `M` is
 /// [MessageEnvelope]).
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Named)]
 pub struct Undeliverable<M: Message>(pub M);
-
-/// For `M` a [RemoteMessage], `Undeliverable<M>` is a [Named]
-/// instance.
-impl<M: RemoteMessage> crate::data::Named for Undeliverable<M> {
-    fn typename() -> &'static str {
-        crate::data::intern_typename!(Self, "hyperactor::Undeliverable<{}>", M)
-    }
-}
 
 // Port handle and receiver for undeliverable messages.
 pub(crate) fn new_undeliverable_port() -> (
