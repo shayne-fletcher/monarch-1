@@ -7,6 +7,7 @@
  */
 
 use async_trait::async_trait;
+use hyperactor::RemoteMessage;
 use ndslice::Range;
 use ndslice::Shape;
 use ndslice::ShapeError;
@@ -17,6 +18,9 @@ use ndslice::SliceIterator;
 pub trait Mesh {
     /// The type of the node contained in the mesh.
     type Node;
+
+    /// The type of identifiers for this mesh.
+    type Id: RemoteMessage;
 
     /// The type of a slice of this mesh. Slices should not outlive their
     /// parent mesh.
@@ -43,6 +47,9 @@ pub trait Mesh {
             slice_iter: self.shape().slice().iter(),
         }
     }
+
+    /// The global identifier for this mesh.
+    fn id(&self) -> Self::Id;
 }
 
 /// An iterator over the nodes of a mesh.

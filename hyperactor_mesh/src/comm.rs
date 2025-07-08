@@ -7,6 +7,7 @@
  */
 
 use crate::comm::multicast::CAST_ORIGINATING_SENDER;
+use crate::reference::ActorMeshId;
 pub mod multicast;
 
 use std::cmp::Ordering;
@@ -84,10 +85,10 @@ struct ReceiveState {
     ],
 )]
 pub struct CommActor {
-    /// Each world will use its own seq num from this caster.
-    send_seq: HashMap<Slice, usize>,
+    /// Sequence numbers are maintained for each (actor mesh id, sender).
+    send_seq: HashMap<(ActorMeshId, ActorId), usize>,
     /// Each sender is a unique stream.
-    recv_state: HashMap<ActorId, ReceiveState>,
+    recv_state: HashMap<(ActorMeshId, ActorId), ReceiveState>,
 
     /// The comm actor's mode.
     mode: CommActorMode,
@@ -313,7 +314,7 @@ impl Handler<CastMessage> for CommActor {
         let rank = frame.slice.location(&frame.here)?;
         let seq = self
             .send_seq
-            .entry(frame.slice.as_ref().clone())
+            .entry(cast_message.message.stream_key())
             .or_default();
         let last_seq = *seq;
         *seq += 1;
@@ -351,7 +352,7 @@ impl Handler<ForwardMessage> for CommActor {
                 panic!("Choice encountered in CommActor routing")
             })?;
 
-        let recv_state = self.recv_state.entry(sender.clone()).or_default();
+        let recv_state = self.recv_state.entry(message.stream_key()).or_default();
         match recv_state.seq.cmp(&last_seq) {
             // We got the expected next message to deliver to this host.
             Ordering::Equal => {

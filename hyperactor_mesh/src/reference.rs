@@ -134,6 +134,7 @@ impl<A: RemoteActor> ActorMeshRef<A> {
     {
         actor_mesh_cast::<M, A>(
             caps,
+            self.mesh_id.clone(),
             self.shape(),
             self.proc_mesh_shape(),
             self.name(),

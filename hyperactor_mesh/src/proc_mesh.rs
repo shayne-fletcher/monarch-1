@@ -54,6 +54,7 @@ use crate::assign::Ranks;
 use crate::comm::CommActorMode;
 use crate::proc_mesh::mesh_agent::MeshAgent;
 use crate::proc_mesh::mesh_agent::MeshAgentMessageClient;
+use crate::reference::ProcMeshId;
 
 pub mod mesh_agent;
 
@@ -574,6 +575,7 @@ impl<D: Deref<Target = ProcMesh> + Send + Sync + 'static> SharedSpawnable for D 
 #[async_trait]
 impl Mesh for ProcMesh {
     type Node = ProcId;
+    type Id = ProcMeshId;
     type Sliced<'a> = SlicedProcMesh<'a>;
 
     fn shape(&self) -> &Shape {
@@ -590,6 +592,10 @@ impl Mesh for ProcMesh {
 
     fn get(&self, rank: usize) -> Option<ProcId> {
         Some(self.ranks[rank].0.clone())
+    }
+
+    fn id(&self) -> Self::Id {
+        ProcMeshId(self.world_id().name().to_string())
     }
 }
 
@@ -616,6 +622,7 @@ pub struct SlicedProcMesh<'a>(&'a ProcMesh, Shape);
 #[async_trait]
 impl Mesh for SlicedProcMesh<'_> {
     type Node = ProcId;
+    type Id = ProcMeshId;
     type Sliced<'b>
         = SlicedProcMesh<'b>
     where
@@ -635,6 +642,10 @@ impl Mesh for SlicedProcMesh<'_> {
 
     fn get(&self, _index: usize) -> Option<ProcId> {
         unimplemented!()
+    }
+
+    fn id(&self) -> Self::Id {
+        self.0.id()
     }
 }
 
