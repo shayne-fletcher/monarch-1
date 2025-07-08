@@ -9,7 +9,7 @@
 from datetime import timedelta
 from typing import Optional
 
-from monarch._src.actor._extension.hyperactor_extension.alloc import Alloc, AllocSpec
+from monarch._rust_bindings.hyperactor_extension.alloc import Alloc, AllocSpec
 from typing_extensions import Self
 
 class ProcessAllocatorBase:

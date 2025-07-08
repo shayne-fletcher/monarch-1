@@ -9,7 +9,7 @@
 
 import logging
 
-from monarch._src.actor._extension.hyperactor_extension.telemetry import (
+from monarch._rust_bindings.hyperactor_extension.telemetry import (  # @manual=//monarch/monarch_extension:monarch_extension
     forward_to_tracing,
 )
 

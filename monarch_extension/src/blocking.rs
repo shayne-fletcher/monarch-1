@@ -31,7 +31,10 @@ pub fn blocking_function() {
 /// Register Python bindings for the blocking module.
 pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let f = wrap_pyfunction!(blocking_function, module)?;
-    f.setattr("__module__", "monarch._src.actor._extension.blocking")?;
+    f.setattr(
+        "__module__",
+        "monarch._rust_bindings.monarch_extension.blocking",
+    )?;
     module.add_function(f)?;
     Ok(())
 }
