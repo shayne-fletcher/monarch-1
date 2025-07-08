@@ -18,7 +18,7 @@ use crate::ndslice::PySlice;
 
 #[pyclass(
     name = "Shape",
-    module = "monarch._rust_bindings.monarch_hyperactor.shape",
+    module = "monarch._src.actor._extension.monarch_hyperactor.shape",
     frozen
 )]
 pub struct PyShape {
@@ -126,7 +126,7 @@ impl From<Shape> for PyShape {
 
 #[pyclass(
     name = "Point",
-    module = "monarch._rust_bindings.monarch_hyperactor.shape",
+    module = "monarch._src.actor._extension.monarch_hyperactor.shape",
     subclass,
     frozen
 )]

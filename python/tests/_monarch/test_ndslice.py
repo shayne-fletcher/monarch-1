@@ -10,9 +10,9 @@ import math
 import random
 from unittest import TestCase
 
-from monarch._rust_bindings.monarch_hyperactor.selection import Selection
+from monarch._src.actor._extension.monarch_hyperactor.selection import Selection
 
-from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
+from monarch._src.actor._extension.monarch_hyperactor.shape import Shape, Slice
 
 
 class TestNdslice(TestCase):

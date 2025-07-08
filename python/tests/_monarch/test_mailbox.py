@@ -12,21 +12,24 @@ from typing import Callable, cast, final, Generic, TypeVar
 
 import monarch
 
-from monarch._rust_bindings.hyperactor_extension.alloc import (
+from monarch._src.actor._extension.hyperactor_extension.alloc import (
     AllocConstraints,
     AllocSpec,
 )
 
-from monarch._rust_bindings.monarch_hyperactor.actor import PanicFlag, PythonMessage
+from monarch._src.actor._extension.monarch_hyperactor.actor import (
+    PanicFlag,
+    PythonMessage,
+)
 
-from monarch._rust_bindings.monarch_hyperactor.mailbox import (
+from monarch._src.actor._extension.monarch_hyperactor.mailbox import (
     Mailbox,
     PortReceiver,
     PortRef,
 )
-from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
-from monarch._rust_bindings.monarch_hyperactor.selection import Selection
-from monarch._rust_bindings.monarch_hyperactor.shape import Shape
+from monarch._src.actor._extension.monarch_hyperactor.proc_mesh import ProcMesh
+from monarch._src.actor._extension.monarch_hyperactor.selection import Selection
+from monarch._src.actor._extension.monarch_hyperactor.shape import Shape
 
 S = TypeVar("S")
 U = TypeVar("U")

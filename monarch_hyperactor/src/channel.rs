@@ -16,7 +16,7 @@ use pyo3::prelude::*;
 /// Python binding for [`hyperactor::channel::ChannelTransport`]
 #[pyclass(
     name = "ChannelTransport",
-    module = "monarch._rust_bindings.monarch_hyperactor.channel",
+    module = "monarch._src.actor._extension.monarch_hyperactor.channel",
     eq
 )]
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -30,7 +30,7 @@ pub enum PyChannelTransport {
 
 #[pyclass(
     name = "ChannelAddr",
-    module = "monarch._rust_bindings.monarch_hyperactor.channel"
+    module = "monarch._src.actor._extension.monarch_hyperactor.channel"
 )]
 pub struct PyChannelAddr {
     inner: ChannelAddr,

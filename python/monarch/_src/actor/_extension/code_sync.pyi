@@ -7,9 +7,9 @@
 from pathlib import Path
 from typing import final
 
-from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
+from monarch._src.actor._extension.monarch_hyperactor.proc_mesh import ProcMesh
 
-from monarch._rust_bindings.monarch_hyperactor.shape import Shape
+from monarch._src.actor._extension.monarch_hyperactor.shape import Shape
 
 class WorkspaceLocation:
     """

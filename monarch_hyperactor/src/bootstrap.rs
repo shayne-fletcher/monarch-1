@@ -40,7 +40,7 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     let f = wrap_pyfunction!(bootstrap_main, hyperactor_mod)?;
     f.setattr(
         "__module__",
-        "monarch._rust_bindings.monarch_hyperactor.bootstrap",
+        "monarch._src.actor._extension.monarch_hyperactor.bootstrap",
     )?;
     hyperactor_mod.add_function(f)?;
 

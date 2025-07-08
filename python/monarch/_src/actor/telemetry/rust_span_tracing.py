@@ -12,7 +12,7 @@ from typing import Iterator, Mapping, Optional, Union
 
 import opentelemetry.util.types as types  # @manual=fbsource//third-party/pypi/opentelemetry-api:opentelemetry-api
 
-from monarch._rust_bindings.hyperactor_extension.telemetry import (
+from monarch._src.actor._extension.hyperactor_extension.telemetry import (
     get_current_span_id,
     PySpan,
 )

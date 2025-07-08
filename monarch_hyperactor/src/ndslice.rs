@@ -28,7 +28,7 @@ use pyo3::types::PyTuple;
 #[pyclass(
     name = "Slice",
     frozen,
-    module = "monarch._rust_bindings.monarch_hyperactor.shape"
+    module = "monarch._src.actor._extension.monarch_hyperactor.shape"
 )]
 #[derive(Clone)]
 pub struct PySlice {

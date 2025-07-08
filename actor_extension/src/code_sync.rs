@@ -31,7 +31,7 @@ use serde::Serialize;
 #[pyclass(
     frozen,
     name = "WorkspaceLocation",
-    module = "monarch._rust_bindings.monarch_extension.code_sync"
+    module = "monarch._src.actor._extension.code_sync"
 )]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum PyWorkspaceLocation {
@@ -75,7 +75,7 @@ impl PyWorkspaceLocation {
 #[pyclass(
     frozen,
     name = "RsyncMeshClient",
-    module = "monarch._rust_bindings.monarch_extension.code_sync"
+    module = "monarch._src.actor._extension.code_sync"
 )]
 pub struct RsyncMeshClient {
     actor_mesh: SharedCell<RootActorMesh<'static, rsync::RsyncActor>>,

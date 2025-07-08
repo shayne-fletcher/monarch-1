@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "actor_extension",
     "controller",
     "hyper",
     "hyperactor",

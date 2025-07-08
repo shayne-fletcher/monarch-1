@@ -121,16 +121,24 @@ with open("README.md", encoding="utf8") as f:
 
 rust_extensions = [
     RustExtension(
-        "monarch._rust_bindings",
+        "monarch._src.actor._extension",
         binding=Binding.PyO3,
-        path="monarch_extension/Cargo.toml",
+        path="actor_extension/Cargo.toml",
         debug=False,
-        features=["tensor_engine"] if USE_TENSOR_ENGINE else [],
-        args=[] if USE_TENSOR_ENGINE else ["--no-default-features"],
     ),
 ]
 
 if USE_TENSOR_ENGINE:
+    rust_extensions.append(
+        RustExtension(
+            "monarch._rust_bindings",
+            binding=Binding.PyO3,
+            path="monarch_extension/Cargo.toml",
+            debug=False,
+            features=["tensor_engine"] if USE_TENSOR_ENGINE else [],
+            args=[] if USE_TENSOR_ENGINE else ["--no-default-features"],
+        )
+    )
     rust_extensions.append(
         RustExtension(
             {"controller_bin": "monarch.monarch_controller"},

@@ -10,13 +10,17 @@ import abc
 
 from typing import final, List, Optional, Protocol
 
-from monarch._rust_bindings.monarch_hyperactor.mailbox import (
+from monarch._src.actor._extension.monarch_hyperactor.mailbox import (
     Mailbox,
     OncePortRef,
     PortRef,
 )
-from monarch._rust_bindings.monarch_hyperactor.proc import ActorId, Proc, Serialized
-from monarch._rust_bindings.monarch_hyperactor.shape import Shape
+from monarch._src.actor._extension.monarch_hyperactor.proc import (
+    ActorId,
+    Proc,
+    Serialized,
+)
+from monarch._src.actor._extension.monarch_hyperactor.shape import Shape
 
 @final
 class PickledMessage:

@@ -45,13 +45,13 @@ from monarch._rust_bindings.controller.bootstrap import (
     RunCommand,
 )
 
-from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
-    ActorId,
-)
-
 from monarch._rust_bindings.monarch_tensor_worker.bootstrap import (
     WorkerServerRequest,
     WorkerServerResponse,
+)
+
+from monarch._src.actor._extension.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
+    ActorId,
 )
 
 from monarch.common.device_mesh import DeviceMesh

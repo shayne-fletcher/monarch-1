@@ -13,16 +13,19 @@ import time
 
 import monarch
 
-from monarch._rust_bindings.hyperactor_extension.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
+from monarch._src.actor._extension.hyperactor_extension.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
     AllocConstraints,
     AllocSpec,
 )
 
-from monarch._rust_bindings.monarch_hyperactor.actor import PanicFlag, PythonMessage
-from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
-from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
-from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
-from monarch._rust_bindings.monarch_hyperactor.shape import Shape
+from monarch._src.actor._extension.monarch_hyperactor.actor import (
+    PanicFlag,
+    PythonMessage,
+)
+from monarch._src.actor._extension.monarch_hyperactor.mailbox import Mailbox
+from monarch._src.actor._extension.monarch_hyperactor.proc import ActorId
+from monarch._src.actor._extension.monarch_hyperactor.proc_mesh import ProcMesh
+from monarch._src.actor._extension.monarch_hyperactor.shape import Shape
 
 
 class MyActor:

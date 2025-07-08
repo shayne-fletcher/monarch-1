@@ -7,9 +7,13 @@
 from typing import Any, ClassVar, Dict, final, List, NamedTuple, Union
 
 from monarch._rust_bindings.monarch_extension.tensor_worker import Ref
-from monarch._rust_bindings.monarch_hyperactor.proc import ActorId, Proc, Serialized
-from monarch._rust_bindings.monarch_hyperactor.shape import Slice as NDSlice
 from monarch._rust_bindings.monarch_messages.debugger import DebuggerActionType
+from monarch._src.actor._extension.monarch_hyperactor.proc import (
+    ActorId,
+    Proc,
+    Serialized,
+)
+from monarch._src.actor._extension.monarch_hyperactor.shape import Slice as NDSlice
 
 class Exception:
     """

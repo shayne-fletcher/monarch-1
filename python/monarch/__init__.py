@@ -9,6 +9,9 @@
 from importlib import import_module as _import_module
 from typing import TYPE_CHECKING
 
+# Import this to initialize actor runtime before anything else.
+import monarch._src.actor._extension  # noqa: F401
+
 # Import before monarch to pre-load torch DSOs as, in exploded wheel flows,
 # our RPATHs won't correctly find them.
 import torch  # noqa: F401

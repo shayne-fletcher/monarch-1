@@ -29,7 +29,7 @@ use pyo3::types::PyDict;
 /// It ensures that the Alloc is only used once (i.e. moved) in rust.
 #[pyclass(
     name = "Alloc",
-    module = "monarch._rust_bindings.hyperactor_extension.alloc"
+    module = "monarch._src.actor._extension.hyperactor_extension.alloc"
 )]
 pub struct PyAlloc {
     pub inner: Arc<Mutex<Option<PyAllocWrapper>>>,
@@ -91,7 +91,7 @@ impl Alloc for PyAllocWrapper {
 
 #[pyclass(
     name = "AllocConstraints",
-    module = "monarch._rust_bindings.hyperactor_extension.alloc"
+    module = "monarch._src.actor._extension.hyperactor_extension.alloc"
 )]
 pub struct PyAllocConstraints {
     inner: AllocConstraints,
@@ -113,7 +113,7 @@ impl PyAllocConstraints {
 
 #[pyclass(
     name = "AllocSpec",
-    module = "monarch._rust_bindings.hyperactor_extension.alloc"
+    module = "monarch._src.actor._extension.hyperactor_extension.alloc"
 )]
 pub struct PyAllocSpec {
     pub inner: AllocSpec,
