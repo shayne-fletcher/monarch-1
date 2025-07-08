@@ -198,6 +198,7 @@ pub(crate) fn resolve_reducer(
         .transpose()
 }
 
+#[derive(Named)]
 struct SumReducer<T>(PhantomData<T>);
 
 impl<T: std::ops::Add<Output = T> + Copy + 'static> CommReducer for SumReducer<T> {
@@ -205,12 +206,6 @@ impl<T: std::ops::Add<Output = T> + Copy + 'static> CommReducer for SumReducer<T
 
     fn reduce(&self, left: T, right: T) -> anyhow::Result<T> {
         Ok(left + right)
-    }
-}
-
-impl<T: Named> Named for SumReducer<T> {
-    fn typename() -> &'static str {
-        intern_typename!(Self, "hyperactor::accum::SumReducer<{}>", T)
     }
 }
 
@@ -241,6 +236,7 @@ pub fn sum<T: std::ops::Add<Output = T> + Copy + Named + 'static>()
     SumAccumulator(PhantomData)
 }
 
+#[derive(Named)]
 struct MaxReducer<T>(PhantomData<T>);
 
 impl<T: Ord> CommReducer for MaxReducer<T> {
@@ -248,12 +244,6 @@ impl<T: Ord> CommReducer for MaxReducer<T> {
 
     fn reduce(&self, left: T, right: T) -> anyhow::Result<T> {
         Ok(std::cmp::max(left, right))
-    }
-}
-
-impl<T: Named> Named for MaxReducer<T> {
-    fn typename() -> &'static str {
-        intern_typename!(Self, "hyperactor::accum::MaxReducer<{}>", T)
     }
 }
 
@@ -299,6 +289,7 @@ pub fn max<T: Ord + Copy + Named + 'static>() -> impl Accumulator<State = Max<T>
     MaxAccumulator(PhantomData::<T>)
 }
 
+#[derive(Named)]
 struct MinReducer<T>(PhantomData<T>);
 
 impl<T: Ord> CommReducer for MinReducer<T> {
@@ -306,12 +297,6 @@ impl<T: Ord> CommReducer for MinReducer<T> {
 
     fn reduce(&self, left: T, right: T) -> anyhow::Result<T> {
         Ok(std::cmp::min(left, right))
-    }
-}
-
-impl<T: Named> Named for MinReducer<T> {
-    fn typename() -> &'static str {
-        intern_typename!(Self, "hyperactor::accum::MinReducer<{}>", T)
     }
 }
 
@@ -359,14 +344,8 @@ pub fn min<T: Ord + Copy + Named + 'static>() -> impl Accumulator<State = Min<T>
 
 /// Update from ranks for watermark accumulator, where map' key is the rank, and
 /// map's value is the update from that rank.
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, Named)]
 pub struct WatermarkUpdate<T>(HashMap<Index, T>);
-
-impl<T: Named> Named for WatermarkUpdate<T> {
-    fn typename() -> &'static str {
-        intern_typename!(Self, "hyperactor::accum::WatermarkUpdate<{}>", T)
-    }
-}
 
 impl<T: Ord> WatermarkUpdate<T> {
     /// Get the watermark value. WatermarkUpdate is guarranteed to be initialized by
@@ -401,6 +380,7 @@ impl<T> From<(Index, T)> for WatermarkUpdate<T> {
 
 /// Merge an old update and a new update. If a rank exists in boths updates,
 /// only keep its value from the new update.
+#[derive(Named)]
 struct WatermarkUpdateReducer<T>(PhantomData<T>);
 
 impl<T: PartialEq> CommReducer for WatermarkUpdateReducer<T> {
@@ -408,12 +388,6 @@ impl<T: PartialEq> CommReducer for WatermarkUpdateReducer<T> {
 
     fn reduce(&self, left: Self::Update, right: Self::Update) -> anyhow::Result<Self::Update> {
         Ok(WatermarkUpdate::merge(left, right))
-    }
-}
-
-impl<T: Named> Named for WatermarkUpdateReducer<T> {
-    fn typename() -> &'static str {
-        intern_typename!(Self, "hyperactor::accum::WatermarkUpdateReducer<{}>", T)
     }
 }
 

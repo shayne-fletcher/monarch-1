@@ -2743,6 +2743,7 @@ mod tests {
             a: u64,
             b: String,
         }
+        crate::register_type!(MyTest);
 
         let envelope = MessageEnvelope::serialize(
             id!(source[0].actor),

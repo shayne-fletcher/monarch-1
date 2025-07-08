@@ -28,7 +28,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 #[derive(Handler, Debug, Named)]
-#[named(dump = false)]
 enum ShoppingList {
     // Oneway messages dispatch messages asynchronously, with no reply.
     Add(String),

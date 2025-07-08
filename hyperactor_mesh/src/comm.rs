@@ -443,7 +443,6 @@ pub mod test_utils {
     }
 
     #[derive(Debug, Named, Serialize, Deserialize, PartialEq, Clone, Bind, Unbind)]
-    #[named(dump = false)]
     pub enum TestMessage {
         Forward(String),
         CastAndReply {

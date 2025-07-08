@@ -554,7 +554,6 @@ impl Bind for EitherPortRef {
 }
 
 #[derive(Debug, Named)]
-#[named(dump = false)]
 struct PythonReducer(PyObject);
 
 impl PythonReducer {

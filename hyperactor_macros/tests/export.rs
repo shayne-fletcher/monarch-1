@@ -60,14 +60,8 @@ impl Handler<TestMessage> for TestActor {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Bind, Unbind)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Bind, Unbind, Named)]
 struct MyGeneric<T>(T);
-
-impl<T: Named> Named for MyGeneric<T> {
-    fn typename() -> &'static str {
-        intern_typename!(Self, "hyperactor_macros::tests::export::MyGeneric<{}>", T)
-    }
-}
 
 #[async_trait]
 impl Handler<()> for TestActor {

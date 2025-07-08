@@ -269,6 +269,27 @@ static TYPE_INFO_BY_TYPE_ID: LazyLock<HashMap<std::any::TypeId, &'static TypeInf
             .collect()
     });
 
+/// Register a (concrete) type so that it may be looked up by name or hash. Type registration
+/// is required only to improve diagnostics, as it allows a binary to introspect serialized
+/// payloads under type erasure.
+///
+/// The provided type must implement [`hyperactor::data::Named`], and must be concrete.
+#[macro_export]
+macro_rules! register_type {
+    ($type:ty) => {
+        hyperactor::submit! {
+            hyperactor::data::TypeInfo {
+                typename: <$type as hyperactor::data::Named>::typename,
+                typehash: <$type as hyperactor::data::Named>::typehash,
+                typeid: <$type as hyperactor::data::Named>::typeid,
+                port: <$type as hyperactor::data::Named>::port,
+                dump: Some(<$type as hyperactor::data::NamedDumpable>::dump),
+                arm_unchecked: <$type as hyperactor::data::Named>::arm_unchecked,
+            }
+        }
+    };
+}
+
 /// The encoding used for a serialized value.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 enum SerializedEncoding {
@@ -525,7 +546,6 @@ mod tests {
     use crate::Named;
 
     #[derive(Named)]
-    #[named(dump = false)]
     struct TestStruct;
 
     #[test]
@@ -568,6 +588,7 @@ mod tests {
         b: u64,
         c: Option<i32>,
     }
+    crate::register_type!(TestDumpStruct);
 
     #[test]
     fn test_dump_struct() {
@@ -638,7 +659,6 @@ mod tests {
     #[test]
     fn test_arms() {
         #[derive(Named)]
-        #[named(dump = false)]
         enum TestArm {
             #[allow(dead_code)]
             A(u32),

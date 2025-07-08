@@ -210,7 +210,7 @@ impl ErasedUnbound {
 
 /// Type used for indexing an erased unbound.
 /// Has the same serialized representation as `ErasedUnbound`.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Named)]
 #[serde(from = "ErasedUnbound")]
 pub struct IndexedErasedUnbound<M>(ErasedUnbound, PhantomData<M>);
 
@@ -242,12 +242,6 @@ impl<M: Bind> IndexedErasedUnbound<M> {
 impl<M> From<ErasedUnbound> for IndexedErasedUnbound<M> {
     fn from(erased: ErasedUnbound) -> Self {
         Self(erased, PhantomData)
-    }
-}
-
-impl<M: Named + 'static> Named for IndexedErasedUnbound<M> {
-    fn typename() -> &'static str {
-        intern_typename!(Self, "hyperactor::message::IndexedErasedUnbound<{}>", M)
     }
 }
 
