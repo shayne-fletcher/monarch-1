@@ -5,11 +5,17 @@
 # LICENSE file in the root directory of this source tree.
 
 import io
+import itertools
 import pickle
+from contextlib import contextmanager, nullcontext
 from typing import Any, Callable, Iterable, List, Tuple
 
 import cloudpickle
-import torch
+
+try:
+    import torch  # @manual
+except ImportError:
+    torch = None
 
 
 class _Pickler(cloudpickle.Pickler):
@@ -45,6 +51,42 @@ def flatten(obj: Any, filter: Callable[[Any], bool]) -> Tuple[List[Any], bytes]:
 
 
 def unflatten(data: bytes, values: Iterable[Any]) -> Any:
-    with torch.utils._python_dispatch._disable_current_modes():
+    if torch is not None:
+        context_manager = torch.utils._python_dispatch._disable_current_modes
+    else:
+        context_manager = nullcontext
+
+    with context_manager():
         up = _Unpickler(data, values)
         return up.load()
+
+
+@contextmanager
+def load_tensors_on_cpu():
+    # Ensure that any tensors load from CPU via monkeypatching how Storages are
+    # loaded.
+    old = torch.storage._load_from_bytes
+    try:
+        torch.storage._load_from_bytes = lambda b: torch.load(
+            io.BytesIO(b), map_location="cpu", weights_only=False
+        )
+        yield
+    finally:
+        torch.storage._load_from_bytes = old
+
+
+def unpickle(data: bytes, mailbox) -> Any:
+    if torch is not None:
+        context_manager = load_tensors_on_cpu
+    else:
+        context_manager = nullcontext
+
+    with context_manager():
+        # regardless of the mailboxes of the remote objects
+        # they all become the local mailbox.
+        return unflatten(data, itertools.repeat(mailbox))
+
+
+def pickle_(obj: object, filter: Callable[[Any], bool]) -> bytes:
+    _, msg = flatten(obj, filter)
+    return msg

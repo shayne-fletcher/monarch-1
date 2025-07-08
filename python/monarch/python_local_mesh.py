@@ -11,7 +11,7 @@ from time import sleep
 from typing import Optional, TYPE_CHECKING
 
 import monarch_supervisor
-from monarch.common._device_utils import _local_device_count
+from monarch._src.actor.device_utils import _local_device_count
 from monarch.common.fake import fake_call
 from monarch.common.invocation import DeviceException, RemoteException
 from monarch.world_mesh import world_mesh

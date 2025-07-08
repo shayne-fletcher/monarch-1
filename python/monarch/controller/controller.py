@@ -19,11 +19,12 @@ from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarc
     ActorId,
 )
 
+from monarch._src.actor.shape import NDSlice
+
 from monarch.common import messages
 from monarch.common.controller_api import LogMessage, MessageResult
 from monarch.common.invocation import DeviceException, Seq
 from monarch.common.reference import Ref
-from monarch.common.shape import NDSlice
 from monarch.common.tensor import Tensor
 from monarch.controller import debugger
 

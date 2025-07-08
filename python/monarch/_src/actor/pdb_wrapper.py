@@ -17,7 +17,7 @@ from typing import Dict, TYPE_CHECKING
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 
 if TYPE_CHECKING:
-    from monarch.debugger import DebugClient
+    from monarch._src.actor.debugger import DebugClient
 
 
 @dataclass

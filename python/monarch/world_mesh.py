@@ -8,10 +8,11 @@
 
 from typing import List
 
+from monarch._src.actor.shape import NDSlice
+
 from monarch.common.client import Client
 
 from monarch.common.device_mesh import DeviceMesh
-from monarch.common.shape import NDSlice
 
 from monarch.controller.backend import ProcessBackend
 

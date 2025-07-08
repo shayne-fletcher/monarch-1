@@ -13,9 +13,10 @@ from monarch._rust_bindings.monarch_extension.client import (  # @manual=//monar
     WorldState,
 )
 
+from monarch._src.actor.shape import NDSlice
+
 from monarch.common.invocation import DeviceException, RemoteException, Seq
 from monarch.common.reference import Ref
-from monarch.common.shape import NDSlice
 from monarch.common.tensor import Tensor
 
 

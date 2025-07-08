@@ -43,12 +43,12 @@ import torch
 from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
+from monarch._src.actor.shape import iter_ranks, NDSlice
 from monarch.common import messages
 from monarch.common.controller_api import LogMessage, MessageResult
 from monarch.common.device_mesh import DeviceMesh
 from monarch.common.function import ResolvableFunction, ResolvableFunctionFromPath
 from monarch.common.invocation import DeviceException
-from monarch.common.shape import iter_ranks, NDSlice
 from monarch.simulator.command_history import CommandHistory, DTensorRef
 from monarch.simulator.config import META_VAL
 from monarch.simulator.ir import IRGraph

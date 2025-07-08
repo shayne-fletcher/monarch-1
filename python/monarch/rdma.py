@@ -12,8 +12,7 @@ from typing import cast, Dict, Optional, Tuple
 import torch
 
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
-
-from monarch.actor_mesh import (
+from monarch._src.actor.actor_mesh import (
     _ActorMeshRefImpl,
     Actor,
     ActorMeshRef,

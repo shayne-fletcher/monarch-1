@@ -20,11 +20,12 @@ from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarc
     init_proc,
     Proc,
 )
+
+from monarch._src.actor.shape import NDSlice
 from monarch.common.client import Client
 from monarch.common.device_mesh import DeviceMesh, DeviceMeshStatus
 from monarch.common.invocation import DeviceException, RemoteException
 from monarch.common.mast import MastJob
-from monarch.common.shape import NDSlice
 from monarch.controller.rust_backend.controller import RustController
 
 TORCHX_MAST_TASK_GROUP_NAME = "script"

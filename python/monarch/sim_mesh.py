@@ -40,6 +40,8 @@ from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarc
     init_proc,
     Proc,
 )
+
+from monarch._src.actor.shape import NDSlice
 from monarch.common.client import Client
 from monarch.common.constants import (
     SIM_MESH_CLIENT_SUPERVISION_UPDATE_INTERVAL,
@@ -50,7 +52,6 @@ from monarch.common.fake import fake_call
 from monarch.common.future import Future, T
 from monarch.common.invocation import DeviceException, RemoteException
 from monarch.common.messages import Dims
-from monarch.common.shape import NDSlice
 from monarch.controller.rust_backend.controller import RustController
 from monarch.rust_backend_mesh import MeshWorld
 

@@ -73,7 +73,7 @@ class RemoteAllocatorBase:
     def __new__(
         cls,
         world_id: str,
-        initializer: "monarch.allocator.RemoteAllocInitializer",  # pyre-ignore[11] defined in monarch/python/monarch/allocator.py
+        initializer: "monarch._src.actor.allocator.RemoteAllocInitializer",  # pyre-ignore[11]
         heartbeat_interval: timedelta = timedelta(seconds=5),
     ) -> Self:
         """

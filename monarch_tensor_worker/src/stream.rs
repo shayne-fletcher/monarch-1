@@ -990,7 +990,7 @@ impl StreamActor {
                 })
                 .and_then(|result| -> Result<PythonMessage, WorkerError> {
                     let pickle = py
-                        .import("monarch.actor_mesh")
+                        .import("monarch._src.actor.actor_mesh")
                         .unwrap()
                         .getattr("_pickle")
                         .unwrap();

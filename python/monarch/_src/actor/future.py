@@ -28,7 +28,7 @@ async def _aincomplete(impl, self):
 
 
 # TODO: consolidate with monarch.common.future
-class ActorFuture(Generic[R]):
+class Future(Generic[R]):
     def __init__(self, impl, blocking_impl=None):
         if blocking_impl is None:
             blocking_impl = partial(asyncio.run, impl())

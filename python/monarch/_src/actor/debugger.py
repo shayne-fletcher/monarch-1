@@ -11,11 +11,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple, Union
 
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
-from monarch.actor_mesh import Actor, ActorMeshRef, endpoint
-
-from monarch.pdb_wrapper import DebuggerWrite
-
-from monarch.proc_mesh import local_proc_mesh
+from monarch._src.actor.actor_mesh import Actor, ActorMeshRef, endpoint
+from monarch._src.actor.pdb_wrapper import DebuggerWrite
+from monarch._src.actor.proc_mesh import local_proc_mesh
 from tabulate import tabulate
 
 

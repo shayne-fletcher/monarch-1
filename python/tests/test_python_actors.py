@@ -17,20 +17,20 @@ import monarch
 import pytest
 
 import torch
+from monarch._src.actor.debugger import init_debugging
 
-from monarch.actor_mesh import (
+from monarch._src.actor.proc_mesh import local_proc_mesh
+from monarch.actor import (
     Accumulator,
     Actor,
     current_actor_name,
     current_rank,
     current_size,
     endpoint,
+    Future,
     MonarchContext,
+    proc_mesh,
 )
-from monarch.debugger import init_debugging
-from monarch.future import ActorFuture
-
-from monarch.proc_mesh import local_proc_mesh, proc_mesh
 from monarch.rdma import RDMABuffer
 
 needs_cuda = pytest.mark.skipif(
@@ -469,9 +469,9 @@ async def test_debug() -> None:
         nonlocal outputs
         outputs.append(msg)
 
-    with patch("monarch.debugger._debugger_input", side_effect=input_mock), patch(
-        "monarch.debugger._debugger_output", new=_patch_output
-    ):
+    with patch(
+        "monarch._src.actor.debugger._debugger_input", side_effect=input_mock
+    ), patch("monarch._src.actor.debugger._debugger_output", new=_patch_output):
         proc = await proc_mesh(hosts=2, gpus=2)
         debugee = await proc.spawn("debugee", DebugeeActor)
         debug_client = await init_debugging(debugee)
@@ -545,7 +545,7 @@ async def test_debug() -> None:
         breakpoints = await debug_client.list.call_one()
         assert len(breakpoints) == 0
 
-        with pytest.raises(monarch.actor_mesh.ActorError, match="ValueError: bad rank"):
+        with pytest.raises(monarch.actor.ActorError, match="ValueError: bad rank"):
             await fut
 
 
@@ -654,13 +654,13 @@ def test_actor_future():
 
     # can use async implementation from sync
     # if no non-blocking is provided
-    f = ActorFuture(incr)
+    f = Future(incr)
     assert f.get() == 1
     assert v == 1
     assert f.get() == 1
     assert asyncio.run(awaitit(f)) == 1
 
-    f = ActorFuture(incr)
+    f = Future(incr)
     assert asyncio.run(awaitit(f)) == 2
     assert f.get() == 2
 
@@ -670,7 +670,7 @@ def test_actor_future():
         return v
 
     # Use non-blocking optimization if provided
-    f = ActorFuture(incr, incr2)
+    f = Future(incr, incr2)
     assert f.get() == 4
     assert asyncio.run(awaitit(f)) == 4
 
@@ -679,7 +679,7 @@ def test_actor_future():
         v += 1
         raise ValueError("nope")
 
-    f = ActorFuture(nope)
+    f = Future(nope)
 
     with pytest.raises(ValueError):
         f.get()
@@ -701,7 +701,7 @@ def test_actor_future():
         v += 1
         raise ValueError("nope")
 
-    f = ActorFuture(incr, nope)
+    f = Future(incr, nope)
 
     with pytest.raises(ValueError):
         f.get()
@@ -723,7 +723,7 @@ def test_actor_future():
     async def seven():
         return 7
 
-    f = ActorFuture(seven)
+    f = Future(seven)
 
     assert 7 == f.get(timeout=0.001)
 
@@ -731,7 +731,7 @@ def test_actor_future():
         f = asyncio.Future()
         await f
 
-    f = ActorFuture(neverfinish)
+    f = Future(neverfinish)
 
     with pytest.raises(asyncio.exceptions.TimeoutError):
         f.get(timeout=0.1)

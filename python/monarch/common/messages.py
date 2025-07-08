@@ -22,13 +22,14 @@ from typing import (
 )
 
 from monarch._rust_bindings.monarch_extension import tensor_worker
+
+from monarch._src.actor.shape import NDSlice
 from monarch.common.function import ResolvableFromCloudpickle, ResolvableFunction
 from monarch.common.invocation import DeviceException, RemoteException
 from monarch.common.reference import Referenceable
 from monarch.common.tree import flattener
 from pyre_extensions import none_throws
 
-from .shape import NDSlice
 from .tensor_factory import TensorFactory
 
 if TYPE_CHECKING:

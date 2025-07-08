@@ -10,7 +10,6 @@ import abc
 import logging
 from typing import final, Optional
 
-from monarch import ActorFuture as Future
 from monarch._rust_bindings.hyperactor_extension.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
     Alloc,
     AllocSpec,
@@ -21,6 +20,8 @@ from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monar
     ProcessAllocatorBase,
     RemoteAllocatorBase,
 )
+
+from monarch._src.actor.future import Future
 
 ALLOC_LABEL_PROC_MESH_NAME = "procmesh.monarch.meta.com/name"
 

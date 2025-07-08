@@ -34,11 +34,11 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
 from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
+from monarch._src.actor.shape import NDSlice
 from monarch.actor_mesh import Port, PortTuple
 from monarch.common import messages
 from monarch.common.controller_api import TController
 from monarch.common.invocation import Seq
-from monarch.common.shape import NDSlice
 from monarch.common.stream import StreamRef
 from monarch.common.tensor import Tensor
 
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.proc_mesh import (
         ProcMesh as HyProcMesh,
     )
-    from monarch.proc_mesh import ProcMesh
+    from monarch.actor import ProcMesh
 
 from monarch._rust_bindings.monarch_hyperactor.shape import Point
 

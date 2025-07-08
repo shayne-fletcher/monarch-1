@@ -28,7 +28,7 @@ from typing import (
 
 import monarch.common.messages as messages
 import torch
-from monarch.common.shape import MeshTrait
+from monarch._src.actor.shape import MeshTrait, NDSlice, Shape
 
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_map
@@ -37,7 +37,6 @@ from ._tensor_to_table import tensor_to_table
 from .context_manager import activate_first_context_manager
 from .messages import Dims
 from .reference import Referenceable
-from .shape import NDSlice, Shape
 from .stream import Stream
 from .tensor import MeshSliceTensor, Tensor
 

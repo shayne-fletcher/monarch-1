@@ -25,6 +25,7 @@ from monarch._rust_bindings.monarch_extension.client import (  # @manual=//monar
 from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
+from monarch._src.actor.shape import iter_ranks, NDSlice, Slices as Ranks
 
 from monarch.common import messages
 
@@ -32,7 +33,6 @@ from monarch.common.controller_api import DebuggerMessage, LogMessage, MessageRe
 from monarch.common.device_mesh import no_mesh
 from monarch.common.invocation import Invocation, RemoteException, Seq
 from monarch.common.reference import Ref
-from monarch.common.shape import iter_ranks, NDSlice, Slices as Ranks
 from monarch.common.tree import flatten
 
 if TYPE_CHECKING:
