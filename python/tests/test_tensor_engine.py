@@ -8,8 +8,8 @@ import monarch
 import pytest
 import torch
 from monarch import remote
+from monarch.actor import proc_mesh
 from monarch.mesh_controller import spawn_tensor_engine
-from monarch.proc_mesh import proc_mesh
 
 
 two_gpu = pytest.mark.skipif(

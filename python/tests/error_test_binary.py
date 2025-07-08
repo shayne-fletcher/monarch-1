@@ -13,8 +13,7 @@ from monarch._rust_bindings.monarch_extension.blocking import blocking_function
 
 from monarch._rust_bindings.monarch_extension.panic import panicking_function
 
-from monarch.actor_mesh import Actor, endpoint, send
-from monarch.proc_mesh import proc_mesh
+from monarch.actor import Actor, endpoint, proc_mesh, send
 
 
 class ErrorActor(Actor):

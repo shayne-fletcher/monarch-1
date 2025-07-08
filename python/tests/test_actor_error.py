@@ -10,8 +10,7 @@ import subprocess
 
 import pytest
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcEvent
-from monarch.actor_mesh import Actor, ActorError, endpoint, send
-from monarch.proc_mesh import local_proc_mesh, proc_mesh
+from monarch.actor import Actor, ActorError, endpoint, local_proc_mesh, proc_mesh
 
 
 class ExceptionActor(Actor):

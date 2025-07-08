@@ -166,7 +166,7 @@ setup(
     entry_points={
         "console_scripts": [
             "monarch=monarch.tools.cli:main",
-            "monarch_bootstrap=monarch.bootstrap_main:invoke_main",
+            "monarch_bootstrap=monarch._src.actor.bootstrap_main:invoke_main",
         ],
     },
     rust_extensions=rust_extensions,

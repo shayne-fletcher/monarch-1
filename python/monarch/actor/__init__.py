@@ -12,27 +12,34 @@ from monarch._src.actor.actor_mesh import (
     Accumulator,
     Actor,
     ActorError,
+    ActorMeshRef,
     current_actor_name,
     current_rank,
     current_size,
     endpoint,
     MonarchContext,
+    Point,
+    send,
     ValueMesh,
 )
 from monarch._src.actor.future import Future
-from monarch._src.actor.proc_mesh import proc_mesh, ProcMesh
+from monarch._src.actor.proc_mesh import local_proc_mesh, proc_mesh, ProcMesh
 
 __all__ = [
     "Accumulator",
     "Actor",
     "ActorError",
+    "ActorMeshRef",
     "current_actor_name",
     "current_rank",
     "current_size",
     "endpoint",
+    "Future",
+    "local_proc_mesh",
     "MonarchContext",
-    "ValueMesh",
+    "Point",
     "proc_mesh",
     "ProcMesh",
-    "Future",
+    "send",
+    "ValueMesh",
 ]

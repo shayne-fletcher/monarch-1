@@ -13,9 +13,8 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from monarch.actor_mesh import Actor, ActorMeshRef, endpoint
 
-from monarch.proc_mesh import proc_mesh
+from monarch.actor import Actor, ActorMeshRef, endpoint, proc_mesh
 from monarch.rdma import RDMABuffer
 from torch.distributions import Categorical, kl_divergence
 
