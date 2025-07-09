@@ -35,7 +35,7 @@ from monarch.builtins.random import set_manual_seed_remote
 from monarch.cached_remote_function import remote_autograd_function
 from monarch.common import remote as remote_module
 from monarch.common.device_mesh import DeviceMesh
-from monarch.common.remote import Remote
+from monarch.common.remote import call_on_shard_and_fetch, Remote
 from monarch.mesh_controller import RemoteException as NewRemoteException
 
 from monarch.opaque_module import OpaqueModule
@@ -634,11 +634,10 @@ class TestRemoteFunctions(RemoteFunctionsTestBase):
         with self.local_device_mesh(2, 2, backend_type):
             assert (
                 "an argument processed"
-                == remote("monarch.worker._testing_function.do_some_processing")
-                .call_on_shard_and_fetch(
+                == call_on_shard_and_fetch(
+                    remote("monarch.worker._testing_function.do_some_processing"),
                     "an argument",
-                )
-                .result()
+                ).result()
             )
 
     def test_cached_remote_function(self, backend_type):
@@ -733,7 +732,7 @@ class TestRemoteFunctions(RemoteFunctionsTestBase):
 
         with self.local_device_mesh(2, 2, backend_type):
             a = torch.ones(())
-            assert check.call_on_shard_and_fetch(bar(a, a)).result()
+            assert call_on_shard_and_fetch(check, bar(a, a)).result()
             # ensure we do not attempt to pickle closures
             close()
 
@@ -776,7 +775,7 @@ class TestRemoteFunctions(RemoteFunctionsTestBase):
 
         with self.local_device_mesh(1, 1, backend_type):
             # This should be a valid return than an exception to raise
-            simple.call_on_shard_and_fetch().result()
+            call_on_shard_and_fetch(simple).result()
 
     def test_opaque_object(self, backend_type):
         with self.local_device_mesh(2, 2, backend_type):

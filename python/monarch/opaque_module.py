@@ -9,7 +9,7 @@ from typing import List
 import torch
 from monarch.common.function_caching import TensorGroup, TensorGroupPattern
 from monarch.common.opaque_ref import OpaqueRef
-from monarch.common.remote import remote
+from monarch.common.remote import call_on_shard_and_fetch, remote
 from monarch.common.tensor_factory import TensorFactory
 from monarch.common.tree import flatten
 from monarch.opaque_object import _fresh_opaque_ref, OpaqueObject
@@ -144,11 +144,9 @@ class OpaqueModule:
 
     def parameters(self):
         if self._parameters is None:
-            tensor_group_pattern = (
-                remote(_get_parameters_shape)
-                .call_on_shard_and_fetch(self._object)
-                .result()
-            )
+            tensor_group_pattern = call_on_shard_and_fetch(
+                remote(_get_parameters_shape), self._object
+            ).result()
             self._parameters = [
                 p.requires_grad_(True)
                 for p in remote(

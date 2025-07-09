@@ -15,7 +15,7 @@ from monarch.common.device_mesh import no_mesh
 
 from monarch.common.future import Future
 
-from monarch.common.remote import _call_on_shard_and_fetch
+from monarch.common.remote import call_on_shard_and_fetch, remote_identity
 
 T = TypeVar("T")
 
@@ -37,9 +37,7 @@ def fetch_shard(
             shard = {}
         shard.update(kwargs)
 
-    return _call_on_shard_and_fetch(
-        None, lambda *args, **kwargs: None, obj, shard=shard
-    )
+    return call_on_shard_and_fetch(remote_identity, obj, shard=shard)
 
 
 def show(obj: T, shard: dict[str, int] | None = None, **kwargs: int) -> object:

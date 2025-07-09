@@ -17,6 +17,7 @@ import torch
 import torch.utils._python_dispatch
 from monarch import fetch_shard, no_mesh, remote, Stream
 from monarch.common.device_mesh import DeviceMesh
+from monarch.common.remote import call_on_shard_and_fetch
 from monarch.rust_local_mesh import local_meshes, LoggingLocation, SocketType
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.functional import scaled_dot_product_attention
@@ -111,9 +112,10 @@ class TestRustBackend(TestCase):
         with local_mesh():
             assert (
                 "an argument processed"
-                == remote("monarch.worker._testing_function.do_some_processing")
-                .call_on_shard_and_fetch("an argument")
-                .result()
+                == call_on_shard_and_fetch(
+                    remote("monarch.worker._testing_function.do_some_processing"),
+                    "an argument",
+                ).result()
             )
 
     def test_brutal_shutdown(self):
@@ -143,8 +145,8 @@ class TestRustBackend(TestCase):
                 return torch.isnan(t).any().item()
 
             t = torch.rand(3, 4)
-            res = has_nan.call_on_shard_and_fetch(
-                t, shard={"host": 0, "gpu": 0}
+            res = call_on_shard_and_fetch(
+                has_nan, t, shard={"host": 0, "gpu": 0}
             ).result()
 
         self.assertFalse(res)

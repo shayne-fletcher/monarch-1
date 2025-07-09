@@ -14,7 +14,7 @@ from monarch.common.function import (
 )
 
 from monarch.common.opaque_ref import OpaqueRef
-from monarch.common.remote import remote
+from monarch.common.remote import call_on_shard_and_fetch, remote
 
 
 def _invoke_method(obj: OpaqueRef, method_name: str, *args, **kwargs):
@@ -83,6 +83,6 @@ class OpaqueObject(OpaqueRef):
         return endpoint(self, method_name, *args, **kwargs)
 
     def call_method_on_shard_and_fetch(self, method_name, *args, **kwargs):
-        return remote(_invoke_method).call_on_shard_and_fetch(
-            self, method_name, *args, **kwargs
+        return call_on_shard_and_fetch(
+            remote(_invoke_method), self, method_name, *args, **kwargs
         )

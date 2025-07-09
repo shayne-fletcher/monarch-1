@@ -72,6 +72,14 @@ class Remote(Generic[P, R]):
     def _resolvable(self):
         return resolvable_function(self._remote_impl)
 
+    @property
+    def _maybe_resolvable(self):
+        return (
+            None
+            if self._remote_impl is None
+            else resolvable_function(self._remote_impl)
+        )
+
     def _propagate(self, args, kwargs, fake_args, fake_kwargs):
         if self._propagator_arg is None or self._propagator_arg == "cached":
             if self._cache is None:
@@ -102,13 +110,6 @@ class Remote(Generic[P, R]):
             kwargs,
             device_mesh._active,
             stream._active,
-        )
-
-    def call_on_shard_and_fetch(
-        self, *args, shard: Dict[str, int] | None = None, **kwargs
-    ) -> Future[R]:
-        return _call_on_shard_and_fetch(
-            self._resolvable, self._fetch_propagate, *args, shard=shard, **kwargs
         )
 
 
@@ -148,14 +149,16 @@ def remote(function: Any = None, *, propagate: Propagator = None) -> Any:
     return Remote(function, propagate)
 
 
-def _call_on_shard_and_fetch(
-    rfunction: ResolvableFunction | None,
-    propagator: Any,
+remote_identity = Remote(None, lambda x: x)
+
+
+def call_on_shard_and_fetch(
+    remote_obj: Remote[P, R],
     /,
     *args: object,
     shard: dict[str, int] | None = None,
     **kwargs: object,
-) -> Future:
+) -> Future[R]:
     """
     Call `function` at the coordinates `shard` of the current device mesh, and retrieve the result as a Future.
         function - the remote function to call
@@ -163,6 +166,9 @@ def _call_on_shard_and_fetch(
         shard - a dictionary from mesh dimension name to coordinate of the shard
                 If None, this will fetch from coordinate 0 for all dimensions (useful after all_reduce/all_gather)
     """
+
+    rfunction = remote_obj._maybe_resolvable
+    propagator = remote_obj._fetch_propagate
     ambient_mesh = device_mesh._active
 
     if rfunction is None:
@@ -271,8 +277,8 @@ def _cached_propagation(_cache, rfunction, args, kwargs):
     if key not in _cache:
         _miss += 1
         args_no_pg, kwargs_no_pg = tree_map(_mock_pgs, (args, kwargs))
-        result_with_placeholders, output_pattern = _propagate.call_on_shard_and_fetch(
-            function=rfunction, args=args_no_pg, kwargs=kwargs_no_pg
+        result_with_placeholders, output_pattern = call_on_shard_and_fetch(
+            _propagate, function=rfunction, args=args_no_pg, kwargs=kwargs_no_pg
         ).result()
 
         _, unflatten_result = flatten(
