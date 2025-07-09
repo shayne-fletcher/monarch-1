@@ -166,13 +166,9 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module,
         "monarch_hyperactor.runtime",
     )?)?;
-    hyperactor_extension::alloc::register_python_bindings(&get_or_add_new_module(
+    monarch_hyperactor::telemetry::register_python_bindings(&get_or_add_new_module(
         module,
-        "hyperactor_extension.alloc",
-    )?)?;
-    hyperactor_extension::telemetry::register_python_bindings(&get_or_add_new_module(
-        module,
-        "hyperactor_extension.telemetry",
+        "monarch_hyperactor.telemetry",
     )?)?;
     code_sync::register_python_bindings(&get_or_add_new_module(
         module,

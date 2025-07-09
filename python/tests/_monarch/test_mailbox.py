@@ -12,12 +12,9 @@ from typing import Callable, cast, final, Generic, TypeVar
 
 import monarch
 
-from monarch._rust_bindings.hyperactor_extension.alloc import (
-    AllocConstraints,
-    AllocSpec,
-)
-
 from monarch._rust_bindings.monarch_hyperactor.actor import PanicFlag, PythonMessage
+
+from monarch._rust_bindings.monarch_hyperactor.alloc import AllocConstraints, AllocSpec
 
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,

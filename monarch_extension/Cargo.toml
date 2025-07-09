@@ -20,7 +20,6 @@ bincode = "1.3.3"
 clap = { version = "4.5.38", features = ["derive", "env", "string", "unicode", "wrap_help"] }
 controller = { version = "0.0.0", path = "../controller", optional = true }
 hyperactor = { version = "0.0.0", path = "../hyperactor" }
-hyperactor_extension = { version = "0.0.0", path = "../hyperactor_extension" }
 hyperactor_mesh = { version = "0.0.0", path = "../hyperactor_mesh" }
 hyperactor_multiprocess = { version = "0.0.0", path = "../hyperactor_multiprocess" }
 libc = "0.2.139"

@@ -26,10 +26,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from monarch._rust_bindings.hyperactor_extension.alloc import (
-    AllocConstraints,
-    AllocSpec,
-)
+from monarch._rust_bindings.monarch_hyperactor.alloc import AllocConstraints, AllocSpec
 from monarch._rust_bindings.monarch_hyperactor.channel import (
     ChannelAddr,
     ChannelTransport,
