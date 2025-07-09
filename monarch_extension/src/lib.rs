@@ -189,6 +189,17 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "monarch_extension.blocking",
     )?)?;
 
+    #[cfg(fbcode_build)]
+    {
+        monarch_hyperactor::meta::alloc::register_python_bindings(&get_or_add_new_module(
+            module,
+            "monarch_hyperactor.meta.alloc",
+        )?)?;
+        monarch_hyperactor::meta::alloc_mock::register_python_bindings(&get_or_add_new_module(
+            module,
+            "monarch_hyperactor.meta.alloc_mock",
+        )?)?;
+    }
     // Add feature detection function
     module.add_function(wrap_pyfunction!(has_tensor_engine, module)?)?;
 

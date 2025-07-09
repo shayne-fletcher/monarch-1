@@ -21,3 +21,6 @@ pub mod proc_mesh;
 pub mod runtime;
 pub mod selection;
 pub mod shape;
+
+#[cfg(fbcode_build)]
+pub mod meta;
