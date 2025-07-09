@@ -290,7 +290,17 @@ pub enum AssignRankMessage {
 }
 
 #[async_trait]
-#[forward(WorkerMessage)]
+impl Handler<WorkerMessage> for WorkerActor {
+    async fn handle(
+        &mut self,
+        cx: &hyperactor::Context<Self>,
+        message: WorkerMessage,
+    ) -> anyhow::Result<()> {
+        <Self as WorkerMessageHandler>::handle(self, cx, message).await
+    }
+}
+
+#[async_trait]
 impl WorkerMessageHandler for WorkerActor {
     async fn backend_network_init(
         &mut self,
