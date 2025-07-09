@@ -60,6 +60,7 @@ use crate::reference::ProcMeshId;
 #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
 pub(crate) fn actor_mesh_cast<M: Castable + Clone, A>(
     caps: &impl cap::CanSend,
+    actor_mesh_id: ActorMeshId,
     actor_mesh_shape: &Shape,
     proc_mesh_shape: &Shape,
     actor_name: &str,
@@ -77,6 +78,7 @@ where
     ));
 
     let message = CastMessageEnvelope::new(
+        actor_mesh_id,
         sender.clone(),
         DestinationPort::new::<A, M>(actor_name.to_string()),
         actor_mesh_shape.clone(),
@@ -115,7 +117,7 @@ where
 }
 
 /// A mesh of actors, all of which reside on the same [`ProcMesh`].
-pub trait ActorMesh: Mesh {
+pub trait ActorMesh: Mesh<Id = ActorMeshId> {
     /// The type of actor in the mesh.
     type Actor: RemoteActor;
 
@@ -128,6 +130,7 @@ pub trait ActorMesh: Mesh {
     {
         actor_mesh_cast::<M, Self::Actor>(
             self.proc_mesh().client(),
+            self.id(),
             self.shape(),
             self.proc_mesh().shape(),
             self.name(),
@@ -288,6 +291,7 @@ impl<'a, A: RemoteActor> RootActorMesh<'a, A> {
 #[async_trait]
 impl<'a, A: RemoteActor> Mesh for RootActorMesh<'a, A> {
     type Node = ActorRef<A>;
+    type Id = ActorMeshId;
     type Sliced<'b>
         = SlicedActorMesh<'b, A>
     where
@@ -307,6 +311,10 @@ impl<'a, A: RemoteActor> Mesh for RootActorMesh<'a, A> {
 
     fn get(&self, rank: usize) -> Option<ActorRef<A>> {
         self.ranks.get(rank).cloned()
+    }
+
+    fn id(&self) -> Self::Id {
+        ActorMeshId(self.proc_mesh.id(), self.name.clone())
     }
 }
 
@@ -337,6 +345,7 @@ impl<'a, A: RemoteActor> SlicedActorMesh<'a, A> {
 #[async_trait]
 impl<A: RemoteActor> Mesh for SlicedActorMesh<'_, A> {
     type Node = ActorRef<A>;
+    type Id = ActorMeshId;
     type Sliced<'b>
         = SlicedActorMesh<'b, A>
     where
@@ -356,6 +365,10 @@ impl<A: RemoteActor> Mesh for SlicedActorMesh<'_, A> {
 
     fn get(&self, _index: usize) -> Option<ActorRef<A>> {
         unimplemented!()
+    }
+
+    fn id(&self) -> Self::Id {
+        self.0.id()
     }
 }
 

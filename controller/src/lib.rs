@@ -39,6 +39,8 @@ use hyperactor_mesh::comm::multicast::CastMessage;
 use hyperactor_mesh::comm::multicast::CastMessageEnvelope;
 use hyperactor_mesh::comm::multicast::DestinationPort;
 use hyperactor_mesh::comm::multicast::Uslice;
+use hyperactor_mesh::reference::ActorMeshId;
+use hyperactor_mesh::reference::ProcMeshId;
 use hyperactor_multiprocess::proc_actor::ProcActor;
 use hyperactor_multiprocess::proc_actor::spawn;
 use hyperactor_multiprocess::supervision::WorldSupervisionMessageClient;
@@ -422,7 +424,12 @@ impl ControllerMessageHandler for ControllerActor {
                 dsl::union(sel, slice_to_selection(slice))
             }),
         };
+
         let message = CastMessageEnvelope::from_serialized(
+            ActorMeshId(
+                ProcMeshId(self.worker_gang_ref.gang_id().world_id().to_string()),
+                self.worker_gang_ref.gang_id().name().to_string(),
+            ),
             cx.self_id().clone(),
             DestinationPort::new::<WorkerActor, WorkerMessage>(
                 // This is awkward, but goes away entirely with meshes.

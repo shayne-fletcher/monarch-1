@@ -28,6 +28,8 @@ use ndslice::selection::routing::RoutingFrame;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::reference::ActorMeshId;
+
 /// A union of slices that can be used to represent arbitrary subset of
 /// ranks in a gang. It is represented by a Slice together with a Selection.
 /// This is used to define the destination of a cast message or the source of
@@ -43,6 +45,8 @@ pub struct Uslice {
 /// An envelope that carries a message destined to a group of actors.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Named)]
 pub struct CastMessageEnvelope {
+    /// The destination actor mesh id.
+    actor_mesh_id: ActorMeshId,
     /// The sender of this message.
     sender: ActorId,
     /// The destination port of the message. It could match multiple actors with
@@ -59,6 +63,7 @@ pub struct CastMessageEnvelope {
 impl CastMessageEnvelope {
     /// Create a new CastMessageEnvelope.
     pub fn new<T: Castable + Serialize + Named>(
+        actor_mesh_id: ActorMeshId,
         sender: ActorId,
         dest_port: DestinationPort,
         shape: Shape,
@@ -67,6 +72,7 @@ impl CastMessageEnvelope {
     ) -> Result<Self, anyhow::Error> {
         let data = ErasedUnbound::try_from_message(message)?;
         Ok(Self {
+            actor_mesh_id,
             sender,
             dest_port,
             data,
@@ -79,12 +85,14 @@ impl CastMessageEnvelope {
     /// when the message do not contain reply ports. Or it does but you are okay
     /// with the destination actors reply to the client actor directly.
     pub fn from_serialized(
+        actor_mesh_id: ActorMeshId,
         sender: ActorId,
         dest_port: DestinationPort,
         shape: Shape,
         data: Serialized,
     ) -> Self {
         Self {
+            actor_mesh_id,
             sender,
             dest_port,
             data: ErasedUnbound::new(data),
@@ -111,6 +119,13 @@ impl CastMessageEnvelope {
 
     pub(crate) fn shape(&self) -> &Shape {
         &self.shape
+    }
+
+    /// The unique key used to indicate the stream to which to deliver this message.
+    /// Concretely, the comm actors along the path should use this key to manage
+    /// sequence numbers and reorder buffers.
+    pub(crate) fn stream_key(&self) -> (ActorMeshId, ActorId) {
+        (self.actor_mesh_id.clone(), self.sender.clone())
     }
 }
 
