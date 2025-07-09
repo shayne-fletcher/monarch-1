@@ -37,8 +37,6 @@ use ndslice::Selection;
 use ndslice::Shape;
 use ndslice::ShapeError;
 use ndslice::Slice;
-use ndslice::dsl;
-use ndslice::selection::ReifyView;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -62,7 +60,7 @@ pub(crate) fn actor_mesh_cast<M: Castable + Clone, A>(
     caps: &impl cap::CanSend,
     actor_mesh_id: ActorMeshId,
     actor_mesh_shape: &Shape,
-    proc_mesh_shape: &Shape,
+    _proc_mesh_shape: &Shape,
     actor_name: &str,
     sender: &ActorId,
     comm_actor_ref: &ActorRef<CommActor>,
@@ -77,6 +75,7 @@ where
         "message_variant" => message.arm().unwrap_or_default(),
     ));
 
+    let slice = actor_mesh_shape.slice().clone();
     let message = CastMessageEnvelope::new(
         actor_mesh_id,
         sender.clone(),
@@ -86,29 +85,10 @@ where
         None, // TODO: reducer typehash
     )?;
 
-    // Sub-set the selection to the selection that represents the mesh's view
-    // of the root mesh. We need to do this because the comm actor uses the
-    // slice as the stream key; thus different sub-slices will result in potentially
-    // out of order delivery.
-    //
-    // TODO: We should repair this by introducing an explicit stream key, associated
-    // with the root mesh.
-    let selection_of_slice = proc_mesh_shape
-        .slice()
-        .reify_view(actor_mesh_shape.slice())
-        .expect("invalid slice");
-    let selection = dsl::intersection(selection, selection_of_slice);
-
     comm_actor_ref.send(
         caps,
         CastMessage {
-            dest: Uslice {
-                // TODO: currently this slice is being used as the stream key
-                // in comm actor. We should change it to an explicit id, maintained
-                // by the root proc mesh.
-                slice: proc_mesh_shape.slice().clone(),
-                selection,
-            },
+            dest: Uslice { slice, selection },
             message,
         },
     )?;
