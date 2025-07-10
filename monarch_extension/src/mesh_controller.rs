@@ -7,7 +7,6 @@
  */
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -55,9 +54,9 @@ use monarch_messages::worker::WorkerMessage;
 use monarch_messages::worker::WorkerParams;
 use monarch_tensor_worker::AssignRankMessage;
 use monarch_tensor_worker::WorkerActor;
-use ndslice::Selection;
 use ndslice::Slice;
 use ndslice::selection;
+use ndslice::selection::ReifyView;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use tokio::sync::Mutex;
@@ -808,19 +807,8 @@ impl Handler<ClientToControllerMessage> for MeshControllerActor {
     ) -> anyhow::Result<()> {
         match message {
             ClientToControllerMessage::Send { slices, message } => {
-                let selection = slices
-                    .iter()
-                    .map(|slice| {
-                        Selection::of_ranks(
-                            self.workers().shape().slice(),
-                            &slice.iter().collect::<BTreeSet<usize>>(),
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_iter()
-                    .reduce(selection::dsl::union)
-                    .unwrap_or_else(selection::dsl::false_);
-                self.workers().cast(selection, message.clone())?;
+                let sel = self.workers().shape().slice().reify_views(slices)?;
+                self.workers().cast(sel, message)?;
             }
             ClientToControllerMessage::Node {
                 seq,
