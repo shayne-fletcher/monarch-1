@@ -45,7 +45,6 @@ use crate::CommActor;
 use crate::Mesh;
 use crate::comm::multicast::CastMessage;
 use crate::comm::multicast::CastMessageEnvelope;
-use crate::comm::multicast::DestinationPort;
 use crate::comm::multicast::Uslice;
 use crate::comm::multicast::set_cast_info_on_headers;
 use crate::metrics;
@@ -54,21 +53,21 @@ use crate::reference::ActorMeshId;
 use crate::reference::ActorMeshRef;
 use crate::reference::ProcMeshId;
 
-/// Common implementation for ActorMeshes and ActorMeshRefs to cast an [`M`]-typed message
+/// Common implementation for `ActorMesh`s and `ActorMeshRef`s to cast
+/// an `M`-typed message
 #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
-pub(crate) fn actor_mesh_cast<M: Castable + Clone, A>(
+pub(crate) fn actor_mesh_cast<A, M>(
     caps: &impl cap::CanSend,
     actor_mesh_id: ActorMeshId,
     actor_mesh_shape: &Shape,
-    _proc_mesh_shape: &Shape,
-    actor_name: &str,
     sender: &ActorId,
     comm_actor_ref: &ActorRef<CommActor>,
     selection: Selection,
     message: M,
 ) -> Result<(), CastError>
 where
-    A: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
+    A: RemoteActor + RemoteHandles<IndexedErasedUnbound<M>>,
+    M: Castable + RemoteMessage,
 {
     let _ = metrics::ACTOR_MESH_CAST_DURATION.start(hyperactor::kv_pairs!(
         "message_type" => M::typename(),
@@ -76,10 +75,9 @@ where
     ));
 
     let slice = actor_mesh_shape.slice().clone();
-    let message = CastMessageEnvelope::new(
+    let message = CastMessageEnvelope::new::<A, M>(
         actor_mesh_id,
         sender.clone(),
-        DestinationPort::new::<A, M>(actor_name.to_string()),
         actor_mesh_shape.clone(),
         message,
         None, // TODO: reducer typehash
@@ -101,30 +99,29 @@ pub trait ActorMesh: Mesh<Id = ActorMeshId> {
     /// The type of actor in the mesh.
     type Actor: RemoteActor;
 
-    /// Cast an [`M`]-typed message to the ranks selected by `sel`
-    /// in this ActorMesh.
+    /// Cast an `M`-typed message to the ranks selected by `sel` in
+    /// this ActorMesh.
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
-    fn cast<M: Castable + Clone>(&self, selection: Selection, message: M) -> Result<(), CastError>
+    fn cast<M>(&self, selection: Selection, message: M) -> Result<(), CastError>
     where
-        Self::Actor: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
+        Self::Actor: RemoteHandles<IndexedErasedUnbound<M>>,
+        M: Castable + RemoteMessage,
     {
-        actor_mesh_cast::<M, Self::Actor>(
-            self.proc_mesh().client(),
-            self.id(),
-            self.shape(),
-            self.proc_mesh().shape(),
-            self.name(),
-            self.proc_mesh().client().actor_id(),
-            self.proc_mesh().comm_actor(),
-            selection,
-            message,
+        actor_mesh_cast::<Self::Actor, M>(
+            self.proc_mesh().client(),            // send capability
+            self.id(),                            // actor mesh id (destination mesh)
+            self.shape(),                         // actor mesh shape
+            self.proc_mesh().client().actor_id(), // sender
+            self.proc_mesh().comm_actor(),        // comm actor
+            selection,                            // the selected actors
+            message,                              // the message
         )
     }
 
     /// The ProcMesh on top of which this actor mesh is spawned.
     fn proc_mesh(&self) -> &ProcMesh;
 
-    /// The name global name of actors in this mesh.
+    /// The name given to the actors in this mesh.
     fn name(&self) -> &str;
 
     fn world_id(&self) -> &WorldId {

@@ -62,19 +62,23 @@ pub struct CastMessageEnvelope {
 
 impl CastMessageEnvelope {
     /// Create a new CastMessageEnvelope.
-    pub fn new<T: Castable + Serialize + Named>(
+    pub fn new<A, M>(
         actor_mesh_id: ActorMeshId,
         sender: ActorId,
-        dest_port: DestinationPort,
         shape: Shape,
-        message: T,
+        message: M,
         reducer_typehash: Option<u64>,
-    ) -> Result<Self, anyhow::Error> {
+    ) -> Result<Self, anyhow::Error>
+    where
+        A: RemoteActor + RemoteHandles<IndexedErasedUnbound<M>>,
+        M: Castable + RemoteMessage,
+    {
         let data = ErasedUnbound::try_from_message(message)?;
+        let actor_name = actor_mesh_id.1.to_string();
         Ok(Self {
             actor_mesh_id,
             sender,
-            dest_port,
+            dest_port: DestinationPort::new::<A, M>(actor_name),
             data,
             reducer_typehash,
             shape,
