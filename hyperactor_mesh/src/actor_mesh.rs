@@ -214,38 +214,6 @@ impl<'a, A: RemoteActor> RootActorMesh<'a, A> {
         self.proc_mesh.client().open_port()
     }
 
-    /// Until the selection logic is more powerful, we need a way to
-    /// replicate the send patterns that the worker actor mesh actually does.
-    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
-    pub fn cast_slices<M: RemoteMessage + Clone>(
-        &self,
-        sel: Vec<Slice>,
-        message: M,
-    ) -> Result<(), CastError>
-    where
-        A: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
-    {
-        let _ = metrics::ACTOR_MESH_CAST_DURATION.start(hyperactor::kv_pairs!(
-            "message_type" => M::typename(),
-            "message_variant" => message.arm().unwrap_or_default(),
-        ));
-        for ref slice in sel {
-            for rank in slice.iter() {
-                let mut headers = Attrs::new();
-                set_cast_info_on_headers(
-                    &mut headers,
-                    rank,
-                    self.shape().clone(),
-                    self.proc_mesh.client().actor_id().clone(),
-                );
-                self.ranks[rank]
-                    .send_with_headers(self.proc_mesh.client(), headers, message.clone())
-                    .map_err(|err| CastError::MailboxSenderError(rank, err))?;
-            }
-        }
-        Ok(())
-    }
-
     /// An event stream of proc events. Each ProcMesh can produce only one such
     /// stream, returning None after the first call.
     pub async fn next(&mut self) -> Option<ActorSupervisionEvent> {
