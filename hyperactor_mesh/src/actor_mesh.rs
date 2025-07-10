@@ -8,6 +8,7 @@
 
 #![allow(dead_code)] // until used publically
 
+use std::collections::BTreeSet;
 use std::ops::Deref;
 
 use async_trait::async_trait;
@@ -25,7 +26,6 @@ use hyperactor::RemoteMessage;
 use hyperactor::Unbind;
 use hyperactor::WorldId;
 use hyperactor::actor::RemoteActor;
-use hyperactor::attrs::Attrs;
 use hyperactor::cap;
 use hyperactor::mailbox::MailboxSenderError;
 use hyperactor::mailbox::PortReceiver;
@@ -36,7 +36,10 @@ use ndslice::Range;
 use ndslice::Selection;
 use ndslice::Shape;
 use ndslice::ShapeError;
-use ndslice::Slice;
+use ndslice::selection;
+use ndslice::selection::EvalOpts;
+use ndslice::selection::ReifyView;
+use ndslice::selection::normal;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -46,7 +49,6 @@ use crate::Mesh;
 use crate::comm::multicast::CastMessage;
 use crate::comm::multicast::CastMessageEnvelope;
 use crate::comm::multicast::Uslice;
-use crate::comm::multicast::set_cast_info_on_headers;
 use crate::metrics;
 use crate::proc_mesh::ProcMesh;
 use crate::reference::ActorMeshId;
@@ -327,6 +329,40 @@ impl<A: RemoteActor> ActorMesh for SlicedActorMesh<'_, A> {
     fn name(&self) -> &str {
         &self.0.name
     }
+
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
+    fn cast<M>(&self, sel: Selection, message: M) -> Result<(), CastError>
+    where
+        Self::Actor: RemoteHandles<IndexedErasedUnbound<M>>,
+        M: Castable + RemoteMessage,
+    {
+        let base_shape = self.0.shape();
+        let base_slice = base_shape.slice();
+
+        // Casting to `*`?
+        let selection = if selection::normalize(&sel) == normal::NormalizedSelection::True {
+            // Reify this view into base.
+            base_slice.reify_view(self.shape().slice()).unwrap()
+        } else {
+            // No, fall back on `of_ranks`.
+            let ranks = sel
+                .eval(&EvalOpts::strict(), self.shape().slice())
+                .unwrap()
+                .collect::<BTreeSet<_>>();
+            Selection::of_ranks(base_slice, &ranks).unwrap()
+        };
+
+        // Cast.
+        actor_mesh_cast::<A, M>(
+            self.proc_mesh().client(),            // send capability
+            self.id(),                            // actor mesh id (destination mesh)
+            base_shape,                           // actor mesh shape
+            self.proc_mesh().client().actor_id(), // sender
+            self.proc_mesh().comm_actor(),        // comm actor
+            selection,                            // the selected actors
+            message,                              // the message
+        )
+    }
 }
 
 /// The type of error of casting operations.
@@ -485,6 +521,7 @@ mod tests {
             use $crate::assign::Ranks;
             use $crate::sel_from_shape;
             use $crate::sel;
+            use $crate::comm::multicast::set_cast_info_on_headers;
             use $crate::proc_mesh::SharedSpawnable;
             use std::collections::VecDeque;
             use hyperactor::data::Serialized;
