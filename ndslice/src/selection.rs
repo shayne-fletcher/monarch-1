@@ -1013,7 +1013,7 @@ pub trait ReifyView: sealed::Sealed {
 
     /// Reify multiple views as a union of selections in the
     /// coordinate system of `self`.
-    fn reify_views(&self, views: &[&Slice]) -> Result<Selection, SliceError>;
+    fn reify_views<V: AsRef<[Slice]>>(&self, views: V) -> Result<Selection, SliceError>;
 }
 
 impl ReifyView for Slice {
@@ -1030,7 +1030,6 @@ impl ReifyView for Slice {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The number of dimensions in the view does not match the base
     /// - The view lies outside the bounds of the base slice
     ///
     /// # Example
@@ -1044,14 +1043,12 @@ impl ReifyView for Slice {
     /// let selection = base.reify_view(view).unwrap();
     /// ```
     fn reify_view(&self, view: &Slice) -> Result<Selection, SliceError> {
-        if view.num_dim() != self.num_dim() {
-            return Err(SliceError::InvalidDims {
-                expected: self.num_dim(),
-                got: view.num_dim(),
-            });
-        }
         if view.is_empty() {
             return Ok(dsl::false_());
+        }
+
+        if view.num_dim() != self.num_dim() {
+            return Selection::of_ranks(self, &view.iter().collect::<BTreeSet<usize>>());
         }
 
         let origin = self.coordinates(view.offset())?;
@@ -1076,7 +1073,6 @@ impl ReifyView for Slice {
     /// # Errors
     ///
     /// Returns an error if any view:
-    /// - Has a different number of dimensions than the base slice
     /// - Refers to coordinates not contained within the base
     ///
     /// # Example
@@ -1087,15 +1083,22 @@ impl ReifyView for Slice {
     /// let shape = ndslice::shape!(x = 4, y = 4);
     /// let base = shape.slice();
     ///
-    /// let a = ndslice::select!(shape, x = 0..2, y = 0..2).unwrap();
-    /// let b = ndslice::select!(shape, x = 2..4, y = 2..4).unwrap();
+    /// let a = ndslice::select!(shape, x = 0..2, y = 0..2)
+    ///     .unwrap()
+    ///     .slice()
+    ///     .clone();
+    /// let b = ndslice::select!(shape, x = 2..4, y = 2..4)
+    ///     .unwrap()
+    ///     .slice()
+    ///     .clone();
     ///
-    /// let sel = base.reify_views(&[a.slice(), b.slice()]).unwrap();
+    /// let sel = base.reify_views(&[a, b]).unwrap();
     /// ```
-    fn reify_views(&self, views: &[&Slice]) -> Result<Selection, SliceError> {
+    fn reify_views<V: AsRef<[Slice]>>(&self, views: V) -> Result<Selection, SliceError> {
+        let views = views.as_ref();
         let mut selections = Vec::with_capacity(views.len());
 
-        for &view in views {
+        for view in views {
             if view.is_empty() {
                 continue;
             }
@@ -2158,6 +2161,28 @@ mod tests {
     }
 
     #[test]
+    fn test_reify_view_dimension_mismatch() {
+        let shape = shape!(host = 2, gpu = 4);
+        let base = shape.slice();
+
+        // Select the 3rd GPU (index 2) across both hosts i.e. flat
+        // indices [2, 6]
+        let indices = vec![
+            base.location(&[0, 2]).unwrap(),
+            base.location(&[1, 2]).unwrap(),
+        ];
+
+        let view = Slice::new(indices[0], vec![indices.len()], vec![4]).unwrap();
+        let selection = base.reify_view(&view).unwrap();
+
+        let expected = Selection::of_ranks(base, &indices.iter().cloned().collect()).unwrap();
+        assert_structurally_eq!(&selection, expected);
+
+        let actual: Vec<_> = selection.eval(&EvalOpts::strict(), base).unwrap().collect();
+        assert_eq!(actual, indices);
+    }
+
+    #[test]
     fn test_union_of_slices_empty() {
         let base = Slice::new_row_major([2]);
         let sel = base.reify_views(&[]).unwrap();
@@ -2175,7 +2200,7 @@ mod tests {
         let shape = shape!(x = 3);
         let base = shape.slice();
         let selected = select!(shape, x = 1).unwrap();
-        let view = selected.slice();
+        let view = selected.slice().clone();
 
         let selection = base.reify_views(&[view]).unwrap();
         let expected = range(1..=1, true_());
@@ -2197,11 +2222,11 @@ mod tests {
 
         // View A: (0, *)
         let a = select!(shape, x = 0).unwrap();
-        let view_a = a.slice();
+        let view_a = a.slice().clone();
 
         // View B: (1, *)
         let b = select!(shape, x = 1).unwrap();
-        let view_b = b.slice();
+        let view_b = b.slice().clone();
 
         let selection = base.reify_views(&[view_a, view_b]).unwrap();
         let expected = union(
@@ -2224,10 +2249,10 @@ mod tests {
         let base = shape.slice();
 
         let selected1 = select!(shape, y = 0..2).unwrap();
-        let view1 = selected1.slice();
+        let view1 = selected1.slice().clone();
 
         let selected2 = select!(shape, y = 1..4).unwrap();
-        let view2 = selected2.slice();
+        let view2 = selected2.slice().clone();
 
         let selection = base.reify_views(&[view1, view2]).unwrap();
         let expected = union(

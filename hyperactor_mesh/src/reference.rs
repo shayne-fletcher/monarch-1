@@ -112,15 +112,6 @@ impl<A: RemoteActor> ActorMeshRef<A> {
         &self.shape
     }
 
-    /// Shape of the underlying Proc Mesh.
-    fn proc_mesh_shape(&self) -> &Shape {
-        &self.proc_mesh_shape
-    }
-
-    fn name(&self) -> &str {
-        &self.mesh_id.1
-    }
-
     /// Cast an [`M`]-typed message to the ranks selected by `sel`
     /// in this ActorMesh.
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
