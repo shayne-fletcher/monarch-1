@@ -34,6 +34,7 @@ from typing import (
     Literal,
     NamedTuple,
     Optional,
+    overload,
     ParamSpec,
     Sequence,
     Tuple,
@@ -466,7 +467,13 @@ def send(
 
 
 class EndpointProperty(Generic[P, R]):
-    def __init__(self, method: Callable[Concatenate[Any, P], Awaitable[R]]) -> None:
+    @overload
+    def __init__(self, method: Callable[Concatenate[Any, P], Awaitable[R]]) -> None: ...
+
+    @overload
+    def __init__(self, method: Callable[Concatenate[Any, P], R]) -> None: ...
+
+    def __init__(self, method: Any) -> None:
         self._method = method
 
     def __get__(self, instance, owner) -> Endpoint[P, R]:
@@ -476,9 +483,19 @@ class EndpointProperty(Generic[P, R]):
         return cast(Endpoint[P, R], self)
 
 
+@overload
 def endpoint(
     method: Callable[Concatenate[Any, P], Awaitable[R]],
-) -> EndpointProperty[P, R]:
+) -> EndpointProperty[P, R]: ...
+
+
+@overload
+def endpoint(
+    method: Callable[Concatenate[Any, P], R],
+) -> EndpointProperty[P, R]: ...
+
+
+def endpoint(method):
     return EndpointProperty(method)
 
 
