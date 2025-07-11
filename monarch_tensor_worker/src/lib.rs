@@ -62,7 +62,6 @@ use hyperactor::Named;
 use hyperactor::Unbind;
 use hyperactor::actor::ActorHandle;
 use hyperactor::cap;
-use hyperactor::forward;
 use hyperactor::reference::ActorId;
 use hyperactor_mesh::comm::multicast::CastInfo;
 use itertools::Itertools;

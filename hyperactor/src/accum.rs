@@ -19,7 +19,6 @@ use serde::de::DeserializeOwned;
 use crate as hyperactor; // for macros
 use crate::Named;
 use crate::data::Serialized;
-use crate::intern_typename;
 use crate::reference::Index;
 
 /// An accumulator is a object that accumulates updates into a state.

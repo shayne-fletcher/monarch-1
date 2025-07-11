@@ -45,7 +45,6 @@ use crate::RemoteHandles;
 use crate::RemoteMessage;
 use crate::actor::RemoteActor;
 use crate::data::Serialized;
-use crate::intern_typename; // for macros
 
 /// An object `T` that is [`Unbind`] can extract a set of parameters from itself,
 /// and store in [`Bindings`]. The extracted parameters in [`Bindings`] can be

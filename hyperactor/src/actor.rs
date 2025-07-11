@@ -15,8 +15,6 @@ use std::fmt;
 use std::fmt::Debug;
 use std::future::Future;
 use std::future::IntoFuture;
-use std::hash::Hash;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -55,9 +53,7 @@ use crate::proc::InstanceCell;
 use crate::proc::Ports;
 use crate::proc::Proc;
 use crate::reference::ActorId;
-use crate::reference::GangId;
 use crate::reference::Index;
-use crate::reference::ProcId;
 use crate::supervision::ActorSupervisionEvent;
 
 pub mod remote;

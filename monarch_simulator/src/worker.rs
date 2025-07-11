@@ -18,7 +18,6 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use hyperactor::Actor;
 use hyperactor::ActorRef;
-use hyperactor::Instance;
 use hyperactor::Mailbox;
 use hyperactor::Named;
 use hyperactor::data::Serialized;

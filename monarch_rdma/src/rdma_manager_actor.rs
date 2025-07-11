@@ -506,7 +506,7 @@ mod tests {
             return Ok(());
         }
         let env = RdmaManagerTestEnv::setup(BSIZE, ("mlx5_0", "mlx5_4"), ("cpu", "cpu")).await?;
-        let mut rdma_handle_1 = env.rdma_handle_1.clone();
+        let /*mut*/ rdma_handle_1 = env.rdma_handle_1.clone();
         rdma_handle_1
             .read_into(&env.client_1.clone(), env.rdma_handle_2.clone(), 2)
             .await?;
@@ -527,7 +527,7 @@ mod tests {
             return Ok(());
         }
         let env = RdmaManagerTestEnv::setup(BSIZE, ("mlx5_0", "mlx5_4"), ("cuda:0", "cpu")).await?;
-        let mut rdma_handle_1 = env.rdma_handle_1.clone();
+        let /*mut*/ rdma_handle_1 = env.rdma_handle_1.clone();
         rdma_handle_1
             .read_into(&env.client_1.clone(), env.rdma_handle_2.clone(), 2)
             .await?;
@@ -549,7 +549,7 @@ mod tests {
         }
         let env =
             RdmaManagerTestEnv::setup(BSIZE, ("mlx5_0", "mlx5_4"), ("cuda:0", "cuda:1")).await?;
-        let mut rdma_handle_1 = env.rdma_handle_1.clone();
+        let /*mut*/ rdma_handle_1 = env.rdma_handle_1.clone();
         rdma_handle_1
             .read_into(&env.client_1.clone(), env.rdma_handle_2.clone(), 2)
             .await?;
@@ -571,7 +571,7 @@ mod tests {
             return Ok(());
         }
         let env = RdmaManagerTestEnv::setup(BSIZE, ("mlx5_0", "mlx5_4"), ("cuda:0", "cpu")).await?;
-        let mut rdma_handle_1 = env.rdma_handle_1.clone();
+        let /*mut*/ rdma_handle_1 = env.rdma_handle_1.clone();
         rdma_handle_1
             .read_into(&env.client_1.clone(), env.rdma_handle_2.clone(), 2)
             .await?;
@@ -592,7 +592,7 @@ mod tests {
             return Ok(());
         }
         let env = RdmaManagerTestEnv::setup(BSIZE, ("mlx5_0", "mlx5_4"), ("cpu", "cpu")).await?;
-        let mut rdma_handle_1 = env.rdma_handle_1.clone();
+        let /*mut*/ rdma_handle_1 = env.rdma_handle_1.clone();
         rdma_handle_1
             .write_from(&env.client_1.clone(), env.rdma_handle_2.clone(), 2)
             .await?;
