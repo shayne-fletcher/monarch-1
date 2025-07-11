@@ -128,9 +128,7 @@ class ProcMesh(MeshTrait):
         )
         return ProcMesh(self._proc_mesh, _mock_shape=shape, _device_mesh=device_mesh)
 
-    def spawn(
-        self, name: str, Class: Type[T], *args: Any, **kwargs: Any
-    ) -> Future[ActorMeshRef[T]]:
+    def spawn(self, name: str, Class: Type[T], *args: Any, **kwargs: Any) -> Future[T]:
         if self._mock_shape is not None:
             raise NotImplementedError("NYI: spawn on slice of a proc mesh.")
         return Future(
@@ -408,12 +406,12 @@ def _get_debug_proc_mesh() -> "ProcMesh":
     return _debug_proc_mesh
 
 
-_debug_client_mesh: Optional[ActorMeshRef[DebugClient]] = None
+_debug_client_mesh: Optional[DebugClient] = None
 
 
 # Lazy init for the same reason as above. This is defined in proc_mesh.py
 # instead of debugger.py for circular import reasons.
-def debug_client() -> ActorMeshRef[DebugClient]:
+def debug_client() -> DebugClient:
     global _debug_client_mesh
     if _debug_client_mesh is None:
         _debug_client_mesh = (

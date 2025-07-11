@@ -8,13 +8,13 @@ import asyncio
 import copy
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from monarch.actor import Actor, ActorMeshRef, endpoint, proc_mesh
+from monarch.actor import Actor, endpoint, proc_mesh
 from monarch.rdma import RDMABuffer
 from torch.distributions import Categorical, kl_divergence
 
@@ -152,7 +152,7 @@ class ReplayBuffer(Actor):
 class Scorer(Actor):
     """Evaluates actions and assigns rewards to trajectory slices."""
 
-    def __init__(self, trajectory_queue: ActorMeshRef, replay_buffer: ActorMeshRef):
+    def __init__(self, trajectory_queue: Any, replay_buffer: Any):
         """Initialize the scorer.
 
         Args:
@@ -216,7 +216,7 @@ class Scorer(Actor):
 class Learner(Actor):
     """Updates policy based on collected experiences using PPO algorithm."""
 
-    def __init__(self, replay_buffer: ActorMeshRef):
+    def __init__(self, replay_buffer: Any):
         """Initialize the learner.
 
         Args:
@@ -238,10 +238,10 @@ class Learner(Actor):
         self.policy_version = 0
         self.replay_buffer = replay_buffer
         self.batch_size = 2
-        self.generators: Optional[ActorMeshRef] = None
+        self.generators: Optional[Any] = None
 
     @endpoint
-    async def init_generators(self, generators: ActorMeshRef) -> None:
+    async def init_generators(self, generators: Any) -> None:
         """Set the generators service for weight updates.
 
         Args:

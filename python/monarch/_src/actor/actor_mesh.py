@@ -751,7 +751,7 @@ class Actor(MeshTrait):
         )
 
 
-class ActorMeshRef(MeshTrait, Generic[T]):
+class ActorMeshRef(MeshTrait):
     def __init__(
         self, Class: Type[T], actor_mesh_ref: _ActorMeshRefImpl, mailbox: Mailbox
     ) -> None:
