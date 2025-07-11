@@ -11,7 +11,10 @@ from typing import TYPE_CHECKING
 
 # Import before monarch to pre-load torch DSOs as, in exploded wheel flows,
 # our RPATHs won't correctly find them.
-import torch  # noqa: F401
+try:
+    import torch  # noqa: F401
+except ImportError:
+    pass
 
 # submodules of monarch should not be imported in this
 # top-level file because it will cause them to get

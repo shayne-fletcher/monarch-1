@@ -6,3 +6,4 @@ pyre-extensions
 cloudpickle
 torchx-nightly
 lark
+tabulate
