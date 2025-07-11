@@ -80,6 +80,7 @@ pub mod test_utils {
     pub struct Buffer {
         ptr: u64,
         len: usize,
+        #[allow(dead_code)]
         cpu_ref: Option<Box<[u8]>>,
     }
     impl RdmaManagerTestEnv<'_> {

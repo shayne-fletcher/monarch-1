@@ -14,7 +14,6 @@ use hyperactor::Handler;
 use hyperactor::Named;
 use hyperactor::PortRef;
 use hyperactor::Unbind;
-use hyperactor::data::intern_typename;
 use serde::Deserialize;
 
 use crate::Serialize;

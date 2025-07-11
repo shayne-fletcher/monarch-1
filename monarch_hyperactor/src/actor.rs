@@ -28,7 +28,6 @@ use hyperactor::message::Unbind;
 use hyperactor_mesh::comm::multicast::CastInfo;
 use monarch_types::PickledPyObject;
 use monarch_types::SerializablePyErr;
-use ndslice::Shape;
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::PyBaseException;
 use pyo3::exceptions::PyRuntimeError;

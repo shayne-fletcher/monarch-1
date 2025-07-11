@@ -358,7 +358,7 @@ impl Handler<WorkerStep> for WorkerActor {
             .ps_grad_handle
             .as_ref()
             .expect("worker_actor should be initialized");
-        let mut lbuffer = owner_ref
+        let /*mut*/ lbuffer = owner_ref
             .request_buffer(
                 cx,
                 self.local_gradients.as_ptr() as usize,
@@ -391,7 +391,7 @@ impl Handler<WorkerUpdate> for WorkerActor {
             "[worker_actor_{}] pulling new weights from parameter server (before: {:?})",
             rank, self.weights_data,
         );
-        let mut lbuffer = self
+        let /*mut*/ lbuffer = self
             .rdma_manager
             .as_ref()
             .expect("Rmda Manager should have been initialized")
