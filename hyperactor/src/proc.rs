@@ -1519,8 +1519,9 @@ impl InstanceCell {
     /// We should find some (better) way to consolidate the two.
     pub(crate) fn bind<A: Actor, R: Binds<A>>(&self, ports: &Ports<A>) -> ActorRef<R> {
         <R as Binds<A>>::bind(ports);
-        // All actors handle signals:
+        // All actors handle signals and undeliverable messages.
         ports.bind::<Signal>();
+        ports.bind::<Undeliverable<MessageEnvelope>>();
         // TODO: consider sharing `ports.bound` directly.
         for entry in ports.bound.iter() {
             self.inner
