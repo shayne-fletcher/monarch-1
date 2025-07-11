@@ -125,7 +125,7 @@ A = TypeVar("A")
 _load_balancing_seed = random.Random(4)
 
 
-Selection = Literal["all", "choose"]  # TODO: replace with real selection objects
+Selection = Literal["all", "choose"] | int  # TODO: replace with real selection objects
 
 
 # standin class for whatever is the serializable python object we use
@@ -202,7 +202,6 @@ class _ActorMeshRefImpl:
             idx = _load_balancing_seed.randrange(len(self._shape))
             actor_rank = self._shape.ndslice[idx]
             self._mailbox.post(self._please_replace_me_actor_ids[actor_rank], message)
-            return
         elif selection == "all":
             # replace me with actual remote actor mesh
             call_shape = Shape(
@@ -214,6 +213,16 @@ class _ActorMeshRefImpl:
                     i,
                     call_shape,
                     message,
+                )
+        elif isinstance(selection, int):
+            try:
+                self._mailbox.post(
+                    self._please_replace_me_actor_ids[selection], message
+                )
+            except IndexError:
+                raise IndexError(
+                    f"Tried to send to an out-of-range rank {selection}: "
+                    f"mesh has {len(self._please_replace_me_actor_ids)} elements."
                 )
         else:
             raise ValueError(f"invalid selection: {selection}")
