@@ -1047,7 +1047,9 @@ impl ReifyView for Slice {
             return Ok(dsl::false_());
         }
 
-        if view.num_dim() != self.num_dim() {
+        if view.num_dim() != self.num_dim()
+            || view.sizes().iter().zip(self.sizes()).any(|(&v, &s)| v > s)
+        {
             return Selection::of_ranks(self, &view.iter().collect::<BTreeSet<usize>>());
         }
 
