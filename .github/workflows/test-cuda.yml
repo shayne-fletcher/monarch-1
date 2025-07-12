@@ -47,6 +47,10 @@ jobs:
         # Install the built wheel from artifact
         install_wheel_from_artifact
 
+        # tests the type_assert statements in test_python_actor are correct
+        # pyre currently does not check these assertions
+        pyright python/tests/test_python_actors.py
+
         # Run CUDA tests
         LC_ALL=C pytest python/tests/ -s -v -m "not oss_skip"
         python python/tests/test_mock_cuda.py
