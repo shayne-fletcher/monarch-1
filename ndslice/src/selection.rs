@@ -1021,16 +1021,22 @@ impl ReifyView for Slice {
     /// matches all coordinates in the given `view`, expressed in the
     /// coordinate system of the provided `base` slice (`self`).
     ///
-    /// The resulting expression uses nested `range(start..end, ...)`
-    /// combinators to represent the rectangular region selected by
-    /// the view within the base slice.
+    /// The result is a nested sequence of `range(start..end, step)`
+    /// combinators that match the rectangular region covered by `view`
+    /// in base coordinates. This preserves geometry and layout when
+    /// `view` is *layout-aligned* — that is, each of its strides is
+    /// a multiple of the corresponding base stride.
     ///
-    /// Returns [`dsl::false_()`] for empty views.
+    /// If any dimension is not layout-aligned, the view is reified
+    /// by explicitly enumerating its coordinates.
+    ///
+    /// Returns [`dsl::false_()`] if the view is empty.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The view lies outside the bounds of the base slice
+    /// - The base is not contiguous and row-major
+    /// - The view lies outside the bounds of the base
     ///
     /// # Example
     ///
@@ -1043,6 +1049,11 @@ impl ReifyView for Slice {
     /// let selection = base.reify_view(view).unwrap();
     /// ```
     fn reify_view(&self, view: &Slice) -> Result<Selection, SliceError> {
+        // Precondition: the base is contiguous and row major.
+        if !self.is_contiguous() {
+            return Err(SliceError::NonContiguous);
+        }
+
         if view.is_empty() {
             return Ok(dsl::false_());
         }
@@ -1055,8 +1066,21 @@ impl ReifyView for Slice {
 
         let origin = self.coordinates(view.offset())?;
         let mut acc = dsl::true_();
-        for (&start, &len) in origin.iter().zip(view.sizes()).rev() {
-            acc = dsl::range(start..start + len, acc);
+        for ((&start, &len), (&view_stride, &base_stride)) in origin
+            .iter()
+            .zip(view.sizes())
+            .zip(view.strides().iter().zip(self.strides()))
+            .rev()
+        {
+            if view_stride % base_stride == 0 {
+                // Layout-aligned with base.
+                let step = view_stride / base_stride;
+                let end = start + step * len;
+                acc = dsl::range(crate::shape::Range(start, Some(end), step), acc);
+            } else {
+                // Irregular layout; fallback to explicit enumeration.
+                return Selection::of_ranks(self, &view.iter().collect::<BTreeSet<_>>());
+            }
         }
 
         Ok(acc)
@@ -1338,6 +1362,7 @@ mod tests {
     use super::Selection;
     use super::dsl::*;
     use super::is_equivalent_true;
+    use crate::Range;
     use crate::Slice;
     use crate::assert_structurally_eq;
     use crate::select;
@@ -2132,6 +2157,55 @@ mod tests {
                 base.location(&[2, 4]).unwrap(),
             ]
         );
+    }
+
+    #[test]
+    #[allow(clippy::identity_op)]
+    fn test_reify_view_1d_with_stride() {
+        let shape = shape!(x = 7); // 1D shape with 7 elements
+        let selected = shape.select("x", Range(0, None, 2)).unwrap();
+        let view = selected.slice();
+        assert_eq!(view, &Slice::new(0, vec![4], vec![1 * 2]).unwrap());
+
+        let base = shape.slice();
+        let selection = base.reify_view(view).unwrap();
+        // Note: ceil(7 / 2) = 4, hence end = 0 + 2 × 4 = 8. See the
+        // more detailed explanation in
+        // `test_reify_view_2d_with_stride`.
+        let expected = range(Range(0, Some(8), 2), true_());
+        assert_structurally_eq!(&selection, expected);
+
+        let flat: Vec<_> = selection.eval(&EvalOpts::strict(), base).unwrap().collect();
+        assert_eq!(flat, vec![0, 2, 4, 6]);
+    }
+
+    #[test]
+    #[allow(clippy::identity_op)]
+    fn test_reify_view_2d_with_stride() {
+        // 4 x 4: x = 4, y = 4.
+        let base = shape!(x = 4, y = 4);
+        // Step 1: select odd rows (x = 1..4 step 2)
+        let shape = base.select("x", Range(1, Some(4), 2)).unwrap();
+        // Step 2: then select odd columns (y = 1..4 step 2)
+        let shape = shape.select("y", Range(1, Some(4), 2)).unwrap();
+        let view = shape.slice();
+        assert_eq!(
+            view,
+            &Slice::new(5, vec![2, 2], vec![4 * 2, 1 * 2]).unwrap()
+        );
+
+        let base = base.slice();
+        let selection = base.reify_view(view).unwrap();
+        // We use `end = start + step * len` to reify the selection.
+        // Note: This may yield `end > original_end` (e.g., 5 instead of 4)
+        // when the selection length was computed via ceiling division.
+        // This is safe: the resulting range will still select the correct
+        // indices (e.g., 1 and 3 for Range(1, Some(5), 2)).
+        let expected = range(Range(1, Some(5), 2), range(Range(1, Some(5), 2), true_()));
+        assert_structurally_eq!(&selection, expected);
+
+        let flat: Vec<_> = selection.eval(&EvalOpts::strict(), base).unwrap().collect();
+        assert_eq!(flat, vec![5, 7, 13, 15]);
     }
 
     #[test]
