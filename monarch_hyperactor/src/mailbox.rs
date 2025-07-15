@@ -44,6 +44,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::actor::PythonMessage;
+use crate::actor::PythonMessageKind;
 use crate::proc::PyActorId;
 use crate::runtime::signal_safe_block_on;
 use crate::shape::PyShape;
@@ -546,7 +547,8 @@ impl PythonOncePortReceiver {
     Named,
     PartialEq,
     FromPyObject,
-    IntoPyObject
+    IntoPyObject,
+    Debug
 )]
 pub enum EitherPortRef {
     Unbounded(PythonPortRef),
@@ -628,7 +630,7 @@ impl Accumulator for PythonAccumulator {
     fn accumulate(&self, state: &mut Self::State, update: Self::Update) -> anyhow::Result<()> {
         Python::with_gil(|py: Python<'_>| {
             // Initialize state if it is empty.
-            if state.message.is_empty() && state.method.is_empty() {
+            if matches!(state.kind, PythonMessageKind::Uninit {}) {
                 *state = self
                     .accumulator
                     .getattr(py, "initial_state")?

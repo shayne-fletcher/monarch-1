@@ -185,6 +185,7 @@ class MeshClient(Client):
         sender, receiver = PortTuple.create(
             self._mesh_controller._mailbox, None, once=True
         )
+        assert sender._port_ref is not None
         self._mesh_controller.sync_at_exit(sender._port_ref.port_id)
         receiver.recv().get(timeout=60)
         # we are not expecting anything more now, because we already
@@ -209,6 +210,7 @@ class MeshClient(Client):
         if future is not None:
             # method annotation is a lie to make Client happy
             port, slice = cast("Tuple[Port[Any], NDSlice]", future)
+            assert port._port_ref is not None
             response_port = (port._port_ref.port_id, slice)
         self._mesh_controller.node(seq, defs, uses, response_port, tracebacks)
         return seq

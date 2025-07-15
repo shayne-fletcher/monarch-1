@@ -39,6 +39,7 @@ use hyperactor::proc::Proc;
 use monarch_hyperactor::actor::LocalPythonMessage;
 use monarch_hyperactor::actor::PythonActor;
 use monarch_hyperactor::actor::PythonMessage;
+use monarch_hyperactor::actor::PythonMessageKind;
 use monarch_hyperactor::mailbox::EitherPortRef;
 use monarch_messages::controller::ControllerMessageClient;
 use monarch_messages::controller::Seq;
@@ -1009,10 +1010,10 @@ impl StreamActor {
                         .extract()
                         .unwrap();
                     Ok(PythonMessage::new_from_buf(
-                        "result".to_string(),
+                        PythonMessageKind::Result {
+                            rank: Some(worker_actor_id.rank()),
+                        },
                         data,
-                        None,
-                        Some(worker_actor_id.rank()),
                     ))
                 })
         });
@@ -1686,12 +1687,13 @@ impl StreamMessageHandler for StreamActor {
         let (send, recv) = cx.open_once_port();
         let send = send.bind();
         let send = EitherPortRef::Once(send.into());
-        let message = PythonMessage {
-            method: params.method,
-            message: params.args_kwargs_tuple.into(),
-            response_port: Some(send),
-            rank: None,
-        };
+        let message = PythonMessage::new_from_buf(
+            PythonMessageKind::CallMethod {
+                name: params.method,
+                response_port: Some(send),
+            },
+            params.args_kwargs_tuple.into(),
+        );
         let local_state: Result<Vec<monarch_hyperactor::actor::LocalState>> =
             Python::with_gil(|py| {
                 params
@@ -1713,31 +1715,44 @@ impl StreamMessageHandler for StreamActor {
             local_state: Some(local_state?),
         };
         actor_handle.send(message)?;
-        let result = recv.recv().await?.with_rank(worker_actor_id.rank());
-        if result.method == "exception" {
-            // If result has "exception" as its kind, then
-            // we need to unpickle and turn it into a WorkerError
-            // and call remote_function_failed otherwise the
-            // controller assumes the object is correct and doesn't handle
-            // dependency tracking correctly.
-            let err = Python::with_gil(|py| -> Result<WorkerError, SerializablePyErr> {
-                let err = py
-                    .import("pickle")
-                    .unwrap()
-                    .call_method1("loads", (result.message.into_vec(),))?;
-                Ok(WorkerError {
-                    worker_actor_id,
-                    backtrace: err.to_string(),
-                })
-            })?;
-            self.controller_actor
-                .remote_function_failed(cx, params.seq, err)
-                .await?;
-        } else {
-            let result = Serialized::serialize(&result).unwrap();
-            self.controller_actor
-                .fetch_result(cx, params.seq, Ok(result))
-                .await?;
+        let result = recv.recv().await?;
+        match result.kind {
+            PythonMessageKind::Exception { .. } => {
+                // If result has "exception" as its kind, then
+                // we need to unpickle and turn it into a WorkerError
+                // and call remote_function_failed otherwise the
+                // controller assumes the object is correct and doesn't handle
+                // dependency tracking correctly.
+                let err = Python::with_gil(|py| -> Result<WorkerError, SerializablePyErr> {
+                    let err = py
+                        .import("pickle")
+                        .unwrap()
+                        .call_method1("loads", (result.message,))?;
+                    Ok(WorkerError {
+                        worker_actor_id,
+                        backtrace: err.to_string(),
+                    })
+                })?;
+                self.controller_actor
+                    .remote_function_failed(cx, params.seq, err)
+                    .await?;
+            }
+            PythonMessageKind::Result { .. } => {
+                let result = PythonMessage::new_from_buf(
+                    PythonMessageKind::Result {
+                        rank: Some(worker_actor_id.rank()),
+                    },
+                    result.message,
+                );
+                let result = Serialized::serialize(&result).unwrap();
+                self.controller_actor
+                    .fetch_result(cx, params.seq, Ok(result))
+                    .await?;
+            }
+            _ => panic!(
+                "Unexpected response kind from PythonActor: {:?}",
+                result.kind
+            ),
         }
         Ok(())
     }

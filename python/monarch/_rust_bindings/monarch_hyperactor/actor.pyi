@@ -8,7 +8,7 @@
 
 import abc
 
-from typing import Any, final, List, Optional, Protocol
+from typing import Any, final, List, Optional, Protocol, Type
 
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
@@ -96,39 +96,64 @@ class PickledMessageClientActor:
         """The actor id of the actor."""
         ...
 
+class PythonMessageKind:
+    @classmethod
+    @property
+    def Result(cls) -> "Type[Result]": ...
+    @classmethod
+    @property
+    def Exception(cls) -> "Type[Exception]": ...
+    @classmethod
+    @property
+    def CallMethod(cls) -> "Type[CallMethod]": ...
+    @classmethod
+    @property
+    def Uninit(cls) -> "Type[Uninit]": ...
+
+class Result(PythonMessageKind):
+    def __init__(self, rank: Optional[int]) -> None: ...
+    @property
+    def rank(self) -> int | None: ...
+
+class Exception(PythonMessageKind):
+    def __init__(self, rank: Optional[int]) -> None: ...
+    @property
+    def rank(self) -> int | None: ...
+
+class CallMethod(PythonMessageKind):
+    def __init__(
+        self, name: str, response_port: PortRef | OncePortRef | None
+    ) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def response_port(self) -> PortRef | OncePortRef | None: ...
+
+class Init(PythonMessageKind):
+    def __init__(self, response_port: PortRef | OncePortRef | None) -> None: ...
+    @property
+    def response_port(self) -> PortRef | OncePortRef | None: ...
+
+class Uninit(PythonMessageKind):
+    pass
+
 @final
 class PythonMessage:
     """
     A message that carries a python method and a pickled message that contains
     the arguments to the method.
     """
-
     def __init__(
         self,
-        method: str,
+        kind: PythonMessageKind,
         message: bytes,
-        response_port: PortRef | OncePortRef | None,
-        rank: int | None,
     ) -> None: ...
-    @property
-    def method(self) -> str:
-        """The method of the message."""
-        ...
-
     @property
     def message(self) -> bytes:
         """The pickled arguments."""
         ...
-
     @property
-    def response_port(self) -> PortRef | OncePortRef | None:
-        """The response port."""
-        ...
-
-    @property
-    def rank(self) -> Optional[int]:
-        """If this message is a response, the rank of the actor in the original broadcast that send the request."""
-        ...
+    def kind(self) -> PythonMessageKind: ...
 
 class UndeliverableMessageEnvelope:
     """

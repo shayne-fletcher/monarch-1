@@ -37,6 +37,7 @@ use hyperactor_mesh::actor_mesh::RootActorMesh;
 use hyperactor_mesh::shared_cell::SharedCell;
 use hyperactor_mesh::shared_cell::SharedCellRef;
 use monarch_hyperactor::actor::PythonMessage;
+use monarch_hyperactor::actor::PythonMessageKind;
 use monarch_hyperactor::mailbox::PyPortId;
 use monarch_hyperactor::ndslice::PySlice;
 use monarch_hyperactor::proc_mesh::PyProcMesh;
@@ -334,7 +335,7 @@ impl Invocation {
                             Some(PortInfo { port, ranks }) => {
                                 *unreported_exception = None;
                                 for rank in ranks.iter() {
-                                    let msg = exception.as_ref().clone().with_rank(rank);
+                                    let msg = exception.as_ref().clone().into_rank(rank);
                                     port.send(sender, msg)?;
                                 }
                             }
@@ -527,7 +528,7 @@ impl History {
                 .call1((exception.backtrace, traceback, rank))
                 .unwrap();
             let data: Vec<u8> = pickle.call1((exe,)).unwrap().extract().unwrap();
-            PythonMessage::new_from_buf("exception".to_string(), data, None, Some(rank))
+            PythonMessage::new_from_buf(PythonMessageKind::Exception { rank: Some(rank) }, data)
         }));
 
         let mut invocation = invocation.lock().unwrap();
@@ -570,7 +571,10 @@ impl History {
                     Some(exception) => exception.as_ref().clone(),
                     None => {
                         // the byte string is just a Python None
-                        PythonMessage::new("result".to_string(), b"\x80\x04N.", None, None)
+                        PythonMessage::new_from_buf(
+                            PythonMessageKind::Result { rank: None },
+                            b"\x80\x04N.".to_vec(),
+                        )
                     }
                 };
                 port.send(sender, result)?;

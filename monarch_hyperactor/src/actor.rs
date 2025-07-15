@@ -171,33 +171,52 @@ impl PickledMessageClientActor {
     }
 }
 
+#[pyclass(module = "monarch._rust_bindings.monarch_hyperactor.actor")]
+#[derive(Clone, Debug, Serialize, Deserialize, Named, PartialEq)]
+pub enum PythonMessageKind {
+    CallMethod {
+        name: String,
+        response_port: Option<EitherPortRef>,
+    },
+    Result {
+        rank: Option<usize>,
+    },
+    Exception {
+        rank: Option<usize>,
+    },
+    Uninit {},
+}
+
+impl Default for PythonMessageKind {
+    fn default() -> Self {
+        PythonMessageKind::Uninit {}
+    }
+}
+
 #[pyclass(frozen, module = "monarch._rust_bindings.monarch_hyperactor.actor")]
-#[derive(Default, Clone, Serialize, Deserialize, Named, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Named, PartialEq, Default)]
 pub struct PythonMessage {
-    pub method: String,
-    pub message: ByteBuf,
-    pub response_port: Option<EitherPortRef>,
-    pub rank: Option<usize>,
+    pub kind: PythonMessageKind,
+    pub message: Vec<u8>,
 }
 
 impl PythonMessage {
-    pub fn with_rank(self, rank: usize) -> PythonMessage {
-        PythonMessage {
-            rank: Some(rank),
-            ..self
-        }
+    pub fn new_from_buf(kind: PythonMessageKind, message: Vec<u8>) -> Self {
+        Self { kind, message }
     }
-    pub fn new_from_buf(
-        method: String,
-        message: Vec<u8>,
-        response_port: Option<EitherPortRef>,
-        rank: Option<usize>,
-    ) -> Self {
-        Self {
-            method,
-            message: message.into(),
-            response_port,
-            rank,
+
+    pub fn into_rank(self, rank: usize) -> Self {
+        let rank = Some(rank);
+        match self.kind {
+            PythonMessageKind::Result { .. } => PythonMessage {
+                kind: PythonMessageKind::Result { rank },
+                message: self.message,
+            },
+            PythonMessageKind::Exception { .. } => PythonMessage {
+                kind: PythonMessageKind::Exception { rank },
+                message: self.message,
+            },
+            _ => panic!("PythonMessage is not a response but {:?}", self),
         }
     }
 }
@@ -205,7 +224,7 @@ impl PythonMessage {
 impl std::fmt::Debug for PythonMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PythonMessage")
-            .field("method", &self.method)
+            .field("kind", &self.kind)
             .field(
                 "message",
                 &hyperactor::data::HexFmt(self.message.as_slice()).to_string(),
@@ -216,47 +235,38 @@ impl std::fmt::Debug for PythonMessage {
 
 impl Unbind for PythonMessage {
     fn unbind(&self, bindings: &mut Bindings) -> anyhow::Result<()> {
-        self.response_port.unbind(bindings)
+        match &self.kind {
+            PythonMessageKind::CallMethod { response_port, .. } => response_port.unbind(bindings),
+            _ => Ok(()),
+        }
     }
 }
 
 impl Bind for PythonMessage {
     fn bind(&mut self, bindings: &mut Bindings) -> anyhow::Result<()> {
-        self.response_port.bind(bindings)
+        match &mut self.kind {
+            PythonMessageKind::CallMethod { response_port, .. } => response_port.bind(bindings),
+            _ => Ok(()),
+        }
     }
 }
 
 #[pymethods]
 impl PythonMessage {
     #[new]
-    #[pyo3(signature = (method, message, response_port, rank))]
-    pub fn new(
-        method: String,
-        message: &[u8],
-        response_port: Option<EitherPortRef>,
-        rank: Option<usize>,
-    ) -> Self {
-        Self::new_from_buf(method, message.into(), response_port, rank)
+    #[pyo3(signature = (kind, message))]
+    pub fn new(kind: PythonMessageKind, message: &[u8]) -> Self {
+        PythonMessage::new_from_buf(kind, message.to_vec())
     }
 
     #[getter]
-    fn method(&self) -> &String {
-        &self.method
+    fn kind(&self) -> PythonMessageKind {
+        self.kind.clone()
     }
 
     #[getter]
     fn message<'a>(&self, py: Python<'a>) -> Bound<'a, PyBytes> {
         PyBytes::new(py, self.message.as_ref())
-    }
-
-    #[getter]
-    fn response_port(&self) -> Option<EitherPortRef> {
-        self.response_port.clone()
-    }
-
-    #[getter]
-    fn rank(&self) -> Option<usize> {
-        self.rank
     }
 }
 
@@ -583,6 +593,7 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     hyperactor_mod.add_class::<PickledMessageClientActor>()?;
     hyperactor_mod.add_class::<PythonActorHandle>()?;
     hyperactor_mod.add_class::<PythonMessage>()?;
+    hyperactor_mod.add_class::<PythonMessageKind>()?;
     hyperactor_mod.add_class::<PanicFlag>()?;
     Ok(())
 }
@@ -610,10 +621,11 @@ mod tests {
             Some(reducer_spec),
         );
         let message = PythonMessage {
-            method: "test".to_string(),
-            message: ByteBuf::from(vec![1, 2, 3]),
-            response_port: Some(EitherPortRef::Unbounded(port_ref.clone().into())),
-            rank: None,
+            kind: PythonMessageKind::CallMethod {
+                name: "test".to_string(),
+                response_port: Some(EitherPortRef::Unbounded(port_ref.clone().into())),
+            },
+            message: vec![1, 2, 3],
         };
         {
             let mut erased = ErasedUnbound::try_from_message(message.clone()).unwrap();
@@ -630,7 +642,10 @@ mod tests {
         }
 
         let no_port_message = PythonMessage {
-            response_port: None,
+            kind: PythonMessageKind::CallMethod {
+                name: "test".to_string(),
+                response_port: None,
+            },
             ..message
         };
         {

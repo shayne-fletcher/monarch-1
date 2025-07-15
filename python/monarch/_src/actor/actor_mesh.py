@@ -45,7 +45,11 @@ from typing import (
     TypeVar,
 )
 
-from monarch._rust_bindings.monarch_hyperactor.actor import PanicFlag, PythonMessage
+from monarch._rust_bindings.monarch_hyperactor.actor import (
+    PanicFlag,
+    PythonMessage,
+    PythonMessageKind,
+)
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import (
     ActorMeshMonitor,
     MonitoredOncePortReceiver,
@@ -412,10 +416,10 @@ class ActorEndpoint(Endpoint[P, R]):
         refs = [obj for obj in objects if hasattr(obj, "__monarch_ref__")]
         if not refs:
             message = PythonMessage(
-                self._name,
+                PythonMessageKind.CallMethod(
+                    self._name, None if port is None else port._port_ref
+                ),
                 bytes,
-                None if port is None else port._port_ref,
-                None,
             )
             self._actor_mesh.cast(message, selection)
         else:
@@ -545,16 +549,31 @@ def endpoint(method):
 
 class Port(Generic[R]):
     def __init__(
-        self, port_ref: PortRef | OncePortRef, mailbox: Mailbox, rank: Optional[int]
+        self,
+        port_ref: PortRef | OncePortRef | None,
+        mailbox: Mailbox,
+        rank: Optional[int],
     ) -> None:
         self._port_ref = port_ref
         self._mailbox = mailbox
         self._rank = rank
 
-    def send(self, method: str, obj: R) -> None:
+    def send(self, obj: R) -> None:
+        if self._port_ref is None:
+            return
         self._port_ref.send(
             self._mailbox,
-            PythonMessage(method, _pickle(obj), None, self._rank),
+            PythonMessage(PythonMessageKind.Result(self._rank), _pickle(obj)),
+        )
+
+    def exception(self, obj: Exception) -> None:
+        # we deliver each error exactly once, so if there is no port to respond to,
+        # the error is sent to the current actor as an exception.
+        if self._port_ref is None:
+            raise obj from None
+        self._port_ref.send(
+            self._mailbox,
+            PythonMessage(PythonMessageKind.Exception(self._rank), _pickle(obj)),
         )
 
 
@@ -651,12 +670,13 @@ class PortReceiver(Generic[R]):
     def _process(self, msg: PythonMessage) -> R:
         # TODO: Try to do something more structured than a cast here
         payload = cast(R, unflatten(msg.message, itertools.repeat(self._mailbox)))
-        if msg.method == "result":
-            return payload
-        else:
-            assert msg.method == "exception"
-            # pyre-ignore
-            raise payload
+        match msg.kind:
+            case PythonMessageKind.Result():
+                return payload
+            case PythonMessageKind.Exception():
+                raise cast(Exception, payload)
+            case _:
+                raise ValueError(f"Unexpected message kind: {msg.kind}")
 
     def recv(self) -> "Future[R]":
         return Future(lambda: self._recv(), self._blocking_recv)
@@ -664,9 +684,12 @@ class PortReceiver(Generic[R]):
 
 class RankedPortReceiver(PortReceiver[Tuple[int, R]]):
     def _process(self, msg: PythonMessage) -> Tuple[int, R]:
-        if msg.rank is None:
-            raise ValueError("RankedPort receiver got a message without a rank")
-        return msg.rank, super()._process(msg)
+        rank = getattr(msg.kind, "rank", None)
+        if rank is None:
+            raise ValueError(
+                f"RankedPort receiver got a message without a rank {msg}",
+            )
+        return rank, super()._process(msg)
 
 
 singleton_shape = Shape([], NDSlice(offset=0, sizes=[], strides=[]))
@@ -701,11 +724,15 @@ class _Actor:
     ) -> None:
         if local_state is None:
             local_state = itertools.repeat(mailbox)
-        port = (
-            Port(message.response_port, mailbox, rank)
-            if message.response_port
-            else None
-        )
+
+        match message.kind:
+            case PythonMessageKind.CallMethod(response_port=response_port):
+                pass
+            case _:
+                response_port = None
+        # response_port can be None. If so, then sending to port will drop the response,
+        # and raise any exceptions to the caller.
+        port = Port(response_port, mailbox, rank)
         try:
             ctx: MonarchContext = MonarchContext(
                 mailbox, mailbox.actor_id.proc_id, Point(rank, shape)
@@ -716,12 +743,16 @@ class _Actor:
 
             args, kwargs = unflatten(message.message, local_state)
 
-            if message.method == "__init__":
-                Class, *args = args
-                self.instance = Class(*args, **kwargs)
-                if port is not None:
-                    port.send("result", None)
-                return None
+            match message.kind:
+                case PythonMessageKind.CallMethod(name=name):
+                    method = name
+                    if method == "__init__":
+                        Class, *args = args
+                        self.instance = Class(*args, **kwargs)
+                        port.send(None)
+                        return None
+                case _:
+                    raise ValueError(f"Unexpected message kind: {message.kind}")
 
             if self.instance is None:
                 # This could happen because of the following reasons. Both
@@ -736,18 +767,18 @@ class _Actor:
                 #    mixed the usage of cast and direct send.
                 raise AssertionError(
                     f"""
-                    actor object is missing when executing method {message.method}
+                    actor object is missing when executing method {method}
                     on actor {mailbox.actor_id}
                     """
                 )
-            the_method = getattr(self.instance, message.method)._method
+            the_method = getattr(self.instance, method)._method
 
             if inspect.iscoroutinefunction(the_method):
 
                 async def instrumented():
                     enter_span(
                         the_method.__module__,
-                        message.method,
+                        method,
                         str(ctx.mailbox.actor_id),
                     )
                     try:
@@ -764,26 +795,16 @@ class _Actor:
 
                 result = await instrumented()
             else:
-                enter_span(
-                    the_method.__module__, message.method, str(ctx.mailbox.actor_id)
-                )
+                enter_span(the_method.__module__, method, str(ctx.mailbox.actor_id))
                 result = the_method(self.instance, *args, **kwargs)
                 self._maybe_exit_debugger()
                 exit_span()
 
-            if port is not None:
-                port.send("result", result)
+            port.send(result)
         except Exception as e:
             self._post_mortem_debug(e.__traceback__)
             traceback.print_exc()
-            s = ActorError(e)
-
-            # The exception is delivered to exactly one of:
-            # (1) our caller, (2) our supervisor
-            if port is not None:
-                port.send("exception", s)
-            else:
-                raise s from None
+            port.exception(ActorError(e))
         except BaseException as e:
             self._post_mortem_debug(e.__traceback__)
             # A BaseException can be thrown in the case of a Rust panic.
