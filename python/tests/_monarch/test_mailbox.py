@@ -8,7 +8,7 @@
 
 import asyncio
 import pickle
-from typing import Callable, cast, final, Generic, TypeVar
+from typing import Any, Callable, cast, final, Generic, List, TypeVar
 
 import monarch
 
@@ -124,6 +124,7 @@ class MyActor:
         shape: Shape,
         message: PythonMessage,
         panic_flag: PanicFlag,
+        local_state: List[Any] | None,
     ) -> None:
         assert message.response_port is not None
         reply_port = message.response_port

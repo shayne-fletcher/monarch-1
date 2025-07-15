@@ -22,6 +22,7 @@ from typing import (
 )
 
 from monarch._rust_bindings.monarch_extension import tensor_worker
+from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
 
 from monarch._src.actor.shape import NDSlice
 from monarch.common.function import ResolvableFromCloudpickle, ResolvableFunction
@@ -423,6 +424,17 @@ class SendTensor(NamedTuple):
             from_stream=tensor_worker.StreamRef(id=self.from_stream.ref),
             to_stream=tensor_worker.StreamRef(id=self.to_stream.ref),
         )
+
+
+class SendResultOfActorCall(NamedTuple):
+    seq: int
+    actor: str
+    actor_index: int
+    method: str
+    args_kwargs_tuple: bytes
+    local_state: List[Referenceable | Mailbox]
+    mutates: List[tensor_worker.Ref]
+    stream: tensor_worker.StreamRef
 
 
 class SplitComm(NamedTuple):

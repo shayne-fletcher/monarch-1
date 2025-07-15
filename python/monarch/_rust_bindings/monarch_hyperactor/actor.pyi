@@ -8,7 +8,7 @@
 
 import abc
 
-from typing import final, List, Optional, Protocol
+from typing import Any, final, List, Optional, Protocol
 
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
@@ -185,4 +185,5 @@ class Actor(Protocol):
         shape: Shape,
         message: PythonMessage,
         panic_flag: PanicFlag,
+        local_state: List[Any] | None,
     ) -> None: ...
