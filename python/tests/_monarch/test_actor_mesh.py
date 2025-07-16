@@ -7,12 +7,16 @@
 # pyre-unsafe
 
 import pickle
-from typing import List
+from typing import Any, List
 
 import monarch
 import pytest
 
-from monarch._rust_bindings.monarch_hyperactor.actor import PanicFlag, PythonMessage
+from monarch._rust_bindings.monarch_hyperactor.actor import (
+    PanicFlag,
+    PythonMessage,
+    PythonMessageKind,
+)
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import (
     PythonActorMesh,
     PythonActorMeshRef,
@@ -45,12 +49,21 @@ class MyActor:
         shape: Shape,
         message: PythonMessage,
         panic_flag: PanicFlag,
+        local_state: List[Any] | None = None,
     ) -> None:
         assert rank is not None
-        reply_port = message.response_port
-        assert reply_port is not None
+
+        # Extract response_port from the message kind
+        call_method = message.kind
+        assert isinstance(call_method, PythonMessageKind.CallMethod)
+        assert call_method.response_port is not None
+
+        reply_port = call_method.response_port
         reply_port.send(
-            mailbox, PythonMessage("pong", pickle.dumps(f"rank: {rank}"), None, rank)
+            mailbox,
+            PythonMessage(
+                PythonMessageKind.Result(rank), pickle.dumps(f"rank: {rank}")
+            ),
         )
 
 
@@ -77,7 +90,9 @@ async def verify_cast(
     handle, receiver = mailbox.open_port()
     port_ref = handle.bind()
 
-    message = PythonMessage("echo", pickle.dumps("ping"), port_ref, None)
+    message = PythonMessage(
+        PythonMessageKind.CallMethod("echo", port_ref), pickle.dumps("ping")
+    )
     sel = Selection.from_string("*")
     if isinstance(actor_mesh, PythonActorMesh):
         actor_mesh.cast(sel, message)
@@ -87,7 +102,9 @@ async def verify_cast(
     rcv_ranks = []
     for _ in range(len(cast_ranks)):
         message = await receiver.recv()
-        rank = message.rank
+        result_kind = message.kind
+        assert isinstance(result_kind, PythonMessageKind.Result)
+        rank = result_kind.rank
         assert rank is not None
         rcv_ranks.append(rank)
     rcv_ranks.sort()
