@@ -117,7 +117,7 @@ pub struct PyProcMesh {
     proc_events: SharedCell<Mutex<ProcEvents>>,
     user_monitor_receiver: SharedCell<Mutex<mpsc::UnboundedReceiver<ProcEvent>>>,
     user_monitor_registered: Arc<AtomicBool>,
-    unhealthy_event: Arc<Mutex<Option<ProcEvent>>>,
+    unhealthy_event: Arc<Mutex<Option<Option<ProcEvent>>>>,
 }
 
 fn allocate_proc_mesh<'py>(py: Python<'py>, alloc: &PyAlloc) -> PyResult<Bound<'py, PyAny>> {
@@ -182,28 +182,30 @@ impl PyProcMesh {
         }
     }
 
-    /// The default monitor of the proc mesh for crashes. If a proc crashes, we print the reason
-    /// to stderr and exit with code 1.
+    /// The default monitor of the proc mesh for crashes.
     async fn default_proc_mesh_monitor(
         events: SharedCellRef<Mutex<ProcEvents>>,
         world_id: WorldId,
         user_sender: mpsc::UnboundedSender<ProcEvent>,
         user_monitor_registered: Arc<AtomicBool>,
-        unhealthy_event: Arc<Mutex<Option<ProcEvent>>>,
+        unhealthy_event: Arc<Mutex<Option<Option<ProcEvent>>>>,
     ) {
         loop {
             let mut proc_events = events.lock().await;
             tokio::select! {
                 event = proc_events.next() => {
-                    if let Some(event) = event {
-                        let mut inner_unhealthy_event = unhealthy_event.lock().await;
-                        *inner_unhealthy_event = Some(event.clone());
-
-                        match event {
-                            // A graceful stop should not be cause for alarm, but
-                            // everything else should be considered a crash.
+                    let mut inner_unhealthy_event = unhealthy_event.lock().await;
+                    match event {
+                        None => {
+                            *inner_unhealthy_event = Some(None);
+                            tracing::info!("ProcMesh {}: alloc has stopped", world_id);
+                            break;
+                        }
+                        Some(event) => match event {
+                            // Graceful stops can be ignored.
                             ProcEvent::Stopped(_, ProcStopReason::Stopped) => continue,
                             event => {
+                                *inner_unhealthy_event = Some(Some(event.clone()));
                                 tracing::info!("ProcMesh {}: {}", world_id, event);
                                 if user_monitor_registered.load(std::sync::atomic::Ordering::SeqCst) {
                                     if user_sender.send(event).is_err() {
@@ -215,7 +217,9 @@ impl PyProcMesh {
                     }
                 }
                 _ = events.preempted() => {
-                    tracing::error!("stop default supervision monitor for ProcMesh {}", world_id);
+                    let mut inner_unhealthy_event = unhealthy_event.lock().await;
+                    *inner_unhealthy_event = Some(None);
+                    tracing::info!("ProcMesh {}: is stopped", world_id);
                     break;
                 }
             }
@@ -255,6 +259,21 @@ impl PyProcMesh {
     }
 }
 
+// Return with error if the mesh is unhealthy.
+async fn ensure_mesh_healthy(
+    unhealthy_event: &Mutex<Option<Option<ProcEvent>>>,
+) -> Result<(), PyErr> {
+    let locked = unhealthy_event.lock().await;
+    if let Some(event) = &*locked {
+        let msg = match event {
+            Some(e) => format!("proc mesh is stopped with reason: {:?}", e),
+            None => "proc mesh is stopped with reason: alloc is stopped".to_string(),
+        };
+        return Err(SupervisionError::new_err(msg));
+    }
+    Ok(())
+}
+
 #[pymethods]
 impl PyProcMesh {
     #[classmethod]
@@ -281,18 +300,12 @@ impl PyProcMesh {
         name: String,
         actor: &Bound<'py, PyType>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let unhealthy_event: Arc<Mutex<Option<ProcEvent>>> = self.unhealthy_event.clone();
+        let unhealthy_event = Arc::clone(&self.unhealthy_event);
         let pickled_type = PickledPyObject::pickle(actor.as_any())?;
         let proc_mesh = self.try_inner()?;
         let keepalive = self.keepalive.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let unhealthy_event = unhealthy_event.lock().await;
-            if let Some(unhealthy_event) = unhealthy_event.clone() {
-                return Err(SupervisionError::new_err(format!(
-                    "proc mesh is stopped with reason: {:?}",
-                    unhealthy_event
-                )));
-            }
+            ensure_mesh_healthy(&unhealthy_event).await?;
 
             let mailbox = proc_mesh.client().clone();
             let actor_mesh = proc_mesh.spawn(&name, &pickled_type).await?;
@@ -313,18 +326,12 @@ impl PyProcMesh {
         name: String,
         actor: &Bound<'py, PyType>,
     ) -> PyResult<PyObject> {
-        let unhealthy_event = self.unhealthy_event.clone();
+        let unhealthy_event = Arc::clone(&self.unhealthy_event);
         let pickled_type = PickledPyObject::pickle(actor.as_any())?;
         let proc_mesh = self.try_inner()?;
         let keepalive = self.keepalive.clone();
         signal_safe_block_on(py, async move {
-            let unhealthy_event = unhealthy_event.lock().await;
-            if let Some(unhealthy_event) = unhealthy_event.clone() {
-                return Err(SupervisionError::new_err(format!(
-                    "proc mesh is stopped with reason: {:?}",
-                    unhealthy_event
-                )));
-            }
+            ensure_mesh_healthy(&unhealthy_event).await?;
 
             let mailbox = proc_mesh.client().clone();
             let actor_mesh = proc_mesh.spawn(&name, &pickled_type).await?;
