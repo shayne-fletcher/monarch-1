@@ -639,7 +639,7 @@ impl WorkerMessageHandler for WorkerActor {
         _cx: &hyperactor::Context<Self>,
         _ref_id: Ref,
         _stream: StreamRef,
-    ) -> Result<Option<Result<WireValue, ValueError>>> {
+    ) -> Result<Option<Result<WireValue, String>>> {
         bail!("unimplemented: get_ref_unit_tests_only")
     }
 
