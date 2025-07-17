@@ -17,6 +17,7 @@ from typing import (
     NamedTuple,
     Optional,
     Protocol,
+    Sequence,
     Tuple,
     TYPE_CHECKING,
 )
@@ -428,11 +429,8 @@ class SendTensor(NamedTuple):
 
 class SendResultOfActorCall(NamedTuple):
     seq: int
-    actor: str
-    actor_index: int
-    method: str
-    args_kwargs_tuple: bytes
-    local_state: List[Referenceable | Mailbox]
+    broker_id: Tuple[str, int]
+    local_state: Sequence[Tensor | tensor_worker.Ref]
     mutates: List[tensor_worker.Ref]
     stream: tensor_worker.StreamRef
 

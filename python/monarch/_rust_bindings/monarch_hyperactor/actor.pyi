@@ -7,8 +7,9 @@
 # pyre-strict
 
 import abc
+from enum import Enum
 
-from typing import Any, final, List, Optional, Protocol, Type
+from typing import Any, final, Iterable, List, Optional, Protocol, Tuple, Type
 
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
@@ -109,6 +110,9 @@ class PythonMessageKind:
     @classmethod
     @property
     def Uninit(cls) -> "Type[Uninit]": ...
+    @classmethod
+    @property
+    def CallMethodIndirect(cls) -> "Type[CallMethodIndirect]": ...
 
 class Result(PythonMessageKind):
     def __init__(self, rank: Optional[int]) -> None: ...
@@ -128,6 +132,19 @@ class CallMethod(PythonMessageKind):
     def name(self) -> str: ...
     @property
     def response_port(self) -> PortRef | OncePortRef | None: ...
+
+class UnflattenArg(Enum):
+    Mailbox = 0
+    PyObject = 1
+
+class CallMethodIndirect(PythonMessageKind):
+    def __init__(
+        self,
+        name: str,
+        broker_id: Tuple[str, int],
+        id: int,
+        unflatten_args: List[UnflattenArg],
+    ) -> None: ...
 
 class Init(PythonMessageKind):
     def __init__(self, response_port: PortRef | OncePortRef | None) -> None: ...
@@ -210,5 +227,5 @@ class Actor(Protocol):
         shape: Shape,
         message: PythonMessage,
         panic_flag: PanicFlag,
-        local_state: List[Any] | None,
+        local_state: Iterable[Any],
     ) -> None: ...

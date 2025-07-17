@@ -30,11 +30,16 @@ from monarch._rust_bindings.monarch_extension.client import (  # @manual=//monar
     WorldState,
 )
 from monarch._rust_bindings.monarch_extension.mesh_controller import _Controller
+from monarch._rust_bindings.monarch_hyperactor.actor import (
+    PythonMessage,
+    PythonMessageKind,
+    UnflattenArg,
+)
 from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
 from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
-from monarch._src.actor.actor_mesh import ActorMeshRef, Port, PortTuple
+from monarch._src.actor.actor_mesh import ActorEndpoint, Port, PortTuple, Selection
 from monarch._src.actor.shape import NDSlice
 from monarch.common import device_mesh, messages, stream
 from monarch.common.controller_api import TController
@@ -264,12 +269,16 @@ class RemoteException(Exception):
 
 
 def actor_send(
-    actor_mesh: ActorMeshRef,
-    method: str,
+    endpoint: ActorEndpoint,
     args_kwargs_tuple: bytes,
     refs: Sequence[Any],
     port: Optional[Port[Any]],
+    selection: Selection,
 ):
+    unflatten_args = [
+        UnflattenArg.PyObject if isinstance(ref, Tensor) else UnflattenArg.Mailbox
+        for ref in refs
+    ]
     tensors = [ref for ref in refs if isinstance(ref, Tensor)]
     # we have some monarch references, we need to ensure their
     # proc_mesh matches that of the tensors we sent to it
@@ -284,8 +293,7 @@ def actor_send(
         # mutates
         checker.check_permission(())
     selected_device_mesh = (
-        actor_mesh._actor_mesh._proc_mesh
-        and actor_mesh._actor_mesh._proc_mesh._device_mesh
+        endpoint._actor_mesh._proc_mesh and endpoint._actor_mesh._proc_mesh._device_mesh
     )
     if selected_device_mesh is not checker.mesh:
         raise ValueError(
@@ -293,26 +301,33 @@ def actor_send(
             "NYI: better serialization of mesh names to make the mismatch more clear."
         )
 
-    client = checker.mesh.client
+    client = cast(MeshClient, checker.mesh.client)
+
+    broker_id: Tuple[str, int] = client._mesh_controller.broker_id
+
     stream_ref = chosen_stream._to_ref(client)
 
     fut = (port, checker.mesh._ndslice) if port is not None else None
 
     ident = client.new_node([], tensors, cast("OldFuture", fut))
 
-    actor_name, actor_index = actor_mesh._actor_mesh._name_pid
-    msg = SendResultOfActorCall(
-        ident,
-        actor_name,
-        actor_index,
-        method,
-        args_kwargs_tuple,
-        cast("List[Mailbox | Referenceable]", refs),
-        [],
-        stream_ref,
-    )
+    # To ensure that both the actor and the stream execute in order, we send a message
+    # to each at this point. The message to the worker will be handled on the stream actor where
+    # it will send the 'tensor's to the broker actor locally, along with a response port with the
+    # computed value.
 
-    client.send(checker.mesh._ndslice, msg)
+    # The message to the generic actor tells it to first wait on the broker to get the local arguments
+    # from the stream, then it will run the actor method, and send the result to response port.
+
+    actor_msg = PythonMessage(
+        PythonMessageKind.CallMethodIndirect(
+            endpoint._name, broker_id, ident, unflatten_args
+        ),
+        args_kwargs_tuple,
+    )
+    endpoint._actor_mesh.cast(actor_msg, selection)
+    worker_msg = SendResultOfActorCall(ident, broker_id, tensors, [], stream_ref)
+    client.send(checker.mesh._ndslice, worker_msg)
     # we have to ask for status updates
     # from workers to be sure they have finished
     # enough work to count this future as finished,

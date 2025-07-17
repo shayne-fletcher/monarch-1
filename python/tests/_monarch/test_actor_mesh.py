@@ -8,7 +8,7 @@
 
 import asyncio
 import pickle
-from typing import Any, List
+from typing import Any, Iterable, List
 
 import monarch
 import pytest
@@ -50,7 +50,7 @@ class MyActor:
         shape: Shape,
         message: PythonMessage,
         panic_flag: PanicFlag,
-        local_state: List[Any] | None = None,
+        local_state: Iterable[Any] | None = None,
     ) -> None:
         assert rank is not None
 

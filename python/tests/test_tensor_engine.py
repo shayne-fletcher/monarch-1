@@ -78,3 +78,29 @@ def test_actor_with_tensors() -> None:
         x = pm.spawn("adder", AddWithState, torch.ones(())).get()
         y = torch.ones(())
         assert x.forward.call(y).get(timeout=5).item(hosts=0, gpus=0).item() == 2
+
+
+class Counter(Actor):
+    def __init__(self):
+        super().__init__()
+        self.c = 0
+
+    @endpoint
+    def incr(self, x) -> int:
+        self.c += 1
+        return self.c - 1
+
+
+@two_gpu
+def test_actor_tensor_ordering() -> None:
+    pm = proc_mesh(gpus=1).get()
+    with pm.activate():
+        counter = pm.spawn("a", Counter).get()
+        results = []
+        for _ in range(0, 10, 2):
+            # tensor engine call
+            results.append(counter.incr.call(torch.ones(())))
+            # non-tensor engine call
+            results.append(counter.incr.call(1))
+
+        assert list(range(10)) == [r.get().item(hosts=0, gpus=0) for r in results]

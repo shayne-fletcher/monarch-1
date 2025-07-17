@@ -402,32 +402,15 @@ pub struct CallFunctionParams {
     pub remote_process_groups: Vec<Ref>,
 }
 
-/// The local state that has to be restored into the python_message during
-/// its unpickling.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum LocalState {
-    Ref(Ref),
-    Mailbox,
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ActorCallParams {
     pub seq: Seq,
-    /// The actor to call is (proc_id of stream worker, 'actor', 'index')
-    pub actor: String,
-    pub index: usize,
-
-    // method name to call
-    pub method: String,
-    // pickled arguments, that will need to be patched with local state
-    pub args_kwargs_tuple: Vec<u8>,
-    /// Referenceable objects to pass to the actor,
+    // The BrokerId but we do not depend on hyperactor in messages.
+    pub broker_id: (String, usize),
+    /// Referenceable objects to pass to the actor as LocalState,
     /// these will be put into the PythonMessage
-    /// during its unpickling. Because unpickling also needs to
-    /// restore mailboxes, we also have to keep track of which
-    /// members should just be the mailbox object.
-    pub local_state: Vec<LocalState>,
-
+    /// during its unpickling.
+    pub local_state: Vec<Ref>,
     /// Tensors that will be mutated by the call.
     pub mutates: Vec<Ref>,
     pub stream: StreamRef,

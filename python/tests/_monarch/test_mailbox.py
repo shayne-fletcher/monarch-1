@@ -8,7 +8,7 @@
 
 import asyncio
 import pickle
-from typing import Any, Callable, cast, final, Generic, List, TYPE_CHECKING, TypeVar
+from typing import Any, Callable, cast, final, Generic, Iterable, TYPE_CHECKING, TypeVar
 
 import monarch
 
@@ -137,7 +137,7 @@ class MyActor:
         shape: Shape,
         message: PythonMessage,
         panic_flag: PanicFlag,
-        local_state: List[Any] | None,
+        local_state: Iterable[Any],
     ) -> None:
         call_method = cast("CallMethod", message.kind)
         assert call_method.response_port is not None

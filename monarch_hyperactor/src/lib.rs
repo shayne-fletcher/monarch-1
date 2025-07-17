@@ -14,6 +14,7 @@ pub mod alloc;
 pub mod bootstrap;
 pub mod channel;
 pub mod config;
+pub mod local_state_broker;
 pub mod mailbox;
 pub mod ndslice;
 pub mod proc;

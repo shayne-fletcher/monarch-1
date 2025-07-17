@@ -36,10 +36,11 @@ use hyperactor::mailbox::Mailbox;
 use hyperactor::mailbox::OncePortHandle;
 use hyperactor::mailbox::PortReceiver;
 use hyperactor::proc::Proc;
-use monarch_hyperactor::actor::LocalPythonMessage;
-use monarch_hyperactor::actor::PythonActor;
 use monarch_hyperactor::actor::PythonMessage;
 use monarch_hyperactor::actor::PythonMessageKind;
+use monarch_hyperactor::local_state_broker::BrokerId;
+use monarch_hyperactor::local_state_broker::LocalState;
+use monarch_hyperactor::local_state_broker::LocalStateBrokerMessage;
 use monarch_hyperactor::mailbox::EitherPortRef;
 use monarch_messages::controller::ControllerMessageClient;
 use monarch_messages::controller::Seq;
@@ -47,7 +48,6 @@ use monarch_messages::controller::WorkerError;
 use monarch_messages::worker::ActorCallParams;
 use monarch_messages::worker::CallFunctionError;
 use monarch_messages::worker::CallFunctionParams;
-use monarch_messages::worker::LocalState;
 use monarch_messages::worker::StreamRef;
 use monarch_types::PyTree;
 use monarch_types::SerializablePyErr;
@@ -1681,40 +1681,33 @@ impl StreamMessageHandler for StreamActor {
         params: ActorCallParams,
     ) -> anyhow::Result<()> {
         // TODO: handle mutates
-        let actor_id = ActorId(cx.proc().proc_id().clone(), params.actor, params.index);
-        let actor_ref: ActorRef<PythonActor> = ActorRef::attest(actor_id);
-        let actor_handle = actor_ref.downcast_handle(cx).unwrap();
+        let local_state: Result<Vec<PyObject>> = Python::with_gil(|py| {
+            params
+                .local_state
+                .into_iter()
+                .map(|elem| {
+                    // SAFETY: python is gonna make unsafe copies of this stuff anyway
+                    unsafe {
+                        let x = self.ref_to_rvalue(&elem)?.try_to_object_unsafe(py)?.into();
+                        Ok(x)
+                    }
+                })
+                .collect()
+        });
+
         let (send, recv) = cx.open_once_port();
         let send = send.bind();
         let send = EitherPortRef::Once(send.into());
-        let message = PythonMessage::new_from_buf(
-            PythonMessageKind::CallMethod {
-                name: params.method,
-                response_port: Some(send),
-            },
-            params.args_kwargs_tuple.into(),
-        );
-        let local_state: Result<Vec<monarch_hyperactor::actor::LocalState>> =
-            Python::with_gil(|py| {
-                params
-                    .local_state
-                    .into_iter()
-                    .map(|elem| match elem {
-                        LocalState::Mailbox => Ok(monarch_hyperactor::actor::LocalState::Mailbox),
-                        // SAFETY: python is gonna make unsafe copies of this stuff anyway
-                        LocalState::Ref(r) => unsafe {
-                            let x = self.ref_to_rvalue(&r)?.try_to_object_unsafe(py)?.into();
-                            Ok(monarch_hyperactor::actor::LocalState::PyObject(x))
-                        },
-                    })
-                    .collect()
-            });
-        // including making the PyMailbox
-        let message = LocalPythonMessage {
-            message,
-            local_state: Some(local_state?),
+
+        let state = LocalState {
+            response_port: send,
+            state: local_state?,
         };
-        actor_handle.send(message)?;
+        let x: u64 = params.seq.into();
+        let message = LocalStateBrokerMessage::Set(x as usize, state);
+
+        let broker = BrokerId::new(params.broker_id).resolve(cx).unwrap();
+        broker.send(message)?;
         let result = recv.recv().await?;
         match result.kind {
             PythonMessageKind::Exception { .. } => {

@@ -217,6 +217,12 @@ impl From<PyPortId> for PortId {
     }
 }
 
+impl From<Mailbox> for PyMailbox {
+    fn from(inner: Mailbox) -> Self {
+        PyMailbox { inner }
+    }
+}
+
 #[pymethods]
 impl PyPortId {
     #[new]
