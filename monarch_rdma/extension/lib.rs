@@ -21,6 +21,7 @@ use monarch_rdma::RdmaBuffer;
 use monarch_rdma::RdmaManagerActor;
 use monarch_rdma::RdmaManagerMessageClient;
 use monarch_rdma::ibverbs_supported;
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyException;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -255,7 +256,7 @@ impl PyRdmaBuffer {
 
     fn __reduce__(&self) -> PyResult<(PyObject, PyObject)> {
         Python::with_gil(|py| {
-            let ctor = py.get_type::<PyRdmaBuffer>().to_object(py);
+            let ctor = py.get_type::<PyRdmaBuffer>().into_py_any(py)?;
             let json = serde_json::to_string(self).map_err(|e| {
                 PyErr::new::<PyValueError, _>(format!("Serialization failed: {}", e))
             })?;
