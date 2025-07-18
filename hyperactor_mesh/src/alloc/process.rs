@@ -452,7 +452,7 @@ impl Alloc for ProcessAlloc {
                             });
                         }
                         Process2AllocatorMessage::Heartbeat => {
-                            tracing::debug!("recv heartbeat from {index}");
+                            tracing::trace!("recv heartbeat from {index}");
                         }
                     }
                 },
