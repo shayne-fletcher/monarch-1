@@ -22,7 +22,6 @@ use hyperactor::Context;
 use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
-use hyperactor::cap::CanSend;
 use hyperactor::forward;
 use hyperactor::message::Bind;
 use hyperactor::message::Bindings;

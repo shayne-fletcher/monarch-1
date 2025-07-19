@@ -9,7 +9,6 @@
 use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::ops::Deref;
 use std::sync::Arc;
 
 use hyperactor::Mailbox;
@@ -36,7 +35,6 @@ use hyperactor::message::Bindings;
 use hyperactor::message::Unbind;
 use hyperactor_mesh::comm::multicast::set_cast_info_on_headers;
 use monarch_types::PickledPyObject;
-use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyEOFError;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
