@@ -86,7 +86,7 @@ Allocator = ProcessAllocator | LocalAllocator
 try:
     from __manifest__ import fbmake  # noqa
 
-    IN_PAR = True
+    IN_PAR = bool(fbmake.get("par_style"))
 except ImportError:
     IN_PAR = False
 
