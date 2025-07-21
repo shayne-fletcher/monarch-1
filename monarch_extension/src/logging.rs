@@ -17,7 +17,6 @@ use hyperactor_mesh::logging::LogForwardMessage;
 use hyperactor_mesh::selection::Selection;
 use hyperactor_mesh::shared_cell::SharedCell;
 use monarch_hyperactor::proc_mesh::PyProcMesh;
-use monarch_hyperactor::runtime::signal_safe_block_on;
 use pyo3::Bound;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -48,7 +47,7 @@ impl LoggingMeshClient {
         })
     }
 
-    fn set_mode<'py>(&self, py: Python<'py>, stream_to_client: bool) -> PyResult<()> {
+    fn set_mode<'py>(&self, _py: Python<'py>, stream_to_client: bool) -> PyResult<()> {
         let inner_mesh = self.actor_mesh.borrow().map_err(anyhow::Error::msg)?;
 
         inner_mesh
