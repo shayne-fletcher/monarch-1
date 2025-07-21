@@ -33,14 +33,13 @@ from monarch._rust_bindings.monarch_hyperactor.channel import (
     ChannelTransport,
 )
 
-from monarch._src.actor.actor_mesh import fake_sync_state
-
 from monarch._src.actor.allocator import (
     ALLOC_LABEL_PROC_MESH_NAME,
     RemoteAllocator,
     StaticRemoteAllocInitializer,
     TorchXRemoteAllocInitializer,
 )
+from monarch._src.actor.sync_state import fake_sync_state
 from monarch.actor import (
     Actor,
     current_rank,

@@ -18,7 +18,6 @@ import random
 import traceback
 
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
 
 from dataclasses import dataclass
 from operator import mul
@@ -80,6 +79,7 @@ from monarch._src.actor.pdb_wrapper import PdbWrapper
 from monarch._src.actor.pickle import flatten, unflatten
 
 from monarch._src.actor.shape import MeshTrait, NDSlice
+from monarch._src.actor.sync_state import fake_sync_state
 
 if TYPE_CHECKING:
     from monarch._src.actor.proc_mesh import ProcMesh
@@ -686,16 +686,6 @@ singleton_shape = Shape([], NDSlice(offset=0, sizes=[], strides=[]))
 # We do this by blanking out the running event loop during the call to the synchronous actor function.
 
 
-@contextmanager
-def fake_sync_state():
-    prev_loop = asyncio.events._get_running_loop()
-    asyncio._set_running_loop(None)
-    try:
-        yield
-    finally:
-        asyncio._set_running_loop(prev_loop)
-
-
 class _Actor:
     """
     This is the message handling implementation of a Python actor.
@@ -836,16 +826,17 @@ class _Actor:
         from monarch._src.actor.debugger import DebugManager
 
         if (pdb_wrapper := DebugContext.get().pdb_wrapper) is not None:
-            ctx = MonarchContext.get()
-            pdb_wrapper = PdbWrapper(
-                ctx.point.rank,
-                ctx.point.shape.coordinates(ctx.point.rank),
-                ctx.mailbox.actor_id,
-                DebugManager.ref().get_debug_client.call_one().get(),
-            )
-            DebugContext.set(DebugContext(pdb_wrapper))
-            pdb_wrapper.post_mortem(exc_tb)
-            self._maybe_exit_debugger(do_continue=False)
+            with fake_sync_state():
+                ctx = MonarchContext.get()
+                pdb_wrapper = PdbWrapper(
+                    ctx.point.rank,
+                    ctx.point.shape.coordinates(ctx.point.rank),
+                    ctx.mailbox.actor_id,
+                    DebugManager.ref().get_debug_client.call_one().get(),
+                )
+                DebugContext.set(DebugContext(pdb_wrapper))
+                pdb_wrapper.post_mortem(exc_tb)
+                self._maybe_exit_debugger(do_continue=False)
 
 
 def _is_mailbox(x: object) -> bool:
