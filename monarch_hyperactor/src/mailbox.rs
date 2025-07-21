@@ -395,7 +395,7 @@ async fn recv_async(
 
 #[pymethods]
 impl PythonPortReceiver {
-    fn recv_task<'py>(&mut self) -> PyPythonTask {
+    fn recv_task(&mut self) -> PyPythonTask {
         let receiver = self.inner.clone();
         PythonTask::new(recv_async(receiver)).into()
     }
@@ -552,7 +552,7 @@ pub(super) struct PythonOncePortReceiver {
 
 #[pymethods]
 impl PythonOncePortReceiver {
-    fn recv_task<'py>(&mut self) -> PyResult<PyPythonTask> {
+    fn recv_task(&mut self) -> PyResult<PyPythonTask> {
         let Some(receiver) = self.inner.lock().unwrap().take() else {
             return Err(PyErr::new::<PyValueError, _>("OncePort is already used"));
         };
