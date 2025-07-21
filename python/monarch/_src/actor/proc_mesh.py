@@ -235,11 +235,12 @@ class ProcMesh(MeshTrait):
             self._code_sync_client = CodeSyncMeshClient.spawn_blocking(
                 proc_mesh=self._proc_mesh,
             )
-            # TODO(agallagher): Merge this into the `CodeSyncMeshClient` actor.
-            self._auto_reload_actor = await self._spawn_nonblocking(
-                "auto_reload",
-                AutoReloadActor,
-            )
+            if auto_reload:
+                # TODO(agallagher): Merge this into the `CodeSyncMeshClient` actor.
+                self._auto_reload_actor = await self._spawn_nonblocking(
+                    "auto_reload",
+                    AutoReloadActor,
+                )
         # TODO(agallagher): We need some way to configure and pass this
         # in -- right now we're assuming the `gpu` dimension, which isn't
         # correct.
