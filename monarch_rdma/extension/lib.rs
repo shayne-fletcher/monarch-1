@@ -70,7 +70,7 @@ impl PyRdmaBuffer {
     #[classmethod]
     fn create_rdma_buffer_nonblocking<'py>(
         _cls: &Bound<'_, PyType>,
-        py: Python<'py>,
+        _py: Python<'py>,
         addr: usize,
         size: usize,
         proc_id: String,
@@ -114,7 +114,7 @@ impl PyRdmaBuffer {
     #[pyo3(signature = (addr, size, local_proc_id, client, timeout))]
     fn read_into<'py>(
         &self,
-        py: Python<'py>,
+        _py: Python<'py>,
         addr: usize,
         size: usize,
         local_proc_id: String,
@@ -148,7 +148,7 @@ impl PyRdmaBuffer {
     #[pyo3(signature = (addr, size, local_proc_id, client, timeout))]
     fn write_from<'py>(
         &self,
-        py: Python<'py>,
+        _py: Python<'py>,
         addr: usize,
         size: usize,
         local_proc_id: String,
@@ -174,7 +174,7 @@ impl PyRdmaBuffer {
                 PyErr::new::<PyValueError, _>(format!("Serialization failed: {}", e))
             })?;
 
-            let args = PyTuple::new_bound(py, [json]).into_py(py);
+            let args = PyTuple::new(py, [json])?.into_py_any(py)?;
             Ok((ctor, args))
         })
     }
@@ -195,6 +195,7 @@ impl PyRdmaBuffer {
 
 #[pyclass(name = "_RdmaManager", module = "monarch._rust_bindings.rdma")]
 pub struct PyRdmaManager {
+    #[allow(dead_code)] // field never read
     inner: SharedCell<RootActorMesh<'static, RdmaManagerActor>>,
     device: String,
 }
