@@ -171,10 +171,13 @@ impl RemoteProcessAllocator {
             if let Some(active_allocation) = active_allocation.take() {
                 tracing::info!("previous alloc found, stopping");
                 active_allocation.cancel_token.cancel();
-                // should be ok to wait even if original caller has gone since heartbeat
-                // will eventually timeout and exit the loop.
-                if let Err(e) = active_allocation.handle.await {
-                    tracing::error!("allocation handler failed: {}", e);
+                match active_allocation.handle.await {
+                    Ok(_) => {
+                        tracing::info!("allocation stopped.")
+                    }
+                    Err(e) => {
+                        tracing::error!("allocation handler failed: {}", e);
+                    }
                 }
             }
         }
@@ -197,6 +200,7 @@ impl RemoteProcessAllocator {
 
                             ensure_previous_alloc_stopped(&mut active_allocation).await;
 
+                            tracing::info!("allocating...");
                             match process_allocator.allocate(spec.clone()).await {
                                 Ok(alloc) => {
                                     let cancel_token = CancellationToken::new();
@@ -259,6 +263,7 @@ impl RemoteProcessAllocator {
         heartbeat_interval: Duration,
         cancel_token: CancellationToken,
     ) {
+        tracing::info!("handle allocation request, bootstrap_addr: {bootstrap_addr}");
         // start proc message forwarder
         let (forwarder_addr, forwarder_rx) =
             match channel::serve(ChannelAddr::any(bootstrap_addr.transport())).await {
@@ -326,6 +331,7 @@ impl RemoteProcessAllocator {
         heartbeat_interval: Duration,
         cancel_token: CancellationToken,
     ) {
+        tracing::info!("starting handle allocation loop");
         let tx = match channel::dial(bootstrap_addr) {
             Ok(tx) => tx,
             Err(err) => {
@@ -417,7 +423,7 @@ impl RemoteProcessAllocator {
                 }
             }
         }
-        tracing::debug!("allocation handler loop exited");
+        tracing::info!("allocation handler loop exited");
         if running {
             tracing::info!("stopping processes");
             if let Err(e) = alloc.stop_and_wait().await {

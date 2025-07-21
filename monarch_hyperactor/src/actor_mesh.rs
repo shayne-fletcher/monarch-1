@@ -332,6 +332,10 @@ impl PythonActorMeshRef {
 
 impl Drop for PythonActorMesh {
     fn drop(&mut self) {
+        tracing::info!(
+            "Dropping PythonActorMesh: {}",
+            self.inner.borrow().unwrap().name()
+        );
         self.monitor.abort();
     }
 }
@@ -390,6 +394,7 @@ async fn get_next(
         },
         Some(event) => PyActorSupervisionEvent::from(event.clone()),
     };
+    tracing::info!("recv supervision event: {supervision_event:?}");
 
     Python::with_gil(|py| supervision_event.into_py_any(py))
 }
@@ -476,6 +481,7 @@ impl MonitoredPythonOncePortReceiver {
     name = "ActorSupervisionEvent",
     module = "monarch._rust_bindings.monarch_hyperactor.actor_mesh"
 )]
+#[derive(Debug)]
 pub struct PyActorSupervisionEvent {
     /// Actor ID of the actor where supervision event originates from.
     #[pyo3(get)]
