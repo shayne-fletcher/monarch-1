@@ -199,7 +199,7 @@ impl PythonActorMesh {
         let monitor_instance = PyActorMeshMonitor {
             receiver: SharedCell::from(Mutex::new(receiver)),
         };
-        Ok(monitor_instance.into_py(py))
+        monitor_instance.into_py_any(py)
     }
 
     #[pyo3(signature = (**kwargs))]
@@ -435,7 +435,7 @@ impl MonitoredPythonPortReceiver {
         }
     }
 
-    fn recv_task<'py>(&mut self) -> PyPythonTask {
+    fn recv_task(&mut self) -> PyPythonTask {
         let receiver = self.inner.clone();
         let monitor = self.monitor.clone();
         PythonTask::new(async move {
@@ -473,7 +473,7 @@ impl MonitoredPythonOncePortReceiver {
         }
     }
 
-    fn recv_task<'py>(&mut self) -> PyResult<PyPythonTask> {
+    fn recv_task(&mut self) -> PyResult<PyPythonTask> {
         let Some(receiver) = self.inner.lock().unwrap().take() else {
             return Err(PyErr::new::<PyValueError, _>("OncePort is already used"));
         };
