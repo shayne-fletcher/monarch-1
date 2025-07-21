@@ -39,7 +39,6 @@ use tokio::process::Command;
 
 use crate::actor::PyPythonTask;
 use crate::channel::PyChannelAddr;
-use crate::runtime::signal_safe_block_on;
 
 /// A python class that wraps a Rust Alloc trait object. It represents what
 /// is shown on the python side. Internals are not exposed.

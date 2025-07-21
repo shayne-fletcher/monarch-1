@@ -29,7 +29,6 @@ use hyperactor_mesh::shared_cell::SharedCellPool;
 use hyperactor_mesh::shared_cell::SharedCellRef;
 use monarch_types::PickledPyObject;
 use ndslice::Shape;
-use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyException;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -43,7 +42,6 @@ use crate::actor::PythonTask;
 use crate::actor_mesh::PythonActorMesh;
 use crate::alloc::PyAlloc;
 use crate::mailbox::PyMailbox;
-use crate::runtime::signal_safe_block_on;
 use crate::shape::PyShape;
 use crate::supervision::SupervisionError;
 use crate::supervision::Unhealthy;
@@ -263,7 +261,7 @@ impl PyProcMesh {
     #[classmethod]
     fn allocate_nonblocking<'py>(
         _cls: &Bound<'_, PyType>,
-        py: Python<'py>,
+        _py: Python<'py>,
         alloc: &PyAlloc,
     ) -> PyResult<PyPythonTask> {
         allocate_proc_mesh(alloc)
@@ -330,7 +328,7 @@ impl PyProcMesh {
         Ok(self.try_inner()?.shape().clone().into())
     }
 
-    fn stop_nonblocking<'py>(&self) -> PyResult<PyPythonTask> {
+    fn stop_nonblocking(&self) -> PyResult<PyPythonTask> {
         // Clone the necessary fields from self to avoid capturing self in the async block
         let inner = self.inner.clone();
         let proc_events = self.proc_events.clone();
