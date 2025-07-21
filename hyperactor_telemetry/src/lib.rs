@@ -49,7 +49,6 @@ pub use tracing::Level;
 use tracing_appender::non_blocking::NonBlocking;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::RollingFileAppender;
-use tracing_appender::rolling::Rotation;
 use tracing_glog::Glog;
 use tracing_glog::GlogFields;
 use tracing_glog::LocalTime;
