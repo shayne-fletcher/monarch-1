@@ -461,7 +461,10 @@ fn create_task_locals() -> pyo3_async_runtimes::TaskLocals {
                 .copy_context(py)
                 .unwrap();
             tx.send(task_locals).unwrap();
-            event_loop.call_method0("run_forever").unwrap();
+            if let Err(e) = event_loop.call_method0("run_forever") {
+                eprintln!("Event loop stopped with error: {:?}", e);
+            }
+            let _ = event_loop.call_method0("close");
         });
     });
     rx.recv().unwrap()
