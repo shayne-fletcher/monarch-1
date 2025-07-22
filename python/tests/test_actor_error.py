@@ -331,10 +331,21 @@ def test_python_actor_process_cleanup():
     )
 
 
+class ActorFailureError(BaseException):
+    """Exception to simulate actor failure for supervision testing.
+
+    Inherits from BaseException in order that supervision be
+    triggered.
+
+    """
+
+    pass
+
+
 class ErrorActor(Actor):
     @endpoint
-    async def fail_with_supervision_error(self) -> None:
-        sys.exit(1)
+    def fail_with_supervision_error(self) -> None:
+        raise ActorFailureError("Simulated actor failure for supervision testing")
 
     @endpoint
     async def check(self) -> str:
@@ -396,8 +407,10 @@ async def test_proc_mesh_monitoring():
     event = await anext(monitor)
     assert isinstance(event, ProcEvent.Crashed)
     assert event[0] == 0  # check rank
-    assert "sys.exit(1)" in event[1]  # check error message
-    assert "fail_with_supervision_error" in event[1]  # check error message
+    assert "ActorFailureError" in event[1]  # check error message
+    assert (
+        "Simulated actor failure for supervision testing" in event[1]
+    )  # check error message
 
     # should not be able to spawn actors anymore as proc mesh is unhealthy
     with pytest.raises(SupervisionError, match="proc mesh is stopped with reason"):
