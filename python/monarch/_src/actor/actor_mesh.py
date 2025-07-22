@@ -51,16 +51,12 @@ from monarch._rust_bindings.monarch_hyperactor.actor import (
     PythonMessage,
     PythonMessageKind,
 )
-from monarch._rust_bindings.monarch_hyperactor.actor_mesh import (
-    ActorMeshMonitor,
-    MonitoredOncePortReceiver,
-    MonitoredPortReceiver,
-    PythonActorMesh,
-)
+from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
     OncePortReceiver,
     OncePortRef,
+    PortReceiver as HyPortReceiver,
     PortRef,
 )
 
@@ -319,6 +315,9 @@ class Endpoint(ABC, Generic[P, R]):
     def _port(self, once: bool = False) -> "PortTuple[R]":
         pass
 
+    def _supervise(self, r: HyPortReceiver | OncePortReceiver) -> Any:
+        return r
+
     # the following are all 'adverbs' or different ways to handle the
     # return values of this endpoint. Adverbs should only ever take *args, **kwargs
     # of the original call. If we want to add syntax sugar for something that needs additional
@@ -401,6 +400,10 @@ class ActorEndpoint(Endpoint[P, R]):
         self._signature: inspect.Signature = inspect.signature(impl)
         self._mailbox = mailbox
 
+    def _supervise(self, r: HyPortReceiver | OncePortReceiver) -> Any:
+        mesh = self._actor_mesh._actor_mesh
+        return r if mesh is None else mesh.supervise(r)
+
     def _send(
         self,
         args: Tuple[Any, ...],
@@ -432,12 +435,12 @@ class ActorEndpoint(Endpoint[P, R]):
         return Extent(shape.labels, shape.ndslice.sizes)
 
     def _port(self, once: bool = False) -> "PortTuple[R]":
-        monitor = (
-            None
-            if self._actor_mesh._actor_mesh is None
-            else self._actor_mesh._actor_mesh.monitor()
-        )
-        return PortTuple.create(self._mailbox, monitor, once)
+        p, r = PortTuple.create(self._mailbox, once)
+        if TYPE_CHECKING:
+            assert isinstance(
+                r._receiver, (HyPortReceiver | OncePortReceiver)
+            ), "unexpected receiver type"
+        return PortTuple(p, PortReceiver(self._mailbox, self._supervise(r._receiver)))
 
 
 class Accumulator(Generic[P, R, A]):
@@ -591,18 +594,9 @@ if TYPE_CHECKING:
         receiver: "PortReceiver[R]"
 
         @staticmethod
-        def create(
-            mailbox: Mailbox, monitor: Optional[ActorMeshMonitor], once: bool = False
-        ) -> "PortTuple[Any]":
+        def create(mailbox: Mailbox, once: bool = False) -> "PortTuple[Any]":
             handle, receiver = mailbox.open_once_port() if once else mailbox.open_port()
             port_ref = handle.bind()
-            if monitor is not None:
-                receiver = (
-                    MonitoredOncePortReceiver(receiver, monitor)
-                    if isinstance(receiver, OncePortReceiver)
-                    else MonitoredPortReceiver(receiver, monitor)
-                )
-
             return PortTuple(
                 Port(port_ref, mailbox, rank=None),
                 PortReceiver(mailbox, receiver),
@@ -614,18 +608,9 @@ else:
         receiver: "PortReceiver[Any]"
 
         @staticmethod
-        def create(
-            mailbox: Mailbox, monitor: Optional[ActorMeshMonitor], once: bool = False
-        ) -> "PortTuple[Any]":
+        def create(mailbox: Mailbox, once: bool = False) -> "PortTuple[Any]":
             handle, receiver = mailbox.open_once_port() if once else mailbox.open_port()
             port_ref = handle.bind()
-            if monitor is not None:
-                receiver = (
-                    MonitoredOncePortReceiver(receiver, monitor)
-                    if isinstance(receiver, OncePortReceiver)
-                    else MonitoredPortReceiver(receiver, monitor)
-                )
-
             return PortTuple(
                 Port(port_ref, mailbox, rank=None),
                 PortReceiver(mailbox, receiver),
