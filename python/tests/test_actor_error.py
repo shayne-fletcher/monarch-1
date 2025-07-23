@@ -611,7 +611,7 @@ async def test_supervision_with_sending_error():
     with pytest.raises(
         SupervisionError, match="supervision error:.*message not delivered:"
     ):
-        await actor_mesh.check_with_payload.call(payload="a" * 2000000000)
+        await actor_mesh.check_with_payload.call(payload="a" * 5000000000)
 
     # new call should fail with check of health state of actor mesh
     with pytest.raises(SupervisionError, match="actor mesh is not in a healthy state"):
