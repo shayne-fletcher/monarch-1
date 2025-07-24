@@ -39,6 +39,7 @@ from typing import (
     Optional,
     overload,
     ParamSpec,
+    Protocol,
     Sequence,
     Tuple,
     Type,
@@ -61,6 +62,7 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
 )
 
 if TYPE_CHECKING:
+    from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
     from monarch._rust_bindings.monarch_hyperactor.mailbox import PortReceiverBase
 
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
@@ -555,7 +557,7 @@ def endpoint(method):
 class Port(Generic[R]):
     def __init__(
         self,
-        port_ref: PortRef | OncePortRef | None,
+        port_ref: PortRef | OncePortRef,
         mailbox: Mailbox,
         rank: Optional[int],
     ) -> None:
@@ -564,8 +566,6 @@ class Port(Generic[R]):
         self._rank = rank
 
     def send(self, obj: R) -> None:
-        if self._port_ref is None:
-            return
         self._port_ref.send(
             self._mailbox,
             PythonMessage(PythonMessageKind.Result(self._rank), _pickle(obj)),
@@ -574,12 +574,28 @@ class Port(Generic[R]):
     def exception(self, obj: Exception) -> None:
         # we deliver each error exactly once, so if there is no port to respond to,
         # the error is sent to the current actor as an exception.
-        if self._port_ref is None:
-            raise obj from None
         self._port_ref.send(
             self._mailbox,
             PythonMessage(PythonMessageKind.Exception(self._rank), _pickle(obj)),
         )
+
+
+class DroppingPort:
+    """
+    Used in place of a real port when the message has no response port.
+    Makes sure any exception sent to it causes the actor to report an exception.
+    """
+
+    def __init__(self):
+        pass
+
+    def send(self, obj: Any) -> None:
+        pass
+
+    def exception(self, obj: Exception) -> None:
+        # we deliver each error exactly once, so if there is no port to respond to,
+        # the error is sent to the current actor as an exception.
+        raise obj from None
 
 
 R = TypeVar("R")
@@ -704,18 +720,14 @@ class _Actor:
         mailbox: Mailbox,
         rank: int,
         shape: Shape,
-        message: PythonMessage,
+        method: str,
+        message: bytes,
         panic_flag: PanicFlag,
         local_state: Iterable[Any],
+        port: "PortProtocol",
     ) -> None:
-        match message.kind:
-            case PythonMessageKind.CallMethod(response_port=response_port):
-                pass
-            case _:
-                response_port = None
         # response_port can be None. If so, then sending to port will drop the response,
         # and raise any exceptions to the caller.
-        port = Port(response_port, mailbox, rank)
         try:
             ctx: MonarchContext = MonarchContext(
                 mailbox, mailbox.actor_id.proc_id, Point(rank, shape)
@@ -724,24 +736,19 @@ class _Actor:
 
             DebugContext.set(DebugContext())
 
-            args, kwargs = unflatten(message.message, local_state)
+            args, kwargs = unflatten(message, local_state)
 
-            match message.kind:
-                case PythonMessageKind.CallMethod(name=name):
-                    method = name
-                    if method == "__init__":
-                        Class, *args = args
-                        try:
-                            self.instance = Class(*args, **kwargs)
-                        except Exception as e:
-                            self._saved_error = ActorError(
-                                e, f"Remote actor {Class}.__init__ call failed."
-                            )
-                            raise e
-                        port.send(None)
-                        return None
-                case _:
-                    raise ValueError(f"Unexpected message kind: {message.kind}")
+            if method == "__init__":
+                Class, *args = args
+                try:
+                    self.instance = Class(*args, **kwargs)
+                except Exception as e:
+                    self._saved_error = ActorError(
+                        e, f"Remote actor {Class}.__init__ call failed."
+                    )
+                    raise e
+                port.send(None)
+                return None
 
             if self.instance is None:
                 # This could happen because of the following reasons. Both

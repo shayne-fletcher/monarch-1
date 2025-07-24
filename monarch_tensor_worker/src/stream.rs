@@ -41,7 +41,6 @@ use monarch_hyperactor::actor::PythonMessageKind;
 use monarch_hyperactor::local_state_broker::BrokerId;
 use monarch_hyperactor::local_state_broker::LocalState;
 use monarch_hyperactor::local_state_broker::LocalStateBrokerMessage;
-use monarch_hyperactor::mailbox::EitherPortRef;
 use monarch_messages::controller::ControllerMessageClient;
 use monarch_messages::controller::Seq;
 use monarch_messages::controller::WorkerError;
@@ -91,6 +90,29 @@ thread_local! {
     pub static CONTROLLER_ACTOR_REF: OnceCell<ActorRef<ControllerActor>> = const { OnceCell::new() };
     pub static PROC: OnceCell<Proc> = const { OnceCell::new() };
     pub static ROOT_ACTOR_ID: OnceCell<ActorId> = const { OnceCell::new() };
+}
+
+fn pickle_python_result(
+    py: Python<'_>,
+    result: Bound<'_, PyAny>,
+    worker_actor_id: ActorId,
+) -> Result<PythonMessage, anyhow::Error> {
+    let pickle = py
+        .import("monarch._src.actor.actor_mesh")
+        .unwrap()
+        .getattr("_pickle")
+        .unwrap();
+    let data: Vec<u8> = pickle
+        .call1((result,))
+        .map_err(|pyerr| anyhow::Error::from(SerializablePyErr::from(py, &pyerr)))?
+        .extract()
+        .unwrap();
+    Ok(PythonMessage::new_from_buf(
+        PythonMessageKind::Result {
+            rank: Some(worker_actor_id.rank()),
+        },
+        data,
+    ))
 }
 
 #[derive(Debug)]
@@ -1006,37 +1028,24 @@ impl StreamActor {
         device_meshes: HashMap<Ref, DeviceMesh>,
     ) -> Result<()> {
         self.try_define(cx, seq, vec![], &vec![], async |self_| {
-            let result = Python::with_gil(|py| -> Result<PythonMessage, CallFunctionError> {
-                let result = tokio::task::block_in_place(|| {
-                    self_.call_python_fn(
-                        py,
-                        cx,
-                        function,
-                        args,
-                        kwargs,
-                        &mutates,
-                        device_meshes,
-                        HashMap::new(),
-                    )
+            let python_message =
+                Python::with_gil(|py| -> Result<PythonMessage, CallFunctionError> {
+                    let python_result = tokio::task::block_in_place(|| {
+                        self_.call_python_fn(
+                            py,
+                            cx,
+                            function,
+                            args,
+                            kwargs,
+                            &mutates,
+                            device_meshes,
+                            HashMap::new(),
+                        )
+                    })?;
+                    pickle_python_result(py, python_result, worker_actor_id)
+                        .map_err(CallFunctionError::Error)
                 })?;
-                let pickle = py
-                    .import("monarch._src.actor.actor_mesh")
-                    .unwrap()
-                    .getattr("_pickle")
-                    .unwrap();
-                let data: Vec<u8> = pickle
-                    .call1((result,))
-                    .map_err(|pyerr| SerializablePyErr::from(py, &pyerr))?
-                    .extract()
-                    .unwrap();
-                Ok(PythonMessage::new_from_buf(
-                    PythonMessageKind::Result {
-                        rank: Some(worker_actor_id.rank()),
-                    },
-                    data,
-                ))
-            })?;
-            let ser = Serialized::serialize(&result).unwrap();
+            let ser = Serialized::serialize(&python_message).unwrap();
             self_
                 .controller_actor
                 .fetch_result(cx, seq, Ok(ser))
@@ -1676,8 +1685,6 @@ impl StreamMessageHandler for StreamActor {
         });
 
         let (send, recv) = cx.open_once_port();
-        let send = send.bind();
-        let send = EitherPortRef::Once(send.into());
 
         let state = LocalState {
             response_port: send,
@@ -1689,43 +1696,33 @@ impl StreamMessageHandler for StreamActor {
         let broker = BrokerId::new(params.broker_id).resolve(cx).unwrap();
         broker.send(message)?;
         let result = recv.recv().await?;
-        match result.kind {
-            PythonMessageKind::Exception { .. } => {
+
+        match result {
+            Err(pyerr) => {
                 // If result has "exception" as its kind, then
                 // we need to unpickle and turn it into a WorkerError
                 // and call remote_function_failed otherwise the
                 // controller assumes the object is correct and doesn't handle
                 // dependency tracking correctly.
                 let err = Python::with_gil(|py| -> Result<WorkerError, SerializablePyErr> {
-                    let err = py
-                        .import("pickle")
-                        .unwrap()
-                        .call_method1("loads", (result.message,))?;
                     Ok(WorkerError {
                         worker_actor_id,
-                        backtrace: err.to_string(),
+                        backtrace: pyerr.to_string(),
                     })
                 })?;
                 self.controller_actor
                     .remote_function_failed(cx, params.seq, err)
                     .await?;
             }
-            PythonMessageKind::Result { .. } => {
-                let result = PythonMessage::new_from_buf(
-                    PythonMessageKind::Result {
-                        rank: Some(worker_actor_id.rank()),
-                    },
-                    result.message,
-                );
+            Ok(value) => {
+                let result = Python::with_gil(|py| {
+                    pickle_python_result(py, value.into_bound(py), worker_actor_id)
+                })?;
                 let result = Serialized::serialize(&result).unwrap();
                 self.controller_actor
                     .fetch_result(cx, params.seq, Ok(result))
                     .await?;
             }
-            _ => panic!(
-                "Unexpected response kind from PythonActor: {:?}",
-                result.kind
-            ),
         }
         Ok(())
     }
