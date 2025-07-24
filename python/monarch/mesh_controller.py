@@ -39,7 +39,8 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
 from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
-from monarch._src.actor.actor_mesh import ActorEndpoint, Port, PortTuple, Selection
+from monarch._src.actor.actor_mesh import ActorEndpoint, Port, PortTuple
+from monarch._src.actor.endpoint import Selection
 from monarch._src.actor.shape import NDSlice
 from monarch.common import device_mesh, messages, stream
 from monarch.common.controller_api import TController
