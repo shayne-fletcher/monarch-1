@@ -42,10 +42,10 @@ from monarch._src.actor.actor_mesh import (
     _ActorMeshRefImpl,
     Actor,
     ActorMeshRef,
-    endpoint,
     fake_sync_state,
     MonarchContext,
 )
+
 from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator, SimAllocator
 from monarch._src.actor.code_sync import (
     CodeSyncMeshClient,
@@ -60,6 +60,8 @@ from monarch._src.actor.debugger import (
 )
 
 from monarch._src.actor.device_utils import _local_device_count
+
+from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
 from monarch._src.actor.shape import MeshTrait
 
