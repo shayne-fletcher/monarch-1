@@ -200,6 +200,7 @@ pub enum StreamMessage {
     },
 
     SetValue {
+        seq: Seq,
         results: Vec<Option<Ref>>,
         pipe: Result<PortHandle<PipeMessage>, Arc<CallFunctionError>>,
     },
@@ -338,7 +339,8 @@ impl StreamMessage {
                 factory: factory.clone(),
                 comm: comm.clone(),
             },
-            StreamMessage::SetValue { results, pipe } => StreamMessage::SetValue {
+            StreamMessage::SetValue { seq, results, pipe } => StreamMessage::SetValue {
+                seq: seq.clone(),
                 results: results.clone(),
                 pipe: pipe.clone(),
             },
@@ -646,11 +648,18 @@ impl StreamActor {
         Ok(ret)
     }
 
-    fn handle_results(
+    async fn try_define<F>(
         &mut self,
-        result_refs: &Vec<Option<Ref>>,
-        actual_results: Result<Vec<RValue>, CallFunctionError>,
-    ) -> Result<(), Arc<CallFunctionError>> {
+        cx: &Context<'_, Self>,
+        seq: Seq,
+        result_refs: Vec<Option<Ref>>,
+        mutates: &Vec<Ref>,
+        f: F,
+    ) -> Result<()>
+    where
+        F: AsyncFnOnce(&mut Self) -> Result<Vec<RValue>, CallFunctionError>,
+    {
+        let actual_results = f(self).await;
         // Check if the expected number of returns is correct, otherwise convert
         // into an error.
         let op_results = actual_results.and_then(|actual_results| {
@@ -676,22 +685,46 @@ impl StreamActor {
                     let prev = self.env.insert(ref_, Ok(rvalue));
                     assert!(prev.is_none(), "Duplicate write to reference: {:?}", ref_);
                 }
-                Ok(())
             }
             Err(err) => {
+                match err {
+                    // Do not send a response message for dependent errors, as the
+                    // original error should have already sent a message.
+                    CallFunctionError::DependentError(_) => (),
+                    // If a recording is active, the error will be reported to the controller
+                    // elsewhere.
+                    _ if self.active_recording.is_some() => (),
+                    // When no recording is active, any non-dependent error should send a
+                    // response message.
+                    _ => {
+                        let worker_error = WorkerError {
+                            backtrace: format!("{err}"),
+                            worker_actor_id: cx.self_id().clone(),
+                        };
+                        tracing::info!(
+                            "Propagating remote function error to client: {worker_error}"
+                        );
+                        self.controller_actor
+                            .remote_function_failed(cx, seq, worker_error)
+                            .await?;
+                    }
+                }
                 let err = Arc::new(err);
                 for ref_ in result_refs {
                     match ref_ {
                         Some(ref_) => {
-                            let prev = self.env.insert(*ref_, Err(err.clone()));
+                            let prev = self.env.insert(ref_, Err(err.clone()));
                             assert!(prev.is_none(), "Duplicate write to reference: {:?}", ref_);
                         }
                         None => {}
                     }
                 }
-                Err(err)
+                for ref_ in mutates {
+                    self.env.insert(*ref_, Err(err.clone()));
+                }
             }
         }
+        Ok(())
     }
 
     fn call_torch_op(
@@ -1055,64 +1088,32 @@ impl StreamMessageHandler for StreamActor {
         }
 
         params.function.panic_if_requested();
-
-        let actual_results = match params.function.as_torch_op() {
-            // Use block-in-place to allow nested callbacks to re-enter the runtime
-            // to run async code.
-            Some((op, overload)) => tokio::task::block_in_place(|| {
-                self.call_torch_op(op, overload, params.args, params.kwargs)
-            }),
-            _ => {
-                // Use block-in-place to allow nested callbacks to re-enter the
-                // runtime to run async code.
-                tokio::task::block_in_place(|| {
-                    self.call_python_fn_pytree(
-                        cx,
-                        params.function,
-                        params.args,
-                        params.kwargs,
-                        &params.mutates,
-                        device_meshes,
-                        remote_process_groups,
-                    )
-                    // TODO: Currently, we throw away the actual result and just take
-                    // the rvalues, but we probably want to fix this at some point.
-                    .map(|results| results.into_leaves())
-                })
-            }
-        };
-
-        match self.handle_results(&params.results, actual_results) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                match &*err {
-                    // Do not send a response message for dependent errors, as the
-                    // original error should have already sent a message.
-                    CallFunctionError::DependentError(_) => (),
-                    // If a recording is active, the error will be reported to the controller
-                    // elsewhere.
-                    _ if self.active_recording.is_some() => (),
-                    // When no recording is active, any non-dependent error should send a
-                    // response message.
-                    _ => {
-                        let worker_error = WorkerError {
-                            backtrace: format!("{err}"),
-                            worker_actor_id: cx.self_id().clone(),
-                        };
-                        tracing::info!(
-                            "Propagating remote function error to client: {worker_error}"
-                        );
-                        self.controller_actor
-                            .remote_function_failed(cx, params.seq, worker_error)
-                            .await?;
+        self.try_define(
+            cx,
+            params.seq,
+            params.results,
+            &params.mutates,
+            async |self| {
+                tokio::task::block_in_place(|| match params.function.as_torch_op() {
+                    Some((op, overload)) => {
+                        self.call_torch_op(op, overload, params.args, params.kwargs)
                     }
-                };
-                for ref_ in params.mutates {
-                    self.env.insert(ref_, Err(err.clone()));
-                }
-                Ok(())
-            }
-        }
+                    _ => self
+                        .call_python_fn_pytree(
+                            cx,
+                            params.function,
+                            params.args,
+                            params.kwargs,
+                            &params.mutates,
+                            device_meshes,
+                            remote_process_groups,
+                        )
+                        .map(|results| results.into_leaves()),
+                })
+            },
+        )
+        .await?;
+        Ok(())
     }
 
     async fn borrow_create(
@@ -1753,44 +1754,27 @@ impl StreamMessageHandler for StreamActor {
     async fn set_value(
         &mut self,
         cx: &Context<Self>,
+        seq: Seq,
         results: Vec<Option<Ref>>,
         pipe: Result<PortHandle<PipeMessage>, Arc<CallFunctionError>>,
     ) -> Result<()> {
         if let Some((recording, _)) = self.get_defining_recording() {
             recording
                 .messages
-                .push(StreamMessage::SetValue { results, pipe });
+                .push(StreamMessage::SetValue { seq, results, pipe });
             return Ok(());
         }
 
-        let pipe = match pipe {
-            Ok(pipe) => Ok(pipe),
-            Err(err) => match err.as_ref() {
-                CallFunctionError::DependentError(dep_err) => {
-                    Err(CallFunctionError::DependentError(dep_err.clone()))
-                }
-                _ => bail!("unexpected error for pipe in set_value: {:?}", err),
-            },
-        };
-
-        let (tx, rx) = cx.open_once_port();
-        let value = async {
-            pipe?
-                .send(PipeMessage::RecvValue(tx))
+        self.try_define(cx, seq, results, &vec![], async |self| {
+            let pipe = pipe.map_err(CallFunctionError::DependentError)?;
+            let (tx, rx) = cx.open_once_port();
+            pipe.send(PipeMessage::RecvValue(tx))
                 .map_err(anyhow::Error::from)
                 .map_err(CallFunctionError::from)?;
-            rx.recv()
-                .await
-                .map_err(anyhow::Error::from)
-                .map_err(CallFunctionError::from)
-        }
-        .await;
-
-        // Apply results to env.
-        // `handle_results` will return the error passed in, which we treat as
-        // as a value and not an actual error.
-        let _ = self.handle_results(&results, value.map(|v| v.into_leaves()));
-        Ok(())
+            let value = rx.recv().await.map_err(anyhow::Error::from)?;
+            Ok(value.into_leaves())
+        })
+        .await
     }
 
     async fn define_recording(&mut self, _cx: &Context<Self>, recording: Ref) -> Result<()> {
@@ -2161,7 +2145,6 @@ impl StreamMessageHandler for StreamActor {
 mod tests {
     use hyperactor::actor::ActorStatus;
     use hyperactor::cap;
-    use hyperactor::id;
     use hyperactor::supervision::ActorSupervisionEvent;
     use monarch_messages::controller::ControllerMessage;
     use monarch_messages::worker::StreamCreationMode;
@@ -2386,54 +2369,6 @@ mod tests {
             } => assert_eq!(seq, actual_seq),
             _ => panic!("Unexpected controller message: {:?}", controller_msg),
         };
-    }
-
-    #[async_timed_test(timeout_secs = 60)]
-    async fn test_handle_results() {
-        let controller_ref = ActorRef::attest(id!(test[0].actor[0]));
-
-        let param = StreamParams {
-            world_size: 1,
-            rank: 0,
-            creation_mode: StreamCreationMode::UseDefaultStream,
-            id: 0.into(),
-            device: None,
-            controller_actor: controller_ref,
-            respond_with_python_message: false,
-        };
-        let mut actor = StreamActor::new(param).await.unwrap();
-
-        actor
-            .handle_results(
-                &vec![Some(0.into()), Some(Ref { id: 1 })],
-                Ok(vec![RValue::Int(1), RValue::Int(2)]),
-            )
-            .unwrap();
-
-        actor
-            .handle_results(
-                &vec![Some(Ref { id: 4 }), None],
-                Ok(vec![RValue::Int(1), RValue::Int(2)]),
-            )
-            .unwrap();
-
-        assert!(
-            actor
-                .handle_results(
-                    &vec![Some(Ref { id: 2 }), Some(Ref { id: 3 })],
-                    Ok(vec![RValue::Int(1), RValue::Int(2), RValue::Int(3)]),
-                )
-                .is_err()
-        );
-
-        assert!(
-            actor
-                .handle_results(
-                    &vec![Some(Ref { id: 6 }), Some(Ref { id: 7 }), None],
-                    Ok(vec![RValue::Int(1), RValue::Int(2)]),
-                )
-                .is_err()
-        );
     }
 
     #[async_timed_test(timeout_secs = 60)]
@@ -4170,7 +4105,12 @@ mod tests {
 
         test_setup
             .stream_actor
-            .set_value(&test_setup.client, vec![Some(result_ref_0)], Ok(pipe_tx))
+            .set_value(
+                &test_setup.client,
+                0.into(),
+                vec![Some(result_ref_0)],
+                Ok(pipe_tx),
+            )
             .await?;
 
         test_setup
@@ -4275,6 +4215,7 @@ mod tests {
             .stream_actor
             .set_value(
                 &test_setup.client,
+                0.into(),
                 vec![Some(result_ref_0)],
                 Err(pipe.clone()),
             )

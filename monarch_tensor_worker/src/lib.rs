@@ -978,7 +978,7 @@ impl WorkerMessageHandler for WorkerActor {
     async fn pipe_recv(
         &mut self,
         cx: &hyperactor::Context<Self>,
-        _seq: Seq,
+        seq: Seq,
         results: Vec<Option<Ref>>,
         pipe: Ref,
         stream: StreamRef,
@@ -986,24 +986,15 @@ impl WorkerMessageHandler for WorkerActor {
         self.maybe_add_stream_to_recording(cx, stream).await?;
 
         // Get a port for the pipe
-        let pipe = match self.pipes.get(&pipe) {
-            None => Err(Arc::new(CallFunctionError::Error(anyhow::anyhow!(
-                "ref not found: {}",
-                pipe
-            )))),
-            Some(pipe) => match pipe.as_ref() {
-                Ok(pipe) => Ok(pipe.port()),
-                Err(e) => Err(Arc::new(CallFunctionError::DependentError(
-                    e.unwrap_dependent_error().unwrap_or(e.clone()),
-                ))),
-            },
-        };
-
+        let pipe = self
+            .pipes
+            .get(&pipe)
+            .ok_or_else(|| anyhow::anyhow!("ref not found: {}", pipe))?;
+        let pipe = pipe.as_ref().map(|p| p.port()).map_err(|x| x.clone());
         // Resolve the stream.
         let stream = self.try_get_stream(stream)?;
-
         // Push result into the stream.
-        stream.set_value(cx, results, pipe).await
+        stream.set_value(cx, seq, results, pipe).await
     }
 
     async fn set_ref_unit_tests_only(
