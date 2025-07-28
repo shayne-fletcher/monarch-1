@@ -19,7 +19,3 @@ members = [
     "rdmacore-sys",
     "cuda-sys",
 ]
-
-[patch.crates-io]
-rustls = { git = "https://github.com/shayne-fletcher/rustls", rev = "796f631997bff19617a890a69dbccc3ec3f51284" } # Forked while we upstream a perf fix; this is 0.21.12 + fix
-tokio-rustls = { git = "https://github.com/shayne-fletcher/tokio-rustls", rev = "62b6a48e4c14a05c193508b9d98a0be6b0cb4baa" } # Forked while we upstream a perf fix; this is v0.24.1 + fix.tokio-rustls = { git = "https://github.com/shayne-fletcher/tokio-rustls", rev = "62b6a48e4c14a05c193508b9d98a0be6b0cb4baa", features = ["dangerous_configuration"] }
