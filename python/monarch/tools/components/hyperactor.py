@@ -22,7 +22,7 @@ DEFAULT_NAME: str = f"monarch-{_USER}"
 __version__ = "latest"  # TODO get version from monarch.__version_
 
 
-def proc_mesh(
+def host_mesh(
     image: str = f"ghcr.io/pytorch-labs/monarch:{__version__}",  # TODO docker needs to be built and pushed to ghcr
     meshes: list[str] = _DEFAULT_MESHES,
     env: Optional[dict[str, str]] = None,
