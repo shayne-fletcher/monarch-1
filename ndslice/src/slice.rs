@@ -45,6 +45,9 @@ pub enum SliceError {
         end: usize,
         step: usize,
     },
+
+    #[error("dimension {dim} out of range for {ndims}-dimensional slice")]
+    DimensionOutOfRange { dim: usize, ndims: usize },
 }
 
 /// Slice is a compact representation of indices into the flat
@@ -191,6 +194,63 @@ impl Slice {
             expected_stride *= *size
         }
         true
+    }
+
+    /// Select a single index along a dimension, removing that
+    /// dimension entirely.
+    ///
+    /// This reduces the dimensionality by 1 by "fixing" one
+    /// coordinate to a specific value. Think of it like taking a
+    /// cross-section: selecting index 2 from the first dimension of a
+    /// 3D array gives you a 2D slice, like cutting a plane from a 3D
+    /// space at a fixed position.
+    ///
+    /// This reduces the dimensionality by 1 by "fixing" one
+    /// coordinate to a specific value. The fixed coordinate's
+    /// contribution (index × stride) gets absorbed into the base
+    /// offset, while the remaining dimensions keep their original
+    /// strides unchanged - they still describe the same memory
+    /// distances between elements.
+    ///
+    /// # Example intuition
+    /// - 3D array → select `at(dim=0, index=2)` → 2D slice (like a
+    ///   plane)
+    /// - 2D matrix → select `at(dim=1, index=3)` → 1D vector (like a
+    ///   column)
+    /// - 1D vector → select `at(dim=0, index=5)` → 0D scalar (single
+    ///   element)
+    ///
+    /// # Arguments
+    /// * `dim` - The dimension index to select from
+    /// * `index` - The index within that dimension
+    ///
+    /// # Returns
+    /// A new slice with one fewer dimension
+    ///
+    /// # Errors
+    /// * `IndexOutOfRange` if `dim >= self.sizes.len()` or `index >=
+    ///   self.sizes[dim]`
+    pub fn at(&self, dim: usize, index: usize) -> Result<Self, SliceError> {
+        if dim >= self.sizes.len() {
+            return Err(SliceError::DimensionOutOfRange {
+                dim,
+                ndims: self.num_dim(),
+            });
+        }
+        if index >= self.sizes[dim] {
+            return Err(SliceError::IndexOutOfRange {
+                index,
+                total: self.sizes[dim],
+            });
+        }
+
+        let new_offset = self.offset + index * self.strides[dim];
+        let mut new_sizes = self.sizes.clone();
+        let mut new_strides = self.strides.clone();
+        new_sizes.remove(dim);
+        new_strides.remove(dim);
+        let slice = Slice::new(new_offset, new_sizes, new_strides)?;
+        Ok(slice)
     }
 
     /// A slice defines a **strided view**; a triple (`offset,
@@ -862,5 +922,48 @@ mod tests {
             reshaped.location(&[5, 3]).unwrap(),
             base.location(&[1, 2, 3]).unwrap()
         );
+    }
+
+    #[test]
+    fn test_at_1d_to_0d() {
+        let slice = Slice::new_row_major(vec![5]);
+        assert_eq!(slice.num_dim(), 1);
+        assert_eq!(slice.sizes(), &[5]);
+        assert_eq!(slice.strides(), &[1]);
+
+        let result = slice.at(0, 3).unwrap();
+        assert_eq!(result.num_dim(), 0);
+        assert_eq!(result.sizes(), &[]);
+        assert_eq!(result.strides(), &[]);
+        assert_eq!(result.offset(), 3);
+        assert_eq!(result.location(&[]).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_at_2d_to_1d() {
+        let slice = Slice::new_row_major(vec![3, 4]);
+        assert_eq!(slice.num_dim(), 2);
+        assert_eq!(slice.sizes(), &[3, 4]);
+        assert_eq!(slice.strides(), &[4, 1]);
+
+        let result = slice.at(0, 1).unwrap();
+        assert_eq!(result.num_dim(), 1);
+        assert_eq!(result.sizes(), &[4]);
+        assert_eq!(result.strides(), &[1]);
+        assert_eq!(result.offset(), 4);
+    }
+
+    #[test]
+    fn test_at_3d_to_2d() {
+        let slice = Slice::new_row_major(vec![2, 3, 4]);
+        assert_eq!(slice.num_dim(), 3);
+        assert_eq!(slice.sizes(), &[2, 3, 4]);
+        assert_eq!(slice.strides(), &[12, 4, 1]);
+
+        let result = slice.at(0, 1).unwrap();
+        assert_eq!(result.num_dim(), 2);
+        assert_eq!(result.sizes(), &[3, 4]);
+        assert_eq!(result.strides(), &[4, 1]);
+        assert_eq!(result.offset(), 12);
     }
 }
