@@ -1710,7 +1710,8 @@ mod tests {
         )
         .await
         .unwrap();
-        let params = PingPongActorParams::new(None, None);
+        let (undeliverable_msg_tx, _) = system_client.open_port();
+        let params = PingPongActorParams::new(Some(undeliverable_msg_tx.bind()), None);
         let actor_ref = spawn::<PingPongActor>(
             &system_client,
             &bootstrap.proc_actor.bind(),
