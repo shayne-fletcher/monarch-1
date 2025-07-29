@@ -42,12 +42,12 @@ use crate::mailbox::PythonOncePortReceiver;
 use crate::mailbox::PythonPortReceiver;
 use crate::proc::PyActorId;
 use crate::proc_mesh::Keepalive;
+use crate::pytokio::PyPythonTask;
+use crate::pytokio::PythonTask;
 use crate::selection::PySelection;
 use crate::shape::PyShape;
 use crate::supervision::SupervisionError;
 use crate::supervision::Unhealthy;
-use crate::tokio::PyPythonTask;
-use crate::tokio::PythonTask;
 
 #[pyclass(
     name = "PythonActorMesh",
