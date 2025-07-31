@@ -54,6 +54,9 @@ use tokio::task::JoinHandle;
 
 use crate::bootstrap::BOOTSTRAP_LOG_CHANNEL;
 
+mod line_prefixing_writer;
+use line_prefixing_writer::LinePrefixingWriter;
+
 const DEFAULT_AGGREGATE_WINDOW_SEC: u64 = 5;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -399,8 +402,8 @@ pub fn get_local_log_destination(
 ) -> Result<Box<dyn io::AsyncWrite + Send + Unpin>> {
     Ok(match env::Env::current() {
         env::Env::Local | env::Env::MastEmulator | env::Env::Test => match output_target {
-            OutputTarget::Stdout => Box::new(io::stdout()),
-            OutputTarget::Stderr => Box::new(io::stderr()),
+            OutputTarget::Stdout => Box::new(LinePrefixingWriter::new(local_rank, io::stdout())),
+            OutputTarget::Stderr => Box::new(LinePrefixingWriter::new(local_rank, io::stderr())),
         },
         env::Env::Mast => create_file_writer(local_rank, output_target)?,
     })
