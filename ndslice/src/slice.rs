@@ -363,15 +363,110 @@ impl Slice {
         Ok(result)
     }
 
+    /// The total length of the slice's indices.
+    pub fn len(&self) -> usize {
+        self.sizes.iter().product()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Iterator over the slice's indices.
+    pub fn iter(&self) -> SliceIterator {
+        SliceIterator {
+            slice: self,
+            pos: CartesianIterator::new(&self.sizes),
+        }
+    }
+
+    /// Iterator over sub-dimensions of the slice.
+    pub fn dim_iter(&self, dims: usize) -> DimSliceIterator {
+        DimSliceIterator {
+            pos: CartesianIterator::new(&self.sizes[0..dims]),
+        }
+    }
+
+    /// The linear index formula calculates the logical rank of a
+    /// multidimensional point in a row-major flattened array,
+    /// assuming dense gapless storage with zero offset:
+    ///
+    /// ```lang=text
+    ///     index := Σ(coordinate[i] × ∏(sizes[j] for j > i))
+    /// ```
+    ///
+    /// For example, given a 3x2 row-major base array B:
+    ///
+    /// ```lang=text
+    ///       0 1 2         1
+    /// B =   3 4 5    V =  4
+    ///       6 7 8         7
+    /// ```
+    ///
+    /// Let V be the first column of B. Then,
+    ///
+    /// ```lang=text
+    /// V      | loc   | index
+    /// -------+-------+------
+    /// (0, 0) |  1    | 0
+    /// (1, 0) |  4    | 1
+    /// (2, 0) |  7    | 2
+    /// ```
+    ///
+    /// # Conditions Under Which `loc = index`
+    ///
+    /// The physical offset formula computes the memory location of a
+    /// point `p` as:
+    ///
+    /// ```lang=text
+    /// loc := offset + Σ(coordinate[i] × stride[i])
+    /// ```
+    ///
+    /// Let the layout be dense row-major and offset = 0.
+    /// Then,
+    ///
+    /// ```lang=text
+    /// stride[i] := ∏(sizes[j] for j > i).
+    /// ```
+    /// and substituting into the physical offset formula:
+    ///
+    /// ```lang=text
+    ///   loc = Σ(coordinate[i] × stride[i])
+    ///       = Σ(coordinate[i] × ∏(sizes[j] for j > i))
+    ///       = index.
+    /// ```
+    ///
+    /// Thus, ∀ p = (i, j) ∈ B, loc_B(p) = index_B(p).
+    ///
+    /// # See also
+    ///
+    /// The [`get`] function performs an inverse operation: given a
+    /// logical index in row-major order, it computes the physical
+    /// memory offset according to the slice layout. So, if the layout
+    /// is row-major then `s.get(s.index(loc)) = loc`.
+    pub fn index(&self, value: usize) -> Result<usize, SliceError> {
+        let coords = self.coordinates(value)?;
+        let mut stride = 1;
+        let mut result = 0;
+
+        for (idx, size) in coords.iter().rev().zip(self.sizes.iter().rev()) {
+            result += *idx * stride;
+            stride *= size;
+        }
+
+        Ok(result)
+    }
+
     /// Given a logical index (in row-major order), return the
     /// physical memory offset of that element according to this
     /// slice’s layout.
     ///
     /// The index is interpreted as a position in row-major traversal
-    /// — that is, iterating across columns within rows. This method
-    /// decodes the index into a multidimensional coordinate, and then
-    /// applies the slice’s `strides` to compute the memory offset of
-    /// that coordinate.
+    /// that is, iterating across columns within rows. This method
+    /// converts logical row-major index to physical offset by:
+    ///
+    /// 1. Decomposing index into multidimensional coordinates
+    /// 2. Computing offset = base + Σ(coordinate[i] × stride[i])
     ///
     /// For example, with shape `[3, 4]` (3 rows, 4 columns) and
     /// column-major layout:
@@ -403,7 +498,15 @@ impl Slice {
     ///   index = 1  → coordinate [0, 1]  → offset = 0*1 + 1*3 = 3
     /// ```
     ///
+    /// # Errors
+    ///
     /// Returns an error if `index >= product(sizes)`.
+    ///
+    /// # See also
+    ///
+    /// The [`index`] function performs an inverse operation: given a
+    /// memory offset, it returns the logical position of that element
+    /// in the slice's row-major iteration order.
     pub fn get(&self, index: usize) -> Result<usize, SliceError> {
         let mut val = self.offset;
         let mut rest = index;
@@ -418,45 +521,6 @@ impl Slice {
         } else {
             Err(SliceError::IndexOutOfRange { index, total })
         }
-    }
-
-    /// The total length of the slice's indices.
-    pub fn len(&self) -> usize {
-        self.sizes.iter().product()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Iterator over the slice's indices.
-    pub fn iter(&self) -> SliceIterator {
-        SliceIterator {
-            slice: self,
-            pos: CartesianIterator::new(&self.sizes),
-        }
-    }
-
-    /// Iterator over sub-dimensions of the slice.
-    pub fn dim_iter(&self, dims: usize) -> DimSliceIterator {
-        DimSliceIterator {
-            pos: CartesianIterator::new(&self.sizes[0..dims]),
-        }
-    }
-
-    /// Returns the index into the flattened representation of `self` where
-    /// `self[index] == value`.
-    pub fn index(&self, value: usize) -> Result<usize, SliceError> {
-        let coords = self.coordinates(value)?;
-        let mut stride = 1;
-        let mut result = 0;
-
-        for (idx, size) in coords.iter().rev().zip(self.sizes.iter().rev()) {
-            result += *idx * stride;
-            stride *= size;
-        }
-
-        Ok(result)
     }
 
     /// The returned [`MapSlice`] is a view of this slice, with its elements
@@ -965,5 +1029,42 @@ mod tests {
         assert_eq!(result.sizes(), &[3, 4]);
         assert_eq!(result.strides(), &[4, 1]);
         assert_eq!(result.offset(), 12);
+    }
+
+    #[test]
+    fn test_get_index_inverse_relationship() {
+        // Start with a 3 x 3 dense row major matrix.
+        //
+        // 0 1 2
+        // 3 4 5
+        // 6 7 8
+        let m = Slice::new_row_major([3, 3]);
+        assert_eq!(m.offset, 0);
+        assert_eq!(m.sizes(), &[3, 3]);
+        assert_eq!(m.strides(), &[3, 1]);
+
+        // Slice `m` is 0-offset, row-major, dense, gapless.
+        for loc in m.iter() {
+            // ∀ `loc` ∈ `m`, `m.index(loc) == loc`.
+            assert_eq!(m.index(loc).unwrap(), loc);
+            // ∀ `loc` ∈ `m`, `m.get(m.index(loc)) == loc`.
+            assert_eq!(m.get(m.index(loc).unwrap()).unwrap(), loc);
+        }
+
+        // Slice out the middle column.
+        //    1
+        //    4
+        //    7
+        let c = m.select(1, 1, 2, 1).unwrap();
+        assert_eq!(c.sizes(), &[3, 1]);
+        assert_eq!(c.strides(), &[3, 1]);
+
+        // Slice `c` has a non-zero offset.
+        for loc in c.iter() {
+            // Local rank of `loc` in `c` != loc.
+            assert_ne!(c.index(loc).unwrap(), loc);
+            // ∀ `loc` ∈ `c`, `c.get(c.index(loc)) == loc`.
+            assert_eq!(c.get(c.index(loc).unwrap()).unwrap(), loc);
+        }
     }
 }
