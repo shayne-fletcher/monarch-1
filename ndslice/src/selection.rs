@@ -1142,16 +1142,27 @@ impl ReifyView for Slice {
 
         let origin = self.coordinates(view.offset())?;
         let mut acc = dsl::true_();
-        for ((&start, &len), (&view_stride, &base_stride)) in origin
-            .iter()
-            .zip(view.sizes())
-            .zip(view.strides().iter().zip(self.strides()))
-            .rev()
-        {
+        for dim in (0..self.num_dim()).rev() {
+            let start = origin[dim];
+            let len = view.sizes()[dim];
+            let view_stride = view.strides()[dim];
+            let base_stride = self.strides()[dim];
+
             if view_stride % base_stride == 0 {
                 // Layout-aligned with base.
                 let step = view_stride / base_stride;
                 let end = start + step * len;
+                // Check that `end` is within bounds.
+                if end - 1 > self.sizes()[dim] {
+                    let bad = origin
+                        .iter()
+                        .enumerate()
+                        .map(|(d, &x)| if d == dim { end } else { x })
+                        .collect::<Vec<_>>();
+                    return Err(SliceError::ValueNotInSlice {
+                        value: self.location(&bad).unwrap(),
+                    });
+                }
                 acc = dsl::range(crate::shape::Range(start, Some(end), step), acc);
             } else {
                 // Irregular layout; fallback to explicit enumeration.
