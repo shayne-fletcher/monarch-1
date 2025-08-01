@@ -327,13 +327,21 @@ impl Point {
     pub fn len(&self) -> usize {
         self.coords.len()
     }
+
+    /// Is this the 0d constant `[]`?
+    pub fn is_empty(&self) -> bool {
+        self.coords.is_empty()
+    }
 }
 
 impl Index<usize> for Point {
     type Output = usize;
 
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.coords[index]
+    /// Returns the coordinate value for the given dimension index.
+    /// This allows using `point[0]` syntax instead of
+    /// `point.coords()[0]`.
+    fn index(&self, dim: usize) -> &Self::Output {
+        &self.coords[dim]
     }
 }
 
@@ -660,5 +668,23 @@ mod test {
             0 => 0;
             1 => 2;
         );
+    }
+
+    fn test_point_indexing() {
+        let extent = Extent::new(vec!["x".into(), "y".into(), "z".into()], vec![4, 5, 6]).unwrap();
+        let point = extent.point(vec![1, 2, 3]).unwrap();
+
+        assert_eq!(point[0], 1);
+        assert_eq!(point[1], 2);
+        assert_eq!(point[2], 3);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_point_indexing_out_of_bounds() {
+        let extent = Extent::new(vec!["x".into(), "y".into()], vec![4, 5]).unwrap();
+        let point = extent.point(vec![1, 2]).unwrap();
+
+        let _ = point[5]; // Should panic
     }
 }
