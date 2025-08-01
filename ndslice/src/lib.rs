@@ -46,6 +46,11 @@ pub use shape::Range;
 pub use shape::Shape;
 /// Errors that can occur during shape construction or validation.
 pub use shape::ShapeError;
+pub use view::Extent;
+pub use view::Point;
+pub use view::View;
+pub use view::ViewExt;
+pub use view::Viewable;
 
 /// Property-based generators for randomized test input.
 #[cfg(test)]

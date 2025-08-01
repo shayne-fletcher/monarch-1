@@ -15,6 +15,7 @@ use crate::DimSliceIterator;
 use crate::Slice;
 use crate::SliceError;
 use crate::selection::Selection;
+use crate::view::Extent;
 
 // We always retain dimensions here even if they are selected out.
 
@@ -195,6 +196,11 @@ impl Shape {
     /// Return the 0-dimensional single element shape
     pub fn unity() -> Shape {
         Shape::new(vec![], Slice::new(0, vec![], vec![]).expect("unity")).expect("unity")
+    }
+
+    /// The extent corresponding to this shape.
+    pub fn extent(&self) -> Extent {
+        Extent::new(self.labels.clone(), self.slice.sizes().to_vec()).unwrap()
     }
 }
 

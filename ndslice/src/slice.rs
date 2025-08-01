@@ -138,6 +138,16 @@ impl Slice {
         })
     }
 
+    /// Deconstruct the slice into its offset, sizes, and strides.
+    pub fn into_inner(self) -> (usize, Vec<usize>, Vec<usize>) {
+        let Slice {
+            offset,
+            sizes,
+            strides,
+        } = self;
+        (offset, sizes, strides)
+    }
+
     /// Create a new slice of the given sizes in row-major order.
     pub fn new_row_major(sizes: impl Into<Vec<usize>>) -> Self {
         let sizes = sizes.into();
@@ -424,12 +434,10 @@ impl Slice {
     ///
     /// Let the layout be dense row-major and offset = 0.
     /// Then,
-    ///
     /// ```lang=text
     /// stride[i] := ∏(sizes[j] for j > i).
     /// ```
     /// and substituting into the physical offset formula:
-    ///
     /// ```lang=text
     ///   loc = Σ(coordinate[i] × stride[i])
     ///       = Σ(coordinate[i] × ∏(sizes[j] for j > i))
@@ -663,7 +671,7 @@ impl<'a> IntoIterator for &'a Slice {
 }
 
 pub struct SliceIterator<'a> {
-    slice: &'a Slice,
+    pub(crate) slice: &'a Slice,
     pos: CartesianIterator<'a>,
 }
 
@@ -711,13 +719,13 @@ impl<'a> Iterator for DimSliceIterator<'a> {
 ///     vec![1, 0], vec![1, 1], vec![1, 2],
 /// ]);
 /// ```
-struct CartesianIterator<'a> {
+pub(crate) struct CartesianIterator<'a> {
     dims: &'a [usize],
     index: usize,
 }
 
 impl<'a> CartesianIterator<'a> {
-    fn new(dims: &'a [usize]) -> Self {
+    pub(crate) fn new(dims: &'a [usize]) -> Self {
         CartesianIterator { dims, index: 0 }
     }
 }
