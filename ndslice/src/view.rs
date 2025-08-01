@@ -7,6 +7,7 @@
  */
 
 use std::ops::Index;
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -41,22 +42,29 @@ pub enum ExtentError {
 ///
 /// Conceptually, it corresponds to a coordinate space in the
 /// mathematical sense.
-///
-/// Internally, `Extent` is represented as:
-/// - `labels`: dimension names like `"zone"`, `"host"`, `"gpu"`
-/// - `sizes`: number of elements in each dimension, independent of
-///            stride or storage layout
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Hash, Debug)]
 pub struct Extent {
+    inner: Arc<ExtentData>,
+}
+
+fn _assert_extent_traits()
+where
+    Extent: Send + Sync + 'static,
+{
+}
+
+// `ExtentData` is represented as:
+// - `labels`: dimension names like `"zone"`, `"host"`, `"gpu"`
+// - `sizes`: number of elements in each dimension, independent of
+//   stride or storage layout
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Hash, Debug)]
+struct ExtentData {
     labels: Vec<String>,
     sizes: Vec<usize>,
 }
 
 impl Extent {
     /// Creates a new `Extent` from the given labels and sizes.
-    ///
-    /// Returns an error if the number of labels and sizes do not
-    /// match.
     pub fn new(labels: Vec<String>, sizes: Vec<usize>) -> Result<Self, ExtentError> {
         if labels.len() != sizes.len() {
             return Err(ExtentError::DimMismatch {
@@ -65,34 +73,36 @@ impl Extent {
             });
         }
 
-        Ok(Self { labels, sizes })
+        Ok(Self {
+            inner: Arc::new(ExtentData { labels, sizes }),
+        })
     }
 
     /// Returns the ordered list of dimension labels in this extent.
     pub fn labels(&self) -> &[String] {
-        &self.labels
+        &self.inner.labels
     }
 
     /// Returns the dimension sizes, ordered to match the labels.
     pub fn sizes(&self) -> &[usize] {
-        &self.sizes
+        &self.inner.sizes
     }
 
     /// Returns the size of the dimension with the given label, if it
     /// exists.
-    pub fn get(&self, label: &str) -> Option<usize> {
-        self.position(label).map(|pos| self.sizes[pos])
+    pub fn size(&self, label: &str) -> Option<usize> {
+        self.position(label).map(|pos| self.sizes()[pos])
     }
 
-    /// Returns the position of the dimension with the given label, if it exists
-    /// exists.
+    /// Returns the position of the dimension with the given label, if
+    /// it exists exists.
     pub fn position(&self, label: &str) -> Option<usize> {
-        self.labels.iter().position(|l| l == label)
+        self.labels().iter().position(|l| l == label)
     }
 
     /// Returns the number of dimensions in this extent.
     pub fn num_dim(&self) -> usize {
-        self.labels.len()
+        self.labels().len()
     }
 
     /// Creates a `Point` in this extent with the given coordinates.
@@ -109,7 +119,9 @@ impl Extent {
 
         Ok(Point {
             coords,
-            extent: self.clone(),
+            extent: Extent {
+                inner: Arc::clone(&self.inner),
+            },
         })
     }
 
@@ -122,7 +134,7 @@ impl Extent {
             });
         }
 
-        let mut stride: usize = self.sizes.iter().product();
+        let mut stride: usize = self.sizes().iter().product();
         let mut coords = vec![0; self.num_dim()];
         for (i, size) in self.sizes().iter().enumerate() {
             stride /= size;
@@ -136,47 +148,43 @@ impl Extent {
         })
     }
 
-    /// Truncate the extent to the first `len` dimensions, discarding the rest.
-    pub fn truncate(&mut self, len: usize) {
-        self.sizes.truncate(len);
-        self.labels.truncate(len);
-    }
-
     /// The total size of the extent.
     pub fn len(&self) -> usize {
-        self.sizes.iter().product()
+        self.sizes().iter().product()
     }
 
-    /// Whether the extent is empty
+    /// Whether the extent is empty.
     pub fn is_empty(&self) -> bool {
-        self.sizes.iter().all(|&s| s == 0)
+        self.sizes().iter().all(|&s| s == 0)
     }
 
     /// Convert this extent into its labels and sizes.
     pub fn into_inner(self) -> (Vec<String>, Vec<usize>) {
-        let Self { labels, sizes } = self;
-        (labels, sizes)
+        match Arc::try_unwrap(self.inner) {
+            Ok(data) => (data.labels, data.sizes),
+            Err(shared) => (shared.labels.clone(), shared.sizes.clone()),
+        }
     }
 
     /// Creates a slice representing the full extent.
     pub fn to_slice(&self) -> Slice {
-        Slice::new_row_major(self.sizes.clone())
+        Slice::new_row_major(self.sizes())
     }
 
     /// Iterate points in this extent.
     pub fn iter(&self) -> ExtentIterator {
         ExtentIterator {
             extent: self,
-            pos: CartesianIterator::new(&self.sizes),
+            pos: CartesianIterator::new(&self.sizes()),
         }
     }
 }
 
 impl std::fmt::Display for Extent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let n = self.sizes.len();
+        let n = self.sizes().len();
         for i in 0..n {
-            write!(f, "{}={}", self.labels[i], self.sizes[i])?;
+            write!(f, "{}={}", self.labels()[i], self.sizes()[i])?;
             if i != n - 1 {
                 write!(f, ",")?;
             }
@@ -244,6 +252,12 @@ pub struct Point {
     extent: Extent,
 }
 
+fn _assert_point_traits()
+where
+    Point: Send + Sync + 'static,
+{
+}
+
 /// Extension trait for creating a `Point` from a coordinate vector
 /// and an `Extent`.
 ///
@@ -264,7 +278,7 @@ pub trait InExtent {
 }
 
 impl InExtent for Vec<usize> {
-    /// Creates a `Point` with this coordinate vector in the given
+    /// Creates a `Point` with the provided coordinates in the given
     /// extent.
     ///
     /// Delegates to `Extent::point`.
@@ -274,20 +288,6 @@ impl InExtent for Vec<usize> {
 }
 
 impl Point {
-    /// Creates a new `Point`. Most users should prefer
-    /// `Extent::point`.
-    #[allow(dead_code)]
-    fn new(coords: Vec<usize>, extent: Extent) -> Result<Self, PointError> {
-        if coords.len() != extent.num_dim() {
-            return Err(PointError::DimMismatch {
-                expected: extent.num_dim(),
-                actual: coords.len(),
-            });
-        }
-
-        Ok(Point { coords, extent })
-    }
-
     /// Returns a reference to the coordinate vector for this point.
     pub fn coords(&self) -> &Vec<usize> {
         &self.coords
@@ -327,11 +327,6 @@ impl Point {
     pub fn len(&self) -> usize {
         self.coords.len()
     }
-
-    /// Whether the point is empty.
-    pub fn is_empty(&self) -> bool {
-        self.coords.is_empty()
-    }
 }
 
 impl Index<usize> for Point {
@@ -346,7 +341,7 @@ impl std::fmt::Display for Point {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let n = self.coords.len();
         for i in 0..n {
-            write!(f, "{}={}", self.extent.labels[i], self.coords[i])?;
+            write!(f, "{}={}", self.extent.labels()[i], self.coords[i])?;
             if i != n - 1 {
                 write!(f, ",")?;
             }
@@ -437,7 +432,7 @@ impl Viewable for View {
 
 impl Viewable for Extent {
     fn labels(&self) -> Vec<String> {
-        self.labels.clone()
+        self.labels().to_vec()
     }
 
     fn slice(&self) -> Slice {
