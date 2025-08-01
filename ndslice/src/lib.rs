@@ -46,11 +46,6 @@ pub use shape::Range;
 pub use shape::Shape;
 /// Errors that can occur during shape construction or validation.
 pub use shape::ShapeError;
-pub use view::Extent;
-pub use view::Point;
-pub use view::View;
-pub use view::ViewExt;
-pub use view::Viewable;
 
 /// Property-based generators for randomized test input.
 #[cfg(test)]
@@ -61,3 +56,21 @@ pub mod utils;
 
 /// Types to describe extents, points and views.
 pub mod view;
+/// Describes the shape of a coordinate space.
+pub use view::Extent;
+/// Errors that can occur during extent construction or validation.
+pub use view::ExtentError;
+/// Extension trait for creating points from coordinate vectors.
+pub use view::InExtent;
+/// Representation of a point in a coordinate space.
+pub use view::Point;
+/// Errors that can occur during point construction or validation.
+pub use view::PointError;
+/// Represents a logical view or projection.
+pub use view::View;
+/// Extension methods for view construction.
+pub use view::ViewExt;
+/// The iterator over views.
+pub use view::ViewIterator;
+/// Trait for data structures from which views can be created.
+pub use view::Viewable;
