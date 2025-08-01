@@ -252,6 +252,30 @@ pub struct Point {
     extent: Extent,
 }
 
+impl Index<usize> for Point {
+    type Output = usize;
+
+    /// Returns the coordinate value for the given dimension index.
+    /// This allows using `point[0]` syntax instead of
+    /// `point.coords()[0]`.
+    fn index(&self, dim: usize) -> &Self::Output {
+        &self.coords[dim]
+    }
+}
+
+impl<'a> IntoIterator for &'a Point {
+    type Item = usize;
+    type IntoIter = std::iter::Cloned<std::slice::Iter<'a, usize>>;
+
+    /// Iterates over the coordinate values of this point.
+    ///
+    /// This allows using `for coord in &point { ... }` syntax to
+    /// iterate through each dimension's coordinate value.
+    fn into_iter(self) -> Self::IntoIter {
+        self.coords.iter().cloned()
+    }
+}
+
 fn _assert_point_traits()
 where
     Point: Send + Sync + 'static,
@@ -331,17 +355,6 @@ impl Point {
     /// Is this the 0d constant `[]`?
     pub fn is_empty(&self) -> bool {
         self.coords.is_empty()
-    }
-}
-
-impl Index<usize> for Point {
-    type Output = usize;
-
-    /// Returns the coordinate value for the given dimension index.
-    /// This allows using `point[0]` syntax instead of
-    /// `point.coords()[0]`.
-    fn index(&self, dim: usize) -> &Self::Output {
-        &self.coords[dim]
     }
 }
 
@@ -686,5 +699,42 @@ mod test {
         let point = extent.point(vec![1, 2]).unwrap();
 
         let _ = point[5]; // Should panic
+    }
+
+    #[test]
+    fn test_point_into_iter() {
+        let extent = Extent::new(vec!["x".into(), "y".into(), "z".into()], vec![4, 5, 6]).unwrap();
+        let point = extent.point(vec![1, 2, 3]).unwrap();
+
+        let coords: Vec<usize> = (&point).into_iter().collect();
+        assert_eq!(coords, vec![1, 2, 3]);
+
+        let mut sum = 0;
+        for coord in &point {
+            sum += coord;
+        }
+        assert_eq!(sum, 6);
+    }
+
+    #[test]
+    fn test_extent_display() {
+        let extent = Extent::new(vec!["x".into(), "y".into(), "z".into()], vec![4, 5, 6]).unwrap();
+        assert_eq!(format!("{}", extent), "x=4,y=5,z=6");
+
+        let empty_extent = Extent::new(vec![], vec![]).unwrap();
+        assert_eq!(format!("{}", empty_extent), "");
+    }
+
+    #[test]
+    fn test_point_display() {
+        let extent = Extent::new(vec!["x".into(), "y".into(), "z".into()], vec![4, 5, 6]).unwrap();
+        let point = extent.point(vec![1, 2, 3]).unwrap();
+        assert_eq!(format!("{}", point), "x=1,y=2,z=3");
+
+        assert!(extent.point(vec![]).is_err());
+
+        let empty_extent = Extent::new(vec![], vec![]).unwrap();
+        let empty_point = empty_extent.point(vec![]).unwrap();
+        assert_eq!(format!("{}", empty_point), "");
     }
 }
