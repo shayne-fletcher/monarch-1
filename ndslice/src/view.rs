@@ -683,6 +683,7 @@ mod test {
         );
     }
 
+    #[test]
     fn test_point_indexing() {
         let extent = Extent::new(vec!["x".into(), "y".into(), "z".into()], vec![4, 5, 6]).unwrap();
         let point = extent.point(vec![1, 2, 3]).unwrap();
