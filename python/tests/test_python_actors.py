@@ -21,6 +21,7 @@ from typing import cast
 import pytest
 
 import torch
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 
 from monarch._src.actor.actor_mesh import ActorMeshRef, Port, PortTuple
 
@@ -598,3 +599,16 @@ def test_ported_actor():
     proc_mesh = local_proc_mesh(gpus=1).get()
     a = proc_mesh.spawn("port_actor", PortedActor).get()
     assert 5 == a.add.call_one(2).get()
+
+
+async def _recv():
+    return (7, 2, 3)
+
+
+async def consume():
+    r = await PythonTask.from_coroutine(_recv())
+    assert r == (7, 2, 3)
+
+
+def test_python_task_tuple() -> None:
+    PythonTask.from_coroutine(consume()).block_on()

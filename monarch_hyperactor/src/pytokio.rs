@@ -85,7 +85,7 @@ impl PythonTaskAwaitIterator {
     fn send(&mut self, value: PyObject) -> PyResult<PyObject> {
         self.value
             .take()
-            .ok_or_else(|| PyStopIteration::new_err(value))
+            .ok_or_else(|| PyStopIteration::new_err((value,)))
     }
     fn throw(&mut self, value: PyObject) -> PyResult<PyObject> {
         Err(Python::with_gil(|py| {
