@@ -170,10 +170,9 @@ class TestSetupActorInAllocator(unittest.IsolatedAsyncioTestCase):
 
         spec = AllocSpec(AllocConstraints(), gpus=1, hosts=1)
         allocator = LocalAllocator()
-        alloc = await allocator.allocate(spec)
+        alloc = allocator.allocate(spec)
 
-        proc_mesh = await ProcMesh.from_alloc(alloc, setup=setup_multiple_env_vars)
-
+        proc_mesh = ProcMesh.from_alloc(alloc, setup=setup_multiple_env_vars)
         try:
             actor = await proc_mesh.spawn("env_check", EnvCheckActor)
 
@@ -197,9 +196,9 @@ class TestSetupActorInAllocator(unittest.IsolatedAsyncioTestCase):
 
         spec = AllocSpec(AllocConstraints(), gpus=1, hosts=1)
         allocator = LocalAllocator()
-        alloc = await allocator.allocate(spec)
+        alloc = allocator.allocate(spec)
 
-        proc_mesh = await ProcMesh.from_alloc(alloc, setup=setup_with_rank)
+        proc_mesh = ProcMesh.from_alloc(alloc, setup=setup_with_rank)
 
         try:
             actor = await proc_mesh.spawn("env_check", EnvCheckActor)
@@ -325,8 +324,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 initializer=StaticRemoteAllocInitializer(host1, host2),
                 heartbeat_interval=_100_MILLISECONDS,
             )
-            alloc = await allocator.allocate(spec)
-            proc_mesh = await ProcMesh.from_alloc(alloc)
+            alloc = allocator.allocate(spec)
+            proc_mesh = ProcMesh.from_alloc(alloc)
             actor = await proc_mesh.spawn("test_actor", TestActor)
 
             values = await actor.compute_world_size.call(
@@ -345,8 +344,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 heartbeat_interval=_100_MILLISECONDS,
             )
 
-            alloc = await allocator.allocate(spec)
-            proc_mesh = await ProcMesh.from_alloc(alloc)
+            alloc = allocator.allocate(spec)
+            proc_mesh = ProcMesh.from_alloc(alloc)
             # XXX - it is not clear why this trying to use
             # async code in a sync context.
             with fake_sync_state():
@@ -396,7 +395,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 heartbeat_interval=_100_MILLISECONDS,
             )
             spec = AllocSpec(AllocConstraints(), host=2, gpu=2)
-            proc_mesh = await ProcMesh.from_alloc(await allocator.allocate(spec))
+            proc_mesh = ProcMesh.from_alloc(allocator.allocate(spec))
             actor_mesh = await proc_mesh.spawn("actor", FailInitActor)
 
             with self.assertRaisesRegex(
@@ -415,8 +414,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 initializer=StaticRemoteAllocInitializer(host1, host2),
                 heartbeat_interval=_100_MILLISECONDS,
             )
-            alloc = await allocator.allocate(spec)
-            proc_mesh = await ProcMesh.from_alloc(alloc)
+            alloc = allocator.allocate(spec)
+            proc_mesh = ProcMesh.from_alloc(alloc)
             actor = await proc_mesh.spawn("test_actor", TestActor)
 
             await proc_mesh.stop()
@@ -441,8 +440,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 initializer=StaticRemoteAllocInitializer(host1, host2),
                 heartbeat_interval=_100_MILLISECONDS,
             )
-            alloc = await allocator.allocate(spec)
-            proc_mesh = await ProcMesh.from_alloc(alloc)
+            alloc = allocator.allocate(spec)
+            proc_mesh = ProcMesh.from_alloc(alloc)
             with self.assertRaises(ValueError, msg="foo"):
                 async with proc_mesh:
                     actor = await proc_mesh.spawn("test_actor", TestActor)
@@ -477,9 +476,9 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 initializer=StaticRemoteAllocInitializer(host1, host2),
                 heartbeat_interval=_100_MILLISECONDS,
             )
-            alloc = await allocator.allocate(spec)
-            proc_mesh = await ProcMesh.from_alloc(alloc, setup=setup_env_vars)
-
+            alloc = allocator.allocate(spec)
+            proc_mesh = ProcMesh.from_alloc(alloc, setup=setup_env_vars)
+            await proc_mesh.initialized
             try:
                 actor = await proc_mesh.spawn("env_check", EnvCheckActor)
 
@@ -504,8 +503,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 initializer=StaticRemoteAllocInitializer(host1, host2),
                 heartbeat_interval=_100_MILLISECONDS,
             )
-            alloc = await allocator.allocate(spec)
-            proc_mesh = await ProcMesh.from_alloc(alloc)
+            alloc = allocator.allocate(spec)
+            proc_mesh = ProcMesh.from_alloc(alloc)
             # We can nest multiple context managers on the same mesh, the innermost
             # one closes the mesh and it cannot be used after that.
             async with proc_mesh:
@@ -537,7 +536,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(
                 Exception, "no process has ever been allocated on"
             ):
-                alloc = await allocator.allocate(spec)
+                alloc = allocator.allocate(spec)
                 await ProcMesh.from_alloc(alloc).initialized
 
     async def test_stacked_1d_meshes(self) -> None:
@@ -559,8 +558,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             spec_a = AllocSpec(AllocConstraints(), host=1, gpu=2)
             spec_b = AllocSpec(AllocConstraints(), host=1, gpu=6)
 
-            proc_mesh_a = await ProcMesh.from_alloc(await allocator_a.allocate(spec_a))
-            proc_mesh_b = await ProcMesh.from_alloc(await allocator_b.allocate(spec_b))
+            proc_mesh_a = ProcMesh.from_alloc(allocator_a.allocate(spec_a))
+            proc_mesh_b = ProcMesh.from_alloc(allocator_b.allocate(spec_b))
 
             actor_a = await proc_mesh_a.spawn("actor_a", TestActor)
             actor_b = await proc_mesh_b.spawn("actor_b", TestActor)
@@ -637,10 +636,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                     initializer=initializer,
                     heartbeat_interval=_100_MILLISECONDS,
                 )
-                alloc = await allocator.allocate(
-                    AllocSpec(AllocConstraints(), host=1, gpu=4)
-                )
-                proc_mesh = await ProcMesh.from_alloc(alloc)
+                alloc = allocator.allocate(AllocSpec(AllocConstraints(), host=1, gpu=4))
+                proc_mesh = ProcMesh.from_alloc(alloc)
                 actor = await proc_mesh.spawn("test_actor", TestActor)
                 results = await actor.compute_world_size.call(
                     master_addr="0.0.0.0", master_port=get_free_port()
@@ -671,7 +668,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                     initializer=initializer,
                     heartbeat_interval=_100_MILLISECONDS,
                 )
-                alloc = await allocator.allocate(
+                alloc = allocator.allocate(
                     AllocSpec(
                         AllocConstraints(
                             match_labels={ALLOC_LABEL_PROC_MESH_NAME: "x"}
@@ -680,7 +677,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                         gpu=3,
                     )
                 )
-                proc_mesh = await ProcMesh.from_alloc(alloc)
+                proc_mesh = ProcMesh.from_alloc(alloc)
                 actor = await proc_mesh.spawn("test_actor", TestActor)
                 results = await actor.compute_world_size.call(
                     master_addr="0.0.0.0", master_port=get_free_port()
@@ -734,7 +731,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
 
             spec = AllocSpec(AllocConstraints(), host=1, gpu=2)
 
-            proc_mesh = await ProcMesh.from_alloc(await allocator.allocate(spec))
+            proc_mesh = ProcMesh.from_alloc(allocator.allocate(spec))
 
             # Generate aggregated log every 1 second.
             await proc_mesh.logging_option(True, 1)
