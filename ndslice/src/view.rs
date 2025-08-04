@@ -176,7 +176,7 @@ impl Extent {
     pub fn iter(&self) -> ExtentIterator {
         ExtentIterator {
             extent: self,
-            pos: CartesianIterator::new(&self.sizes()),
+            pos: CartesianIterator::new(self.sizes()),
         }
     }
 }

@@ -1878,7 +1878,7 @@ impl StreamMessageHandler for StreamActor {
         let mut formal_to_actual_refs = HashMap::new();
         // clear any pre-existing error messages before recording started
         self.last_seq_error = None;
-        for (index, message) in messages.into_iter().enumerate() {
+        for message in messages.into_iter() {
             let defined_refs = message.get_defined_refs();
             all_defined_refs.extend(defined_refs.clone());
 
