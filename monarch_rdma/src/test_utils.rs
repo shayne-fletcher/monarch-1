@@ -113,7 +113,7 @@ pub mod test_utils {
         let start_time = Instant::now();
         while start_time.elapsed() < timeout {
             match qp.poll_completion_target(poll_target) {
-                Ok(Some(wc)) => {
+                Ok(Some(_wc)) => {
                     return Ok(true);
                 }
                 Ok(None) => {
@@ -162,7 +162,7 @@ pub mod test_utils {
     pub async fn recv_wqe_gpu(
         qp: &mut RdmaQueuePair,
         lhandle: &RdmaBuffer,
-        rhandle: &RdmaBuffer,
+        _rhandle: &RdmaBuffer,
         op_type: u32,
     ) -> Result<(), anyhow::Error> {
         // Populate params using lhandle and rhandle

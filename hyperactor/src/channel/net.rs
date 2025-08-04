@@ -1945,7 +1945,6 @@ pub(crate) mod meta {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
     use std::marker::PhantomData;
     use std::sync::RwLock;
     use std::sync::atomic::AtomicBool;

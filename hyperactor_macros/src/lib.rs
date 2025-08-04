@@ -860,7 +860,7 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
                     (Some(global), None) => global.clone(),
                     _ => Ident::new("DEBUG", Span::call_site()),
                 };
-                let log_level = if is_handle {
+                let _log_level = if is_handle {
                     quote! {
                         tracing::Level::TRACE
                     }

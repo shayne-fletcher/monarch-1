@@ -6,6 +6,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#![allow(clippy::disallowed_methods)] // tokio::time::sleep
+
 use std::time::Duration;
 use std::time::Instant;
 

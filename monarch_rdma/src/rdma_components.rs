@@ -192,7 +192,7 @@ impl RdmaBuffer {
 
         while start_time.elapsed() < timeout {
             match qp.poll_completion_target(poll_target) {
-                Ok(Some(wc)) => {
+                Ok(Some(_wc)) => {
                     tracing::debug!("work completed");
                     return Ok(true);
                 }
@@ -1188,7 +1188,7 @@ impl RdmaQueuePair {
     ) -> Result<Option<IbvWc>, anyhow::Error> {
         unsafe {
             let context = self.context as *mut rdmaxcel_sys::ibv_context;
-            let mut outstanding_wqe =
+            let _outstanding_wqe =
                 self.send_db_idx + self.recv_db_idx - self.send_cq_idx - self.recv_cq_idx;
 
             // Check for send completions if requested
@@ -1218,7 +1218,6 @@ impl RdmaQueuePair {
 
                     // This should be a send completion
                     self.send_cq_idx += 1;
-                    outstanding_wqe -= 1;
 
                     return Ok(Some(IbvWc::from(wc)));
                 }
@@ -1251,7 +1250,6 @@ impl RdmaQueuePair {
 
                     // This should be a receive completion
                     self.recv_cq_idx += 1;
-                    outstanding_wqe -= 1;
 
                     return Ok(Some(IbvWc::from(wc)));
                 }

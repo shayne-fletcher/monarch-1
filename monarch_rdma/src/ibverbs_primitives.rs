@@ -684,7 +684,6 @@ impl From<RdmaOperation> for rdmaxcel_sys::ibv_wr_opcode::Type {
             RdmaOperation::WriteWithImm => rdmaxcel_sys::ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM,
             RdmaOperation::Read => rdmaxcel_sys::ibv_wr_opcode::IBV_WR_RDMA_READ,
             RdmaOperation::Recv => panic!("Invalid wr opcode"),
-            _ => panic!("Unsupported operation type"),
         }
     }
 }
@@ -829,20 +828,19 @@ mod tests {
         // Basic validation of first device
         let device = &devices[0];
 
-        if let dev = device {
-            // Verify getters return expected values
-            assert_eq!(dev.vendor_id(), dev.vendor_id);
-            assert_eq!(dev.vendor_part_id(), dev.vendor_part_id);
-            assert_eq!(dev.hw_ver(), dev.hw_ver);
-            assert_eq!(dev.fw_ver(), &dev.fw_ver);
-            assert_eq!(dev.node_guid(), dev.node_guid);
-            assert_eq!(dev.max_qp(), dev.max_qp);
-            assert_eq!(dev.max_cq(), dev.max_cq);
-            assert_eq!(dev.max_mr(), dev.max_mr);
-            assert_eq!(dev.max_pd(), dev.max_pd);
-            assert_eq!(dev.max_qp_wr(), dev.max_qp_wr);
-            assert_eq!(dev.max_sge(), dev.max_sge);
-        }
+        let dev = device;
+        // Verify getters return expected values
+        assert_eq!(dev.vendor_id(), dev.vendor_id);
+        assert_eq!(dev.vendor_part_id(), dev.vendor_part_id);
+        assert_eq!(dev.hw_ver(), dev.hw_ver);
+        assert_eq!(dev.fw_ver(), &dev.fw_ver);
+        assert_eq!(dev.node_guid(), dev.node_guid);
+        assert_eq!(dev.max_qp(), dev.max_qp);
+        assert_eq!(dev.max_cq(), dev.max_cq);
+        assert_eq!(dev.max_mr(), dev.max_mr);
+        assert_eq!(dev.max_pd(), dev.max_pd);
+        assert_eq!(dev.max_qp_wr(), dev.max_qp_wr);
+        assert_eq!(dev.max_sge(), dev.max_sge);
     }
 
     #[test]

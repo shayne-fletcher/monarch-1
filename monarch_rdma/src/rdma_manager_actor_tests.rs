@@ -112,7 +112,7 @@ mod tests {
             .actor_1
             .request_queue_pair(&env.client_1.clone(), env.actor_2.clone())
             .await?;
-        let qp_2 = env
+        let _qp_2 = env
             .actor_2
             .request_queue_pair(&env.client_2.clone(), env.actor_1.clone())
             .await?;
@@ -320,10 +320,7 @@ mod tests {
 
     // Helper function to check if GPU supports P2P
     async fn does_gpu_support_p2p() -> bool {
-        match validate_execution_context().await {
-            Ok(_) => true,
-            Err(e) => false,
-        }
+        validate_execution_context().await.is_ok()
     }
 
     // Test that RDMA write can be performed between two actors on separate devices with CUDA.
@@ -351,7 +348,7 @@ mod tests {
             .actor_1
             .request_queue_pair(&env.client_1.clone(), env.actor_2.clone())
             .await?;
-        let qp_2 = env
+        let _qp_2 = env
             .actor_2
             .request_queue_pair(&env.client_2.clone(), env.actor_1.clone())
             .await?;
@@ -538,7 +535,7 @@ mod tests {
         }
         let env = RdmaManagerTestEnv::setup(BSIZE * 2, ("mlx5_0", "mlx5_4"), ("cuda:0", "cuda:1"))
             .await?;
-        let qp_1 = env
+        let _qp_1 = env
             .actor_1
             .request_queue_pair(&env.client_1.clone(), env.actor_2.clone())
             .await?;
