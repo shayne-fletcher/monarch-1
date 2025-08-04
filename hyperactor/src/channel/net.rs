@@ -66,6 +66,7 @@ use crate::RemoteMessage;
 use crate::clock::Clock;
 use crate::clock::RealClock;
 use crate::config;
+use crate::metrics;
 
 /// Use to prevent [futures::Stream] objects using the wrong next() method by
 /// accident. Bascially, we want to use [tokio_stream::StreamExt::next] since it
@@ -185,6 +186,7 @@ impl<M: RemoteMessage> NetTx<M> {
         let (sender, receiver) = mpsc::unbounded_channel();
         let dest = link.dest();
         let (notify, status) = watch::channel(TxStatus::Active);
+
         let tx = Self {
             sender,
             dest,
@@ -201,11 +203,6 @@ impl<M: RemoteMessage> NetTx<M> {
         mut receiver: mpsc::UnboundedReceiver<(M, oneshot::Sender<M>, Instant)>,
         notify: watch::Sender<TxStatus>,
     ) {
-        hyperactor_telemetry::declare_static_histogram!(
-            REMOTE_MESSAGE_SEND_SIZE,
-            "channel.remote_message_send_size"
-        );
-
         // If we can't deliver a message within this limit consider
         // `link` broken and return.
 
@@ -295,7 +292,8 @@ impl<M: RemoteMessage> NetTx<M> {
                 let data: Bytes = bincode::serialize(&frame)
                     .map_err(|e| format!("serialization error: {e}"))?
                     .into();
-                REMOTE_MESSAGE_SEND_SIZE.record(data.len() as f64, &[]);
+                metrics::REMOTE_MESSAGE_SEND_SIZE.record(data.len() as f64, &[]);
+
                 self.deque.push_back(QueuedMessage {
                     seq: self.next_seq,
                     data,
@@ -722,6 +720,15 @@ impl<M: RemoteMessage> NetTx<M> {
                                 let data = bincode::serialize(&Frame::<M>::Init(session_id))
                                     .expect("unexpected serialization error");
                                 let initialized = sink.send(data.into()).await.is_ok();
+
+                                metrics::CHANNEL_RECONNECTIONS.add(
+                                    1,
+                                    hyperactor_telemetry::kv_pairs!(
+                                        "transport" => link.dest().transport().to_string(),
+                                        "reason" => "network_flakiness",
+                                    ),
+                                );
+
                                 // Need to resend unacked after reconnecting.
                                 let largest_acked = unacked.largest_acked;
                                 outbox.requeue_unacked(unacked);
@@ -952,6 +959,14 @@ where
     L::Addr: Sync + Send + fmt::Debug + Into<ChannelAddr>,
     L::Io: Sync + Send + Unpin + fmt::Debug,
 {
+    metrics::CHANNEL_CONNECTIONS.add(
+        1,
+        hyperactor_telemetry::kv_pairs!(
+            "transport" => channel_addr.transport().to_string(),
+            "operation" => "serve"
+        ),
+    );
+
     let (tx, rx) = mpsc::channel::<M>(1024);
     let cancel_token = CancellationToken::new();
     let join_handle = tokio::spawn(listen(
@@ -1078,7 +1093,6 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
                                 ),
                             }
                         }
-
                         Some(Err(err)) => {
                             break (next, Err::<(), anyhow::Error>(err.into()).context(format!("error receiving peer message from {:?}", self.source)))
                         }
@@ -1300,6 +1314,14 @@ where
                 tracing::debug!("listener accepted a new connection to {}", listener_channel_addr);
                 match result {
                     Ok((stream, addr)) => {
+                        metrics::CHANNEL_CONNECTIONS.add(
+                            1,
+                            hyperactor_telemetry::kv_pairs!(
+                                "transport" => listener_channel_addr.transport().to_string(),
+                                "operation" => "accept"
+                            ),
+                        );
+
                         let tx = tx.clone();
                         let child_cancel_token = child_cancel_token.child_token();
                         let source : ChannelAddr = addr.into();
@@ -1317,6 +1339,14 @@ where
                             };
 
                             if let Err(ref err) = res {
+                                metrics::CHANNEL_CONNECTION_ERRORS.add(
+                                    1,
+                                    hyperactor_telemetry::kv_pairs!(
+                                        "transport" => dest.transport().to_string(),
+                                        "error" => err.to_string(),
+                                    ),
+                                );
+
                                 // we don't want the health probe TCP connections to be counted as an error.
                                 match source {
                                     ChannelAddr::Tcp(source_addr) if source_addr.ip().is_loopback() => {},
@@ -1332,6 +1362,15 @@ where
                     });
                     }
                     Err(err) => {
+                        metrics::CHANNEL_CONNECTION_ERRORS.add(
+                            1,
+                            hyperactor_telemetry::kv_pairs!(
+                                "transport" => listener_channel_addr.transport().to_string(),
+                                "operation" => "accept",
+                                "error" => err.to_string(),
+                            ),
+                        );
+
                         tracing::info!("serve {}: accept error: {}", listener_channel_addr, err)
                     }
                 }
@@ -2357,6 +2396,15 @@ mod tests {
                             if network_flakiness.should_disconnect(&mut rng, count, &prev_diconnected_at).await {
                                 tracing::debug!("MockLink disconnects");
                                 disconnected_count.fetch_add(1, Ordering::Relaxed);
+
+                                metrics::CHANNEL_RECONNECTIONS.add(
+                                    1,
+                                    hyperactor_telemetry::kv_pairs!(
+                                        "transport" => "mock",
+                                        "reason" => "network_flakiness",
+                                    ),
+                                );
+
                                 let mut w = prev_diconnected_at.write().unwrap();
                                 *w = RealClock.now();
                                 break;
