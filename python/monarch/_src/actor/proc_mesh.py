@@ -197,8 +197,7 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
             setup_actor = await self._spawn_nonblocking_on(
                 proc_mesh, "setup", SetupActor, setup
             )
-            # pyre-ignore
-            await setup_actor.setup.call()._status.coro
+            await setup_actor.setup.call()
 
         return proc_mesh
 

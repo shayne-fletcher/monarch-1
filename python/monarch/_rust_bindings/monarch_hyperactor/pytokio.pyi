@@ -73,3 +73,9 @@ class Shared(Generic[T]):
         Create a one-use Task that awaits on this if you want to use other PythonTask apis like with_timeout.
         """
         ...
+
+def is_tokio_thread() -> bool:
+    """
+    Returns true if the current thread is a tokio worker thread (and block_on will fail).
+    """
+    ...

@@ -20,7 +20,11 @@ from typing import (
     TypeVar,
 )
 
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
+from monarch._rust_bindings.monarch_hyperactor.pytokio import (
+    is_tokio_thread,
+    PythonTask,
+    Shared,
+)
 
 from typing_extensions import deprecated, Self
 
@@ -79,7 +83,11 @@ class _Asyncio(NamedTuple):
     fut: asyncio.Future
 
 
-_Status = _Unawaited | _Complete | _Exception | _Asyncio
+class _Tokio(NamedTuple):
+    shared: Shared
+
+
+_Status = _Unawaited | _Complete | _Exception | _Asyncio | _Tokio
 
 
 class Future(Generic[R]):
@@ -108,31 +116,60 @@ class Future(Generic[R]):
                 return cast("R", value)
             case _Exception(exe=exe):
                 raise exe
+            case _Tokio(_):
+                raise ValueError(
+                    "already converted into a pytokio.Shared object, use 'await' from a PythonTask coroutine to get the value."
+                )
             case _:
                 raise RuntimeError("unknown status")
 
     def __await__(self) -> Generator[Any, Any, R]:
-        match self._status:
-            case _Unawaited(coro=coro):
-                loop = asyncio.get_running_loop()
-                fut = loop.create_future()
-                self._status = _Asyncio(fut)
+        if asyncio._get_running_loop() is not None:
+            match self._status:
+                case _Unawaited(coro=coro):
+                    loop = asyncio.get_running_loop()
+                    fut = loop.create_future()
+                    self._status = _Asyncio(fut)
 
-                async def mark_complete():
-                    try:
-                        func, value = fut.set_result, await coro
-                    except Exception as e:
-                        func, value = fut.set_exception, e
-                    loop.call_soon_threadsafe(func, value)
+                    async def mark_complete():
+                        try:
+                            func, value = fut.set_result, await coro
+                        except Exception as e:
+                            func, value = fut.set_exception, e
+                        loop.call_soon_threadsafe(func, value)
 
-                PythonTask.from_coroutine(mark_complete()).spawn()
-                return fut.__await__()
-            case _Asyncio(fut=fut):
-                return fut.__await__()
-            case _:
-                raise ValueError(
-                    "already converted into a synchronous future, use 'get' to get the value."
-                )
+                    PythonTask.from_coroutine(mark_complete()).spawn()
+                    return fut.__await__()
+                case _Asyncio(fut=fut):
+                    return fut.__await__()
+                case _Tokio(_):
+                    raise ValueError(
+                        "already converted into a tokio future, but being awaited from the asyncio loop."
+                    )
+                case _:
+                    raise ValueError(
+                        "already converted into a synchronous future, use 'get' to get the value."
+                    )
+        elif is_tokio_thread():
+            match self._status:
+                case _Unawaited(coro=coro):
+                    shared = coro.spawn()
+                    self._status = _Tokio(shared)
+                    return shared.__await__()
+                case _Tokio(shared=shared):
+                    return shared.__await__()
+                case _Asyncio(_):
+                    raise ValueError(
+                        "already converted into asyncio future, but being awaited from the tokio loop."
+                    )
+                case _:
+                    raise ValueError(
+                        "already converted into a synchronous future, use 'get' to get the value."
+                    )
+        else:
+            raise ValueError(
+                "__await__ with no active event loop (either asyncio or tokio)"
+            )
 
     # compatibility with old tensor engine Future objects
     # hopefully we do not need done(), add_callback because

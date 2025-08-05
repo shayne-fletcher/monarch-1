@@ -282,8 +282,20 @@ impl PyShared {
     }
 }
 
+#[pyfunction]
+fn is_tokio_thread() -> bool {
+    tokio::runtime::Handle::try_current().is_ok()
+}
+
 pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     hyperactor_mod.add_class::<PyPythonTask>()?;
     hyperactor_mod.add_class::<PyShared>()?;
+    let f = wrap_pyfunction!(is_tokio_thread, hyperactor_mod)?;
+    f.setattr(
+        "__module__",
+        "monarch._rust_bindings.monarch_hyperactor.pytokio",
+    )?;
+    hyperactor_mod.add_function(f)?;
+
     Ok(())
 }
