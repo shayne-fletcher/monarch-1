@@ -41,7 +41,7 @@ use ndslice::ShapeError;
 use ndslice::SliceError;
 use ndslice::selection;
 use ndslice::selection::EvalOpts;
-use ndslice::selection::ReifyView;
+use ndslice::selection::ReifySlice;
 use ndslice::selection::normal;
 use serde::Deserialize;
 use serde::Serialize;
@@ -130,7 +130,7 @@ where
     // Casting to `*`?
     let sel_of_root = if selection::normalize(sel_of_sliced) == normal::NormalizedSelection::True {
         // Reify this view into base.
-        root_slice.reify_view(sliced_shape.slice())?
+        root_slice.reify_slice(sliced_shape.slice())?
     } else {
         // No, fall back on `of_ranks`.
         let ranks = sel_of_sliced

@@ -1076,81 +1076,81 @@ mod sealed {
 }
 
 /// Connects the `select!` API to the `Selection` algebra by enabling
-/// `base.reify_view(view)` syntax, where `base: Slice`.
+/// `base.reify_slice(slice)` syntax, where `base: Slice`.
 ///
-/// The base slice defines the coordinate system in which the view is
-/// interpreted. Views are themselves `Slice` values, typically
+/// The base slice defines the coordinate system in which the slice is
+/// interpreted. Slices are themselves `Slice` values, typically
 /// produced by `select!`, and are reified as `Selection` expressions
 /// over the base.
-pub trait ReifyView: sealed::Sealed {
-    /// Reify a view as a `Selection` in the coordinate system of
+pub trait ReifySlice: sealed::Sealed {
+    /// Reify a slice as a `Selection` in the coordinate system of
     /// `self`.
-    fn reify_view(&self, view: &Slice) -> Result<Selection, SliceError>;
+    fn reify_slice(&self, slice: &Slice) -> Result<Selection, SliceError>;
 
-    /// Reify multiple views as a union of selections in the
+    /// Reify multiple slices as a union of selections in the
     /// coordinate system of `self`.
-    fn reify_views<V: AsRef<[Slice]>>(&self, views: V) -> Result<Selection, SliceError>;
+    fn reify_slices<V: AsRef<[Slice]>>(&self, slices: V) -> Result<Selection, SliceError>;
 }
 
-impl ReifyView for Slice {
+impl ReifySlice for Slice {
     /// Constructs a [`Selection`] expression that symbolically
-    /// matches all coordinates in the given `view`, expressed in the
+    /// matches all coordinates in the given `slice`, expressed in the
     /// coordinate system of the provided `base` slice (`self`).
     ///
     /// The result is a nested sequence of `range(start..end, step)`
-    /// combinators that match the rectangular region covered by `view`
+    /// combinators that match the rectangular region covered by `slice`
     /// in base coordinates. This preserves geometry and layout when
-    /// `view` is *layout-aligned* — that is, each of its strides is
+    /// `slice` is *layout-aligned* — that is, each of its strides is
     /// a multiple of the corresponding base stride.
     ///
-    /// If any dimension is not layout-aligned, the view is reified
+    /// If any dimension is not layout-aligned, the slice is reified
     /// by explicitly enumerating its coordinates.
     ///
-    /// Returns [`dsl::false_()`] if the view is empty.
+    /// Returns [`dsl::false_()`] if the slice is empty.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The base is not contiguous and row-major
-    /// - The view lies outside the bounds of the base
+    /// - The slice lies outside the bounds of the base
     ///
     /// # Example
     ///
     /// ```rust
-    /// use ndslice::selection::ReifyView;
+    /// use ndslice::selection::ReifySlice;
     /// let shape = ndslice::shape!(x = 4, y = 4);
     /// let base = shape.slice();
     /// let selected = ndslice::select!(shape, x = 1..3, y = 2..4).unwrap();
-    /// let view = selected.slice();
-    /// let selection = base.reify_view(view).unwrap();
+    /// let slice = selected.slice();
+    /// let selection = base.reify_slice(slice).unwrap();
     /// ```
-    fn reify_view(&self, view: &Slice) -> Result<Selection, SliceError> {
+    fn reify_slice(&self, slice: &Slice) -> Result<Selection, SliceError> {
         // Precondition: the base is contiguous and row major.
         if !self.is_contiguous() {
             return Err(SliceError::NonContiguous);
         }
 
-        if view.is_empty() {
+        if slice.is_empty() {
             return Ok(dsl::false_());
         }
 
-        if view.num_dim() != self.num_dim()
-            || view.sizes().iter().zip(self.sizes()).any(|(&v, &s)| v > s)
+        if slice.num_dim() != self.num_dim()
+            || slice.sizes().iter().zip(self.sizes()).any(|(&v, &s)| v > s)
         {
-            return Selection::of_ranks(self, &view.iter().collect::<BTreeSet<usize>>());
+            return Selection::of_ranks(self, &slice.iter().collect::<BTreeSet<usize>>());
         }
 
-        let origin = self.coordinates(view.offset())?;
+        let origin = self.coordinates(slice.offset())?;
         let mut acc = dsl::true_();
         for dim in (0..self.num_dim()).rev() {
             let start = origin[dim];
-            let len = view.sizes()[dim];
-            let view_stride = view.strides()[dim];
+            let len = slice.sizes()[dim];
+            let slice_stride = slice.strides()[dim];
             let base_stride = self.strides()[dim];
 
-            if view_stride % base_stride == 0 {
+            if slice_stride % base_stride == 0 {
                 // Layout-aligned with base.
-                let step = view_stride / base_stride;
+                let step = slice_stride / base_stride;
                 let end = start + step * len;
                 // Check that `end` is within bounds.
                 if end - 1 > self.sizes()[dim] {
@@ -1166,32 +1166,32 @@ impl ReifyView for Slice {
                 acc = dsl::range(crate::shape::Range(start, Some(end), step), acc);
             } else {
                 // Irregular layout; fallback to explicit enumeration.
-                return Selection::of_ranks(self, &view.iter().collect::<BTreeSet<_>>());
+                return Selection::of_ranks(self, &slice.iter().collect::<BTreeSet<_>>());
             }
         }
 
         Ok(acc)
     }
 
-    /// Converts a list of `views` into a symbolic [`Selection`]
+    /// Converts a list of `slices` into a symbolic [`Selection`]
     /// expression over a common `base` [`Slice`].
     ///
-    /// Each view describes a rectangular subregion of the base. This
-    /// function reifies each view into a nested `range(.., ..)`
+    /// Each slice describes a rectangular subregion of the base. This
+    /// function reifies each slice into a nested `range(.., ..)`
     /// expression in the base coordinate system and returns the union
     /// of all such selections.
     ///
-    /// Empty views are ignored.
+    /// Empty slices are ignored.
     ///
     /// # Errors
     ///
-    /// Returns an error if any view:
+    /// Returns an error if any slice:
     /// - Refers to coordinates not contained within the base
     ///
     /// # Example
     ///
     /// ```rust
-    /// use ndslice::selection::ReifyView;
+    /// use ndslice::selection::ReifySlice;
     ///
     /// let shape = ndslice::shape!(x = 4, y = 4);
     /// let base = shape.slice();
@@ -1205,17 +1205,17 @@ impl ReifyView for Slice {
     ///     .slice()
     ///     .clone();
     ///
-    /// let sel = base.reify_views(&[a, b]).unwrap();
+    /// let sel = base.reify_slices(&[a, b]).unwrap();
     /// ```
-    fn reify_views<V: AsRef<[Slice]>>(&self, views: V) -> Result<Selection, SliceError> {
-        let views = views.as_ref();
-        let mut selections = Vec::with_capacity(views.len());
+    fn reify_slices<V: AsRef<[Slice]>>(&self, slices: V) -> Result<Selection, SliceError> {
+        let slices = slices.as_ref();
+        let mut selections = Vec::with_capacity(slices.len());
 
-        for view in views {
-            if view.is_empty() {
+        for slice in slices {
+            if slice.is_empty() {
                 continue;
             }
-            selections.push(self.reify_view(view)?);
+            selections.push(self.reify_slice(slice)?);
         }
 
         let mut iter = selections.into_iter();
@@ -1445,7 +1445,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::EvalOpts;
-    use super::ReifyView;
+    use super::ReifySlice;
     use super::Selection;
     use super::dsl::*;
     use super::is_equivalent_true;
@@ -2205,9 +2205,9 @@ mod tests {
     }
 
     #[test]
-    fn test_reify_view_empty() {
+    fn test_reify_slice_empty() {
         let slice = Slice::new_row_major([0]);
-        let selection = slice.reify_view(&slice).unwrap();
+        let selection = slice.reify_slice(&slice).unwrap();
         let expected = false_();
         assert_structurally_eq!(&selection, expected);
         assert_eq!(
@@ -2220,14 +2220,14 @@ mod tests {
     }
 
     #[test]
-    fn test_reify_view_1d() {
+    fn test_reify_slice_1d() {
         let shape = shape!(x = 6); // 1D shape with 6 elements
         let base = shape.slice();
 
         let selected = select!(shape, x = 2..5).unwrap();
         let view = selected.slice();
 
-        let selection = base.reify_view(view).unwrap();
+        let selection = base.reify_slice(view).unwrap();
         let expected = range(2..5, true_());
         assert_structurally_eq!(&selection, expected);
 
@@ -2236,14 +2236,14 @@ mod tests {
     }
 
     #[test]
-    fn test_reify_view_2d() {
+    fn test_reify_slice_2d() {
         let shape = shape!(x = 4, y = 5); // 2D shape: 4 rows, 5 columns
         let base = shape.slice();
 
         // Select the middle 2x3 block: rows 1..3 and columns 2..5
         let selected = select!(shape, x = 1..3, y = 2..5).unwrap();
         let view = selected.slice();
-        let selection = base.reify_view(view).unwrap();
+        let selection = base.reify_slice(view).unwrap();
         let expected = range(1..3, range(2..5, true_()));
         assert_structurally_eq!(&selection, expected);
 
@@ -2263,17 +2263,17 @@ mod tests {
 
     #[test]
     #[allow(clippy::identity_op)]
-    fn test_reify_view_1d_with_stride() {
+    fn test_reify_slice_1d_with_stride() {
         let shape = shape!(x = 7); // 1D shape with 7 elements
         let selected = shape.select("x", Range(0, None, 2)).unwrap();
         let view = selected.slice();
         assert_eq!(view, &Slice::new(0, vec![4], vec![1 * 2]).unwrap());
 
         let base = shape.slice();
-        let selection = base.reify_view(view).unwrap();
+        let selection = base.reify_slice(view).unwrap();
         // Note: ceil(7 / 2) = 4, hence end = 0 + 2 × 4 = 8. See the
         // more detailed explanation in
-        // `test_reify_view_2d_with_stride`.
+        // `test_reify_slice_2d_with_stride`.
         let expected = range(Range(0, Some(8), 2), true_());
         assert_structurally_eq!(&selection, expected);
 
@@ -2283,7 +2283,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::identity_op)]
-    fn test_reify_view_2d_with_stride() {
+    fn test_reify_slice_2d_with_stride() {
         // 4 x 4: x = 4, y = 4.
         let base = shape!(x = 4, y = 4);
         // Step 1: select odd rows (x = 1..4 step 2)
@@ -2297,7 +2297,7 @@ mod tests {
         );
 
         let base = base.slice();
-        let selection = base.reify_view(view).unwrap();
+        let selection = base.reify_slice(view).unwrap();
         // We use `end = start + step * len` to reify the selection.
         // Note: This may yield `end > original_end` (e.g., 5 instead of 4)
         // when the selection length was computed via ceiling division.
@@ -2311,7 +2311,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reify_view_selects_column_across_rows() {
+    fn test_reify_slice_selects_column_across_rows() {
         let shape = shape!(host = 2, gpu = 4); // shape [2, 4]
         let base = shape.slice();
 
@@ -2321,7 +2321,7 @@ mod tests {
         let coordinates: Vec<_> = view.iter().map(|i| view.coordinates(i).unwrap()).collect();
         assert_eq!(coordinates, [[0, 0], [1, 0]]);
 
-        let selection = base.reify_view(view).unwrap();
+        let selection = base.reify_slice(view).unwrap();
         let expected = range(0..2, range(2..3, true_()));
         assert_structurally_eq!(&selection, expected);
 
@@ -2339,7 +2339,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reify_view_dimension_mismatch() {
+    fn test_reify_slice_dimension_mismatch() {
         let shape = shape!(host = 2, gpu = 4);
         let base = shape.slice();
 
@@ -2351,7 +2351,7 @@ mod tests {
         ];
 
         let view = Slice::new(indices[0], vec![indices.len()], vec![4]).unwrap();
-        let selection = base.reify_view(&view).unwrap();
+        let selection = base.reify_slice(&view).unwrap();
 
         let expected = Selection::of_ranks(base, &indices.iter().cloned().collect()).unwrap();
         assert_structurally_eq!(&selection, expected);
@@ -2363,7 +2363,7 @@ mod tests {
     #[test]
     fn test_union_of_slices_empty() {
         let base = Slice::new_row_major([2]);
-        let sel = base.reify_views(&[]).unwrap();
+        let sel = base.reify_slices(&[]).unwrap();
         assert_structurally_eq!(&sel, &false_());
         assert_eq!(
             sel.eval(&EvalOpts::strict(), &base)
@@ -2380,7 +2380,7 @@ mod tests {
         let selected = select!(shape, x = 1).unwrap();
         let view = selected.slice().clone();
 
-        let selection = base.reify_views(&[view]).unwrap();
+        let selection = base.reify_slices(&[view]).unwrap();
         let expected = range(1..=1, true_());
         assert_structurally_eq!(&selection, &expected);
 
@@ -2406,7 +2406,7 @@ mod tests {
         let b = select!(shape, x = 1).unwrap();
         let view_b = b.slice().clone();
 
-        let selection = base.reify_views(&[view_a, view_b]).unwrap();
+        let selection = base.reify_slices(&[view_a, view_b]).unwrap();
         let expected = union(
             range(0..1, range(0..2, true_())),
             range(1..2, range(0..2, true_())),
@@ -2432,7 +2432,7 @@ mod tests {
         let selected2 = select!(shape, y = 1..4).unwrap();
         let view2 = selected2.slice().clone();
 
-        let selection = base.reify_views(&[view1, view2]).unwrap();
+        let selection = base.reify_slices(&[view1, view2]).unwrap();
         let expected = union(
             range(0..1, range(0..2, true_())),
             range(0..1, range(1..4, true_())),

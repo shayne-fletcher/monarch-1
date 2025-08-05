@@ -58,7 +58,7 @@ use monarch_tensor_worker::AssignRankMessage;
 use monarch_tensor_worker::WorkerActor;
 use ndslice::Slice;
 use ndslice::selection;
-use ndslice::selection::ReifyView;
+use ndslice::selection::ReifySlice;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use tokio::sync::Mutex;
@@ -827,7 +827,7 @@ impl Handler<ClientToControllerMessage> for MeshControllerActor {
     ) -> anyhow::Result<()> {
         match message {
             ClientToControllerMessage::Send { slices, message } => {
-                let sel = self.workers().shape().slice().reify_views(slices)?;
+                let sel = self.workers().shape().slice().reify_slices(slices)?;
                 self.workers().cast(sel, message)?;
             }
             ClientToControllerMessage::Node {
