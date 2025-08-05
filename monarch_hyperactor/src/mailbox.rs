@@ -436,7 +436,7 @@ pub(super) struct PythonUndeliverablePortReceiver {
 impl PythonUndeliverablePortReceiver {
     fn recv<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let receiver = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let message = receiver
                 .lock()
                 .await

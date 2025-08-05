@@ -14,7 +14,7 @@ use pyo3::prelude::*;
 #[pyfunction]
 #[pyo3(name = "start_event_loop")]
 pub fn start_simnet_event_loop(py: Python) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    monarch_hyperactor::runtime::future_into_py(py, async move {
         simnet::start();
         Ok(())
     })
@@ -24,7 +24,7 @@ pub fn start_simnet_event_loop(py: Python) -> PyResult<Bound<'_, PyAny>> {
 #[pyo3(name="sleep",signature=(seconds))]
 pub fn py_sim_sleep<'py>(py: Python<'py>, seconds: f64) -> PyResult<Bound<'py, PyAny>> {
     let millis = (seconds * 1000.0).ceil() as u64;
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    monarch_hyperactor::runtime::future_into_py(py, async move {
         let duration = tokio::time::Duration::from_millis(millis);
         SimClock.sleep(duration).await;
         Ok(())

@@ -8,26 +8,65 @@
 
 use std::cell::Cell;
 use std::future::Future;
-use std::sync::OnceLock;
+use std::pin::Pin;
+use std::sync::RwLock;
+use std::sync::RwLockReadGuard;
 use std::time::Duration;
 
 use anyhow::Result;
-use anyhow::anyhow;
 use anyhow::ensure;
+use once_cell::unsync::OnceCell as UnsyncOnceCell;
 use pyo3::PyResult;
 use pyo3::Python;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyAnyMethods;
+use pyo3::types::PyCFunction;
+use pyo3::types::PyDict;
+use pyo3::types::PyTuple;
+use pyo3_async_runtimes::TaskLocals;
+use tokio::task;
 
-pub fn get_tokio_runtime() -> &'static tokio::runtime::Runtime {
-    static INSTANCE: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    INSTANCE.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap()
+// this must be a RwLock and only return a guard for reading the runtime.
+// Otherwise multiple threads can deadlock fighting for the Runtime object if they hold it
+// while blocking on something.
+static INSTANCE: std::sync::LazyLock<RwLock<Option<tokio::runtime::Runtime>>> =
+    std::sync::LazyLock::new(|| RwLock::new(None));
+
+pub fn get_tokio_runtime<'l>() -> std::sync::MappedRwLockReadGuard<'l, tokio::runtime::Runtime> {
+    // First try to get a read lock and check if runtime exists
+    {
+        let read_guard = INSTANCE.read().unwrap();
+        if read_guard.is_some() {
+            return RwLockReadGuard::map(read_guard, |lock: &Option<tokio::runtime::Runtime>| {
+                lock.as_ref().unwrap()
+            });
+        }
+        // Drop the read lock by letting it go out of scope
+    }
+
+    // Runtime doesn't exist, upgrade to write lock to initialize
+    let mut write_guard = INSTANCE.write().unwrap();
+    if write_guard.is_none() {
+        *write_guard = Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+    }
+
+    // Downgrade write lock to read lock and return the reference
+    let read_guard = std::sync::RwLockWriteGuard::downgrade(write_guard);
+    RwLockReadGuard::map(read_guard, |lock: &Option<tokio::runtime::Runtime>| {
+        lock.as_ref().unwrap()
     })
+}
+
+pub fn shutdown_tokio_runtime() {
+    INSTANCE.write().unwrap().take().map(|x| {
+        x.shutdown_timeout(Duration::from_secs(1));
+    });
 }
 
 thread_local! {
@@ -35,9 +74,6 @@ thread_local! {
 }
 
 pub fn initialize(py: Python) -> Result<()> {
-    pyo3_async_runtimes::tokio::init_with_runtime(get_tokio_runtime())
-        .map_err(|_| anyhow!("failed to initialize py3 async runtime"))?;
-
     // Initialize thread local state to identify the main Python thread.
     let threading = Python::import(py, "threading")?;
     let main_thread = threading.call_method0("main_thread")?;
@@ -48,6 +84,17 @@ pub fn initialize(py: Python) -> Result<()> {
     );
     IS_MAIN_THREAD.set(true);
 
+    let closure = PyCFunction::new_closure(
+        py,
+        None,
+        None,
+        |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| {
+            shutdown_tokio_runtime();
+        },
+    )
+    .unwrap();
+    let atexit = py.import("atexit").unwrap();
+    atexit.call_method1("register", (closure,)).unwrap();
     Ok(())
 }
 
@@ -130,4 +177,53 @@ pub fn register_python_bindings(runtime_mod: &Bound<'_, PyModule>) -> PyResult<(
     )?;
     runtime_mod.add_function(sleep_indefinitely_fn)?;
     Ok(())
+}
+
+struct SimpleRuntime;
+
+impl pyo3_async_runtimes::generic::Runtime for SimpleRuntime {
+    type JoinError = task::JoinError;
+    type JoinHandle = task::JoinHandle<()>;
+
+    fn spawn<F>(fut: F) -> Self::JoinHandle
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        get_tokio_runtime().spawn(async move {
+            fut.await;
+        })
+    }
+}
+
+tokio::task_local! {
+    static TASK_LOCALS: UnsyncOnceCell<TaskLocals>;
+}
+
+impl pyo3_async_runtimes::generic::ContextExt for SimpleRuntime {
+    fn scope<F, R>(locals: TaskLocals, fut: F) -> Pin<Box<dyn Future<Output = R> + Send>>
+    where
+        F: Future<Output = R> + Send + 'static,
+    {
+        let cell = UnsyncOnceCell::new();
+        cell.set(locals).unwrap();
+
+        Box::pin(TASK_LOCALS.scope(cell, fut))
+    }
+
+    fn get_task_locals() -> Option<TaskLocals> {
+        TASK_LOCALS
+            .try_with(|c| {
+                c.get()
+                    .map(|locals| Python::with_gil(|py| locals.clone_ref(py)))
+            })
+            .unwrap_or_default()
+    }
+}
+
+pub fn future_into_py<F, T>(py: Python, fut: F) -> PyResult<Bound<PyAny>>
+where
+    F: Future<Output = PyResult<T>> + Send + 'static,
+    T: for<'py> IntoPyObject<'py>,
+{
+    pyo3_async_runtimes::generic::future_into_py::<SimpleRuntime, F, T>(py, fut)
 }

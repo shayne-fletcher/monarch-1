@@ -1389,7 +1389,6 @@ fn worker_main(py: Python<'_>) -> PyResult<()> {
             BinaryArgs::Pipe => bootstrap_pipe(),
             BinaryArgs::WorkerServer { rd, wr } => {
                 worker_server(
-                    get_tokio_runtime(),
                     // SAFETY: Raw FD passed in from parent.
                     BufReader::new(File::from(unsafe { OwnedFd::from_raw_fd(rd) })),
                     // SAFETY: Raw FD passed in from parent.

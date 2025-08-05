@@ -249,7 +249,7 @@ impl PythonActorMesh {
 
     fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let actor_mesh = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let actor_mesh = actor_mesh
                 .take()
                 .await

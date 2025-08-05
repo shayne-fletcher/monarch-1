@@ -21,6 +21,7 @@ use hyperactor::actor::ActorStatus;
 use hyperactor::channel::ChannelAddr;
 use hyperactor_multiprocess::proc_actor::ProcActor;
 use hyperactor_multiprocess::system_actor::ProcLifecycleMode;
+use monarch_hyperactor::runtime::get_tokio_runtime;
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 use serde::Deserialize;
@@ -174,11 +175,7 @@ impl WorkerServerResponse {
     }
 }
 
-pub fn worker_server(
-    rt: &tokio::runtime::Runtime,
-    inp: impl BufRead,
-    mut outp: impl Write,
-) -> Result<()> {
+pub fn worker_server(inp: impl BufRead, mut outp: impl Write) -> Result<()> {
     tracing::info!("running worker server on {}", std::process::id());
 
     for line in inp.lines() {
@@ -199,7 +196,7 @@ pub fn worker_server(
                     supervision_update_interval_in_sec: 5,
                     extra_proc_labels: Some(labels),
                 };
-                let res = rt
+                let res = get_tokio_runtime()
                     .block_on(async move { anyhow::Ok(bootstrap_worker_proc(args).await?.await) });
                 WorkerServerResponse::Finished {
                     error: match res {

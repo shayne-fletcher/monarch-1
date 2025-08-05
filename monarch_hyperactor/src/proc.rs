@@ -137,7 +137,7 @@ impl PyProc {
     ) -> PyResult<Bound<'py, PyAny>> {
         let proc = self.inner.clone();
         let pickled_type = PickledPyObject::pickle(actor.as_any())?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             Ok(PythonActorHandle {
                 inner: proc
                     .spawn(name.as_deref().unwrap_or("anon"), pickled_type)

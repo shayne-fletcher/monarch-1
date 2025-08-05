@@ -307,7 +307,7 @@ impl PyProcMesh {
             ));
         }
         let receiver = self.user_monitor_receiver.clone();
-        Ok(pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        Ok(crate::runtime::future_into_py(py, async move {
             // Create a new user monitor
             Ok(PyProcMeshMonitor { receiver })
         })?
@@ -385,7 +385,7 @@ impl PyProcMeshMonitor {
 
     fn __anext__(&self, py: Python<'_>) -> PyResult<PyObject> {
         let receiver = self.receiver.clone();
-        Ok(pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        Ok(crate::runtime::future_into_py(py, async move {
             let receiver = receiver
                 .borrow()
                 .map_err(|_| PyRuntimeError::new_err("`ProcEvent receiver` is shutdown"))?;

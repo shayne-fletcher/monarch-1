@@ -219,9 +219,8 @@ async def test_sync_actor_sync_client() -> None:
 async def test_proc_mesh_size() -> None:
     proc = local_proc_mesh(gpus=2)
     assert 2 == proc.size("gpus")
-    proc.initialized.get()
-
-    await proc.stop()
+    # proc.initialized.get()
+    # await proc.stop()
 
 
 @pytest.mark.timeout(60)

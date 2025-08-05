@@ -318,17 +318,17 @@ impl PyRemoteProcessAllocInitializer {
                 .call_method1("initialize_alloc", args)
                 .map(|x| x.unbind())
         })?;
-        get_tokio_runtime()
-            .spawn_blocking(move || -> PyResult<Vec<String>> {
-                // call the function as implemented in python
-                Python::with_gil(|py| {
-                    let asyncio = py.import("asyncio").unwrap();
-                    let addrs = asyncio.call_method1("run", (coro,))?;
-                    let addrs: PyResult<Vec<String>> = addrs.extract();
-                    addrs
-                })
+        let r = get_tokio_runtime().spawn_blocking(move || -> PyResult<Vec<String>> {
+            // call the function as implemented in python
+            Python::with_gil(|py| {
+                let asyncio = py.import("asyncio").unwrap();
+                let addrs = asyncio.call_method1("run", (coro,))?;
+                let addrs: PyResult<Vec<String>> = addrs.extract();
+                addrs
             })
-            .await
+        });
+
+        r.await
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
     }
 

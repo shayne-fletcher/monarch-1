@@ -191,7 +191,7 @@ impl CodeSyncMeshClient {
         remote: RemoteWorkspace,
         auto_reload: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(
+        monarch_hyperactor::runtime::future_into_py(
             py,
             CodeSyncMeshClient::sync_workspace_(
                 self.actor_mesh.clone(),
@@ -211,7 +211,7 @@ impl CodeSyncMeshClient {
         auto_reload: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let actor_mesh = self.actor_mesh.clone();
-        pyo3_async_runtimes::tokio::future_into_py(
+        monarch_hyperactor::runtime::future_into_py(
             py,
             try_join_all(workspaces.into_iter().map(|workspace| {
                 CodeSyncMeshClient::sync_workspace_(
