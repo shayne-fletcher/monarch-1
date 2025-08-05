@@ -127,6 +127,7 @@ mod undeliverable;
 /// For [`Undeliverable`], a message type for delivery failures.
 pub use undeliverable::Undeliverable;
 pub use undeliverable::UndeliverableMessageError;
+pub use undeliverable::custom_monitored_return_handle;
 pub use undeliverable::monitored_return_handle; // TODO: Audit
 pub use undeliverable::supervise_undeliverable_messages;
 /// For [`MailboxAdminMessage`], a message type for mailbox administration.

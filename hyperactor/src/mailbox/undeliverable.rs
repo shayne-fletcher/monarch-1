@@ -70,6 +70,24 @@ pub fn monitored_return_handle() -> PortHandle<Undeliverable<MessageEnvelope>> {
     return_handle.clone()
 }
 
+/// Now that monitored return handles are rare, it's becoming helpful
+/// to get insights into where they are getting used (so that they can
+/// be eliminated and replaced with something better).
+#[track_caller]
+pub fn custom_monitored_return_handle(caller: &str) -> PortHandle<Undeliverable<MessageEnvelope>> {
+    let caller = caller.to_owned();
+    let (return_handle, mut rx) = new_undeliverable_port();
+    tokio::task::spawn(async move {
+        while let Ok(Undeliverable(mut envelope)) = rx.recv().await {
+            envelope.try_set_error(DeliveryError::BrokenLink(
+                "message returned to undeliverable port".to_string(),
+            ));
+            tracing::error!("{caller} took back an undeliverable message: {}", envelope);
+        }
+    });
+    return_handle
+}
+
 /// Returns a message envelope to its original sender.
 pub(crate) fn return_undeliverable(
     return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
