@@ -85,8 +85,6 @@ async def test_choose():
     assert_type(result, int)
     assert result2 == result3
 
-    await proc.stop()
-
 
 @pytest.mark.timeout(60)
 async def test_stream():
@@ -95,8 +93,6 @@ async def test_stream():
     v.incr.broadcast()
 
     assert 8 == sum([await x for x in v.value.stream()])
-
-    await proc.stop()
 
 
 class To(Actor):
@@ -120,8 +116,6 @@ async def test_mesh_passed_to_mesh():
     assert len(all) == 4
     assert all[0] != all[1]
 
-    await proc.stop()
-
 
 @pytest.mark.timeout(60)
 async def test_mesh_passed_to_mesh_on_different_proc_mesh():
@@ -132,9 +126,6 @@ async def test_mesh_passed_to_mesh_on_different_proc_mesh():
     all = [y for x in f.get.stream(t) for y in await x]
     assert len(all) == 4
     assert all[0] != all[1]
-
-    await proc.stop()
-    await proc2.stop()
 
 
 @pytest.mark.timeout(60)
@@ -152,9 +143,6 @@ async def test_actor_slicing():
 
     assert result[0] == result[1]
 
-    await proc.stop()
-    await proc2.stop()
-
 
 @pytest.mark.timeout(60)
 async def test_aggregate():
@@ -164,8 +152,6 @@ async def test_aggregate():
     acc = Accumulator(counter.value, 0, operator.add)
     r = await acc.accumulate()
     assert r == 4
-
-    await proc.stop()
 
 
 class RunIt(Actor):
@@ -184,8 +170,6 @@ async def test_rank_size():
     assert 1 == await acc.accumulate(lambda: current_rank()["gpus"])
     assert 4 == await acc.accumulate(lambda: current_size()["gpus"])
 
-    await proc.stop()
-
 
 class SyncActor(Actor):
     @endpoint
@@ -201,30 +185,24 @@ async def test_sync_actor():
     r = await a.sync_endpoint.choose(c)
     assert r == 5
 
-    await proc.stop()
-
 
 @pytest.mark.timeout(60)
-async def test_sync_actor_sync_client() -> None:
+def test_sync_actor_sync_client() -> None:
     proc = local_proc_mesh(gpus=2)
     a = proc.spawn("actor", SyncActor).get()
     c = proc.spawn("counter", Counter, 5).get()
     r = a.sync_endpoint.choose(c).get()
     assert r == 5
 
-    await proc.stop()
-
 
 @pytest.mark.timeout(60)
-async def test_proc_mesh_size() -> None:
+def test_proc_mesh_size() -> None:
     proc = local_proc_mesh(gpus=2)
     assert 2 == proc.size("gpus")
-    # proc.initialized.get()
-    # await proc.stop()
 
 
 @pytest.mark.timeout(60)
-async def test_rank_size_sync() -> None:
+def test_rank_size_sync() -> None:
     proc = local_proc_mesh(gpus=2)
     r = proc.spawn("runit", RunIt).get()
 
@@ -232,19 +210,15 @@ async def test_rank_size_sync() -> None:
     assert 1 == acc.accumulate(lambda: current_rank()["gpus"]).get()
     assert 4 == acc.accumulate(lambda: current_size()["gpus"]).get()
 
-    await proc.stop()
-
 
 @pytest.mark.timeout(60)
-async def test_accumulate_sync() -> None:
+def test_accumulate_sync() -> None:
     proc = local_proc_mesh(gpus=2)
     counter = proc.spawn("counter", Counter, 1).get()
     counter.incr.broadcast()
     acc = Accumulator(counter.value, 0, operator.add)
     r = acc.accumulate().get()
     assert r == 4
-
-    await proc.stop()
 
 
 class CastToCounter(Actor):
@@ -254,7 +228,7 @@ class CastToCounter(Actor):
 
 
 @pytest.mark.timeout(60)
-async def test_value_mesh() -> None:
+def test_value_mesh() -> None:
     proc = local_proc_mesh(gpus=2)
     counter = proc.spawn("counter", Counter, 0).get()
     counter.slice(hosts=0, gpus=1).incr.broadcast()
@@ -264,8 +238,6 @@ async def test_value_mesh() -> None:
     assert 1 == x.slice(hosts=0, gpus=1).item()
     n = proc.spawn("ctc", CastToCounter).get()
     assert list(x) == n.slice(gpus=0).doit.call_one(counter).get()
-
-    await proc.stop()
 
 
 @pytest.mark.timeout(60)
@@ -333,8 +305,6 @@ async def test_actor_tls() -> None:
     assert 4 == await am.get.call_one()
     assert 4 == await am.get_async.call_one()
 
-    await pm.stop()
-
 
 class TLSActorFullSync(Actor):
     """An actor that manages thread-local state."""
@@ -364,8 +334,6 @@ async def test_actor_tls_full_sync() -> None:
 
     assert 4 == await am.get.call_one()
 
-    await pm.stop()
-
 
 class AsyncActor(Actor):
     def __init__(self):
@@ -391,8 +359,6 @@ async def test_async_concurrency():
     # actually concurrently processing messages.
     await am.no_more.call()
     await fut
-
-    await pm.stop()
 
 
 async def awaitit(f):
@@ -755,7 +721,7 @@ class SendAlot(Actor):
 
 
 @pytest.mark.timeout(60)
-async def test_port_as_argument() -> None:
+def test_port_as_argument() -> None:
     proc_mesh = local_proc_mesh(gpus=1)
     s = proc_mesh.spawn("send_alot", SendAlot).get()
     send, recv = Channel[int].open()
@@ -764,8 +730,6 @@ async def test_port_as_argument() -> None:
 
     for i in range(100):
         assert i == recv.recv().get()
-
-    await proc_mesh.stop()
 
 
 @pytest.mark.timeout(15)
@@ -782,8 +746,6 @@ async def test_same_actor_twice() -> None:
     assert (
         "gspawn failed: an actor with name 'dup' has already been spawned" in error_msg
     ), f"Expected error message about duplicate actor name, got: {error_msg}"
-
-    await pm.stop()
 
 
 class TestActorMeshStop(unittest.IsolatedAsyncioTestCase):
@@ -811,12 +773,10 @@ class PortedActor(Actor):
 
 
 @pytest.mark.timeout(60)
-async def test_ported_actor():
+def test_ported_actor():
     proc_mesh = local_proc_mesh(gpus=1).get()
     a = proc_mesh.spawn("port_actor", PortedActor).get()
     assert 5 == a.add.call_one(2).get()
-
-    await proc_mesh.stop()
 
 
 async def _recv():
