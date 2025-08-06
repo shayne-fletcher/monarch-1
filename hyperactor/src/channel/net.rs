@@ -721,11 +721,11 @@ impl<M: RemoteMessage> NetTx<M> {
                                     .expect("unexpected serialization error");
                                 let initialized = sink.send(data.into()).await.is_ok();
 
-                                metrics::CHANNEL_RECONNECTIONS.add(
+                                metrics::CHANNEL_CONNECTIONS.add(
                                     1,
                                     hyperactor_telemetry::kv_pairs!(
                                         "transport" => link.dest().transport().to_string(),
-                                        "reason" => "network_flakiness",
+                                        "reason" => "link connected",
                                     ),
                                 );
 
