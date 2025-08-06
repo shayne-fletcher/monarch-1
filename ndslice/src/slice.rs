@@ -654,6 +654,17 @@ impl Slice {
             strides: self.strides.clone(),
         })
     }
+
+    /// Ensures that every storage offset used by `other` is valid in
+    /// `self`.
+    ///
+    /// That is, for all p ∈ other:
+    /// `self.coordinates(other.location(p))` is defined.
+    pub fn enforce_embedding(&self, other: &Slice) -> Result<(), SliceError> {
+        other
+            .iter()
+            .try_for_each(|loc| self.coordinates(loc).map(|_| ()))
+    }
 }
 
 impl std::fmt::Display for Slice {
@@ -1074,5 +1085,21 @@ mod tests {
             // ∀ `loc` ∈ `c`, `c.get(c.index(loc)) == loc`.
             assert_eq!(c.get(c.index(loc).unwrap()).unwrap(), loc);
         }
+    }
+
+    #[test]
+    fn embedding_succeeds_for_contained_view() {
+        let base = Slice::new(0, vec![4, 4], vec![4, 1]).unwrap(); // 4×4 matrix, row-major
+        let view = Slice::new(5, vec![2, 2], vec![4, 1]).unwrap(); // a 2×2 submatrix starting at (1,1)
+
+        assert!(base.enforce_embedding(&view).is_ok());
+    }
+
+    #[test]
+    fn embedding_fails_for_out_of_bounds_view() {
+        let base = Slice::new(0, vec![4, 4], vec![4, 1]).unwrap(); // 4×4 matrix
+        let view = Slice::new(14, vec![2, 2], vec![4, 1]).unwrap(); // starts at (3,2), accesses (4,3)
+
+        assert!(base.enforce_embedding(&view).is_err());
     }
 }
