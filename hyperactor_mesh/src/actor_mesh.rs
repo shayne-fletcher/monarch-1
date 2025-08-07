@@ -623,16 +623,39 @@ pub(crate) mod test_util {
     #[async_trait]
     impl Handler<Echo> for ProxyActor {
         async fn handle(&mut self, cx: &Context<Self>, message: Echo) -> Result<(), anyhow::Error> {
-            let actor = self.actor_mesh.get(0).unwrap();
+            if std::env::var("HYPERACTOR_MESH_ROUTER_NO_GLOBAL_FALLBACK").is_err() {
+                // test_proxy_mesh
 
-            // For now, we reply directly to the client.
-            // We will support directly wiring up the meshes later.
-            let (tx, mut rx) = cx.open_port();
+                let actor = self.actor_mesh.get(0).unwrap();
 
-            actor.send(cx, Echo(message.0, tx.bind()))?;
-            message.1.send(cx, rx.recv().await.unwrap())?;
+                // For now, we reply directly to the client.
+                // We will support directly wiring up the meshes later.
+                let (tx, mut rx) = cx.open_port();
 
-            Ok(())
+                actor.send(cx, Echo(message.0, tx.bind()))?;
+                message.1.send(cx, rx.recv().await.unwrap())?;
+
+                Ok(())
+            } else {
+                // test_router_undeliverable_return
+
+                let actor: ActorRef<_> = self.actor_mesh.get(0).unwrap();
+                let (tx, mut rx) = cx.open_port::<String>();
+                actor.send(cx, Echo(message.0, tx.bind()))?;
+
+                use tokio::time::Duration;
+                use tokio::time::timeout;
+                #[allow(clippy::disallowed_methods)]
+                match timeout(Duration::from_secs(1), rx.recv()).await {
+                    Ok(_) => message
+                        .1
+                        .send(cx, "the impossible happened".to_owned())
+                        .unwrap(),
+                    _ => (),
+                }
+
+                Ok(())
+            }
         }
     }
 }
@@ -677,8 +700,6 @@ mod tests {
                 use $crate::alloc::AllocSpec;
                 use $crate::alloc::Allocator;
 
-                hyperactor_telemetry::initialize_logging(hyperactor::clock::ClockKind::default());
-
                 use ndslice::extent;
 
                 let alloc = $allocator
@@ -693,7 +714,12 @@ mod tests {
                 let proxy_actor = actor_mesh.get(0).unwrap();
                 let (tx, mut rx) = actor_mesh.open_port::<String>();
                 proxy_actor.send(proc_mesh.client(), Echo("hello!".to_owned(), tx.bind())).unwrap();
-                assert_eq!(rx.recv().await.unwrap(), "hello!");
+
+                #[allow(clippy::disallowed_methods)]
+                match tokio::time::timeout(tokio::time::Duration::from_secs(3), rx.recv()).await {
+                    Ok(msg) => assert_eq!(&msg.unwrap(), "hello!"),
+                    Err(_) =>  assert!(false),
+                }
             }
 
             #[tokio::test]
@@ -1286,6 +1312,62 @@ mod tests {
                 let event = actor_mesh_events.next().await.unwrap();
                 assert_eq!(event.actor_id.name(), &actor_mesh.name);
             }
+        }
+
+        // Set this test only for `mod process` because it relies on a
+        // trick to emulate router failure that only works when using
+        // non-local allocators.
+        #[cfg(fbcode_build)]
+        #[tokio::test]
+        async fn test_router_undeliverable_return() {
+            // Test that an undeliverable message received by a
+            // router results in actor mesh supervision events.
+            use ndslice::extent;
+
+            use super::test_util::*;
+            use crate::alloc::AllocSpec;
+            use crate::alloc::Allocator;
+
+            let alloc = process_allocator()
+                .allocate(AllocSpec {
+                    extent: extent! { replica = 1 },
+                    constraints: Default::default(),
+                })
+                .await
+                .unwrap();
+
+            // SAFETY: Not multithread safe.
+            unsafe { std::env::set_var("HYPERACTOR_MESH_ROUTER_NO_GLOBAL_FALLBACK", "1") };
+
+            let mut proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
+            let mut proc_events = proc_mesh.events().unwrap();
+            let mut actor_mesh: RootActorMesh<'_, ProxyActor> =
+                { proc_mesh.spawn("proxy", &()).await.unwrap() };
+            let mut actor_events = actor_mesh.events().unwrap();
+
+            let proxy_actor = actor_mesh.get(0).unwrap();
+            let (tx, mut rx) = actor_mesh.open_port::<String>();
+            proxy_actor
+                .send(proc_mesh.client(), Echo("hello!".to_owned(), tx.bind()))
+                .unwrap();
+
+            #[allow(clippy::disallowed_methods)]
+            match tokio::time::timeout(tokio::time::Duration::from_secs(3), rx.recv()).await {
+                Ok(_) => panic!("the impossible happened"),
+                Err(_) => {
+                    assert_matches!(
+                        proc_events.next().await.unwrap(),
+                        ProcEvent::Crashed(0, reason) if reason.contains("undeliverable")
+                    );
+                    assert_eq!(
+                        actor_events.next().await.unwrap().actor_id.name(),
+                        &actor_mesh.name
+                    );
+                }
+            }
+
+            // SAFETY: Not multithread safe.
+            unsafe { std::env::remove_var("HYPERACTOR_MESH_ROUTER_NO_GLOBAL_FALLBACK") };
         }
     }
 
