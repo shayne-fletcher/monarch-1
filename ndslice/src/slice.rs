@@ -655,15 +655,30 @@ impl Slice {
         })
     }
 
-    /// Ensures that every storage offset used by `other` is valid in
-    /// `self`.
+    /// Ensures that every storage offset used by `self` is valid in
+    /// `other`.
     ///
-    /// That is, for all p ∈ other:
-    /// `self.coordinates(other.location(p))` is defined.
-    pub fn enforce_embedding(&self, other: &Slice) -> Result<(), SliceError> {
-        other
-            .iter()
-            .try_for_each(|loc| self.coordinates(loc).map(|_| ()))
+    /// That is, for all p ∈ self:
+    /// `other.coordinates(self.location(p))` is defined.
+    ///
+    /// Returns `self` on success, enabling fluent chaining.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ndslice::Slice;
+    ///
+    /// let base = Slice::new(0, vec![4, 4], vec![4, 1]).unwrap();
+    /// let view = base.subview(&[1, 1], &[2, 2]).unwrap();
+    /// assert_eq!(view.enforce_embedding(&base).unwrap().len(), 4);
+    ///
+    /// let small = Slice::new(0, vec![2, 2], vec![2, 1]).unwrap();
+    /// assert!(view.enforce_embedding(&small).is_err());
+    ///  ```
+    pub fn enforce_embedding<'a>(&'a self, other: &'_ Slice) -> Result<&'a Slice, SliceError> {
+        self.iter()
+            .try_for_each(|loc| other.coordinates(loc).map(|_| ()))?;
+        Ok(self)
     }
 }
 
@@ -1092,7 +1107,7 @@ mod tests {
         let base = Slice::new(0, vec![4, 4], vec![4, 1]).unwrap(); // 4×4 matrix, row-major
         let view = Slice::new(5, vec![2, 2], vec![4, 1]).unwrap(); // a 2×2 submatrix starting at (1,1)
 
-        assert!(base.enforce_embedding(&view).is_ok());
+        assert!(view.enforce_embedding(&base).is_ok());
     }
 
     #[test]
@@ -1100,6 +1115,6 @@ mod tests {
         let base = Slice::new(0, vec![4, 4], vec![4, 1]).unwrap(); // 4×4 matrix
         let view = Slice::new(14, vec![2, 2], vec![4, 1]).unwrap(); // starts at (3,2), accesses (4,3)
 
-        assert!(base.enforce_embedding(&view).is_err());
+        assert!(view.enforce_embedding(&base).is_err());
     }
 }
