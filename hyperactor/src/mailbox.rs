@@ -840,7 +840,7 @@ impl Future for MailboxServerHandle {
 
 /// Serve a port on the provided [`channel::Rx`]. This dispatches all
 /// channel messages directly to the port.
-pub trait MailboxServer: MailboxSender + Sized + 'static {
+pub trait MailboxServer: MailboxSender + Clone + Sized + 'static {
     /// Serve the provided port on the given channel on this sender on
     /// a background task which may be joined with the returned handle.
     /// The task fails on any send error.
@@ -887,7 +887,7 @@ pub trait MailboxServer: MailboxSender + Sized + 'static {
     }
 }
 
-impl<T: MailboxSender + Sized + Sync + Send + 'static> MailboxServer for T {}
+impl<T: MailboxSender + Clone + Sized + Sync + Send + 'static> MailboxServer for T {}
 
 /// A mailbox server client that transmits messages on a Tx channel.
 #[derive(Debug)]
