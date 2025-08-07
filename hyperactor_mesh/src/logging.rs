@@ -840,7 +840,6 @@ mod tests {
     use hyperactor::channel::ChannelTx;
     use hyperactor::channel::Tx;
     use hyperactor::id;
-    use hyperactor::mailbox;
     use hyperactor::mailbox::BoxedMailboxSender;
     use hyperactor::mailbox::DialMailboxRouter;
     use hyperactor::mailbox::MailboxServer;
@@ -858,8 +857,7 @@ mod tests {
             .await
             .unwrap();
         let proc = Proc::new(id!(client[0]), BoxedMailboxSender::new(router.clone()));
-        proc.clone()
-            .serve(client_rx, mailbox::monitored_return_handle());
+        proc.clone().serve(client_rx);
         router.bind(id!(client[0]).into(), proc_addr.clone());
         let client = proc.attach("client").unwrap();
 

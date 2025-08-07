@@ -187,7 +187,7 @@ impl Alloc for LocalAlloc {
                     };
 
                     // Undeliverable messages get forwarded to the mesh agent.
-                    let handle = proc.clone().serve(proc_rx, mesh_agent.port());
+                    let handle = proc.clone().serve(proc_rx);
 
                     self.procs.insert(
                         rank,
