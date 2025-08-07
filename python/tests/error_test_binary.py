@@ -158,8 +158,9 @@ def error_endpoint(num_procs, sync_test_impl, sync_endpoint, endpoint_name):
 @main.command("error-bootstrap")
 def error_bootstrap():
     print("Started function error_bootstrap", flush=True)
-
-    proc_mesh(gpus=4, env={"MONARCH_ERROR_DURING_BOOTSTRAP_FOR_TESTING": "1"}).get()
+    proc_mesh(
+        gpus=4, env={"MONARCH_ERROR_DURING_BOOTSTRAP_FOR_TESTING": "1"}
+    ).initialized.get()
 
 
 async def _error_unmonitored():

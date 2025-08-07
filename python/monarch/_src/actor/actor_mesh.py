@@ -59,6 +59,7 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     PortReceiver as HyPortReceiver,
     PortRef,
 )
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 
 if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
@@ -208,9 +209,7 @@ class ActorMeshProtocol(Protocol):
 
     def new_with_shape(self, shape: Shape) -> Self: ...
 
-    def supervise(
-        self, r: HyPortReceiver | HyOncePortReceiver
-    ) -> "PortReceiverBase": ...
+    def supervision_event(self) -> "Optional[Shared[Exception]]": ...
 
     async def stop(self) -> None: ...
 
@@ -250,8 +249,8 @@ class _PythonActorMeshAdapter(ActorMeshProtocol):
         sliced: PythonActorMeshRef = self._inner.new_with_shape(shape)
         return _PythonActorMeshRefAdapter(sliced, self.proc_mesh)
 
-    def supervise(self, r: HyPortReceiver | HyOncePortReceiver) -> "PortReceiverBase":
-        return self._inner.supervise(r)
+    def supervision_event(self) -> "Optional[Shared[Exception]]":
+        return self._inner.supervision_event().spawn()
 
     async def stop(self) -> None:
         await self._inner.stop()
@@ -301,8 +300,8 @@ class _PythonActorMeshRefAdapter(ActorMeshProtocol):
         sliced: PythonActorMeshRef = self._inner.new_with_shape(shape)
         return _PythonActorMeshRefAdapter(sliced, self._proc_mesh)
 
-    def supervise(self, r: HyPortReceiver | HyOncePortReceiver) -> "PortReceiverBase":
-        return r
+    def supervision_event(self) -> "Optional[Shared[Exception]]":
+        return None
 
     async def stop(self) -> None:
         raise NotImplementedError("PythonActorMeshRef.stop() is not supported")
@@ -339,8 +338,8 @@ class _SingletonActorAdapator(ActorMeshProtocol):
     def new_with_shape(self, shape: Shape) -> "ActorMeshProtocol":
         raise NotImplementedError("ActorId does not support new_with_shape")
 
-    def supervise(self, r: HyPortReceiver | HyOncePortReceiver) -> "PortReceiverBase":
-        return r
+    def supervision_event(self) -> "Optional[Shared[Exception]]":
+        return None
 
     async def stop(self) -> None:
         raise NotImplementedError("ActorId does not support stop")
@@ -478,8 +477,10 @@ class _ActorMeshRefImpl(ActorMeshProtocol):
             self._mailbox, None, None, shape, self._please_replace_me_actor_ids
         )
 
-    def supervise(self, r: HyPortReceiver | HyOncePortReceiver) -> "PortReceiverBase":
-        return r if self._actor_mesh is None else self._actor_mesh.supervise(r)
+    def supervision_event(self) -> "Optional[Shared[Exception]]":
+        if self._actor_mesh is None:
+            return None
+        return self._actor_mesh.supervision_event().spawn()
 
     async def stop(self):
         await self._actor_mesh.stop()
@@ -501,9 +502,6 @@ class ActorEndpoint(Endpoint[P, R]):
         self._signature: inspect.Signature = inspect.signature(impl)
         self._mailbox = mailbox
         self._explicit_response_port = explicit_response_port
-
-    def _supervise(self, r: HyPortReceiver | HyOncePortReceiver) -> "PortReceiverBase":
-        return self._actor_mesh.supervise(r)
 
     def _call_name(self) -> Any:
         return self._name
@@ -543,11 +541,9 @@ class ActorEndpoint(Endpoint[P, R]):
 
     def _port(self, once: bool = False) -> "Tuple[Port[R], PortReceiver[R]]":
         p, r = super()._port(once=once)
-        if TYPE_CHECKING:
-            assert isinstance(
-                r._receiver, (HyPortReceiver | HyOncePortReceiver)
-            ), "unexpected receiver type"
-        return (p, PortReceiver(self._mailbox, self._supervise(r._receiver)))
+        monitor: Optional[Shared[Exception]] = self._actor_mesh.supervision_event()
+        r._set_monitor(monitor)
+        return (p, r)
 
     def _rref(self, args, kwargs):
         self._check_arguments(args, kwargs)
@@ -749,12 +745,22 @@ class PortReceiver(Generic[R]):
         self,
         mailbox: Mailbox,
         receiver: "PortReceiverBase",
+        monitor: "Optional[Shared[Exception]]" = None,
     ) -> None:
         self._mailbox: Mailbox = mailbox
+        self._monitor = monitor
         self._receiver = receiver
 
     async def _recv(self) -> R:
-        return self._process(await self._receiver.recv_task())
+        awaitable = self._receiver.recv_task()
+        if self._monitor is None:
+            result = await awaitable
+        else:
+            # type: ignore
+            result, i = await PythonTask.select_one([self._monitor.task(), awaitable])
+            if i == 0:
+                raise result
+        return self._process(result)
 
     def _process(self, msg: PythonMessage) -> R:
         # TODO: Try to do something more structured than a cast here
@@ -771,7 +777,10 @@ class PortReceiver(Generic[R]):
         return Future(coro=self._recv())
 
     def ranked(self) -> "RankedPortReceiver[R]":
-        return RankedPortReceiver[R](self._mailbox, self._receiver)
+        return RankedPortReceiver[R](self._mailbox, self._receiver, self._monitor)
+
+    def _set_monitor(self, monitor: "Optional[Shared[Exception]]"):
+        self._monitor = monitor
 
 
 class RankedPortReceiver(PortReceiver[Tuple[int, R]]):

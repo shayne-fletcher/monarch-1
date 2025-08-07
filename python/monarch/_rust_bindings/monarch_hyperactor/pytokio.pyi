@@ -7,7 +7,18 @@
 # pyre-strict
 
 import asyncio
-from typing import Any, Awaitable, Callable, Coroutine, Generator, Generic, TypeVar
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Generator,
+    Generic,
+    NoReturn,
+    Sequence,
+    Tuple,
+    TypeVar,
+)
 
 T = TypeVar("T")
 
@@ -59,6 +70,15 @@ class PythonTask(Generic[T], Awaitable[T]):
     def with_timeout(self, seconds: float) -> PythonTask[T]:
         """
         Perform the task but throw a TimeoutException if not finished in 'seconds' seconds.
+        """
+        ...
+
+    @staticmethod
+    def select_one(
+        tasks: "Sequence[PythonTask[T]]",
+    ) -> "PythonTask[Tuple[T, int]]":
+        """
+        Run the tasks concurrently and return the first one to finish along with the index of which task it was.
         """
         ...
 

@@ -6,16 +6,16 @@
 
 # pyre-strict
 
-from typing import AsyncIterator, final
+from typing import AsyncIterator, final, NoReturn
 
 from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
     OncePortReceiver,
     PortReceiver,
-    PortReceiverBase,
 )
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.selection import Selection
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape
 from typing_extensions import Self
@@ -97,23 +97,15 @@ class PythonActorMesh:
         """
         ...
 
-    def get(self, rank: int) -> ActorId | None:
+    def supervision_event(self) -> PythonTask[Exception]:
         """
-        Get the actor id for the actor at the given rank.
+        Completes with an exception when there is a supervision error.
         """
         ...
 
-    def supervise(
-        self, r: PortReceiver | OncePortReceiver
-    ) -> SupervisedPortReceiver | SupervisedOncePortReceiver:
-        """Return a monitored port receiver.
-
-        A monitored port receiver behaves like a regular port receiver
-        but also observes the health of the actor mesh associated with
-        the sender. If the actor mesh becomes unhealthy, the receiver
-        will yield a supervision error instead of waiting indefinitely
-        for a message.
-
+    def get(self, rank: int) -> ActorId | None:
+        """
+        Get the actor id for the actor at the given rank.
         """
         ...
 
@@ -148,18 +140,6 @@ class PythonActorMesh:
         If the mesh has been stopped.
         """
         ...
-
-@final
-class SupervisedPortReceiver(PortReceiverBase):
-    """A monitored receiver to which PythonMessages are sent. Values
-    of this type cannot be constructed directly in Python.
-    """
-
-@final
-class SupervisedOncePortReceiver(PortReceiverBase):
-    """A monitored once receiver to which PythonMessages are sent.
-    Values of this type cannot be constructed directly in Python.
-    """
 
 @final
 class ActorSupervisionEvent:

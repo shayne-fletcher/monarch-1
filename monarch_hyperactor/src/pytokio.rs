@@ -244,6 +244,23 @@ impl PyPythonTask {
         });
         Ok(PyShared { rx })
     }
+
+    #[staticmethod]
+    fn select_one(mut tasks: Vec<PyRefMut<'_, PyPythonTask>>) -> PyResult<PyPythonTask> {
+        if tasks.is_empty() {
+            return Err(PyValueError::new_err("Cannot select from empty task list"));
+        }
+
+        let mut futures = Vec::new();
+        for task_ref in tasks.iter_mut() {
+            futures.push(task_ref.take_task()?);
+        }
+
+        PyPythonTask::new(async move {
+            let (result, index, _remaining) = futures::future::select_all(futures).await;
+            result.map(|r| (r, index))
+        })
+    }
 }
 
 #[pyclass(

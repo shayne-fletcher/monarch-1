@@ -791,3 +791,14 @@ async def consume():
 @pytest.mark.timeout(60)
 def test_python_task_tuple() -> None:
     PythonTask.from_coroutine(consume()).block_on()
+
+
+def test_select_result() -> None:
+    def s(t):
+        time.sleep(t)
+        return t
+
+    a = PythonTask.spawn_blocking(lambda: s(4))
+    b = PythonTask.spawn_blocking(lambda: s(0))
+    r = PythonTask.select_one([a.task(), b.task()]).block_on()
+    assert r == (0, 1)
