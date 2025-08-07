@@ -408,7 +408,8 @@ impl PythonPortReceiver {
 }
 
 impl PythonPortReceiver {
-    pub fn inner(&self) -> Arc<tokio::sync::Mutex<PortReceiver<PythonMessage>>> {
+    #[allow(dead_code)]
+    pub(super) fn inner(&self) -> Arc<tokio::sync::Mutex<PortReceiver<PythonMessage>>> {
         Arc::clone(&self.inner)
     }
 }
@@ -574,7 +575,8 @@ impl PythonOncePortReceiver {
 }
 
 impl PythonOncePortReceiver {
-    pub fn inner(&self) -> Arc<std::sync::Mutex<Option<OncePortReceiver<PythonMessage>>>> {
+    #[allow(dead_code)]
+    pub(super) fn inner(&self) -> Arc<std::sync::Mutex<Option<OncePortReceiver<PythonMessage>>>> {
         Arc::clone(&self.inner)
     }
 }

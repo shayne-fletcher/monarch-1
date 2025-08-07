@@ -88,7 +88,7 @@ pub fn initialize(py: Python) -> Result<()> {
         py,
         None,
         None,
-        |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| {
+        |_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| {
             shutdown_tokio_runtime();
         },
     )
