@@ -22,7 +22,6 @@ use hyperactor_mesh::alloc::LocalAllocator;
 use hyperactor_mesh::extent;
 use hyperactor_mesh::selection::dsl::all;
 use hyperactor_mesh::selection::dsl::true_;
-use hyperactor_mesh::shape;
 use tokio::time::Duration;
 
 mod bench_actor;
