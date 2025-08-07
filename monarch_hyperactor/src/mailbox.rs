@@ -29,7 +29,7 @@ use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::OncePortReceiver;
 use hyperactor::mailbox::PortReceiver;
 use hyperactor::mailbox::Undeliverable;
-use hyperactor::mailbox::monitored_return_handle;
+use hyperactor::mailbox::custom_monitored_return_handle;
 use hyperactor::message::Bind;
 use hyperactor::message::Bindings;
 use hyperactor::message::Unbind;
@@ -138,7 +138,7 @@ impl PyMailbox {
         let return_handle = self
             .inner
             .bound_return_handle()
-            .unwrap_or(monitored_return_handle());
+            .unwrap_or(custom_monitored_return_handle("PyMailbox::post"));
         self.inner.post(envelope, return_handle);
         Ok(())
     }
@@ -169,7 +169,7 @@ impl PyMailbox {
         let return_handle = self
             .inner
             .bound_return_handle()
-            .unwrap_or(monitored_return_handle());
+            .unwrap_or(custom_monitored_return_handle("PyMailbox::post_cast"));
         self.inner.post(envelope, return_handle);
         Ok(())
     }
