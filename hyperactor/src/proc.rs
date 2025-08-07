@@ -2615,7 +2615,7 @@ mod tests {
         impl Actor for TestActor {
             type Params = ();
 
-            async fn new(param: ()) -> Result<Self, anyhow::Error> {
+            async fn new(_param: ()) -> Result<Self, anyhow::Error> {
                 Ok(Self)
             }
         }
