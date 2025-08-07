@@ -926,7 +926,7 @@ mod tests {
                     .await
                     .unwrap();
 
-                let proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
+                let mut proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
 
                 let (tx, mut rx) = hyperactor::mailbox::open_port(proc_mesh.client());
                 let params = CastTestActorParams{ forward_port: tx.bind() };
@@ -937,6 +937,12 @@ mod tests {
                 for _ in 0..num_actors {
                     assert_eq!(rx.recv().await.unwrap(), CastTestMessage::Forward("abc".to_string()));
                 }
+
+                // Attempt to avoid this intermittent fatal error.
+                // ⚠ Fatal: monarch/hyperactor_mesh:hyperactor_mesh-unittest - \
+                //            actor_mesh::tests::sim::test_actor_mesh_cast (2.5s)
+                // Test appears to have passed but the binary exited with a non-zero exit code.
+                proc_mesh.events().unwrap().into_alloc().stop_and_wait().await.unwrap();
             }
 
             #[tokio::test]
