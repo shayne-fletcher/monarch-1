@@ -32,7 +32,25 @@ pub struct ActorSupervisionEvent {
     /// If this event is associated with a message, the message headers.
     #[derivative(PartialEq = "ignore")]
     pub message_headers: Option<Attrs>,
+    /// Optional supervision event that caused this event, for recursive propagation.
+    pub caused_by: Option<Box<ActorSupervisionEvent>>,
 }
+
+impl ActorSupervisionEvent {
+    /// Compute an actor status from this event, ensuring that "caused-by"
+    /// events are included in failure states. This should be used as the
+    /// actor status when reporting events to users.
+    pub fn status(&self) -> ActorStatus {
+        match &self.actor_status {
+            ActorStatus::Failed(msg) => {
+                ActorStatus::Failed(format!("{}: {}", self.to_string(), msg))
+            }
+            status => status.clone(),
+        }
+    }
+}
+
+impl std::error::Error for ActorSupervisionEvent {}
 
 impl fmt::Display for ActorSupervisionEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -40,7 +58,10 @@ impl fmt::Display for ActorSupervisionEvent {
         if let Some(message_headers) = &self.message_headers {
             let headers = serde_json::to_string(&message_headers)
                 .expect("could not serialize message headers");
-            write!(f, " headers: {}", headers)?;
+            write!(f, " (headers: {})", headers)?;
+        }
+        if let Some(caused_by) = &self.caused_by {
+            write!(f, ": caused by: {})", caused_by)?;
         }
         Ok(())
     }

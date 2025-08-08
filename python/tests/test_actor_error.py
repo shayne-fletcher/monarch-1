@@ -490,7 +490,7 @@ async def test_proc_mesh_monitoring(mesh):
     event = await anext(monitor)
     assert isinstance(event, ProcEvent.Crashed)
     assert event[0] == 0  # check rank
-    assert "ActorFailureError" in event[1]  # check error message
+    assert "failed: did not handle supervision event" in event[1]  # check error message
     assert (
         "Simulated actor failure for supervision testing" in event[1]
     )  # check error message

@@ -588,6 +588,7 @@ impl ProcEvents {
                             actor_id: proc_id.actor_id("any", 0),
                             actor_status: ActorStatus::Failed(format!("proc {} is stopped", proc_id)),
                             message_headers: None,
+                            caused_by: None,
                         };
                         if entry.value().send(event).is_err() {
                             tracing::warn!("unable to transmit supervision event to actor {}", entry.key());
@@ -617,6 +618,7 @@ impl ProcEvents {
                     };
                     let actor_id = event.actor_id.clone();
                     let actor_status = event.actor_status.clone();
+                    let reason = event.to_string();
                     let Some(rank) = self.ranks.get(actor_id.proc_id()) else {
                         tracing::warn!("received supervision event for unmapped actor {}", actor_id);
                         continue;
@@ -641,7 +643,7 @@ impl ProcEvents {
                     );
 
                     // Send this event to Python proc mesh to keep its health status up to date.
-                    break Some(ProcEvent::Crashed(*rank, actor_status.to_string()))
+                    break Some(ProcEvent::Crashed(*rank, reason))
                 }
             }
         }
