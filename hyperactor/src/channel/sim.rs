@@ -419,8 +419,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sim_basic() {
-        let dst_ok = vec!["[::1]:1234", "tcp!127.0.0.1:8080", "local!123"];
-        let srcs_ok = vec!["[::2]:1234", "tcp!127.0.0.2:8080", "local!124"];
+        let dst_ok = vec!["tcp![::1]:1234", "tcp!127.0.0.1:8080", "local!123"];
+        let srcs_ok = vec!["tcp![::2]:1234", "tcp!127.0.0.2:8080", "local!124"];
 
         start();
 

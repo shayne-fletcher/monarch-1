@@ -281,7 +281,7 @@ pub type Port = u16;
 /// "tcp". For example:
 ///
 /// - `tcp!127.0.0.1:1234` - localhost port 1234 over TCP
-/// - `192.168.0.1:1111` - 192.168.0.1 port 1111 over TCP
+/// - `tcp!192.168.0.1:1111` - 192.168.0.1 port 1111 over TCP
 /// - `local!123` - the (in-process) local port 123
 ///
 /// Both local and TCP ports 0 are reserved to indicate "any available
@@ -427,10 +427,7 @@ impl FromStr for ChannelAddr {
             Some(("sim", rest)) => sim::parse(rest).map_err(|e| e.into()),
             Some(("unix", rest)) => Ok(Self::Unix(net::unix::SocketAddr::from_str(rest)?)),
             Some((r#type, _)) => Err(anyhow::anyhow!("no such channel type: {type}")),
-            None => addr
-                .parse::<SocketAddr>()
-                .map(Self::Tcp)
-                .map_err(anyhow::Error::from),
+            None => Err(anyhow::anyhow!("no channel type specified")),
         }
     }
 }
@@ -607,7 +604,7 @@ mod tests {
     fn test_channel_addr() {
         let cases_ok = vec![
             (
-                "[::1]:1234",
+                "tcp![::1]:1234",
                 ChannelAddr::Tcp(SocketAddr::new(
                     IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
                     1234,
@@ -640,7 +637,7 @@ mod tests {
 
         let src_ok = vec![
             (
-                "[::1]:1235",
+                "tcp![::1]:1235",
                 ChannelAddr::Tcp(SocketAddr::new(
                     IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
                     1235,
@@ -670,9 +667,9 @@ mod tests {
         }
 
         let cases_err = vec![
-            ("abcdef..123124", "invalid socket address syntax"),
+            ("tcp!abcdef..123124", "invalid socket address syntax"),
             ("xxx!foo", "no such channel type: xxx"),
-            ("127.0.0.1", "invalid socket address syntax"),
+            ("127.0.0.1", "no channel type specified"),
             ("local!abc", "invalid digit found in string"),
         ];
 
@@ -754,7 +751,7 @@ mod tests {
 
         let rng = rand::thread_rng();
         vec![
-            "[::1]:0".parse().unwrap(),
+            "tcp![::1]:0".parse().unwrap(),
             "local!0".parse().unwrap(),
             #[cfg(target_os = "linux")]
             "unix!".parse().unwrap(),
