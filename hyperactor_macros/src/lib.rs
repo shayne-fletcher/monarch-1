@@ -633,7 +633,8 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
 
                 let (reply_port_arg, _) = message.reply_port_arg().unwrap();
                 let constructor = variant.constructor();
-                let construct_result_future = quote! { use hyperactor::Message; let result = self.#variant_name_snake(cx, #(#arg_names),*).await?; };
+                let result_ident = Ident::new("result", Span::mixed_site());
+                let construct_result_future = quote! { use hyperactor::Message; let #result_ident = self.#variant_name_snake(cx, #(#arg_names),*).await?; };
                 if *reply_port_is_handle {
                     match_arms.push(quote! {
                         #constructor => {
@@ -641,7 +642,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                             // TODO: should we propagate this error (to supervision), or send it back as an "RPC error"?
                             // This would require Result<Result<..., in order to handle RPC errors.
                             #construct_result_future
-                            #reply_port_arg.send(result).map_err(hyperactor::anyhow::Error::from)
+                            #reply_port_arg.send(#result_ident).map_err(hyperactor::anyhow::Error::from)
                         }
                     });
                 } else {
@@ -651,7 +652,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                             // TODO: should we propagate this error (to supervision), or send it back as an "RPC error"?
                             // This would require Result<Result<..., in order to handle RPC errors.
                             #construct_result_future
-                            #reply_port_arg.send(cx, result).map_err(hyperactor::anyhow::Error::from)
+                            #reply_port_arg.send(cx, #result_ident).map_err(hyperactor::anyhow::Error::from)
                         }
                     });
                 }

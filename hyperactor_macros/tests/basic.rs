@@ -31,11 +31,20 @@ use serde::Serialize;
 enum ShoppingList {
     // Oneway messages dispatch messages asynchronously, with no reply.
     Add(String),
-    Remove { item: String }, // both tuple and struct variants are supported.
+    Remove {
+        item: String,
+    }, // both tuple and struct variants are supported.
 
     // Call messages dispatch a request, expecting a reply to the
     // provided port, which must be in the last position.
     Exists(String, #[reply] OncePortRef<bool>),
+
+    // Tests macro hygience. We use 'result' as a keyword in the implementation.
+    Clobber {
+        arg: String,
+        #[reply]
+        result: OncePortRef<bool>,
+    },
 }
 
 #[derive(Handler, HandleClient, RefClient, Debug, Serialize, Deserialize, Named)]
