@@ -371,6 +371,7 @@ impl ProcessAlloc {
         cmd.env(bootstrap::BOOTSTRAP_LOG_CHANNEL, log_channel.to_string());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
         let proc_id = ProcId::Ranked(WorldId(self.name.to_string()), index);
         tracing::debug!("Spawning process {:?}", cmd);
