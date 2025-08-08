@@ -22,3 +22,14 @@ Cargo.lock
 books/hyperactor-book/book/**
 
 CLAUDE.md
+
+# macOS files
+*/.DS_Store
+
+
+# Sphinx build files
+build/**
+docs/_build/**
+docs/build/**
+docs/generated/**
+*/sg_execution_times.rst
