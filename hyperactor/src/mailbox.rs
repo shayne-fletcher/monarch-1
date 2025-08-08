@@ -838,6 +838,43 @@ impl Future for MailboxServerHandle {
     }
 }
 
+// A `MailboxServer` (such as a router) can can receive a message
+// that couldn't reach its destination. We can use the fact that
+// servers are `MailboxSender`s to attempt to forward them back to
+// their senders.
+fn server_return_handle<T: MailboxServer>(server: T) -> PortHandle<Undeliverable<MessageEnvelope>> {
+    let (return_handle, mut rx) = undeliverable::new_undeliverable_port();
+
+    tokio::task::spawn(async move {
+        while let Ok(Undeliverable(mut envelope)) = rx.recv().await {
+            if let Ok(Undeliverable(e)) = envelope.deserialized::<Undeliverable<MessageEnvelope>>()
+            {
+                // A non-returnable undeliverable.
+                UndeliverableMailboxSender.post(e, monitored_return_handle());
+                continue;
+            }
+            envelope.try_set_error(DeliveryError::BrokenLink(
+                "message was undeliverable".to_owned(),
+            ));
+            server.post(
+                MessageEnvelope::new(
+                    envelope.sender().clone(),
+                    PortRef::<Undeliverable<MessageEnvelope>>::attest_message_port(
+                        envelope.sender(),
+                    )
+                    .port_id()
+                    .clone(),
+                    Serialized::serialize(&Undeliverable(envelope)).unwrap(),
+                    Attrs::new(),
+                ),
+                monitored_return_handle(),
+            );
+        }
+    });
+
+    return_handle
+}
+
 /// Serve a port on the provided [`channel::Rx`]. This dispatches all
 /// channel messages directly to the port.
 pub trait MailboxServer: MailboxSender + Clone + Sized + 'static {
@@ -847,8 +884,41 @@ pub trait MailboxServer: MailboxSender + Clone + Sized + 'static {
     fn serve(
         self,
         mut rx: impl channel::Rx<MessageEnvelope> + Send + 'static,
-        return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) -> MailboxServerHandle {
+        // A `MailboxServer` can can receive a message that couldn't
+        // reach its destination. We can use the fact that servers are
+        // `MailboxSender`s to attempt to forward them back to their
+        // senders.
+        let (return_handle, mut undeliverable_rx) = undeliverable::new_undeliverable_port();
+        let server = self.clone();
+        tokio::task::spawn(async move {
+            while let Ok(Undeliverable(mut envelope)) = undeliverable_rx.recv().await {
+                if let Ok(Undeliverable(e)) =
+                    envelope.deserialized::<Undeliverable<MessageEnvelope>>()
+                {
+                    // A non-returnable undeliverable.
+                    UndeliverableMailboxSender.post(e, monitored_return_handle());
+                    continue;
+                }
+                envelope.try_set_error(DeliveryError::BrokenLink(
+                    "message was undeliverable".to_owned(),
+                ));
+                server.post(
+                    MessageEnvelope::new(
+                        envelope.sender().clone(),
+                        PortRef::<Undeliverable<MessageEnvelope>>::attest_message_port(
+                            envelope.sender(),
+                        )
+                        .port_id()
+                        .clone(),
+                        Serialized::serialize(&Undeliverable(envelope)).unwrap(),
+                        Attrs::new(),
+                    ),
+                    monitored_return_handle(),
+                );
+            }
+        });
+
         let (stopped_tx, mut stopped_rx) = watch::channel(false);
         let join_handle = tokio::spawn(async move {
             let mut detached = false;
@@ -2399,45 +2469,6 @@ impl MailboxSender for DialMailboxRouter {
     }
 }
 
-/// A `MailboxServer` (such as a router) can can receive a message
-/// that couldn't reach its destination. We can use the fact that
-/// servers are `MailboxSender`s to attempt to forward them back to
-/// their senders.
-pub fn server_return_handle<T: MailboxServer>(
-    server: T,
-) -> PortHandle<Undeliverable<MessageEnvelope>> {
-    let (return_handle, mut rx) = undeliverable::new_undeliverable_port();
-
-    tokio::task::spawn(async move {
-        while let Ok(Undeliverable(mut envelope)) = rx.recv().await {
-            if let Ok(Undeliverable(e)) = envelope.deserialized::<Undeliverable<MessageEnvelope>>()
-            {
-                // A non-returnable undeliverable.
-                UndeliverableMailboxSender.post(e, monitored_return_handle());
-                continue;
-            }
-            envelope.try_set_error(DeliveryError::BrokenLink(
-                "message was undeliverable".to_owned(),
-            ));
-            server.post(
-                MessageEnvelope::new(
-                    envelope.sender().clone(),
-                    PortRef::<Undeliverable<MessageEnvelope>>::attest_message_port(
-                        envelope.sender(),
-                    )
-                    .port_id()
-                    .clone(),
-                    Serialized::serialize(&Undeliverable(envelope)).unwrap(),
-                    Attrs::new(),
-                ),
-                monitored_return_handle(),
-            );
-        }
-    });
-
-    return_handle
-}
-
 /// A MailboxSender that reports any envelope as undeliverable due to
 /// routing failure.
 #[derive(Debug)]
@@ -2657,7 +2688,7 @@ mod tests {
     async fn test_local_client_server() {
         let mbox = Mailbox::new_detached(id!(test[0].actor0));
         let (tx, rx) = channel::local::new();
-        let serve_handle = mbox.clone().serve(rx, monitored_return_handle());
+        let serve_handle = mbox.clone().serve(rx);
         let client = MailboxClient::new(tx);
 
         let (port, receiver) = mbox.open_once_port::<u64>();
@@ -2688,7 +2719,7 @@ mod tests {
             .unwrap();
         let tx = dial::<MessageEnvelope>(src_to_dst).unwrap();
         let mbox = Mailbox::new_detached(id!(test[0].actor0));
-        let serve_handle = mbox.clone().serve(rx, monitored_return_handle());
+        let serve_handle = mbox.clone().serve(rx);
         let client = MailboxClient::new(tx);
         let (port, receiver) = mbox.open_once_port::<u64>();
         let port = port.bind();
@@ -2798,7 +2829,7 @@ mod tests {
             let (addr, rx) = channel::serve(ChannelAddr::any(ChannelTransport::Local))
                 .await
                 .unwrap();
-            let handle = (*mbox).clone().serve(rx, monitored_return_handle());
+            let handle = (*mbox).clone().serve(rx);
             handles.push(handle);
 
             eprintln!("{}: {}", mbox.actor_id(), addr);

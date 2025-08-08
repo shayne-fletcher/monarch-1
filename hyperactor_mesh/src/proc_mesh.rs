@@ -37,7 +37,6 @@ use hyperactor::mailbox::MailboxServer;
 use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::PortReceiver;
 use hyperactor::mailbox::Undeliverable;
-use hyperactor::mailbox::server_return_handle;
 use hyperactor::metrics;
 use hyperactor::proc::Proc;
 use hyperactor::reference::ProcId;
@@ -210,9 +209,7 @@ impl ProcMesh {
             // Work around for Allocs that have more than one world.
             world_ids.insert(proc_id.world_id().clone());
         }
-        router
-            .clone()
-            .serve(router_rx, server_return_handle(router.clone()));
+        router.clone().serve(router_rx);
 
         // Set up a client proc for the mesh itself, so that we can attach ourselves
         // to it, and communicate with the agents. We wire it into the same router as
@@ -226,9 +223,7 @@ impl ProcMesh {
             client_proc_id.clone(),
             BoxedMailboxSender::new(router.clone()),
         );
-        client_proc
-            .clone()
-            .serve(client_rx, server_return_handle(client_proc.clone()));
+        client_proc.clone().serve(client_rx);
         router.bind(client_proc_id.clone().into(), client_proc_addr.clone());
 
         // Bind this router to the global router, to enable cross-mesh routing.

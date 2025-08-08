@@ -24,9 +24,6 @@ use hyperactor::mailbox::MailboxClient;
 use hyperactor::mailbox::MailboxSender;
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::mailbox::MailboxServerHandle;
-use hyperactor::mailbox::MessageEnvelope;
-use hyperactor::mailbox::Undeliverable;
-use hyperactor::mailbox::monitored_return_handle;
 use hyperactor::proc::Proc;
 use system_actor::SystemActor;
 use system_actor::SystemActorParams;
@@ -57,12 +54,8 @@ impl System {
         let (actor_handle, system_proc) = SystemActor::bootstrap_with_clock(params, clock).await?;
         actor_handle.bind::<SystemActor>();
 
-        // Undeliverable messages encountered by the mailbox server
-        // are to be returned to the system actor.
-        let system_return_handle = actor_handle.port::<Undeliverable<MessageEnvelope>>();
         let (local_addr, rx) = channel::serve(addr).await?;
-        // `MailboxServer::serve()`.
-        let mailbox_handle = system_proc.clone().serve(rx, system_return_handle);
+        let mailbox_handle = system_proc.clone().serve(rx);
 
         Ok(ServerHandle {
             actor_handle,
@@ -100,8 +93,7 @@ impl System {
             .await
             .unwrap();
 
-        let _proc_serve_handle: MailboxServerHandle =
-            proc.clone().serve(proc_rx, monitored_return_handle());
+        let _proc_serve_handle: MailboxServerHandle = proc.clone().serve(proc_rx);
 
         // Now, pretend we are the proc actor, and use this to join the system.
         let proc_inst = proc.attach("proc")?;

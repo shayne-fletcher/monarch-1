@@ -37,14 +37,12 @@ use hyperactor::channel::ChannelAddr;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
 use hyperactor::mailbox::BoxedMailboxSender;
-use hyperactor::mailbox::DeliveryError;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::IntoBoxedMailboxSender;
 use hyperactor::mailbox::MailboxClient;
 use hyperactor::mailbox::MailboxSender;
 use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::Undeliverable;
-use hyperactor::mailbox::UndeliverableMessageError;
 use hyperactor::proc::Proc;
 use hyperactor::supervision::ActorSupervisionEvent;
 use serde::Deserialize;
@@ -160,30 +158,6 @@ impl Actor for MeshAgent {
 
     async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
         self.proc.set_supervision_coordinator(this.port())?;
-        Ok(())
-    }
-
-    // This is an override of the default actor behavior.
-    async fn handle_undeliverable_message(
-        &mut self,
-        cx: &Instance<Self>,
-        undelivered: Undeliverable<MessageEnvelope>,
-    ) -> Result<(), anyhow::Error> {
-        let Undeliverable(ref envelope) = undelivered;
-        tracing::debug!("took charge of a message not delivered: {}", envelope);
-
-        let sender = envelope.sender().clone();
-        if cx.self_id() == &sender {
-            anyhow::bail!(UndeliverableMessageError::delivery_failure(envelope));
-        }
-
-        let mut envelope = envelope.clone();
-        let return_port = PortRef::attest_message_port(&sender);
-        return_port.send(cx, undelivered).map_err(|err| {
-            envelope.try_set_error(DeliveryError::BrokenLink(format!("send failure: {err}")));
-            UndeliverableMessageError::return_failure(&envelope)
-        })?;
-
         Ok(())
     }
 }

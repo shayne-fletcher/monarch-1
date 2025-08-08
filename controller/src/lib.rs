@@ -638,7 +638,6 @@ mod tests {
     use hyperactor::mailbox::MailboxServer;
     use hyperactor::mailbox::PortHandle;
     use hyperactor::mailbox::PortReceiver;
-    use hyperactor::mailbox::monitored_return_handle;
     use hyperactor::message::IndexedErasedUnbound;
     use hyperactor::proc::Proc;
     use hyperactor::reference::GangId;
@@ -1545,9 +1544,7 @@ mod tests {
         let (local_proc_message_port, local_proc_message_receiver) = local_proc_mbox.open_port();
         local_proc_message_port.bind();
 
-        let _local_proc_serve_handle = local_proc_mbox
-            .clone()
-            .serve(local_proc_rx, monitored_return_handle());
+        let _local_proc_serve_handle = local_proc_mbox.clone().serve(local_proc_rx);
         (
             world_id,
             local_proc_id,

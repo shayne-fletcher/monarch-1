@@ -459,9 +459,7 @@ pub(crate) mod testing {
             .unwrap();
         let router =
             DialMailboxRouter::new_with_default((UndeliverableMailboxSender {}).into_boxed());
-        router
-            .clone()
-            .serve(router_rx, mailbox::monitored_return_handle());
+        router.clone().serve(router_rx);
 
         let client_proc_id = ProcId(WorldId("test_stuck".to_string()), 0);
         let (client_proc_addr, client_rx) =
@@ -470,9 +468,7 @@ pub(crate) mod testing {
             client_proc_id.clone(),
             BoxedMailboxSender::new(router.clone()),
         );
-        client_proc
-            .clone()
-            .serve(client_rx, mailbox::monitored_return_handle());
+        client_proc.clone().serve(client_rx);
         router.bind(client_proc_id.clone().into(), client_proc_addr);
         (
             router,

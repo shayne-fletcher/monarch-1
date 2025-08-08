@@ -44,7 +44,6 @@ use hyperactor::mailbox::MailboxAdminMessageHandler;
 use hyperactor::mailbox::MailboxClient;
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::mailbox::MailboxServerHandle;
-use hyperactor::mailbox::monitored_return_handle;
 use hyperactor::mailbox::open_port;
 use hyperactor::proc::ActorLedgerSnapshot;
 use hyperactor::proc::Proc;
@@ -419,7 +418,7 @@ impl ProcActor {
         lifecycle_mode: ProcLifecycleMode,
     ) -> Result<BootstrappedProc, anyhow::Error> {
         let (local_addr, rx) = channel::serve(listen_addr).await?;
-        let mailbox_handle = proc.clone().serve(rx, monitored_return_handle());
+        let mailbox_handle = proc.clone().serve(rx);
         let (state_tx, mut state_rx) = watch::channel(ProcState::AwaitingJoin);
 
         let handle = match proc

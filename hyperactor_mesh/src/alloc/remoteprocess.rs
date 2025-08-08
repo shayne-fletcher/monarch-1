@@ -35,7 +35,6 @@ use hyperactor::clock::RealClock;
 use hyperactor::config;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxServer;
-use hyperactor::mailbox::server_return_handle;
 use hyperactor::reference::Reference;
 use hyperactor::serde_json;
 use mockall::automock;
@@ -284,9 +283,7 @@ impl RemoteProcessAllocator {
                 }
             };
         let router = DialMailboxRouter::new();
-        let mailbox_handle = router
-            .clone()
-            .serve(forwarder_rx, server_return_handle(router.clone()));
+        let mailbox_handle = router.clone().serve(forwarder_rx);
         tracing::info!("started forwarder on: {}", forwarder_addr);
 
         // Check if we need to write TORCH_ELASTIC_CUSTOM_HOSTNAMES_LIST_FILE
