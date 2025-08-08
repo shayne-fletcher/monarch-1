@@ -474,8 +474,8 @@ impl FromStr for WorldId {
 pub enum ProcId {
     /// A ranked proc within a world
     Ranked(WorldId, Index),
-    /// A proc reachable via a direct channel address
-    Direct(ChannelAddr),
+    /// A proc reachable via a direct channel address, and local name.
+    Direct(ChannelAddr, String),
 }
 
 impl ProcId {
@@ -488,7 +488,7 @@ impl ProcId {
     pub fn world_id(&self) -> Option<&WorldId> {
         match self {
             ProcId::Ranked(world_id, _) => Some(world_id),
-            ProcId::Direct(_) => None,
+            ProcId::Direct(_, _) => None,
         }
     }
 
@@ -501,7 +501,7 @@ impl ProcId {
     pub fn rank(&self) -> Option<Index> {
         match self {
             ProcId::Ranked(_, rank) => Some(*rank),
-            ProcId::Direct(_) => None,
+            ProcId::Direct(_, _) => None,
         }
     }
 }
@@ -510,7 +510,7 @@ impl fmt::Display for ProcId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProcId::Ranked(world_id, rank) => write!(f, "{}[{}]", world_id, rank),
-            ProcId::Direct(addr) => write!(f, "{}", addr),
+            ProcId::Direct(addr, name) => write!(f, "{},{}", addr, name),
         }
     }
 }
@@ -526,7 +526,8 @@ impl FromStr for ProcId {
         // Over time, we will deprecate ranked references and provide a robustly
         // unambiguous syntax.
         if let Ok(channel_addr) = addr.parse::<ChannelAddr>() {
-            return Ok(ProcId::Direct(channel_addr));
+            // TODO: parse names
+            return Ok(ProcId::Direct(channel_addr, "".to_string()));
         }
         match addr.parse()? {
             Reference::Proc(proc_id) => Ok(proc_id),
