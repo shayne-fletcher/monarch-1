@@ -38,6 +38,8 @@ pub enum Token<'a> {
     Colon,
     /// "."
     Dot,
+    /// ","
+    Comma,
 
     // Special token to denote an invalid element. It is used to poison
     // the parser.
@@ -56,7 +58,7 @@ impl<'a> Lexer<'a> {
         Self {
             // TODO: compose iterators directly; would be simpler with
             // existential type support.
-            tokens: chop(input, &["[", "]", ".", "@"]).collect(),
+            tokens: chop(input, &["[", "]", ".", "@", ","]).collect(),
         }
     }
 }
@@ -72,6 +74,7 @@ impl<'a> Iterator for Lexer<'a> {
             Some("@") => Some(Token::At),
             Some(":") => Some(Token::Colon),
             Some(".") => Some(Token::Dot),
+            Some(",") => Some(Token::Comma),
             Some(elem) => Some({
                 if let Ok(uint) = elem.parse::<usize>() {
                     Token::Uint(uint)
@@ -180,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_lexer() {
-        let tokens = Lexer::new("foo.bar[123]");
+        let tokens = Lexer::new("foo.bar[123],baz");
         assert_eq!(
             tokens.collect::<Vec<Token>>(),
             vec![
@@ -189,7 +192,9 @@ mod tests {
                 Token::Elem("bar"),
                 Token::LeftBracket,
                 Token::Uint(123),
-                Token::RightBracket
+                Token::RightBracket,
+                Token::Comma,
+                Token::Elem("baz"),
             ]
         )
     }

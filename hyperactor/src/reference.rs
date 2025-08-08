@@ -302,7 +302,7 @@ macro_rules! id {
 pub use id;
 
 /// The type of error encountered while parsing references.
-#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+#[derive(thiserror::Error, Debug)]
 pub enum ReferenceParsingError {
     /// The parser expected a token, but it reached the end of the token stream.
     #[error("expected token")]
@@ -323,45 +323,82 @@ pub enum ReferenceParsingError {
     /// The parser encountered the wrong reference type.
     #[error("wrong reference type: expected {0}")]
     WrongType(String),
+
+    /// An invalid channel address was encountered while parsing the reference.
+    #[error("invalid channel address {0}: {1}")]
+    InvalidChannelAddress(String, anyhow::Error),
 }
 
 impl FromStr for Reference {
     type Err = ReferenceParsingError;
 
     fn from_str(addr: &str) -> Result<Self, Self::Err> {
-        let reference = parse! {
-            Lexer::new(addr);
+        // First, try to parse a "new style" reference:
+        // 1) If the reference contains a comma (anywhere), it is a new style reference;
+        //    commas were not a valid lexeme in the previous reference format.
+        // 2) This is a bit ugly, but we bypass the tokenizer prior to this comma,
+        //    try to parse a channel address, and then parse the remainder.
 
-            // world
-            Token::Elem(world) => Self::World(WorldId(world.into())),
+        match addr.split_once(",") {
+            Some((channel_addr, rest)) => {
+                let channel_addr = channel_addr.parse().map_err(|err| {
+                    ReferenceParsingError::InvalidChannelAddress(channel_addr.to_string(), err)
+                })?;
 
-            // world[rank]
-            Token::Elem(world) Token::LeftBracket Token::Uint(rank) Token::RightBracket =>
-                Self::Proc(ProcId::Ranked(WorldId(world.into()), rank)),
+                Ok(parse! {
+                    Lexer::new(rest);
 
-            // world[rank].actor  (implied pid=0)
-            Token::Elem(world) Token::LeftBracket Token::Uint(rank) Token::RightBracket
-                Token::Dot Token::Elem(actor) =>
-                Self::Actor(ActorId(ProcId::Ranked(WorldId(world.into()), rank), actor.into(), 0)),
+                    // channeladdr,proc_name
+                    Token::Elem(proc_name) =>
+                    Self::Proc(ProcId::Direct(channel_addr, proc_name.to_string())),
 
-            // world[rank].actor[pid]
-            Token::Elem(world) Token::LeftBracket Token::Uint(rank) Token::RightBracket
-                Token::Dot Token::Elem(actor)
-                Token::LeftBracket Token::Uint(pid) Token::RightBracket =>
-                Self::Actor(ActorId(ProcId::Ranked(WorldId(world.into()), rank), actor.into(), pid)),
+                    // channeladdr,proc_name,actor_name
+                    Token::Elem(proc_name) Token::Comma Token::Elem(actor_name) =>
+                    Self::Actor(ActorId(ProcId::Direct(channel_addr, proc_name.to_string()), actor_name.to_string(), 0)),
 
-            // world[rank].actor[pid][port]
-            Token::Elem(world) Token::LeftBracket Token::Uint(rank) Token::RightBracket
-                Token::Dot Token::Elem(actor)
-                Token::LeftBracket Token::Uint(pid) Token::RightBracket
-                Token::LeftBracket Token::Uint(index) Token::RightBracket =>
-                Self::Port(PortId(ActorId(ProcId::Ranked(WorldId(world.into()), rank), actor.into(), pid), index as u64)),
+                    // channeladdr,proc_name,actor_name[rank]
+                    Token::Elem(proc_name) Token::Comma Token::Elem(actor_name)
+                        Token::LeftBracket Token::Uint(rank) Token::RightBracket =>
+                        Self::Actor(ActorId(ProcId::Direct(channel_addr, proc_name.to_string()), actor_name.to_string(), rank)),
+                }?)
+            }
 
-            // world.actor
-            Token::Elem(world) Token::Dot Token::Elem(actor) =>
-                Self::Gang(GangId(WorldId(world.into()), actor.into())),
-        };
-        Ok(reference?)
+            // "old style" / "ranked" reference
+            None => {
+                Ok(parse! {
+                    Lexer::new(addr);
+
+                    // world
+                    Token::Elem(world) => Self::World(WorldId(world.into())),
+
+                    // world[rank]
+                    Token::Elem(world) Token::LeftBracket Token::Uint(rank) Token::RightBracket =>
+                        Self::Proc(ProcId::Ranked(WorldId(world.into()), rank)),
+
+                    // world[rank].actor  (implied pid=0)
+                    Token::Elem(world) Token::LeftBracket Token::Uint(rank) Token::RightBracket
+                        Token::Dot Token::Elem(actor) =>
+                        Self::Actor(ActorId(ProcId::Ranked(WorldId(world.into()), rank), actor.into(), 0)),
+
+                    // world[rank].actor[pid]
+                    Token::Elem(world) Token::LeftBracket Token::Uint(rank) Token::RightBracket
+                        Token::Dot Token::Elem(actor)
+                        Token::LeftBracket Token::Uint(pid) Token::RightBracket =>
+                        Self::Actor(ActorId(ProcId::Ranked(WorldId(world.into()), rank), actor.into(), pid)),
+
+                    // world[rank].actor[pid][port]
+                    Token::Elem(world) Token::LeftBracket Token::Uint(rank) Token::RightBracket
+                        Token::Dot Token::Elem(actor)
+                        Token::LeftBracket Token::Uint(pid) Token::RightBracket
+                        Token::LeftBracket Token::Uint(index) Token::RightBracket =>
+                        Self::Port(PortId(ActorId(ProcId::Ranked(WorldId(world.into()), rank), actor.into(), pid), index as u64)),
+
+                    // world.actor
+                    Token::Elem(world) Token::Dot Token::Elem(actor) =>
+                        Self::Gang(GangId(WorldId(world.into()), actor.into())),
+                }?)
+            }
+        }
     }
 }
 
@@ -519,16 +556,6 @@ impl FromStr for ProcId {
     type Err = ReferenceParsingError;
 
     fn from_str(addr: &str) -> Result<Self, Self::Err> {
-        // We first try to parse the proc id as a channel address; otherwise
-        // as a ranked reference. These grammars are currently non-overlapping,
-        // but we need to be careful when we add new channel address types.
-        //
-        // Over time, we will deprecate ranked references and provide a robustly
-        // unambiguous syntax.
-        if let Ok(channel_addr) = addr.parse::<ChannelAddr>() {
-            // TODO: parse names
-            return Ok(ProcId::Direct(channel_addr, "".to_string()));
-        }
         match addr.parse()? {
             Reference::Proc(proc_id) => Ok(proc_id),
             _ => Err(ReferenceParsingError::WrongType("proc".into())),
@@ -1257,6 +1284,15 @@ mod tests {
             (
                 "test.testactor",
                 GangId(WorldId("test".into()), "testactor".into()).into(),
+            ),
+            (
+                "tcp:[::1]:1234,test,testactor[123]",
+                ActorId(
+                    ProcId::Direct("tcp:[::1]:1234".parse().unwrap(), "test".to_string()),
+                    "testactor".to_string(),
+                    123,
+                )
+                .into(),
             ),
         ];
 
