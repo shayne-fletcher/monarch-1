@@ -134,12 +134,12 @@ mod tests {
             let controller_world_name = format!("controller_world_{}", i);
             let worker_world_name = format!("worker_world_{}", i);
             controller_actor_ids.push(ActorId(
-                ProcId(WorldId(controller_world_name), 0),
+                ProcId::Ranked(WorldId(controller_world_name), 0),
                 "root".into(),
                 0,
             ));
             worker_actor_ids.push(ActorId(
-                ProcId(WorldId(worker_world_name.clone()), 0),
+                ProcId::Ranked(WorldId(worker_world_name.clone()), 0),
                 "root".into(),
                 0,
             ));

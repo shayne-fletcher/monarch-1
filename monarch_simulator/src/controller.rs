@@ -217,7 +217,11 @@ impl SimControllerActor {
     ) -> Result<(ActorHandle<ProcActor>, ActorRef<SimControllerActor>), anyhow::Error> {
         let bootstrap = ProcActor::bootstrap(
             controller_id.proc_id().clone(),
-            controller_id.proc_id().world_id().clone(), // REFACTOR(marius): plumb world id through SimControllerActor::bootstrap
+            controller_id
+                .proc_id()
+                .world_id()
+                .expect("sim controller only works on ranked procs")
+                .clone(), // REFACTOR(marius): plumb world id through SimControllerActor::bootstrap
             listen_addr,
             bootstrap_addr.clone(),
             supervision_update_interval,

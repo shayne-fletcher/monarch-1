@@ -307,7 +307,7 @@ mod tests {
                 let test_labels =
                     HashMap::from([("test_name".to_string(), "test_value".to_string())]);
                 let listen_addr = ChannelAddr::any(ChannelTransport::Local);
-                let proc_id = ProcId(foo_world_id.clone(), 1);
+                let proc_id = ProcId::Ranked(foo_world_id.clone(), 1);
                 ProcActor::try_bootstrap(
                     proc_id.clone(),
                     foo_world_id.clone(),
@@ -392,7 +392,7 @@ mod tests {
             let host_world_id = WorldId(("hostworker_world").to_string());
             let listen_addr: ChannelAddr = ChannelAddr::any(ChannelTransport::Local);
             // Join a host proc to the system first with no worker_world yet.
-            let host_proc_id_1 = ProcId(host_world_id.clone(), 1);
+            let host_proc_id_1 = ProcId::Ranked(host_world_id.clone(), 1);
             ProcActor::try_bootstrap(
                 host_proc_id_1.clone(),
                 host_world_id.clone(),
@@ -470,7 +470,7 @@ mod tests {
                                     host_procs: HashSet::from([host_proc_id_1.clone()]),
                                     procs: (8..12)
                                         .map(|i| (
-                                            ProcId(worker_world_id.clone(), i),
+                                            ProcId::Ranked(worker_world_id.clone(), i),
                                             WorldSnapshotProcInfo {
                                                 labels: HashMap::new()
                                             }
@@ -486,7 +486,7 @@ mod tests {
                 );
             }
 
-            let host_proc_id_0 = ProcId(host_world_id.clone(), 0);
+            let host_proc_id_0 = ProcId::Ranked(host_world_id.clone(), 0);
             ProcActor::try_bootstrap(
                 host_proc_id_0.clone(),
                 host_world_id.clone(),
@@ -517,7 +517,7 @@ mod tests {
                                 WorldSnapshot {
                                     host_procs: HashSet::from([host_proc_id_0, host_proc_id_1]),
                                     procs: HashMap::from_iter((0..12).map(|i| (
-                                        ProcId(worker_world_id.clone(), i),
+                                        ProcId::Ranked(worker_world_id.clone(), i),
                                         WorldSnapshotProcInfo {
                                             labels: HashMap::new()
                                         }
@@ -579,7 +579,7 @@ mod tests {
 
             // Bootstrap the host procs, which will lead to work procs being spawned.
             let futs = (0..2).map(|i| {
-                let host_proc_id = ProcId(host_world_id.clone(), i);
+                let host_proc_id = ProcId::Ranked(host_world_id.clone(), i);
                 ProcActor::try_bootstrap(
                     host_proc_id.clone(),
                     host_world_id.clone(),
@@ -613,7 +613,7 @@ mod tests {
             // Join a non-worker proc to the "foo" world.
             let foo_futs = (0..2).map(|i| {
                 let listen_addr = ChannelAddr::any(ChannelTransport::Local);
-                let proc_id = ProcId(foo_world_id.clone(), i);
+                let proc_id = ProcId::Ranked(foo_world_id.clone(), i);
                 ProcActor::try_bootstrap(
                     proc_id.clone(),
                     foo_world_id.clone(),
@@ -700,7 +700,7 @@ mod tests {
 
             // Bootstrap the host procs, which will lead to work procs being spawned.
             let futs = (0..2).map(|i| {
-                let host_proc_id = ProcId(host_world_id.clone(), i);
+                let host_proc_id = ProcId::Ranked(host_world_id.clone(), i);
                 ProcActor::try_bootstrap(
                     host_proc_id.clone(),
                     host_world_id.clone(),
@@ -733,7 +733,7 @@ mod tests {
             // Join a non-worker proc to the "foo" world.
             let foo_futs = (0..2).map(|i| {
                 let listen_addr = ChannelAddr::any(ChannelTransport::Local);
-                let proc_id = ProcId(foo_world_id.clone(), i);
+                let proc_id = ProcId::Ranked(foo_world_id.clone(), i);
                 ProcActor::try_bootstrap(
                     proc_id.clone(),
                     foo_world_id.clone(),

@@ -34,6 +34,7 @@ use std::num::ParseIntError;
 use std::str::FromStr;
 
 use derivative::Derivative;
+use enum_as_inner::EnumAsInner;
 use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
@@ -48,6 +49,7 @@ use crate::accum::ReducerSpec;
 use crate::actor::RemoteActor;
 use crate::attrs::Attrs;
 use crate::cap;
+use crate::channel::ChannelAddr;
 use crate::data::Serialized;
 use crate::mailbox::MailboxSenderError;
 use crate::mailbox::MailboxSenderErrorKind;
@@ -94,9 +96,7 @@ impl Reference {
     pub fn is_prefix_of(&self, other: &Reference) -> bool {
         match self {
             Self::World(_) => self.world_id() == other.world_id(),
-            Self::Proc(_) => {
-                self.world_id() == other.world_id() && self.proc_id() == other.proc_id()
-            }
+            Self::Proc(_) => self.proc_id() == other.proc_id(),
             Self::Actor(_) => self == other,
             Self::Port(_) => self == other,
             Self::Gang(_) => self == other,
@@ -104,13 +104,13 @@ impl Reference {
     }
 
     /// The world id of the reference.
-    pub fn world_id(&self) -> &WorldId {
+    pub fn world_id(&self) -> Option<&WorldId> {
         match self {
-            Self::World(world_id) => world_id,
-            Self::Proc(ProcId(world_id, _)) => world_id,
-            Self::Actor(ActorId(ProcId(world_id, _), _, _)) => world_id,
-            Self::Port(PortId(ActorId(ProcId(world_id, _), _, _), _)) => world_id,
-            Self::Gang(GangId(world_id, _)) => world_id,
+            Self::World(world_id) => Some(world_id),
+            Self::Proc(proc_id) => proc_id.world_id(),
+            Self::Actor(ActorId(proc_id, _, _)) => proc_id.world_id(),
+            Self::Port(PortId(ActorId(proc_id, _, _), _)) => proc_id.world_id(),
+            Self::Gang(GangId(world_id, _)) => Some(world_id),
         }
     }
 
@@ -127,7 +127,7 @@ impl Reference {
 
     /// The rank of the reference, if any.
     fn rank(&self) -> Option<Index> {
-        self.proc_id().map(|proc_id| proc_id.rank())
+        self.proc_id().and_then(|proc_id| proc_id.rank())
     }
 
     /// The actor id of the reference, if any.
@@ -222,14 +222,22 @@ impl fmt::Display for Reference {
 /// # use hyperactor::reference::ActorId;
 /// # use hyperactor::reference::GangId;
 /// assert_eq!(id!(hello), WorldId("hello".into()));
-/// assert_eq!(id!(hello[0]), ProcId(WorldId("hello".into()), 0));
+/// assert_eq!(id!(hello[0]), ProcId::Ranked(WorldId("hello".into()), 0));
 /// assert_eq!(
 ///     id!(hello[0].actor),
-///     ActorId(ProcId(WorldId("hello".into()), 0), "actor".into(), 0)
+///     ActorId(
+///         ProcId::Ranked(WorldId("hello".into()), 0),
+///         "actor".into(),
+///         0
+///     )
 /// );
 /// assert_eq!(
 ///     id!(hello[0].actor[1]),
-///     ActorId(ProcId(WorldId("hello".into()), 0), "actor".into(), 1)
+///     ActorId(
+///         ProcId::Ranked(WorldId("hello".into()), 0),
+///         "actor".into(),
+///         1
+///     )
 /// );
 /// assert_eq!(
 ///     id!(hello.actor),
@@ -246,14 +254,14 @@ macro_rules! id {
         $crate::reference::WorldId(stringify!($world).to_string())
     };
     ($world:ident [$rank:expr_2021]) => {
-        $crate::reference::ProcId(
+        $crate::reference::ProcId::Ranked(
             $crate::reference::WorldId(stringify!($world).to_string()),
             $rank,
         )
     };
     ($world:ident [$rank:expr_2021] . $actor:ident) => {
         $crate::reference::ActorId(
-            $crate::reference::ProcId(
+            $crate::reference::ProcId::Ranked(
                 $crate::reference::WorldId(stringify!($world).to_string()),
                 $rank,
             ),
@@ -263,7 +271,7 @@ macro_rules! id {
     };
     ($world:ident [$rank:expr_2021] . $actor:ident [$pid:expr_2021]) => {
         $crate::reference::ActorId(
-            $crate::reference::ProcId(
+            $crate::reference::ProcId::Ranked(
                 $crate::reference::WorldId(stringify!($world).to_string()),
                 $rank,
             ),
@@ -280,7 +288,7 @@ macro_rules! id {
     ($world:ident [$rank:expr_2021] . $actor:ident [$pid:expr_2021] [$port:expr_2021]) => {
         $crate::reference::PortId(
             $crate::reference::ActorId(
-                $crate::reference::ProcId(
+                $crate::reference::ProcId::Ranked(
                     $crate::reference::WorldId(stringify!($world).to_string()),
                     $rank,
                 ),
@@ -329,25 +337,25 @@ impl FromStr for Reference {
 
             // world[rank]
             Token::Elem(world) Token::LeftBracket Token::Uint(rank) Token::RightBracket =>
-                Self::Proc(ProcId(WorldId(world.into()), rank)),
+                Self::Proc(ProcId::Ranked(WorldId(world.into()), rank)),
 
             // world[rank].actor  (implied pid=0)
             Token::Elem(world) Token::LeftBracket Token::Uint(rank) Token::RightBracket
                 Token::Dot Token::Elem(actor) =>
-                Self::Actor(ActorId(ProcId(WorldId(world.into()), rank), actor.into(), 0)),
+                Self::Actor(ActorId(ProcId::Ranked(WorldId(world.into()), rank), actor.into(), 0)),
 
             // world[rank].actor[pid]
             Token::Elem(world) Token::LeftBracket Token::Uint(rank) Token::RightBracket
                 Token::Dot Token::Elem(actor)
                 Token::LeftBracket Token::Uint(pid) Token::RightBracket =>
-                Self::Actor(ActorId(ProcId(WorldId(world.into()), rank), actor.into(), pid)),
+                Self::Actor(ActorId(ProcId::Ranked(WorldId(world.into()), rank), actor.into(), pid)),
 
             // world[rank].actor[pid][port]
             Token::Elem(world) Token::LeftBracket Token::Uint(rank) Token::RightBracket
                 Token::Dot Token::Elem(actor)
                 Token::LeftBracket Token::Uint(pid) Token::RightBracket
                 Token::LeftBracket Token::Uint(index) Token::RightBracket =>
-                Self::Port(PortId(ActorId(ProcId(WorldId(world.into()), rank), actor.into(), pid), index as u64)),
+                Self::Port(PortId(ActorId(ProcId::Ranked(WorldId(world.into()), rank), actor.into(), pid), index as u64)),
 
             // world.actor
             Token::Elem(world) Token::Dot Token::Elem(actor) =>
@@ -410,7 +418,7 @@ pub struct WorldId(pub String);
 impl WorldId {
     /// Create a proc ID with the provided index in this world.
     pub fn proc_id(&self, index: Index) -> ProcId {
-        ProcId(self.clone(), index)
+        ProcId::Ranked(self.clone(), index)
     }
 
     /// The world index.
@@ -421,7 +429,7 @@ impl WorldId {
     /// Return a randomly selected user proc in this world.
     pub fn random_user_proc(&self) -> ProcId {
         let mask = 1usize << (std::mem::size_of::<usize>() * 8 - 1);
-        ProcId(self.clone(), rand::thread_rng().r#gen::<usize>() | mask)
+        ProcId::Ranked(self.clone(), rand::thread_rng().r#gen::<usize>() | mask)
     }
 }
 
@@ -443,8 +451,8 @@ impl FromStr for WorldId {
     }
 }
 
-/// Procs are identified by their _rank_ within a world. Each proc
-/// represents an actor runtime that can locally route to all of its
+/// Procs are identified by their _rank_ within a world or by a direct channel address.
+/// Each proc represents an actor runtime that can locally route to all of its
 /// constituent actors.
 ///
 /// Ranks >= 1usize << (no. bits in usize - 1) (i.e., with the high bit set) are "user"
@@ -460,9 +468,15 @@ impl FromStr for WorldId {
     PartialOrd,
     Hash,
     Ord,
-    Named
+    Named,
+    EnumAsInner
 )]
-pub struct ProcId(pub WorldId, pub Index);
+pub enum ProcId {
+    /// A ranked proc within a world
+    Ranked(WorldId, Index),
+    /// A proc reachable via a direct channel address
+    Direct(ChannelAddr),
+}
 
 impl ProcId {
     /// Create an actor ID with the provided name, pid within this proc.
@@ -470,26 +484,34 @@ impl ProcId {
         ActorId(self.clone(), name.into(), pid)
     }
 
-    /// The proc's world id.
-    pub fn world_id(&self) -> &WorldId {
-        &self.0
+    /// The proc's world id, if this is a ranked proc.
+    pub fn world_id(&self) -> Option<&WorldId> {
+        match self {
+            ProcId::Ranked(world_id, _) => Some(world_id),
+            ProcId::Direct(_) => None,
+        }
     }
 
-    /// The world index.
-    pub fn world_name(&self) -> &str {
-        self.0.name()
+    /// The world name, if this is a ranked proc.
+    pub fn world_name(&self) -> Option<&str> {
+        self.world_id().map(|world_id| world_id.name())
     }
 
-    /// The proc's rank.
-    pub fn rank(&self) -> Index {
-        self.1
+    /// The proc's rank, if this is a ranked proc.
+    pub fn rank(&self) -> Option<Index> {
+        match self {
+            ProcId::Ranked(_, rank) => Some(*rank),
+            ProcId::Direct(_) => None,
+        }
     }
 }
 
 impl fmt::Display for ProcId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let ProcId(world_id, rank) = self;
-        write!(f, "{}[{}]", world_id, rank)
+        match self {
+            ProcId::Ranked(world_id, rank) => write!(f, "{}[{}]", world_id, rank),
+            ProcId::Direct(addr) => write!(f, "{}", addr),
+        }
     }
 }
 
@@ -497,6 +519,15 @@ impl FromStr for ProcId {
     type Err = ReferenceParsingError;
 
     fn from_str(addr: &str) -> Result<Self, Self::Err> {
+        // We first try to parse the proc id as a channel address; otherwise
+        // as a ranked reference. These grammars are currently non-overlapping,
+        // but we need to be careful when we add new channel address types.
+        //
+        // Over time, we will deprecate ranked references and provide a robustly
+        // unambiguous syntax.
+        if let Ok(channel_addr) = addr.parse::<ChannelAddr>() {
+            return Ok(ProcId::Direct(channel_addr));
+        }
         match addr.parse()? {
             Reference::Proc(proc_id) => Ok(proc_id),
             _ => Err(ReferenceParsingError::WrongType("proc".into())),
@@ -540,14 +571,16 @@ impl ActorId {
         &self.0
     }
 
-    /// The world index.
+    /// The world name. Panics if this is a direct proc.
     pub fn world_name(&self) -> &str {
-        self.0.world_name()
+        self.0
+            .world_name()
+            .expect("world_name() called on direct proc")
     }
 
-    /// The actor's proc's rank.
+    /// The actor's proc's rank. Panics if this is a direct proc.
     pub fn rank(&self) -> Index {
-        self.0.rank()
+        self.0.rank().expect("rank() called on direct proc")
     }
 
     /// The actor's name.
@@ -1050,7 +1083,7 @@ pub struct GangId(pub WorldId, pub String);
 
 impl GangId {
     pub(crate) fn expand(&self, world_size: usize) -> impl Iterator<Item = ActorId> + '_ {
-        (0..world_size).map(|rank| ActorId(ProcId(self.0.clone(), rank), self.1.clone(), 0))
+        (0..world_size).map(|rank| ActorId(ProcId::Ranked(self.0.clone(), rank), self.1.clone(), 0))
     }
 
     /// The world id of the gang.
@@ -1067,7 +1100,7 @@ impl GangId {
     /// actor because the root actor is the public interface of a gang.
     pub fn actor_id(&self, rank: Index) -> ActorId {
         ActorId(
-            ProcId(self.world_id().clone(), rank),
+            ProcId::Ranked(self.world_id().clone(), rank),
             self.name().to_string(),
             0,
         )
@@ -1140,7 +1173,11 @@ impl<A: RemoteActor> GangRef<A> {
             gang_id: GangId(world_id, name),
             ..
         } = self;
-        ActorRef::attest(ActorId(ProcId(world_id.clone(), rank), name.clone(), 0))
+        ActorRef::attest(ActorId(
+            ProcId::Ranked(world_id.clone(), rank),
+            name.clone(),
+            0,
+        ))
     }
 
     /// Return the gang ID.
@@ -1191,15 +1228,27 @@ mod tests {
     fn test_reference_parse() {
         let cases: Vec<(&str, Reference)> = vec![
             ("test", WorldId("test".into()).into()),
-            ("test[234]", ProcId(WorldId("test".into()), 234).into()),
+            (
+                "test[234]",
+                ProcId::Ranked(WorldId("test".into()), 234).into(),
+            ),
             (
                 "test[234].testactor[6]",
-                ActorId(ProcId(WorldId("test".into()), 234), "testactor".into(), 6).into(),
+                ActorId(
+                    ProcId::Ranked(WorldId("test".into()), 234),
+                    "testactor".into(),
+                    6,
+                )
+                .into(),
             ),
             (
                 "test[234].testactor[6][1]",
                 PortId(
-                    ActorId(ProcId(WorldId("test".into()), 234), "testactor".into(), 6),
+                    ActorId(
+                        ProcId::Ranked(WorldId("test".into()), 234),
+                        "testactor".into(),
+                        6,
+                    ),
                     1,
                 )
                 .into(),
@@ -1229,14 +1278,22 @@ mod tests {
     #[test]
     fn test_id_macro() {
         assert_eq!(id!(hello), WorldId("hello".into()));
-        assert_eq!(id!(hello[0]), ProcId(WorldId("hello".into()), 0));
+        assert_eq!(id!(hello[0]), ProcId::Ranked(WorldId("hello".into()), 0));
         assert_eq!(
             id!(hello[0].actor),
-            ActorId(ProcId(WorldId("hello".into()), 0), "actor".into(), 0)
+            ActorId(
+                ProcId::Ranked(WorldId("hello".into()), 0),
+                "actor".into(),
+                0
+            )
         );
         assert_eq!(
             id!(hello[0].actor[1]),
-            ActorId(ProcId(WorldId("hello".into()), 0), "actor".into(), 1)
+            ActorId(
+                ProcId::Ranked(WorldId("hello".into()), 0),
+                "actor".into(),
+                1
+            )
         );
         assert_eq!(
             id!(hello.actor),

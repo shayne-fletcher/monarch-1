@@ -376,7 +376,7 @@ impl Proc {
     pub fn local() -> Self {
         // TODO: name these something that is ~ globally unique, e.g., incorporate
         // the hostname, some GUID, etc.
-        let proc_id = ProcId(id!(local), NEXT_LOCAL_RANK.fetch_add(1, Ordering::Relaxed));
+        let proc_id = ProcId::Ranked(id!(local), NEXT_LOCAL_RANK.fetch_add(1, Ordering::Relaxed));
         // TODO: make it so that local procs can talk to each other.
         Proc::new(proc_id, BoxedMailboxSender::new(PanickingMailboxSender))
     }

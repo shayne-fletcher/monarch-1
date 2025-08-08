@@ -19,7 +19,7 @@
 //! # use hyperactor::mailbox::Mailbox;
 //! # use hyperactor::reference::{ActorId, ProcId, WorldId};
 //! # tokio_test::block_on(async {
-//! # let proc_id = ProcId(WorldId("world".to_string()), 0);
+//! # let proc_id = ProcId::Ranked(WorldId("world".to_string()), 0);
 //! # let actor_id = ActorId(proc_id, "actor".to_string(), 0);
 //! let mbox = Mailbox::new_detached(actor_id);
 //! let (port, mut receiver) = mbox.open_port::<u64>();
@@ -36,7 +36,7 @@
 //! # use hyperactor::mailbox::Mailbox;
 //! # use hyperactor::reference::{ActorId, ProcId, WorldId};
 //! # tokio_test::block_on(async {
-//! # let proc_id = ProcId(WorldId("world".to_string()), 0);
+//! # let proc_id = ProcId::Ranked(WorldId("world".to_string()), 0);
 //! # let actor_id = ActorId(proc_id, "actor".to_string(), 0);
 //! let mbox = Mailbox::new_detached(actor_id);
 //!
@@ -2517,7 +2517,11 @@ mod tests {
     #[test]
     fn test_error() {
         let err = MailboxError::new(
-            ActorId(ProcId(WorldId("myworld".into()), 2), "myactor".into(), 5),
+            ActorId(
+                ProcId::Ranked(WorldId("myworld".to_string()), 2),
+                "myactor".to_string(),
+                5,
+            ),
             MailboxErrorKind::Closed,
         );
         assert_eq!(format!("{}", err), "myworld[2].myactor[5]: mailbox closed");

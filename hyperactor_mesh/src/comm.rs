@@ -131,7 +131,10 @@ impl CommActorMode {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("no peer for rank {}", rank)),
             Self::Implicit => {
-                let world_id = self_id.proc_id().world_id();
+                let world_id = self_id
+                    .proc_id()
+                    .world_id()
+                    .ok_or_else(|| anyhow::anyhow!("comm actor must be on a ranked proc"))?;
                 let proc_id = world_id.proc_id(rank);
                 let actor_id = ActorId::root(proc_id, self_id.name().to_string());
                 Ok(ActorRef::<CommActor>::attest(actor_id))
@@ -145,10 +148,13 @@ impl CommActorMode {
     }
 
     /// Return the rank of the comm actor, given a self id.
-    fn self_rank(&self, self_id: &ActorId) -> usize {
+    fn self_rank(&self, self_id: &ActorId) -> Result<usize> {
         match self {
-            Self::Mesh(rank, _) => *rank,
-            Self::Implicit | Self::ImplicitWithWorldId(_) => self_id.proc_id().rank(),
+            Self::Mesh(rank, _) => Ok(*rank),
+            Self::Implicit | Self::ImplicitWithWorldId(_) => self_id
+                .proc_id()
+                .rank()
+                .ok_or_else(|| anyhow::anyhow!("comm actor must be on a ranked proc")),
         }
     }
 }
@@ -249,7 +255,7 @@ impl CommActor {
 
         // Deliver message here, if necessary.
         if deliver_here {
-            let rank_on_root_mesh = mode.self_rank(cx.self_id());
+            let rank_on_root_mesh = mode.self_rank(cx.self_id())?;
             let cast_rank = message.relative_rank(rank_on_root_mesh)?;
             let cast_shape = message.shape();
             let mut headers = cx.headers().clone();
@@ -346,7 +352,7 @@ impl Handler<ForwardMessage> for CommActor {
         } = fwd_message;
 
         // Resolve/dedup routing frames.
-        let rank = self.mode.self_rank(cx.self_id());
+        let rank = self.mode.self_rank(cx.self_id())?;
         let (deliver_here, next_steps) =
             ndslice::selection::routing::resolve_routing(rank, dests, &mut |_| {
                 panic!("Choice encountered in CommActor routing")

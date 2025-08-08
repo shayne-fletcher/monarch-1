@@ -89,12 +89,19 @@ impl PyProc {
 
     #[getter]
     fn world_name(&self) -> String {
-        self.inner.proc_id().world_name().to_string()
+        self.inner
+            .proc_id()
+            .world_name()
+            .expect("proc must be ranked for world name")
+            .to_string()
     }
 
     #[getter]
     fn rank(&self) -> usize {
-        self.inner.proc_id().rank()
+        self.inner
+            .proc_id()
+            .rank()
+            .expect("proc must be ranked for rank access")
     }
 
     #[getter]
@@ -201,7 +208,11 @@ impl PyProc {
 
         let bootstrap = ProcActor::bootstrap_for_proc(
             proc.clone().clone(),
-            proc.clone().proc_id().world_id().clone(), // REFACTOR(marius): factor out world id
+            proc.clone()
+                .proc_id()
+                .world_id()
+                .expect("proc must be ranked for world id")
+                .clone(), // REFACTOR(marius): factor out world id
             listen_addr,
             bootstrap_addr.clone(),
             system_supervision_ref,
@@ -281,7 +292,7 @@ impl PyActorId {
     fn new(world_name: &str, rank: Index, actor_name: &str, pid: Index) -> Self {
         Self {
             inner: ActorId(
-                ProcId(WorldId(world_name.to_string()), rank),
+                ProcId::Ranked(WorldId(world_name.to_string()), rank),
                 actor_name.to_string(),
                 pid,
             ),

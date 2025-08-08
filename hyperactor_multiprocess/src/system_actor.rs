@@ -385,7 +385,7 @@ impl Host {
             // interval [H*N, (H+1)*N).
             let rank =
                 self.host_rank * scheduler_params.num_procs_per_host + self.num_procs_assigned;
-            let proc_id = ProcId(world_id.clone(), rank);
+            let proc_id = ProcId::Ranked(world_id.clone(), rank);
             proc_ids.push(proc_id);
             self.num_procs_assigned += 1;
         }
@@ -432,7 +432,11 @@ pub struct HostId(ProcId);
 impl HostId {
     /// Creates a new HostId from a proc_id.
     pub fn new(proc_id: ProcId) -> Result<Self, anyhow::Error> {
-        if !proc_id.world_name().starts_with(SHADOW_PREFIX) {
+        if !proc_id
+            .world_name()
+            .expect("proc must be ranked for world_name check")
+            .starts_with(SHADOW_PREFIX)
+        {
             anyhow::bail!(
                 "proc_id {} is not a valid HostId because it does not start with {}",
                 proc_id,
@@ -447,7 +451,11 @@ impl TryFrom<ProcId> for HostId {
     type Error = anyhow::Error;
 
     fn try_from(proc_id: ProcId) -> Result<Self, anyhow::Error> {
-        if !proc_id.world_name().starts_with(SHADOW_PREFIX) {
+        if !proc_id
+            .world_name()
+            .expect("proc must be ranked for world_name check")
+            .starts_with(SHADOW_PREFIX)
+        {
             anyhow::bail!(
                 "proc_id {} is not a valid HostId because it does not start with {}",
                 proc_id,
@@ -616,9 +624,13 @@ impl World {
             Entry::Occupied(_) => {
                 return Err(SystemActorError::DuplicatedHostId(host_id));
             }
-            Entry::Vacant(entry) => {
-                entry.insert_entry(Host::new(proc_message_port.clone(), host_id.0.rank()))
-            }
+            Entry::Vacant(entry) => entry.insert_entry(Host::new(
+                proc_message_port.clone(),
+                host_id
+                    .0
+                    .rank()
+                    .expect("host proc must be ranked for rank access"),
+            )),
         };
 
         if self.state.status == WorldStatus::AwaitingCreation {
@@ -670,7 +682,14 @@ impl World {
             }
 
             // REFACTOR(marius): remove
-            let world_id = procs_ids.first().unwrap().0.clone();
+            let world_id = procs_ids
+                .first()
+                .unwrap()
+                .clone()
+                .into_ranked()
+                .expect("proc must be ranked for world_id access")
+                .0
+                .clone();
             // Open port ref
             tracing::info!("spawning procs for host {:?}", host_id);
             router.serialize_and_send(
@@ -736,7 +755,7 @@ impl ReportingRouter {
         // - The sender and the destination are on the same proc (it
         //   doesn't make sense to be dialing connections between them).
         if envelope.sender().proc_id() == &id!(unknown[0])
-            || envelope.sender().proc_id().world_id() == &id!(user)
+            || envelope.sender().proc_id().world_id() == Some(&id!(user))
             || envelope.sender().proc_id() == &system_proc_id
             || envelope.dest().actor_id().proc_id() == &system_proc_id
             || envelope.sender().proc_id() == envelope.dest().actor_id().proc_id()
@@ -911,7 +930,10 @@ impl HeartbeatRecord {
                 now > *last_update_time + supervision_update_timeout
             })
             .for_each(|(_, proc_id)| {
-                if let Some(proc_state) = state.procs.get_mut(&proc_id.1) {
+                if let Some(proc_state) = state
+                    .procs
+                    .get_mut(&proc_id.rank().expect("proc must be ranked for rank access"))
+                {
                     match proc_state.proc_health {
                         ProcStatus::Alive => proc_state.proc_health = ProcStatus::Expired,
                         // Do not overwrite the health of a proc already known to be unhealthy.
@@ -989,7 +1011,12 @@ impl SystemSupervisionState {
         world.heartbeat_record.update(&proc_state.proc_id, clock);
 
         // Update supervision map.
-        if let Some(info) = world.state.procs.get_mut(&proc_state.proc_id.rank()) {
+        if let Some(info) = world.state.procs.get_mut(
+            &proc_state
+                .proc_id
+                .rank()
+                .expect("proc must be ranked for proc state update"),
+        ) {
             match info.proc_health {
                 ProcStatus::Alive => info.proc_health = proc_state.proc_health,
                 // Do not overwrite the health of a proc already known to be unhealthy.
@@ -997,10 +1024,13 @@ impl SystemSupervisionState {
             }
             info.failed_actors.extend(proc_state.failed_actors);
         } else {
-            world
-                .state
-                .procs
-                .insert(proc_state.proc_id.rank(), proc_state);
+            world.state.procs.insert(
+                proc_state
+                    .proc_id
+                    .rank()
+                    .expect("proc must be ranked for rank access"),
+                proc_state,
+            );
         }
     }
 
@@ -1017,7 +1047,7 @@ impl SystemSupervisionState {
                     .get_mut()
                     .state
                     .procs
-                    .entry(proc_id.1)
+                    .entry(proc_id.rank().expect("proc must be ranked for rank access"))
                 {
                     Entry::Occupied(_) => {
                         self.update(proc_state, clock);
@@ -1209,9 +1239,15 @@ impl Actor for SystemActor {
         // established. Update the proc's supervision status
         // accordingly.
         let proc_id = to.actor_id().proc_id();
-        let world_id = proc_id.world_id();
+        let world_id = proc_id
+            .world_id()
+            .expect("proc must be ranked for world_id access");
         if let Some(world) = &mut self.supervision_state.supervision_map.get_mut(world_id) {
-            if let Some(proc) = world.state.procs.get_mut(&proc_id.rank()) {
+            if let Some(proc) = world
+                .state
+                .procs
+                .get_mut(&proc_id.rank().expect("proc must be ranked for rank access"))
+            {
                 match proc.proc_health {
                     ProcStatus::Alive => proc.proc_health = ProcStatus::ConnectionFailure,
                     // Do not overwrite the health of a proc already
@@ -1516,7 +1552,11 @@ impl SystemMessageHandler for SystemActor {
         for (proc_id, port) in all_procs.into_iter() {
             let stopping_state = self
                 .worlds_to_stop
-                .get_mut(&World::get_real_world_id(proc_id.world_id()))
+                .get_mut(&World::get_real_world_id(
+                    proc_id
+                        .world_id()
+                        .expect("proc must be ranked for world_id access"),
+                ))
                 .unwrap();
             if !stopping_state.stopping_procs.insert(proc_id) {
                 continue;
@@ -1722,7 +1762,12 @@ impl Handler<ProcStopResult> for SystemActor {
             }
         }
         let mut world_stopped = false;
-        let world_id = &msg.proc_id.0;
+        let world_id = &msg
+            .proc_id
+            .clone()
+            .into_ranked()
+            .expect("proc must be ranked for world_id access")
+            .0;
         if let Some(stopping_state) = self.worlds_to_stop.get_mut(world_id) {
             stopping_state.stopped_procs.insert(msg.proc_id.clone());
             tracing::debug!(
@@ -1833,7 +1878,7 @@ mod tests {
 
     async fn spawn_mock_host_actor(proc_world_id: WorldId, host_id: usize) -> MockHostActor {
         // Set up a local actor.
-        let local_proc_id = ProcId(
+        let local_proc_id = ProcId::Ranked(
             WorldId(format!("{}{}", SHADOW_PREFIX, proc_world_id.name())),
             host_id,
         );
@@ -1866,7 +1911,7 @@ mod tests {
     ) {
         let world_id = WorldId(name.to_string());
         // Proc ID: world[idx]
-        let local_proc_id = ProcId(world_id.clone(), idx);
+        let local_proc_id = ProcId::Ranked(world_id.clone(), idx);
         let (local_proc_addr, local_proc_rx) =
             channel::serve(ChannelAddr::any(ChannelTransport::Local))
                 .await
@@ -1989,7 +2034,13 @@ mod tests {
         let failures = sv.get_world_with_failures(&world_id, &clock);
         let procs = failures.unwrap().procs;
         assert_eq!(procs.len(), 1);
-        assert!(procs.contains_key(&proc_id_0.1));
+        assert!(
+            procs.contains_key(
+                &proc_id_0
+                    .rank()
+                    .expect("proc must be ranked for rank access")
+            )
+        );
 
         // Actor failure happened to proc_1
         sv.report(
@@ -2007,8 +2058,20 @@ mod tests {
         let failures = sv.get_world_with_failures(&world_id, &clock);
         let procs = failures.unwrap().procs;
         assert_eq!(procs.len(), 2);
-        assert!(procs.contains_key(&proc_id_0.1));
-        assert!(procs.contains_key(&proc_id_1.1));
+        assert!(
+            procs.contains_key(
+                &proc_id_0
+                    .rank()
+                    .expect("proc must be ranked for rank access")
+            )
+        );
+        assert!(
+            procs.contains_key(
+                &proc_id_1
+                    .rank()
+                    .expect("proc must be ranked for rank access")
+            )
+        );
     }
 
     #[tokio::test]
@@ -2056,7 +2119,14 @@ mod tests {
         let ret = client_rx.recv().await.unwrap();
         assert_eq!(ret.worlds.len(), 1);
         assert_eq!(
-            ret.worlds.get(&client_proc_id.0).unwrap().status,
+            ret.worlds
+                .get(
+                    client_proc_id
+                        .world_id()
+                        .expect("proc must be ranked for world_id access")
+                )
+                .unwrap()
+                .status,
             WorldStatus::AwaitingCreation
         );
 
@@ -2122,7 +2192,9 @@ mod tests {
             msg.unwrap(),
             Some(WorldSupervisionState {
                 procs: HashMap::from([(
-                    local_proc_id.1,
+                    local_proc_id
+                        .rank()
+                        .expect("proc must be ranked for rank access"),
                     ProcSupervisionState {
                         world_id: world_id.clone(),
                         proc_addr: local_proc_addr.clone(),
@@ -2182,7 +2254,10 @@ mod tests {
         // Create a world
         system_actor_handle
             .send(SystemMessage::UpsertWorld {
-                world_id: local_proc_id.0.clone(),
+                world_id: local_proc_id
+                    .world_id()
+                    .expect("proc must be ranked for world_id access")
+                    .clone(),
                 shape: Shape::Definite(vec![1]),
                 num_procs_per_host: 1,
                 env: Environment::Local,
@@ -2214,7 +2289,15 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.worlds.len(), 1);
         assert_eq!(
-            snapshot.worlds.get(&local_proc_id.0).unwrap().status,
+            snapshot
+                .worlds
+                .get(
+                    local_proc_id
+                        .world_id()
+                        .expect("proc must be ranked for world_id access")
+                )
+                .unwrap()
+                .status,
             WorldStatus::Live
         );
 
@@ -2224,7 +2307,13 @@ mod tests {
         let mut iter = 0;
         // Wait for the world to be unhealthy
         let mut state = system_actor_handle
-            .state(&client_mailbox, local_proc_id.0.clone())
+            .state(
+                &client_mailbox,
+                local_proc_id
+                    .world_id()
+                    .expect("proc must be ranked for world_id access")
+                    .clone(),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -2236,7 +2325,13 @@ mod tests {
             // Don't query too frequently
             RealClock.sleep(Duration::from_millis(100)).await;
             state = system_actor_handle
-                .state(&client_mailbox, local_proc_id.0.clone())
+                .state(
+                    &client_mailbox,
+                    local_proc_id
+                        .world_id()
+                        .expect("proc must be ranked for world_id access")
+                        .clone(),
+                )
                 .await
                 .unwrap()
                 .unwrap();
@@ -2254,7 +2349,12 @@ mod tests {
         let _ = system_actor_handle
             .stop(
                 &client_mailbox,
-                Some(vec![local_proc_id.0]),
+                Some(vec![
+                    local_proc_id
+                        .world_id()
+                        .expect("proc must be ranked for world_id access")
+                        .clone(),
+                ]),
                 Duration::from_secs(2),
                 client_tx.bind(),
             )
@@ -2325,7 +2425,10 @@ mod tests {
         // Create a world
         system_actor_handle
             .send(SystemMessage::UpsertWorld {
-                world_id: local_proc_id.0.clone(),
+                world_id: local_proc_id
+                    .world_id()
+                    .expect("proc must be ranked for world_id access")
+                    .clone(),
                 shape: Shape::Definite(vec![1]),
                 num_procs_per_host: 1,
                 env: Environment::Local,
@@ -2358,7 +2461,13 @@ mod tests {
         let mut iter = 0;
         // Wait for the world to be unhealthy
         let mut state = system_actor_handle
-            .state(&client_mailbox, local_proc_id.0.clone())
+            .state(
+                &client_mailbox,
+                local_proc_id
+                    .world_id()
+                    .expect("proc must be ranked for world_id access")
+                    .clone(),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -2370,7 +2479,13 @@ mod tests {
             // Don't query too frequently
             RealClock.sleep(Duration::from_millis(100)).await;
             state = system_actor_handle
-                .state(&client_mailbox, local_proc_id.0.clone())
+                .state(
+                    &client_mailbox,
+                    local_proc_id
+                        .world_id()
+                        .expect("proc must be ranked for world_id access")
+                        .clone(),
+                )
                 .await
                 .unwrap()
                 .unwrap();
@@ -2382,7 +2497,12 @@ mod tests {
         let _ = system_actor_handle
             .stop(
                 &client_mailbox,
-                Some(vec![local_proc_id.0]),
+                Some(vec![
+                    local_proc_id
+                        .world_id()
+                        .expect("proc must be ranked for world_id access")
+                        .clone(),
+                ]),
                 Duration::from_secs(2),
                 client_tx.bind(),
             )
@@ -2468,7 +2588,7 @@ mod tests {
         assert_eq!(all_procs.len(), num_procs);
         all_procs.sort();
         for (i, proc) in all_procs.iter().enumerate() {
-            assert_eq!(*proc, ProcId(WorldId(world_name.clone()), i));
+            assert_eq!(*proc, ProcId::Ranked(WorldId(world_name.clone()), i));
         }
     }
 
@@ -2542,7 +2662,7 @@ mod tests {
         assert_eq!(all_procs.len(), num_procs);
         all_procs.sort();
         for (i, proc) in all_procs.iter().enumerate() {
-            assert_eq!(*proc, ProcId(WorldId(world_name.clone()), i));
+            assert_eq!(*proc, ProcId::Ranked(WorldId(world_name.clone()), i));
         }
     }
 

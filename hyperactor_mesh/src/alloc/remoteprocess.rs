@@ -807,7 +807,11 @@ impl RemoteProcessAlloc {
         &mut self,
         proc_id: &ProcId,
     ) -> Result<&mut RemoteProcessAllocHostState, anyhow::Error> {
-        self.host_state_for_world_id(proc_id.world_id())
+        self.host_state_for_world_id(
+            proc_id
+                .world_id()
+                .expect("proc must be ranked for host state lookup"),
+        )
     }
 
     fn add_proc_id_to_host_state(&mut self, proc_id: &ProcId) -> Result<(), anyhow::Error> {
@@ -835,7 +839,9 @@ impl RemoteProcessAlloc {
         proc_id: &ProcId,
         point: &Point,
     ) -> Result<Point, anyhow::Error> {
-        let world_id = proc_id.world_id();
+        let world_id = proc_id
+            .world_id()
+            .expect("proc must be ranked for point mapping");
         let offset = self
             .world_offsets
             .get(world_id)

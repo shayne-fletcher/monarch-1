@@ -61,7 +61,10 @@ impl DemoCommand {
 
                 let proc_actor = ProcActor::bootstrap(
                     proc_id.clone(),
-                    proc_id.0.clone(),
+                    proc_id
+                        .world_id()
+                        .expect("unranked proc not supported")
+                        .clone(),
                     addr,
                     system_addr,
                     Duration::from_secs(5),

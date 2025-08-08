@@ -150,10 +150,20 @@ mod tests {
                 alloc::ProcState::Created { proc_id, .. } => {
                     // alloc.next() will keep creating procs and incrementing rank id
                     // so we mod the rank by world_size to map it to its logical rank
-                    created_ranks.insert(proc_id.rank() % world_size);
+                    created_ranks.insert(
+                        proc_id
+                            .rank()
+                            .expect("process allocator currently supports only ranked procs")
+                            % world_size,
+                    );
                 }
                 alloc::ProcState::Stopped { proc_id, .. } => {
-                    stopped_ranks.insert(proc_id.rank() % world_size);
+                    stopped_ranks.insert(
+                        proc_id
+                            .rank()
+                            .expect("process allocator currently supports only ranked procs")
+                            % world_size,
+                    );
                 }
                 _ => {}
             }
@@ -353,7 +363,11 @@ mod tests {
             let proc_state = alloc.next().await.unwrap();
             match proc_state {
                 alloc::ProcState::Created { proc_id, .. } => {
-                    created_ranks.insert(proc_id.rank());
+                    created_ranks.insert(
+                        proc_id
+                            .rank()
+                            .expect("process allocator currently supports only ranked procs"),
+                    );
                 }
                 _ => {
                     panic!("Unexpected message: {:?}", proc_state)
@@ -373,7 +387,12 @@ mod tests {
                     // ignore
                 }
                 alloc::ProcState::Stopped { proc_id, .. } => {
-                    stopped_ranks.insert(proc_id.rank() % world_size);
+                    stopped_ranks.insert(
+                        proc_id
+                            .rank()
+                            .expect("process allocator currently supports only ranked procs")
+                            % world_size,
+                    );
                 }
                 _ => {
                     panic!("Unexpected message: {:?}", proc_state)

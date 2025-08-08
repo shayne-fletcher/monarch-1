@@ -987,7 +987,7 @@ mod tests {
 
                 // Send a message to a non-existent actor (the proc however exists).
                 let unmonitored_reply_to = mesh.client().open_port::<usize>().0.bind();
-                let bad_actor = ActorRef::<TestActor>::attest(ActorId(ProcId(WorldId(name.clone()), 0), "foo".into(), 0));
+                let bad_actor = ActorRef::<TestActor>::attest(ActorId(ProcId::Ranked(WorldId(name.clone()), 0), "foo".into(), 0));
                 bad_actor.send(mesh.client(), GetRank(true, unmonitored_reply_to)).unwrap();
 
                 // The message will be returned!

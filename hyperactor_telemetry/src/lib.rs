@@ -135,7 +135,7 @@ fn writer() -> Box<dyn Write + Send> {
 
 lazy_static! {
     static ref TELEMETRY_CLOCK: Arc<Mutex<Box<dyn TelemetryClock + Send>>> =
-        { Arc::new(Mutex::new(Box::new(DefaultTelemetryClock {}))) };
+        Arc::new(Mutex::new(Box::new(DefaultTelemetryClock {})));
 }
 
 /// The recorder singleton that is configured as a layer in the the default tracing

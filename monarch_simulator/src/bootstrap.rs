@@ -105,7 +105,7 @@ pub async fn spawn_sim_worker(
     rank: usize,
 ) -> anyhow::Result<ActorHandle<ProcActor>> {
     let listen_addr = ChannelAddr::any(bootstrap_addr.transport());
-    let worker_proc_id = ProcId(worker_world_id.clone(), rank);
+    let worker_proc_id = ProcId::Ranked(worker_world_id.clone(), rank);
     let worker_actor_id = ActorId(worker_proc_id.clone(), "worker".into(), 0);
 
     let ChannelAddr::Sim(bootstrap_addr) = bootstrap_addr else {

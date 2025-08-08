@@ -175,7 +175,11 @@ impl ControllerActor {
     ) -> Result<(ActorHandle<ProcActor>, ActorRef<ControllerActor>), anyhow::Error> {
         let bootstrap = ProcActor::bootstrap(
             controller_id.proc_id().clone(),
-            controller_id.proc_id().world_id().clone(), // REFACTOR(marius): make world_id a parameter of ControllerActor::bootstrap
+            controller_id
+                .proc_id()
+                .world_id()
+                .expect("multiprocess supports only ranked procs")
+                .clone(), // REFACTOR(marius): make world_id a parameter of ControllerActor::bootstrap
             listen_addr,
             bootstrap_addr.clone(),
             supervision_update_interval,
@@ -685,7 +689,12 @@ mod tests {
                     world_size: 1,
                     comm_actor_ref: comm_handle.bind(),
                     worker_gang_ref: GangId(
-                        WorldId(proc.proc_id().world_name().to_string()),
+                        WorldId(
+                            proc.proc_id()
+                                .world_name()
+                                .expect("only ranked actors are supported in the controller tests")
+                                .to_string(),
+                        ),
                         "worker".to_string(),
                     )
                     .into(),
@@ -869,7 +878,12 @@ mod tests {
                     world_size: 1,
                     comm_actor_ref: comm_handle.bind(),
                     worker_gang_ref: GangId(
-                        WorldId(proc.proc_id().world_name().to_string()),
+                        WorldId(
+                            proc.proc_id()
+                                .world_name()
+                                .expect("only ranked actors are supported in the controller tests")
+                                .to_string(),
+                        ),
                         "worker".to_string(),
                     )
                     .into(),
@@ -975,7 +989,12 @@ mod tests {
             .await
             .unwrap();
 
-        let world_id = WorldId(proc.proc_id().world_name().to_string());
+        let world_id = WorldId(
+            proc.proc_id()
+                .world_name()
+                .expect("only ranked actors are supported in the controller tests")
+                .to_string(),
+        );
         let controller_handle = proc
             .spawn::<ControllerActor>(
                 "controller",
@@ -1500,7 +1519,12 @@ mod tests {
                 world_size: 1,
                 comm_actor_ref: ActorRef::attest(controller_id.proc_id().actor_id("comm", 0)),
                 worker_gang_ref: GangId(
-                    WorldId(proc_id.world_name().to_string()),
+                    WorldId(
+                        proc_id
+                            .world_name()
+                            .expect("only ranked actors are supported in the controller tests")
+                            .to_string(),
+                    ),
                     "worker".to_string(),
                 )
                 .into(),
@@ -1591,7 +1615,12 @@ mod tests {
                 world_size: 1,
                 comm_actor_ref: ActorRef::attest(controller_id.proc_id().actor_id("comm", 0)),
                 worker_gang_ref: GangId(
-                    WorldId(proc_id.world_name().to_string()),
+                    WorldId(
+                        proc_id
+                            .world_name()
+                            .expect("only ranked actors are supported in the controller tests")
+                            .to_string(),
+                    ),
                     "worker".to_string(),
                 )
                 .into(),
@@ -1692,7 +1721,12 @@ mod tests {
                 world_size: 1,
                 comm_actor_ref: ActorRef::attest(controller_id.proc_id().actor_id("comm", 0)),
                 worker_gang_ref: GangId(
-                    WorldId(proc_id.world_name().to_string()),
+                    WorldId(
+                        proc_id
+                            .world_name()
+                            .expect("only ranked actors are supported in the controller tests")
+                            .to_string(),
+                    ),
                     "worker".to_string(),
                 )
                 .into(),
@@ -1835,7 +1869,12 @@ mod tests {
                 world_size: 1,
                 comm_actor_ref: ActorRef::attest(controller_id.proc_id().actor_id("comm", 0)),
                 worker_gang_ref: GangId(
-                    WorldId(proc_id.world_name().to_string()),
+                    WorldId(
+                        proc_id
+                            .world_name()
+                            .expect("only ranked actors are supported in the controller tests")
+                            .to_string(),
+                    ),
                     "worker".to_string(),
                 )
                 .into(),

@@ -550,7 +550,11 @@ impl Actor for ProcActor {
 impl ProcActor {
     /// This proc's rank in the world.
     fn rank(&self) -> Index {
-        self.params.proc.proc_id().rank()
+        self.params
+            .proc
+            .proc_id()
+            .rank()
+            .expect("proc must be ranked")
     }
 }
 
@@ -624,10 +628,25 @@ impl ProcMessageHandler for ProcActor {
         world_size: usize,
     ) -> Result<(), anyhow::Error> {
         for (index, proc_id) in proc_ids.into_iter().enumerate() {
-            let proc_world_id = proc_id.world_id().clone();
+            let proc_world_id = proc_id
+                .world_id()
+                .expect("proc must be ranked for world_id access")
+                .clone();
             // Check world id isn't the same as this proc's world id.
-            if &proc_world_id == self.params.proc.proc_id().world_id()
-                || &world_id == self.params.proc.proc_id().world_id()
+            if &proc_world_id
+                == self
+                    .params
+                    .proc
+                    .proc_id()
+                    .world_id()
+                    .expect("proc must be ranked for world_id access")
+                || &world_id
+                    == self
+                        .params
+                        .proc
+                        .proc_id()
+                        .world_id()
+                        .expect("proc must be ranked for world_id access")
             {
                 return Err(anyhow::anyhow!(
                     "cannot spawn proc in same world {}",
@@ -658,7 +677,13 @@ impl ProcMessageHandler for ProcActor {
                             self.params.bootstrap_channel_addr.to_string(),
                         )
                         .env(HYPERACTOR_WORLD_SIZE, world_size.to_string())
-                        .env(HYPERACTOR_RANK, proc_id.rank().to_string())
+                        .env(
+                            HYPERACTOR_RANK,
+                            proc_id
+                                .rank()
+                                .expect("proc must be ranked for rank env var")
+                                .to_string(),
+                        )
                         .env(HYPERACTOR_LOCAL_RANK, index.to_string())
                         .stdin(Stdio::null())
                         .stdout(Stdio::inherit())
@@ -831,7 +856,11 @@ where
         .await?;
 
     // Wait for the spawned actor to join.
-    while spawned_receiver.recv().await? != proc_id.rank() {}
+    while spawned_receiver.recv().await?
+        != proc_id
+            .rank()
+            .expect("proc must be ranked for rank comparison")
+    {}
 
     // Gspawned actors are always exported.
     Ok(ActorRef::attest(proc_id.actor_id(actor_name, 0)))
@@ -1575,7 +1604,7 @@ mod tests {
 
         // Ping gets Pong's address
         let expected_1 = r#"UpdateAddress {
-    proc_id: ProcId(
+    proc_id: Ranked(
         WorldId(
             "world",
         ),
@@ -1585,7 +1614,7 @@ mod tests {
 
         // Pong gets Ping's address
         let expected_2 = r#"UpdateAddress {
-    proc_id: ProcId(
+    proc_id: Ranked(
         WorldId(
             "world",
         ),
@@ -1595,7 +1624,7 @@ mod tests {
 
         // Ping gets "user"'s address
         let expected_3 = r#"UpdateAddress {
-    proc_id: ProcId(
+    proc_id: Ranked(
         WorldId(
             "user",
         ),"#;
@@ -1701,7 +1730,11 @@ mod tests {
         let listen_addr = ChannelAddr::any(ChannelTransport::Tcp);
         let bootstrap = ProcActor::bootstrap(
             actor_id.proc_id().clone(),
-            actor_id.proc_id().world_id().clone(),
+            actor_id
+                .proc_id()
+                .world_id()
+                .expect("proc must be ranked for bootstrap world_id")
+                .clone(),
             listen_addr.clone(),
             system_addr.clone(),
             Duration::from_secs(3),
