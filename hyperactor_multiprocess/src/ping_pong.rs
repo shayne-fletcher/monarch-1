@@ -33,7 +33,7 @@ mod tests {
     #[tracing_test::traced_test]
     #[tokio::test]
     async fn test_sim_ping_pong() {
-        let system_addr = "local!1".parse::<ChannelAddr>().unwrap();
+        let system_addr = "local:1".parse::<ChannelAddr>().unwrap();
 
         simnet::start();
 

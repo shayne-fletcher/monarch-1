@@ -917,8 +917,8 @@ mod tests {
         // Tests that we can create a simnet, config latency between two node and deliver
         // the message with configured latency.
         start();
-        let alice = "local!1".parse::<simnet::ChannelAddr>().unwrap();
-        let bob = "local!2".parse::<simnet::ChannelAddr>().unwrap();
+        let alice = "local:1".parse::<simnet::ChannelAddr>().unwrap();
+        let bob = "local:2".parse::<simnet::ChannelAddr>().unwrap();
         let latency = Duration::from_millis(1000);
         let config = NetworkConfig {
             edges: vec![EdgeConfig {
@@ -949,7 +949,7 @@ mod tests {
             .unwrap();
         let records = simnet_handle().unwrap().close().await;
         let expected_record = SimulatorEventRecord {
-            summary: "Sending message from local!1 to local!2".to_string(),
+            summary: "Sending message from local:1 to local:2".to_string(),
             start_at: 0,
             end_at: latency.as_millis() as u64,
         };
@@ -960,8 +960,8 @@ mod tests {
     #[tokio::test]
     async fn test_simnet_debounce() {
         start();
-        let alice = "local!1".parse::<simnet::ChannelAddr>().unwrap();
-        let bob = "local!2".parse::<simnet::ChannelAddr>().unwrap();
+        let alice = "local:1".parse::<simnet::ChannelAddr>().unwrap();
+        let bob = "local:2".parse::<simnet::ChannelAddr>().unwrap();
 
         let latency = Duration::from_millis(10000);
         simnet_handle()
@@ -1020,7 +1020,7 @@ mod tests {
         // // Create a simple network of 4 nodes.
         for i in 0..4 {
             addresses.push(
-                format!("local!{}", i)
+                format!("local:{}", i)
                     .parse::<simnet::ChannelAddr>()
                     .unwrap(),
             );
@@ -1083,16 +1083,16 @@ mod tests {
     async fn test_read_config_from_yaml() {
         let yaml = r#"
  edges:
-   - src: local!0
-     dst: local!1
+   - src: local:0
+     dst: local:1
      metadata:
        latency: 1
-   - src: local!0
-     dst: local!2
+   - src: local:0
+     dst: local:2
      metadata:
        latency: 2
-   - src: local!1
-     dst: local!2
+   - src: local:1
+     dst: local:2
      metadata:
        latency: 3
  "#;
@@ -1100,29 +1100,29 @@ mod tests {
         assert_eq!(config.edges.len(), 3);
         assert_eq!(
             config.edges[0].src,
-            "local!0".parse::<simnet::ChannelAddr>().unwrap()
+            "local:0".parse::<simnet::ChannelAddr>().unwrap()
         );
         assert_eq!(
             config.edges[0].dst,
-            "local!1".parse::<simnet::ChannelAddr>().unwrap()
+            "local:1".parse::<simnet::ChannelAddr>().unwrap()
         );
         assert_eq!(config.edges[0].metadata.latency, Duration::from_secs(1));
         assert_eq!(
             config.edges[1].src,
-            "local!0".parse::<simnet::ChannelAddr>().unwrap()
+            "local:0".parse::<simnet::ChannelAddr>().unwrap()
         );
         assert_eq!(
             config.edges[1].dst,
-            "local!2".parse::<simnet::ChannelAddr>().unwrap()
+            "local:2".parse::<simnet::ChannelAddr>().unwrap()
         );
         assert_eq!(config.edges[1].metadata.latency, Duration::from_secs(2));
         assert_eq!(
             config.edges[2].src,
-            "local!1".parse::<simnet::ChannelAddr>().unwrap()
+            "local:1".parse::<simnet::ChannelAddr>().unwrap()
         );
         assert_eq!(
             config.edges[2].dst,
-            "local!2".parse::<simnet::ChannelAddr>().unwrap()
+            "local:2".parse::<simnet::ChannelAddr>().unwrap()
         );
         assert_eq!(config.edges[2].metadata.latency, Duration::from_secs(3));
     }

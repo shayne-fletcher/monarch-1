@@ -276,20 +276,20 @@ pub type Port = u16;
 
 /// The type of a channel address, used to multiplex different underlying
 /// channel implementations. ChannelAddrs also have a concrete syntax:
-/// the address type ("tcp" or "local"), followed by "!", and an address
-/// parseable to that type. Addresses without a specified type default to
-/// "tcp". For example:
+/// the address type (e.g., "tcp" or "local"), followed by ":", and an address
+/// parseable to that type. For example:
 ///
-/// - `tcp!127.0.0.1:1234` - localhost port 1234 over TCP
-/// - `tcp!192.168.0.1:1111` - 192.168.0.1 port 1111 over TCP
-/// - `local!123` - the (in-process) local port 123
+/// - `tcp:127.0.0.1:1234` - localhost port 1234 over TCP
+/// - `tcp:192.168.0.1:1111` - 192.168.0.1 port 1111 over TCP
+/// - `local:123` - the (in-process) local port 123
+/// - `unix:/some/path` - the Unix socket at `/some/path`
 ///
 /// Both local and TCP ports 0 are reserved to indicate "any available
 /// port" when serving.
 ///
 /// ```
 /// # use hyperactor::channel::ChannelAddr;
-/// let addr: ChannelAddr = "tcp!127.0.0.1:1234".parse().unwrap();
+/// let addr: ChannelAddr = "tcp:127.0.0.1:1234".parse().unwrap();
 /// let ChannelAddr::Tcp(socket_addr) = addr else {
 ///     panic!()
 /// };
@@ -401,11 +401,11 @@ impl ChannelAddr {
 impl fmt::Display for ChannelAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Tcp(addr) => write!(f, "tcp!{}", addr),
-            Self::MetaTls(hostname, port) => write!(f, "metatls!{}:{}", hostname, port),
-            Self::Local(index) => write!(f, "local!{}", index),
-            Self::Sim(sim_addr) => write!(f, "sim!{}", sim_addr),
-            Self::Unix(addr) => write!(f, "unix!{}", addr),
+            Self::Tcp(addr) => write!(f, "tcp:{}", addr),
+            Self::MetaTls(hostname, port) => write!(f, "metatls:{}:{}", hostname, port),
+            Self::Local(index) => write!(f, "local:{}", index),
+            Self::Sim(sim_addr) => write!(f, "sim:{}", sim_addr),
+            Self::Unix(addr) => write!(f, "unix:{}", addr),
         }
     }
 }
@@ -414,7 +414,8 @@ impl FromStr for ChannelAddr {
     type Err = anyhow::Error;
 
     fn from_str(addr: &str) -> Result<Self, Self::Err> {
-        match addr.split_once('!') {
+        // "!" is the legacy delimiter; ":" is preferred
+        match addr.split_once('!').or_else(|| addr.split_once(':')) {
             Some(("local", rest)) => rest
                 .parse::<u64>()
                 .map(Self::Local)
@@ -604,30 +605,30 @@ mod tests {
     fn test_channel_addr() {
         let cases_ok = vec![
             (
-                "tcp![::1]:1234",
+                "tcp<DELIM>[::1]:1234",
                 ChannelAddr::Tcp(SocketAddr::new(
                     IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
                     1234,
                 )),
             ),
             (
-                "tcp!127.0.0.1:8080",
+                "tcp<DELIM>127.0.0.1:8080",
                 ChannelAddr::Tcp(SocketAddr::new(
                     IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
                     8080,
                 )),
             ),
-            ("local!123", ChannelAddr::Local(123)),
             #[cfg(target_os = "linux")]
+            ("local<DELIM>123", ChannelAddr::Local(123)),
             (
-                "unix!@yolo",
+                "unix<DELIM>@yolo",
                 ChannelAddr::Unix(
                     unix::SocketAddr::from_abstract_name("yolo")
                         .expect("can't make socket from abstract name"),
                 ),
             ),
             (
-                "unix!/cool/socket-path",
+                "unix<DELIM>/cool/socket-path",
                 ChannelAddr::Unix(
                     unix::SocketAddr::from_pathname("/cool/socket-path")
                         .expect("can't make socket from path"),
@@ -635,42 +636,29 @@ mod tests {
             ),
         ];
 
-        let src_ok = vec![
-            (
-                "tcp![::1]:1235",
-                ChannelAddr::Tcp(SocketAddr::new(
-                    IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
-                    1235,
-                )),
-            ),
-            (
-                "tcp!127.0.0.1:8081",
-                ChannelAddr::Tcp(SocketAddr::new(
-                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-                    8081,
-                )),
-            ),
-            ("local!124", ChannelAddr::Local(124)),
-        ];
-
         for (raw, parsed) in cases_ok.clone() {
-            assert_eq!(raw.parse::<ChannelAddr>().unwrap(), parsed);
+            for delim in ["!", ":"] {
+                let raw = raw.replace("<DELIM>", delim);
+                assert_eq!(raw.parse::<ChannelAddr>().unwrap(), parsed);
+            }
         }
 
-        for (raw, parsed) in cases_ok.iter().zip(src_ok.clone()).map(|(a, _)| {
-            (
-                format!("sim!{}", a.0),
-                ChannelAddr::Sim(SimAddr::new(a.1.clone()).unwrap()),
-            )
-        }) {
-            assert_eq!(raw.parse::<ChannelAddr>().unwrap(), parsed);
+        for (raw, parsed) in cases_ok {
+            for delim in ["!", ":"] {
+                // We don't allow mixing and matching delims
+                let raw = format!("sim{}{}", delim, raw.replace("<DELIM>", delim));
+                assert_eq!(
+                    raw.parse::<ChannelAddr>().unwrap(),
+                    ChannelAddr::Sim(SimAddr::new(parsed.clone()).unwrap())
+                );
+            }
         }
 
         let cases_err = vec![
-            ("tcp!abcdef..123124", "invalid socket address syntax"),
-            ("xxx!foo", "no such channel type: xxx"),
+            ("tcp:abcdef..123124", "invalid socket address syntax"),
+            ("xxx:foo", "no such channel type: xxx"),
             ("127.0.0.1", "no channel type specified"),
-            ("local!abc", "invalid digit found in string"),
+            ("local:abc", "invalid digit found in string"),
         ];
 
         for (raw, error) in cases_err {
@@ -751,13 +739,13 @@ mod tests {
 
         let rng = rand::thread_rng();
         vec![
-            "tcp![::1]:0".parse().unwrap(),
-            "local!0".parse().unwrap(),
+            "tcp:[::1]:0".parse().unwrap(),
+            "local:0".parse().unwrap(),
             #[cfg(target_os = "linux")]
-            "unix!".parse().unwrap(),
+            "unix:".parse().unwrap(),
             #[cfg(target_os = "linux")]
             format!(
-                "unix!@{}",
+                "unix:@{}",
                 rng.sample_iter(Uniform::new_inclusive('a', 'z'))
                     .take(10)
                     .collect::<String>()

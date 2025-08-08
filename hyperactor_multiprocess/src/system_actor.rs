@@ -2947,7 +2947,7 @@ mod tests {
             panic!("Expected sim address");
         };
 
-        assert_eq!(addr.src().clone().unwrap().to_string(), "unix!@src");
-        assert_eq!(addr.addr().to_string(), "unix!@dst");
+        assert_eq!(addr.src().clone().unwrap().to_string(), "unix:@src");
+        assert_eq!(addr.addr().to_string(), "unix:@dst");
     }
 }

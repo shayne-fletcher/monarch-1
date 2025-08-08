@@ -2709,10 +2709,10 @@ mod tests {
     #[tokio::test]
     async fn test_sim_client_server() {
         simnet::start();
-        let dst_addr = SimAddr::new("local!1".parse::<ChannelAddr>().unwrap()).unwrap();
+        let dst_addr = SimAddr::new("local:1".parse::<ChannelAddr>().unwrap()).unwrap();
         let src_to_dst = ChannelAddr::Sim(
             SimAddr::new_with_src(
-                "local!0".parse::<ChannelAddr>().unwrap(),
+                "local:0".parse::<ChannelAddr>().unwrap(),
                 dst_addr.addr().clone(),
             )
             .unwrap(),

@@ -419,8 +419,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sim_basic() {
-        let dst_ok = vec!["tcp![::1]:1234", "tcp!127.0.0.1:8080", "local!123"];
-        let srcs_ok = vec!["tcp![::2]:1234", "tcp!127.0.0.2:8080", "local!124"];
+        let dst_ok = vec!["tcp:[::1]:1234", "tcp:127.0.0.1:8080", "local:123"];
+        let srcs_ok = vec!["tcp:[::2]:1234", "tcp:127.0.0.2:8080", "local:124"];
 
         start();
 
@@ -460,23 +460,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_sim_addr() {
-        let sim_addr = "sim!unix!@dst";
+        let sim_addr = "sim!unix:@dst";
         let result = sim_addr.parse();
         assert!(result.is_ok());
         let ChannelAddr::Sim(sim_addr) = result.unwrap() else {
             panic!("Expected a sim address");
         };
         assert!(sim_addr.src().is_none());
-        assert_eq!(sim_addr.addr().to_string(), "unix!@dst");
+        assert_eq!(sim_addr.addr().to_string(), "unix:@dst");
 
-        let sim_addr = "sim!unix!@src,unix!@dst";
+        let sim_addr = "sim!unix:@src,unix:@dst";
         let result = sim_addr.parse();
         assert!(result.is_ok());
         let ChannelAddr::Sim(sim_addr) = result.unwrap() else {
             panic!("Expected a sim address");
         };
         assert!(sim_addr.src().is_some());
-        assert_eq!(sim_addr.addr().to_string(), "unix!@dst");
+        assert_eq!(sim_addr.addr().to_string(), "unix:@dst");
     }
 
     #[tokio::test]
@@ -484,18 +484,18 @@ mod tests {
         start();
 
         tokio::time::pause();
-        let sim_addr = SimAddr::new("unix!@dst".parse::<ChannelAddr>().unwrap()).unwrap();
+        let sim_addr = SimAddr::new("unix:@dst".parse::<ChannelAddr>().unwrap()).unwrap();
         let sim_addr_with_src = SimAddr::new_with_src(
-            "unix!@src".parse::<ChannelAddr>().unwrap(),
-            "unix!@dst".parse::<ChannelAddr>().unwrap(),
+            "unix:@src".parse::<ChannelAddr>().unwrap(),
+            "unix:@dst".parse::<ChannelAddr>().unwrap(),
         )
         .unwrap();
         let (_, mut rx) = sim::serve::<()>(sim_addr.clone()).unwrap();
         let tx = sim::dial::<()>(sim_addr_with_src).unwrap();
         let simnet_config_yaml = r#"
         edges:
-        - src: unix!@src
-          dst: unix!@dst
+        - src: unix:@src
+          dst: unix:@dst
           metadata:
             latency: 100
         "#;
@@ -526,15 +526,15 @@ mod tests {
         tokio::time::pause();
         start();
         let controller_to_dst = SimAddr::new_with_src(
-            "unix!@controller".parse::<ChannelAddr>().unwrap(),
-            "unix!@dst".parse::<ChannelAddr>().unwrap(),
+            "unix:@controller".parse::<ChannelAddr>().unwrap(),
+            "unix:@dst".parse::<ChannelAddr>().unwrap(),
         )
         .unwrap();
         let controller_tx = sim::dial::<()>(controller_to_dst.clone()).unwrap();
 
         let client_to_dst = SimAddr::new_with_client_src(
-            "unix!@client".parse::<ChannelAddr>().unwrap(),
-            "unix!@dst".parse::<ChannelAddr>().unwrap(),
+            "unix:@client".parse::<ChannelAddr>().unwrap(),
+            "unix:@dst".parse::<ChannelAddr>().unwrap(),
         )
         .unwrap();
         let client_tx = sim::dial::<()>(client_to_dst).unwrap();
@@ -542,8 +542,8 @@ mod tests {
         // 1 second of latency
         let simnet_config_yaml = r#"
         edges:
-        - src: unix!@controller
-          dst: unix!@dst
+        - src: unix:@controller
+          dst: unix:@dst
           metadata:
             latency: 1
         "#;
