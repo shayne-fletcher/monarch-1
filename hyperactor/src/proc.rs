@@ -1286,11 +1286,17 @@ impl<A: Actor> cap::sealed::CanSend for Instance<A> {
         let envelope = MessageEnvelope::new(self.self_id().clone(), dest, data, headers);
         self.proc.post(envelope, self.ports.get());
     }
+    fn actor_id(&self) -> &ActorId {
+        self.self_id()
+    }
 }
 
 impl<A: Actor> cap::sealed::CanSend for &Instance<A> {
     fn post(&self, dest: PortId, headers: Attrs, data: Serialized) {
         (*self).post(dest, headers, data)
+    }
+    fn actor_id(&self) -> &ActorId {
+        self.self_id()
     }
 }
 
@@ -1337,11 +1343,17 @@ impl<A: Actor> cap::sealed::CanSend for Context<'_, A> {
     fn post(&self, dest: PortId, headers: Attrs, data: Serialized) {
         <Instance<A> as cap::sealed::CanSend>::post(self, dest, headers, data)
     }
+    fn actor_id(&self) -> &ActorId {
+        self.self_id()
+    }
 }
 
 impl<A: Actor> cap::sealed::CanSend for &Context<'_, A> {
     fn post(&self, dest: PortId, headers: Attrs, data: Serialized) {
         <Instance<A> as cap::sealed::CanSend>::post(self, dest, headers, data)
+    }
+    fn actor_id(&self) -> &ActorId {
+        self.self_id()
     }
 }
 

@@ -542,6 +542,7 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
     println!("initializing worker actor mesh");
     worker_actor_mesh
         .cast(
+            worker_proc_mesh.client(),
             selection::selection_from(worker_actor_mesh.shape(), &[("gpu", 0..num_workers)])
                 .unwrap(),
             WorkerInit(ps_actor.clone(), worker_rdma_managers),
@@ -553,6 +554,7 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
         println!("===== starting step {} =====", step);
         worker_actor_mesh
             .cast(
+                worker_proc_mesh.client(),
                 selection::selection_from(worker_actor_mesh.shape(), &[("gpu", 0..num_workers)])
                     .unwrap(),
                 Log {},
@@ -562,6 +564,7 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
         let (handle, mut recv) = worker_proc_mesh.client().open_port::<bool>();
         worker_actor_mesh
             .cast(
+                worker_proc_mesh.client(),
                 selection::selection_from(worker_actor_mesh.shape(), &[("gpu", 0..num_workers)])
                     .unwrap(),
                 WorkerStep(handle.bind()),
@@ -590,6 +593,7 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
         let (handle, mut recv) = worker_proc_mesh.client().open_port::<bool>();
         worker_actor_mesh
             .cast(
+                worker_proc_mesh.client(),
                 selection::selection_from(worker_actor_mesh.shape(), &[("gpu", 0..num_workers)])
                     .unwrap(),
                 WorkerUpdate(handle.bind()),
