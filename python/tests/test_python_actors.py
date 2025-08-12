@@ -105,7 +105,7 @@ class To(Actor):
 
 class From(Actor):
     @endpoint
-    async def get(self, to: To):
+    async def fetch(self, to: To):
         return [await x for x in to.whoami.stream()]
 
 
@@ -114,7 +114,7 @@ async def test_mesh_passed_to_mesh():
     proc = await local_proc_mesh(gpus=2)
     f = await proc.spawn("from", From)
     t = await proc.spawn("to", To)
-    all = [y for x in f.get.stream(t) for y in await x]
+    all = [y for x in f.fetch.stream(t) for y in await x]
     assert len(all) == 4
     assert all[0] != all[1]
 
@@ -125,7 +125,7 @@ async def test_mesh_passed_to_mesh_on_different_proc_mesh():
     proc2 = await local_proc_mesh(gpus=2)
     f = await proc.spawn("from", From)
     t = await proc2.spawn("to", To)
-    all = [y for x in f.get.stream(t) for y in await x]
+    all = [y for x in f.fetch.stream(t) for y in await x]
     assert len(all) == 4
     assert all[0] != all[1]
 
@@ -135,12 +135,12 @@ def test_actor_slicing():
     proc = local_proc_mesh(gpus=2)
     proc2 = local_proc_mesh(gpus=2)
 
-    f = proc.spawn("from", From).get()
-    t = proc2.spawn("to", To).get()
+    f = proc.spawn("from", From)
+    t = proc2.spawn("to", To)
 
     assert t.slice(gpus=0).whoami.call().get() != t.slice(gpus=1).whoami.call().get()
 
-    result = [y for x in f.get.stream(t.slice(gpus=0)) for y in x.get()]
+    result = [y for x in f.fetch.stream(t.slice(gpus=0)) for y in x.get()]
     assert len(result) == 2
 
     assert result[0] == result[1]
@@ -286,7 +286,7 @@ class TLSActor(Actor):
         self.local.value += 1
 
     @endpoint
-    def get(self):
+    def get_value(self):
         return self.local.value
 
     @endpoint
@@ -304,7 +304,7 @@ async def test_actor_tls() -> None:
     await am.increment.call_one()
     await am.increment_async.call_one()
 
-    assert 4 == await am.get.call_one()
+    assert 4 == await am.get_value.call_one()
     assert 4 == await am.get_async.call_one()
 
 
@@ -320,7 +320,7 @@ class TLSActorFullSync(Actor):
         self.local.value += 1
 
     @endpoint
-    def get(self):
+    def get_value(self):
         return self.local.value
 
 
@@ -334,7 +334,7 @@ async def test_actor_tls_full_sync() -> None:
     await am.increment.call_one()
     await am.increment.call_one()
 
-    assert 4 == await am.get.call_one()
+    assert 4 == await am.get_value.call_one()
 
 
 class AsyncActor(Actor):
@@ -937,11 +937,11 @@ def test_port_as_argument() -> None:
 @pytest.mark.timeout(15)
 async def test_same_actor_twice() -> None:
     pm = proc_mesh(gpus=1)
-    await pm.spawn("dup", Counter, 0)
+    await pm.spawn("dup", Counter, 0).initialized
 
     # The second spawn with the same name should fail with a specific error
     with pytest.raises(Exception) as exc_info:
-        await pm.spawn("dup", Counter, 0)
+        await pm.spawn("dup", Counter, 0).initialized
 
     # Assert that the error message contains the expected text about duplicate actor name
     error_msg = str(exc_info.value)
