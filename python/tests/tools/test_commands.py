@@ -24,6 +24,7 @@ from torchx.specs import AppDef, AppDryRunInfo, AppState, AppStatus, Role
 
 CMD_INFO = "monarch.tools.commands.info"
 CMD_CREATE = "monarch.tools.commands.create"
+CMD_KILL = "monarch.tools.commands.kill"
 
 
 class TestCommands(unittest.TestCase):
@@ -335,4 +336,46 @@ class TestCommandsAsync(unittest.IsolatedAsyncioTestCase):
                 name="123",
                 config=config,
                 check_interval=_5_MS,
+            )
+
+    async def test_get_or_create_force_restart(self) -> None:
+        with mock.patch(
+            CMD_INFO,
+            side_effect=[
+                # -- state for slurm:///123
+                server(AppState.RUNNING, name="123"),
+                # -- force_restart kills the server
+                server(AppState.CANCELLED, name="123"),
+                # -- states for (new) slurm:///456
+                server(AppState.SUBMITTED, name="456"),
+                server(AppState.PENDING, name="456"),
+                server(AppState.RUNNING, name="456"),
+            ],
+        ) as mock_info, mock.patch(
+            CMD_CREATE, return_value="slurm:///456"
+        ) as mock_create, mock.patch(CMD_KILL) as mock_kill:
+            config = Config(
+                scheduler="slurm",
+                scheduler_args={},
+                appdef=defaults.component_fn("slurm")(),
+            )
+            server_info = await commands.get_or_create(
+                name="123",
+                config=config,
+                check_interval=_5_MS,
+                force_restart=True,
+            )
+
+            mock_create.called_once_with(config, "123")
+            mock_kill.assert_called_once_with("slurm:///123")
+            self.assertEqual(server_info.server_handle, "slurm:///456")
+            self.assertListEqual(
+                mock_info.call_args_list,
+                [
+                    mock.call("slurm:///123"),
+                    mock.call("slurm:///123"),
+                    mock.call("slurm:///456"),
+                    mock.call("slurm:///456"),
+                    mock.call("slurm:///456"),
+                ],
             )
