@@ -238,9 +238,9 @@ impl PythonActorMesh {
         Err(self.pickling_err())
     }
 
-    fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn stop<'py>(&self) -> PyResult<PyPythonTask> {
         let actor_mesh = self.inner.clone();
-        crate::runtime::future_into_py(py, async move {
+        PyPythonTask::new(async move {
             let actor_mesh = actor_mesh
                 .take()
                 .await

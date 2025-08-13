@@ -506,8 +506,7 @@ class SharedProtocolAdapter(ActorMeshProtocol):
         return PythonTask.from_coroutine(task()).spawn()
 
     async def stop(self) -> None:
-        inner = await Future(coro=self._inner.task())
-        await inner.stop()
+        await (await self._inner).stop()
 
     @staticmethod
     def _restore(inner: ActorMeshProtocol) -> ActorMeshProtocol:
@@ -1183,8 +1182,8 @@ class ActorMesh(MeshTrait, Generic[T], DeprecatedNotAFuture):
     def __repr__(self) -> str:
         return f"ActorMesh(class={self._class}, shape={self._shape}), inner={type(self._inner)})"
 
-    async def stop(self):
-        await self._inner.stop()
+    def stop(self) -> "Future[None]":
+        return Future(coro=self._inner.stop())
 
     @property
     def initialized(self) -> Future[None]:
