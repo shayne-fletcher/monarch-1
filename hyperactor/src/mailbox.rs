@@ -2924,16 +2924,8 @@ mod tests {
         );
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Default, Actor)]
     struct Foo;
-
-    #[async_trait]
-    impl Actor for Foo {
-        type Params = ();
-        async fn new(_params: ()) -> Result<Self, anyhow::Error> {
-            Ok(Self)
-        }
-    }
 
     // Test that a message delivery failure causes the sending actor
     // to stop running.
