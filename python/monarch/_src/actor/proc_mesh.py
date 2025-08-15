@@ -8,10 +8,13 @@
 
 import asyncio
 import logging
+import os
 import sys
 import threading
 import warnings
 from contextlib import AbstractContextManager
+
+from functools import cache
 from pathlib import Path
 
 from typing import (
@@ -121,6 +124,17 @@ try:
     IN_PAR = bool(fbmake.get("par_style"))
 except ImportError:
     IN_PAR = False
+
+
+# A temporary gate used by the PythonActorMesh/PythonActorMeshRef migration.
+# We can use this gate to quickly roll back to using _ActorMeshRefImpl, if we
+# encounter any issues with the migration.
+#
+# This should be removed once we confirm PythonActorMesh/PythonActorMeshRef is
+# working correctly in production.
+@cache
+def _use_standin_mesh() -> bool:
+    return os.getenv("USE_STANDIN_ACTOR_MESH", default="0") != "0"
 
 
 class ProcMesh(MeshTrait, DeprecatedNotAFuture):
@@ -325,10 +339,7 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
                 f"{Class} must subclass monarch.service.Actor to spawn it."
             )
 
-        async def task() -> "PythonActorMesh":
-            return await (await pm).spawn_nonblocking(name, _Actor)
-
-        actor_mesh = PythonTask.from_coroutine(task())
+        actor_mesh = HyProcMesh.spawn_async(pm, name, _Actor, _use_standin_mesh())
         service = ActorMesh._create(
             Class,
             actor_mesh,
