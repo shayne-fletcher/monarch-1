@@ -43,7 +43,6 @@ use dashmap::mapref::entry::Entry;
 use enum_as_inner::EnumAsInner;
 use serde::de::Error;
 use tokio::io::AsyncRead;
-use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use tokio::io::ReadHalf;
@@ -997,7 +996,7 @@ impl<W: AsyncWrite + Unpin, T> WriteState<W, T> {
     async fn send(&mut self) -> io::Result<T> {
         match self {
             Self::Idle(_) => futures::future::pending().await,
-            Self::Writing(fw, value) => {
+            Self::Writing(fw, _value) => {
                 fw.send().await?;
                 let Ok((fw, value)) = replace(self, Self::Broken).into_writing() else {
                     panic!("illegal state");
@@ -2020,6 +2019,7 @@ mod tests {
 
     #[cfg(target_os = "linux")] // uses abstract names
     use anyhow::Result;
+    use bytes::Bytes;
     use futures::SinkExt;
     use futures::stream::SplitSink;
     use futures::stream::SplitStream;
@@ -2027,6 +2027,7 @@ mod tests {
     use rand::SeedableRng;
     use rand::distributions::Alphanumeric;
     use timed_test::async_timed_test;
+    use tokio::io::AsyncWrite;
     use tokio::io::DuplexStream;
     use tokio_util::codec::Framed;
 
@@ -2548,6 +2549,36 @@ mod tests {
         }
     }
 
+    async fn serve2<M>(
+        manager: &SessionManager,
+    ) -> (
+        JoinHandle<std::result::Result<(), anyhow::Error>>,
+        FrameReader<ReadHalf<DuplexStream>>,
+        WriteHalf<DuplexStream>,
+        mpsc::Receiver<M>,
+        CancellationToken,
+    )
+    where
+        M: RemoteMessage,
+    {
+        let cancel_token = CancellationToken::new();
+        // When testing ServerConn, we do not need a Link object, but
+        // only a duplex stream. Therefore, we create them directly so
+        // the test will not have dependence on Link.
+        let (sender, receiver) = tokio::io::duplex(5000);
+        let source = ChannelAddr::Local(u64::MAX);
+        let dest = ChannelAddr::Local(u64::MAX);
+        let conn = ServerConn::new(receiver, source, dest);
+        let manager1 = manager.clone();
+        let cancel_token_1 = cancel_token.child_token();
+        let (tx, rx) = mpsc::channel(1);
+        let join_handle =
+            tokio::spawn(async move { manager1.serve(conn, tx, cancel_token_1).await });
+        let (r, writer) = tokio::io::split(sender);
+        let reader = FrameReader::new(r, config::global::get(config::CODEC_MAX_FRAME_LENGTH));
+        (join_handle, reader, writer, rx, cancel_token)
+    }
+
     async fn serve<M>(
         manager: &SessionManager,
     ) -> (
@@ -2574,6 +2605,33 @@ mod tests {
             tokio::spawn(async move { manager1.serve(conn, tx, cancel_token_1).await });
         let framed = Framed::new(sender, build_codec());
         (join_handle, framed, rx, cancel_token)
+    }
+
+    async fn write_stream2<M, W>(
+        mut writer: W,
+        session_id: u64,
+        messages: &[(u64, M)],
+        init: bool,
+    ) -> W
+    where
+        M: RemoteMessage + PartialEq + Clone,
+        W: AsyncWrite + Unpin,
+    {
+        if init {
+            let frame = bincode::serialize(&Frame::<u64>::Init(session_id)).unwrap();
+            let mut fw = FrameWrite::new(writer, Bytes::from(frame));
+            fw.send().await.unwrap();
+            writer = fw.complete();
+        }
+
+        for (seq, message) in messages {
+            let frame = bincode::serialize(&Frame::<M>::Message(*seq, message.clone())).unwrap();
+            let mut fw = FrameWrite::new(writer, Bytes::from(frame));
+            fw.send().await.unwrap();
+            writer = fw.complete();
+        }
+
+        writer
     }
 
     async fn write_stream<M: RemoteMessage + std::cmp::PartialEq + Clone>(
@@ -2610,21 +2668,12 @@ mod tests {
         // Use temporary config for this test
         let config = config::global::lock();
         let _guard = config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 1);
-        async fn verify_ack(
-            framed: &mut Framed<DuplexStream, LengthDelimitedCodec>,
-            expected_last: u64,
-        ) {
+
+        async fn verify_ack(reader: &mut FrameReader<ReadHalf<DuplexStream>>, expected_last: u64) {
             let mut last_acked: i128 = -1;
             loop {
-                let acked = deserialize_ack(
-                    tokio_stream::StreamExt::next(framed)
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .into(),
-                )
-                .unwrap();
-
+                let bytes = reader.next().await.unwrap().unwrap();
+                let acked = deserialize_ack(bytes).unwrap();
                 assert!(
                     acked as i128 > last_acked,
                     "acks should be delivered in ascending order"
@@ -2641,11 +2690,17 @@ mod tests {
         let session_id = 123;
 
         {
-            let (handle, mut framed, mut rx, _cancel_token) = serve(&manager).await;
-            write_stream(
-                &mut framed,
+            let (handle, mut reader, mut writer, mut rx, _cancel_token) =
+                serve2::<u64>(&manager).await;
+            writer = write_stream2(
+                writer,
                 session_id,
-                &[(0, 100), (1, 101), (2, 102), (3, 103)],
+                &[
+                    (0u64, 100u64),
+                    (1u64, 101u64),
+                    (2u64, 102u64),
+                    (3u64, 103u64),
+                ],
                 /*init*/ true,
             )
             .await;
@@ -2660,10 +2715,11 @@ mod tests {
             // server side might or might not ack seq<3 depending on the order
             // of execution introduced by tokio::select. But it definitely would
             // ack 3.
-            verify_ack(&mut framed, 3).await;
+            verify_ack(&mut reader, 3).await;
 
-            // Drop the sender side and cause the connection to close.
-            drop(framed);
+            // Drop the reader and writer to cause the connection to close.
+            drop(reader);
+            drop(writer);
             handle.await.unwrap().unwrap();
             // mspc is closed too and there should be no unread message left.
             assert_eq!(rx.recv().await, Some(103));
@@ -2672,17 +2728,23 @@ mod tests {
 
         // Now, create a new connection with the same session.
         {
-            let (handle, mut framed, mut rx, cancel_token) = serve(&manager).await;
+            let (handle, mut reader, mut writer, mut rx, cancel_token) =
+                serve2::<u64>(&manager).await;
             let handle = tokio::spawn(async move {
                 let result = handle.await.unwrap();
                 eprintln!("handle joined with: {:?}", result);
                 result
             });
 
-            write_stream(
-                &mut framed,
+            writer = write_stream2(
+                writer,
                 session_id,
-                &[(2, 102), (3, 103), (4, 104), (5, 105)],
+                &[
+                    (2u64, 102u64),
+                    (3u64, 103u64),
+                    (4u64, 104u64),
+                    (5u64, 105u64),
+                ],
                 /*init*/ true,
             )
             .await;
@@ -2692,7 +2754,7 @@ mod tests {
             assert_eq!(rx.recv().await, Some(104));
             assert_eq!(rx.recv().await, Some(105));
 
-            verify_ack(&mut framed, 5).await;
+            verify_ack(&mut reader, 5).await;
 
             // Wait long enough to ensure server processed everything.
             RealClock.sleep(Duration::from_secs(5)).await;
@@ -2702,7 +2764,7 @@ mod tests {
             // mspc is closed too and there should be no unread message left.
             assert!(rx.recv().await.is_none());
             // No more acks from server.
-            assert!(tokio_stream::StreamExt::next(&mut framed).await.is_none());
+            assert!(reader.next().await.unwrap().is_none());
         };
     }
 
@@ -2711,26 +2773,20 @@ mod tests {
         let config = config::global::lock();
         let _guard = config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 1);
         let manager = SessionManager::new();
-        let session_id = 123;
+        let session_id = 123u64;
 
-        let (handle, mut framed, mut rx, cancel_token) = serve(&manager).await;
-        for i in 0..100 {
-            write_stream(
-                &mut framed,
+        let (handle, mut reader, mut writer, mut rx, cancel_token) = serve2::<u64>(&manager).await;
+        for i in 0u64..100u64 {
+            writer = write_stream2(
+                writer,
                 session_id,
-                &[(i, 100 + i)],
-                /*init*/ i == 0,
+                &[(i, 100u64 + i)],
+                /*init*/ i == 0u64,
             )
             .await;
-            assert_eq!(rx.recv().await, Some(100 + i));
-            let acked = deserialize_ack(
-                tokio_stream::StreamExt::next(&mut framed)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .into(),
-            )
-            .unwrap();
+            assert_eq!(rx.recv().await, Some(100u64 + i));
+            let bytes = reader.next().await.unwrap().unwrap();
+            let acked = deserialize_ack(bytes).unwrap();
             assert_eq!(acked, i);
         }
 
@@ -2742,7 +2798,7 @@ mod tests {
         // mspc is closed too and there should be no unread message left.
         assert!(rx.recv().await.is_none());
         // No more acks from server.
-        assert!(tokio_stream::StreamExt::next(&mut framed).await.is_none());
+        assert!(reader.next().await.unwrap().is_none());
     }
 
     #[tracing_test::traced_test]
