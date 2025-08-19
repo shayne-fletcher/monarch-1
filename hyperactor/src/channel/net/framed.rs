@@ -211,6 +211,7 @@ impl<W: AsyncWrite + Unpin> FrameWrite<W> {
 mod tests {
     use rand::Rng;
     use rand::thread_rng;
+    use tokio::io::AsyncWriteExt;
 
     use super::*;
 
@@ -242,8 +243,6 @@ mod tests {
         }
     }
 
-    // todo: test cancellation, frame size
-
     #[tokio::test]
     async fn test_write_frame_smoke() {
         let (a, b) = tokio::io::duplex(4096);
@@ -265,4 +264,49 @@ mod tests {
         assert_eq!(f1.as_ref(), b"hello");
         assert_eq!(f2.as_ref(), b"world");
     }
+
+    #[tokio::test]
+    async fn test_reader_eof_at_boundary() {
+        let (a, b) = tokio::io::duplex(4096);
+        let (r, _wu) = tokio::io::split(a);
+        let (_ru, mut w) = tokio::io::split(b);
+        let mut reader = FrameReader::new(r, 1024);
+
+        // Write a complete frame.
+        w = FrameWrite::write_frame(w, Bytes::from_static(b"done"))
+            .await
+            .unwrap();
+        // Now, shutdown the writer so the peer gets an EOF.
+        w.shutdown().await.unwrap();
+        drop(w);
+        assert_eq!(
+            reader.next().await.unwrap(),
+            Some(Bytes::from_static(b"done"))
+        );
+        // Boundary EOF.
+        assert!(reader.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_reader_eof_mid_frame() {
+        let (a, b) = tokio::io::duplex(4096);
+        let (r, _wu) = tokio::io::split(a);
+        let (_ru, mut w) = tokio::io::split(b);
+        let mut reader = FrameReader::new(r, 1024);
+
+        // Start a frame of length 5.
+        let mut len = bytes::BytesMut::with_capacity(8);
+        len.put_u64(5);
+        w.write_all(&len.freeze()).await.unwrap();
+        // Write only 2 bytes of the body.
+        w.write_all(b"he").await.unwrap();
+        // Shutdown the writer so there's an EOF mid frame.
+        w.shutdown().await.unwrap();
+
+        // Reading back the frame will manifest an error.
+        let err = reader.next().await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    // todo: test cancellation, frame size
 }
