@@ -4,19 +4,27 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-unsafe
+import functools
 import logging
 import warnings
 from typing import Optional
 
 import torch
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 
 try:
-    from monarch._rust_bindings.rdma import _RdmaBuffer
+    from monarch._rust_bindings.rdma import _RdmaBuffer, _RdmaManager
 except ImportError as e:
     logging.error("RDMA is not available: {}".format(e))
     raise e
-from monarch._src.actor.actor_mesh import MonarchContext
+from typing import Dict
+
+from monarch._src.actor.actor_mesh import Actor, MonarchContext
+from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
+from monarch._src.actor.proc_mesh import get_or_spawn_controller, ProcMesh
+from pyre_extensions import none_throws
 
 
 # RDMARead/WriteTransferWarnings are warnings that are only printed once per process.
@@ -35,6 +43,38 @@ warnings.simplefilter("once", RDMAWriteTransferWarning)
 
 def is_available():
     return _RdmaBuffer.rdma_supported()
+
+
+class RdmaController(Actor):
+    def __init__(self) -> None:
+        self._managers: Dict[ProcMesh, _RdmaManager] = {}
+
+    @endpoint
+    async def init_rdma_on_mesh(self, proc_mesh: ProcMesh) -> None:
+        if proc_mesh not in self._managers:
+            if not _RdmaBuffer.rdma_supported():
+                raise RuntimeError(
+                    "Cannot spawn _RdmaManager because RDMA is not supported on this machine"
+                )
+            self._managers[proc_mesh] = none_throws(
+                await Future(
+                    coro=_RdmaManager.create_rdma_manager_nonblocking(
+                        await Future(coro=proc_mesh._proc_mesh.task())
+                    )
+                )
+            )
+
+
+# Cached so that we don't have to call out to the root client every time,
+# which may be on a different host.
+@functools.cache
+def _ensure_init_rdma_manager() -> Shared[None]:
+    async def task() -> None:
+        await (
+            await get_or_spawn_controller("rdma_controller", RdmaController)
+        ).init_rdma_on_mesh.call_one(none_throws(MonarchContext.get().proc_mesh))
+
+    return PythonTask.from_coroutine(task()).spawn()
 
 
 def _assert_tensor_is_1d_contiguous_uint8(t: torch.Tensor) -> None:
@@ -58,6 +98,10 @@ class RDMABuffer:
         assert (
             is_available()
         ), "Tried to create an RDMABuffer, but RDMA is not available on this platform."
+
+        # We need to ensure that _RdmaManager is initialized at this point, because under the hood
+        # _RdmaBuffer.create_rdma_buffer_blocking relies on this being the case.
+        _ensure_init_rdma_manager().block_on()
 
         if data.device.type != "cpu":
             # TODO - CUDA support for RDMABuffer exists at the Rust layer, but
@@ -124,6 +168,8 @@ class RDMABuffer:
         client = MonarchContext.get().mailbox
 
         async def read_into_nonblocking() -> Optional[int]:
+            await _ensure_init_rdma_manager()
+
             res = await self._buffer.read_into(
                 addr=addr,
                 size=size,
@@ -171,6 +217,8 @@ class RDMABuffer:
         client = MonarchContext.get().mailbox
 
         async def write_from_nonblocking() -> None:
+            await _ensure_init_rdma_manager()
+
             res = await self._buffer.write_from(
                 addr=addr,
                 size=size,

@@ -26,13 +26,14 @@ from typing import (
     Literal,
     Optional,
     Sequence,
+    Tuple,
     Type,
     TYPE_CHECKING,
     TypeVar,
 )
+from weakref import WeakValueDictionary
 
 from monarch._rust_bindings.monarch_extension.logging import LoggingMeshClient
-from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
 from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
     Alloc,
     AllocConstraints,
@@ -62,11 +63,6 @@ from monarch._src.actor.code_sync import (
     WorkspaceLocation,
     WorkspaceShape,
 )
-from monarch._src.actor.debugger import (
-    _DEBUG_MANAGER_ACTOR_NAME,
-    DebugClient,
-    DebugManager,
-)
 from monarch._src.actor.device_utils import _local_device_count
 
 from monarch._src.actor.endpoint import endpoint
@@ -81,10 +77,7 @@ try:
     import torch  # @manual
 
     # Confirm that rust bindings were built with tensor engine enabled
-    from monarch._rust_bindings.rdma import (  # type: ignore[import]
-        _RdmaBuffer,
-        _RdmaManager,
-    )
+    from monarch._rust_bindings.rdma import _RdmaManager  # noqa
 
     # type: ignore[16]
     HAS_TENSOR_ENGINE = torch.cuda.is_available()
@@ -137,6 +130,50 @@ def _use_standin_mesh() -> bool:
     return os.getenv("USE_STANDIN_ACTOR_MESH", default="0") != "0"
 
 
+# Ultra-hack to allow actors to identify proc meshes but with no real functionality.
+class ProcMeshRef:
+    def __init__(self, proc_mesh_id: int) -> None:
+        self._proc_mesh_id = proc_mesh_id
+
+    @classmethod
+    def _fake_proc_mesh(cls, proc_mesh_id: int) -> "ProcMesh":
+        return cast(ProcMesh, cls(proc_mesh_id))
+
+    def __getattr__(self, attr: str) -> Any:
+        # AttributeError instead of NotImplementedError so that any hasattr calls
+        # will properly return False
+        raise AttributeError(
+            f"NYI: attempting to get ProcMesh attribute `{attr}` on object that's actually a ProcMeshRef"
+        )
+
+    def __hash__(self) -> int:
+        return hash(self._proc_mesh_id)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ProcMeshRef):
+            return False
+        return self._proc_mesh_id == other._proc_mesh_id
+
+    @property
+    def _proc_mesh(self) -> Shared["HyProcMesh"]:
+        return _deref_proc_mesh(self)._proc_mesh
+
+
+_proc_mesh_lock: threading.Lock = threading.Lock()
+_proc_mesh_key: int = 0
+_proc_mesh_registry: WeakValueDictionary[ProcMeshRef, "ProcMesh"] = (
+    WeakValueDictionary()
+)
+
+
+def _deref_proc_mesh(proc_mesh: ProcMeshRef) -> "ProcMesh":
+    if proc_mesh not in _proc_mesh_registry:
+        raise ValueError(
+            f"ProcMesh with id {proc_mesh._proc_mesh_id} does not exist on host."
+        )
+    return _proc_mesh_registry[proc_mesh]
+
+
 class ProcMesh(MeshTrait, DeprecatedNotAFuture):
     def __init__(
         self,
@@ -145,17 +182,19 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         _device_mesh: Optional["DeviceMesh"] = None,
     ) -> None:
         self._proc_mesh = hy_proc_mesh
+        global _proc_mesh_lock, _proc_mesh_key
+        with _proc_mesh_lock:
+            self._proc_mesh_id: int = _proc_mesh_key
+            _proc_mesh_key += 1
         self._shape = shape
         # until we have real slicing support keep track
         # of whether this is a slice of a real proc_meshg
         self._slice = False
-        # type: ignore[21]
-        self._rdma_manager: Optional["_RdmaManager"] = None
-        self._debug_manager: Optional[DebugManager] = None
         self._code_sync_client: Optional[CodeSyncMeshClient] = None
         self._logging_mesh_client: Optional[LoggingMeshClient] = None
         self._maybe_device_mesh: Optional["DeviceMesh"] = _device_mesh
         self._stopped = False
+        self._controller_controller: Optional["_ControllerController"] = None
 
     @property
     def initialized(self) -> Future[Literal[True]]:
@@ -171,49 +210,6 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
             return True
 
         return Future(coro=task())
-
-    def _init_manager_actors(self, setup: Callable[[], None] | None = None) -> None:
-        self._proc_mesh = PythonTask.from_coroutine(
-            self._init_manager_actors_coro(self._proc_mesh, setup)
-        ).spawn()
-
-    async def _init_manager_actors_coro(
-        self,
-        proc_mesh_: "Shared[HyProcMesh]",
-        setup: Callable[[], None] | None = None,
-    ) -> "HyProcMesh":
-        # WARNING: it is unsafe to await self._proc_mesh here
-        # because self._proc_mesh is the result of this function itself!
-
-        proc_mesh = await proc_mesh_
-
-        self._logging_mesh_client = await LoggingMeshClient.spawn(proc_mesh=proc_mesh)
-        self._logging_mesh_client.set_mode(
-            stream_to_client=True,
-            aggregate_window_sec=3,
-            level=logging.INFO,
-        )
-
-        _rdma_manager = (
-            # type: ignore[16]
-            await _RdmaManager.create_rdma_manager_nonblocking(proc_mesh)
-            # type: ignore[16]
-            if HAS_TENSOR_ENGINE and _RdmaBuffer.rdma_supported()
-            else None
-        )
-
-        self._rdma_manager = _rdma_manager
-
-        if setup is not None:
-            # If the user has passed the setup lambda, we need to call
-            # it here before any of the other actors are spawned so that
-            # the environment variables are set up before cuda init.
-            setup_actor = self._spawn_nonblocking_on(
-                proc_mesh_, "setup", SetupActor, setup
-            )
-            await setup_actor.setup.call()
-
-        return await proc_mesh_
 
     @property
     def _ndslice(self) -> Slice:
@@ -273,7 +269,7 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         self,
         alloc: AllocHandle,
         setup: Callable[[], None] | None = None,
-        _init_manager_actors: bool = True,
+        _attach_controller_controller: bool = True,
     ) -> "ProcMesh":
         """
         Allocate a process mesh according to the provided alloc.
@@ -301,17 +297,47 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
             list(alloc._extent.keys()),
             Slice.new_row_major(list(alloc._extent.values())),
         )
-        pm = ProcMesh(PythonTask.from_coroutine(task()).spawn(), shape)
 
-        if _init_manager_actors:
-            pm._init_manager_actors(setup)
-            # we do this here rather than in _init_manager_actors
-            # because serializing debug_client() requires waiting on
-            # its actor to spawn which would block the tokio event loop inside
-            # _init_manager_actors
-            pm._debug_manager = pm.spawn(
-                _DEBUG_MANAGER_ACTOR_NAME, DebugManager, debug_client()
+        hy_proc_mesh = PythonTask.from_coroutine(task()).spawn()
+
+        pm = ProcMesh(hy_proc_mesh, shape)
+
+        async def task(
+            pm: "ProcMesh",
+            hy_proc_mesh_task: "Shared[HyProcMesh]",
+            setup_actor: Optional[SetupActor],
+        ) -> HyProcMesh:
+            hy_proc_mesh = await hy_proc_mesh_task
+
+            pm._logging_mesh_client = await LoggingMeshClient.spawn(
+                proc_mesh=hy_proc_mesh
             )
+            pm._logging_mesh_client.set_mode(
+                stream_to_client=True,
+                aggregate_window_sec=3,
+                level=logging.INFO,
+            )
+
+            if setup_actor is not None:
+                await setup_actor.setup.call()
+
+            return hy_proc_mesh
+
+        if _attach_controller_controller:
+            pm._controller_controller = _get_controller_controller()
+
+        setup_actor = None
+        if setup is not None:
+            # If the user has passed the setup lambda, we need to call
+            # it here before any of the other actors are spawned so that
+            # the environment variables are set up before cuda init.
+            setup_actor = pm._spawn_nonblocking_on(
+                hy_proc_mesh, "setup", SetupActor, setup
+            )
+
+        pm._proc_mesh = PythonTask.from_coroutine(
+            task(pm, hy_proc_mesh, setup_actor)
+        ).spawn()
 
         return pm
 
@@ -346,6 +372,7 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
             MonarchContext.get().mailbox,
             self._shape,
             self,
+            self._controller_controller,
             *args,
             **kwargs,
         )
@@ -498,6 +525,24 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
             )
             # Cannot call stop here because it is async.
 
+    def __reduce_ex__(self, protocol: ...) -> Tuple[Any, Tuple[Any, ...]]:
+        # Ultra-hack. Remote python actors can get a reference to this proc mesh that
+        # doesn't have any real functionality, but if they send a request back to the client
+        # where the real proc mesh exists, the client can look it up in the proc mesh registry
+        # and do something with it.
+        global _proc_mesh_registry
+        _proc_mesh_registry[ProcMeshRef(self._proc_mesh_id)] = self
+        return (ProcMeshRef._fake_proc_mesh, (self._proc_mesh_id,))
+
+    @staticmethod
+    def _from_ref(proc_mesh_ref: ProcMeshRef) -> "ProcMesh":
+        maybe_proc_mesh = _proc_mesh_registry.get(proc_mesh_ref, None)
+        if maybe_proc_mesh is None:
+            raise RuntimeError(
+                f"ProcMesh with id {proc_mesh_ref._proc_mesh_id} does not exist"
+            )
+        return maybe_proc_mesh
+
 
 def local_proc_mesh(*, gpus: Optional[int] = None, hosts: int = 1) -> ProcMesh:
     return _proc_mesh_from_allocator(allocator=LocalAllocator(), gpus=gpus, hosts=hosts)
@@ -537,7 +582,7 @@ def _proc_mesh_from_allocator(
     gpus: Optional[int],
     hosts: int,
     setup: Callable[[], None] | None = None,
-    _init_manager_actors: bool = True,
+    _attach_controller_controller: bool = True,
 ) -> ProcMesh:
     if gpus is None:
         gpus = _local_device_count()
@@ -546,7 +591,7 @@ def _proc_mesh_from_allocator(
     # in the order of the dimensions.
     spec: AllocSpec = AllocSpec(AllocConstraints(), hosts=hosts, gpus=gpus)
     alloc = allocator.allocate(spec)
-    return ProcMesh.from_alloc(alloc, setup, _init_manager_actors)
+    return ProcMesh.from_alloc(alloc, setup, _attach_controller_controller)
 
 
 def proc_mesh(
@@ -568,27 +613,81 @@ def proc_mesh(
         hosts=hosts,
         gpus=gpus,
         setup=setup,
-        _init_manager_actors=True,
+        _attach_controller_controller=True,
     )
 
 
-_debug_client_init = threading.Lock()
-_debug_proc_mesh: Optional["ProcMesh"] = None
-_debug_client_mesh: "Optional[DebugClient]" = None
+_ActorType = TypeVar("_ActorType", bound=Actor)
 
 
-# Lazy init so that the debug client and proc does not produce logs when it isn't used.
-# Checking for the client needs a lock otherwise two initializing procs will both
-# try to init resulting in duplicates. The critical region is not blocking: it spawns
-# a separate task to do the init, asigns the Shared[Client] from that task to the global
-# and releases the lock.
-def debug_client() -> "DebugClient":
-    global _debug_client_mesh, _debug_proc_mesh
-    with _debug_client_init:
-        if _debug_client_mesh is None:
-            _debug_proc_mesh = _proc_mesh_from_allocator(
-                gpus=1, hosts=1, allocator=LocalAllocator(), _init_manager_actors=False
+class _ControllerController(Actor):
+    def __init__(self) -> None:
+        self._controllers: Dict[str, Actor] = {}
+
+    # pyre-ignore
+    @endpoint
+    def get_or_spawn(
+        self, name: str, Class: Type[_ActorType], *args: Any, **kwargs: Any
+    ) -> _ActorType:
+        if name not in self._controllers:
+            proc_mesh = _proc_mesh_from_allocator(
+                gpus=1,
+                hosts=1,
+                allocator=LocalAllocator(),
             )
-            _debug_client_mesh = _debug_proc_mesh.spawn("debug_client", DebugClient)
+            self._controllers[name] = proc_mesh.spawn(name, Class, *args, **kwargs)
+        return cast(_ActorType, self._controllers[name])
 
-    return _debug_client_mesh
+
+_cc_init = threading.Lock()
+_cc_proc_mesh: Optional["ProcMesh"] = None
+_controller_controller: Optional["_ControllerController"] = None
+
+
+# Lazy init so that the controller_controller and proc do not produce logs when they aren't used.
+# Checking for the controller (when it does not already exist in the MonarchContext) needs a lock,
+# otherwise two initializing procs will both try to init resulting in duplicates. The critical
+# region is not blocking: it spawns a separate task to do the init, assigns the
+# Shared[_ControllerController] from that task to the global and releases the lock.
+def _get_controller_controller() -> "_ControllerController":
+    # Check the MonarchContext first -- this way, remote actors that spawn new proc meshes
+    # will use the original ControllerController instead of creating a new one.
+    if (
+        controller_controller := MonarchContext.get().controller_controller
+    ) is not None:
+        return controller_controller
+    global _controller_controller, _cc_proc_mesh
+    with _cc_init:
+        if _controller_controller is None:
+            _cc_proc_mesh = _proc_mesh_from_allocator(
+                gpus=1,
+                hosts=1,
+                allocator=LocalAllocator(),
+                _attach_controller_controller=False,
+            )
+            _controller_controller = _cc_proc_mesh.spawn(
+                "controller_controller", _ControllerController
+            )
+
+    return _controller_controller
+
+
+def get_or_spawn_controller(
+    name: str, Class: Type["_ActorType"], *args: Any, **kwargs: Any
+) -> Future["_ActorType"]:
+    """
+    Creates a singleton actor (controller) indexed by name, or if it already exists, returns the
+    existing actor.
+
+    Args:
+        name (str): The unique name of the actor, used as a key for retrieval.
+        Class (Type): The class of the actor to spawn. Must be a subclass of Actor.
+        *args (Any): Positional arguments to pass to the actor constructor.
+        **kwargs (Any): Keyword arguments to pass to the actor constructor.
+
+    Returns:
+        A Future that resolves to a reference to the actor.
+    """
+    return _get_controller_controller().get_or_spawn.call_one(
+        name, Class, *args, **kwargs
+    )
