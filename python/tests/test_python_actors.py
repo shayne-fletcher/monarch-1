@@ -246,6 +246,16 @@ def test_value_mesh() -> None:
 
 @pytest.mark.timeout(60)
 def test_rust_binding_modules_correct() -> None:
+    """
+    This tests that rust bindings will survive pickling correctly.
+
+    To correctly define a rust binding, either
+
+    (1) Set its module to "monarch._rust_bindings.rust_crate.rust_module",
+        and make sure it is registered in monarch_extension/lib.rs
+    (2) Set its module to some existing python file, and use @rust_struct to install
+        the rust struct in that file and patch in any python extension methods.
+    """
     import monarch._rust_bindings as bindings
 
     def check(module, path):
@@ -255,8 +265,9 @@ def test_rust_binding_modules_correct() -> None:
             if isinstance(value, ModuleType):
                 check(value, f"{path}.{name}")
             elif hasattr(value, "__module__"):
-                assert value.__name__ == name
-                assert value.__module__ == path
+                value_module = importlib.import_module(value.__module__)
+                resolved_value = getattr(value_module, value.__name__)
+                assert value is resolved_value
 
     check(bindings, "monarch._rust_bindings")
 
