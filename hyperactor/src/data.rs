@@ -105,6 +105,12 @@ impl Named for std::time::Duration {
     }
 }
 
+impl Named for bytes::Bytes {
+    fn typename() -> &'static str {
+        "bytes::Bytes"
+    }
+}
+
 // A macro that implements type-keyed interning of typenames. This is useful
 // for implementing [`Named`] for generic types.
 #[doc(hidden)] // not part of the public API
