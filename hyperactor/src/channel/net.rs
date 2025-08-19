@@ -2607,6 +2607,15 @@ mod tests {
         (join_handle, framed, rx, cancel_token)
     }
 
+    async fn send_frame2<W>(writer: W, bytes: bytes::Bytes) -> W
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let mut fw = FrameWrite::new(writer, bytes);
+        fw.send().await.unwrap();
+        fw.complete()
+    }
+
     async fn write_stream2<M, W>(
         mut writer: W,
         session_id: u64,
@@ -2838,6 +2847,15 @@ mod tests {
         verify_tx_closed(&mut tx_receiver, "failed to deliver message within timeout").await;
     }
 
+    async fn take_receiver2(
+        receiver_storage: &MVar<DuplexStream>,
+    ) -> (FrameReader<ReadHalf<DuplexStream>>, WriteHalf<DuplexStream>) {
+        let receiver = receiver_storage.take().await;
+        let (r, writer) = tokio::io::split(receiver);
+        let reader = FrameReader::new(r, config::global::get(config::CODEC_MAX_FRAME_LENGTH));
+        (reader, writer)
+    }
+
     async fn take_receiver(
         receiver_storage: &MVar<DuplexStream>,
     ) -> (
@@ -2847,6 +2865,18 @@ mod tests {
         let client = receiver_storage.take().await;
         let framed = Framed::new(client, build_codec());
         futures::StreamExt::split(framed)
+    }
+
+    async fn verify_message2<M: RemoteMessage + PartialEq>(
+        reader: &mut FrameReader<ReadHalf<DuplexStream>>,
+        expect: (u64, M),
+        loc: u32,
+    ) {
+        let expected = Frame::Message(expect.0, expect.1);
+        let bytes = reader.next().await.unwrap().expect("unexpected EOF");
+        let frame: Frame<M> = bincode::deserialize(bytes.as_ref()).unwrap();
+
+        assert_eq!(frame, expected, "from ln={loc}");
     }
 
     async fn verify_message<M: RemoteMessage + std::cmp::PartialEq>(
@@ -2862,6 +2892,32 @@ mod tests {
         let frame: Frame<M> = bincode::deserialize(data.as_ref()).unwrap();
 
         assert_eq!(frame, expected, "from ln={loc}");
+    }
+
+    async fn verify_stream2<M: RemoteMessage + PartialEq + Clone>(
+        reader: &mut FrameReader<ReadHalf<DuplexStream>>,
+        expects: &[(u64, M)],
+        expect_session_id: Option<u64>,
+        loc: u32,
+    ) -> u64 {
+        let session_id = {
+            let bytes = reader.next().await.unwrap().expect("unexpected EOF");
+            let frame: Frame<M> = bincode::deserialize(bytes.as_ref()).unwrap();
+            match frame {
+                Frame::Init(session_id) => session_id,
+                _ => panic!("the 1st frame is not Init: {:?}. from ln={loc}", frame),
+            }
+        };
+
+        if let Some(expected_id) = expect_session_id {
+            assert_eq!(session_id, expected_id, "from ln={loc}");
+        }
+
+        for expect in expects {
+            verify_message2(reader, expect.clone(), loc).await;
+        }
+
+        session_id
     }
 
     async fn verify_stream<M: RemoteMessage + std::cmp::PartialEq + Clone>(
@@ -2910,30 +2966,39 @@ mod tests {
         // Send some messages, but not acking any of them.
         net_tx_send(&tx, &[100, 101, 102, 103, 104]).await;
         let session_id = {
-            let (mut sink, mut stream) = take_receiver(&receiver_storage).await;
-            let id = verify_stream(
-                &mut stream,
-                &[(0, 100), (1, 101), (2, 102), (3, 103), (4, 104)],
+            let (mut reader, mut writer) = take_receiver2(&receiver_storage).await;
+            let id = verify_stream2(
+                &mut reader,
+                &[
+                    (0u64, 100u64),
+                    (1u64, 101u64),
+                    (2u64, 102u64),
+                    (3u64, 103u64),
+                    (4u64, 104u64),
+                ],
                 None,
                 line!(),
             )
             .await;
 
-            for i in 0..5 {
-                sink.send(serialize_ack(i)).await.unwrap();
+            for i in 0u64..5u64 {
+                writer = send_frame2(writer, serialize_ack(i)).await;
             }
             // Wait for the acks to be processed by NetTx.
             RealClock.sleep(Duration::from_secs(3)).await;
-            // client DuplexStream is dropped here. This breaks the connection.
+            // Drop both halves to break the in-memory connection (parity with old drop of DuplexStream).
+            drop(reader);
+            drop(writer);
+
             id
         };
 
         // Sent a new message to verify all sent messages will not be resent.
-        net_tx_send(&tx, &[105]).await;
+        net_tx_send(&tx, &[105u64]).await;
         {
-            let (_sink, mut stream) = take_receiver(&receiver_storage).await;
-            verify_stream(&mut stream, &[(5, 105)], Some(session_id), line!()).await;
-            // client DuplexStream is dropped here. This breaks the connection.
+            let (mut reader, _writer) = take_receiver2(&receiver_storage).await;
+            verify_stream2(&mut reader, &[(5u64, 105u64)], Some(session_id), line!()).await;
+            // Reader/writer dropped here. This breaks the connection.
         };
     }
 
@@ -2956,10 +3021,16 @@ mod tests {
         // because none of them is acked.
         for i in 0..n {
             {
-                let (mut sink, mut stream) = take_receiver(&receiver_storage).await;
-                let id = verify_stream(
-                    &mut stream,
-                    &[(0, 100), (1, 101), (2, 102), (3, 103), (4, 104)],
+                let (mut reader, mut writer) = take_receiver2(&receiver_storage).await;
+                let id = verify_stream2(
+                    &mut reader,
+                    &[
+                        (0u64, 100u64),
+                        (1u64, 101u64),
+                        (2u64, 102u64),
+                        (3u64, 103u64),
+                        (4u64, 104u64),
+                    ],
                     session_id,
                     line!(),
                 )
@@ -2972,51 +3043,51 @@ mod tests {
                 // In the last iteration, ack part of the messages. This should
                 // prune them from future resent.
                 if i == n - 1 {
-                    sink.send(serialize_ack(1)).await.unwrap();
+                    writer = send_frame2(writer, serialize_ack(1)).await;
                     // Wait for the acks to be processed by NetTx.
                     RealClock.sleep(Duration::from_secs(3)).await;
                 }
                 // client DuplexStream is dropped here. This breaks the connection.
+                drop(reader);
+                drop(writer);
             };
         }
 
         // Verify only unacked are resent.
         for _ in 0..n {
             {
-                let client = receiver_storage.take().await;
-                let framed = Framed::new(client, build_codec());
-                let (_sink, mut stream) = futures::StreamExt::split(framed);
-                verify_stream(
-                    &mut stream,
-                    &[(2, 102), (3, 103), (4, 104)],
+                let (mut reader, mut _writer) = take_receiver2(&receiver_storage).await;
+                verify_stream2(
+                    &mut reader,
+                    &[(2u64, 102u64), (3u64, 103u64), (4u64, 104u64)],
                     session_id,
                     line!(),
                 )
                 .await;
-                // client DuplexStream is dropped here. This breaks the connection.
+                // drop(reader/_writer) at scope end
             };
         }
 
         // Now send more messages.
-        net_tx_send(&tx, &[105, 106, 107, 108, 109]).await;
+        net_tx_send(&tx, &[105u64, 106u64, 107u64, 108u64, 109u64]).await;
         // Verify the unacked messages from the 1st send will be grouped with
         // the 2nd send.
         for i in 0..n {
             {
-                let (mut sink, mut stream) = take_receiver(&receiver_storage).await;
-                verify_stream(
-                    &mut stream,
+                let (mut reader, mut writer) = take_receiver2(&receiver_storage).await;
+                verify_stream2(
+                    &mut reader,
                     &[
                         // From the 1st send.
-                        (2, 102),
-                        (3, 103),
-                        (4, 104),
+                        (2u64, 102u64),
+                        (3u64, 103u64),
+                        (4u64, 104u64),
                         // From the 2nd send.
-                        (5, 105),
-                        (6, 106),
-                        (7, 107),
-                        (8, 108),
-                        (9, 109),
+                        (5u64, 105u64),
+                        (6u64, 106u64),
+                        (7u64, 107u64),
+                        (8u64, 108u64),
+                        (9u64, 109u64),
                     ],
                     session_id,
                     line!(),
@@ -3028,30 +3099,32 @@ mod tests {
                 if i == n - 1 {
                     // Intentionally ack 1 again to verify it is okay to ack
                     // messages that was already acked.
-                    sink.send(serialize_ack(1)).await.unwrap();
-                    sink.send(serialize_ack(2)).await.unwrap();
-                    sink.send(serialize_ack(3)).await.unwrap();
+                    writer = send_frame2(writer, serialize_ack(1)).await;
+                    writer = send_frame2(writer, serialize_ack(2)).await;
+                    writer = send_frame2(writer, serialize_ack(3)).await;
                     // Wait for the acks to be processed by NetTx.
                     RealClock.sleep(Duration::from_secs(3)).await;
                 }
                 // client DuplexStream is dropped here. This breaks the connection.
+                drop(reader);
+                drop(writer);
             };
         }
 
         for i in 0..n {
             {
-                let (mut sink, mut stream) = take_receiver(&receiver_storage).await;
-                verify_stream(
-                    &mut stream,
+                let (mut reader, mut writer) = take_receiver2(&receiver_storage).await;
+                verify_stream2(
+                    &mut reader,
                     &[
                         // From the 1st send.
-                        (4, 104),
+                        (4u64, 104),
                         // From the 2nd send.
-                        (5, 105),
-                        (6, 106),
-                        (7, 107),
-                        (8, 108),
-                        (9, 109),
+                        (5u64, 105u64),
+                        (6u64, 106u64),
+                        (7u64, 107u64),
+                        (8u64, 108u64),
+                        (9u64, 109u64),
                     ],
                     session_id,
                     line!(),
@@ -3060,29 +3133,33 @@ mod tests {
 
                 // In the last iteration, ack part of the messages from the 2nd send.
                 if i == n - 1 {
-                    sink.send(serialize_ack(7)).await.unwrap();
+                    writer = send_frame2(writer, serialize_ack(7)).await;
                     // Wait for the acks to be processed by NetTx.
                     RealClock.sleep(Duration::from_secs(3)).await;
                 }
                 // client DuplexStream is dropped here. This breaks the connection.
+                drop(reader);
+                drop(writer);
             };
         }
 
         for _ in 0..n {
             {
-                let (_sink, mut stream) = take_receiver(&receiver_storage).await;
-                verify_stream(
-                    &mut stream,
+                let (mut reader, writer) = take_receiver2(&receiver_storage).await;
+                verify_stream2(
+                    &mut reader,
                     &[
                         // From the 2nd send.
-                        (8, 108),
-                        (9, 109),
+                        (8u64, 108u64),
+                        (9u64, 109u64),
                     ],
                     session_id,
                     line!(),
                 )
                 .await;
                 // client DuplexStream is dropped here. This breaks the connection.
+                drop(reader);
+                drop(writer);
             };
         }
     }
