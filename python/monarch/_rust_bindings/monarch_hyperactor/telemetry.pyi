@@ -87,6 +87,20 @@ def use_sim_clock() -> None:
     """
     ...
 
+def get_execution_id() -> str:
+    """
+    Get the current execution ID.
+
+    Returns the execution ID that is set by the telemetry system. This ID is either:
+    - Set from the HYPERACTOR_EXECUTION_ID environment variable
+    - Set from the MAST_HPC_JOB_NAME environment variable (in MAST environments)
+    - Generated as a random string if neither environment variable is available
+
+    Returns:
+        str: The current execution ID
+    """
+    ...
+
 class PySpan:
     def __init__(self, name: str) -> None:
         """

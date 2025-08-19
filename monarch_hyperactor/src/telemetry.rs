@@ -113,6 +113,12 @@ pub fn use_sim_clock() -> PyResult<()> {
     Ok(())
 }
 
+/// Get the current execution ID
+#[pyfunction]
+pub fn get_execution_id() -> PyResult<String> {
+    Ok(hyperactor_telemetry::env::execution_id())
+}
+
 // opentelemetry requires that the names of counters etc are static for the lifetime of the program.
 // Since we are binding these classes from python to rust, we have to leak these strings in order to
 // ensure they live forever. This is fine, as these classes aren't dynamically created.
@@ -319,6 +325,13 @@ pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "monarch._rust_bindings.monarch_hyperactor.telemetry",
     )?;
     module.add_function(use_sim_clock_fn)?;
+
+    let get_execution_id_fn = wrap_pyfunction!(get_execution_id, module)?;
+    get_execution_id_fn.setattr(
+        "__module__",
+        "monarch._rust_bindings.monarch_hyperactor.telemetry",
+    )?;
+    module.add_function(get_execution_id_fn)?;
 
     module.add_class::<PySpan>()?;
     module.add_class::<PyCounter>()?;
