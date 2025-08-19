@@ -11,6 +11,7 @@
 use std::time::Duration;
 use std::time::Instant;
 
+use bytes::Bytes;
 use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::Throughput;
@@ -18,6 +19,7 @@ use criterion::criterion_group;
 use criterion::criterion_main;
 use futures::future::join_all;
 use hyperactor::Named;
+use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::channel::ChannelTransport;
 use hyperactor::channel::Rx;
@@ -26,9 +28,17 @@ use hyperactor::channel::dial;
 use hyperactor::channel::serve;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::runtime;
 use tokio::runtime::Runtime;
 use tokio::select;
 use tokio::sync::oneshot;
+
+fn new_runtime() -> Runtime {
+    runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Named, PartialEq)]
 struct Message {
@@ -62,7 +72,7 @@ fn bench_message_sizes(c: &mut Criterion) {
             group.sampling_mode(criterion::SamplingMode::Flat);
             group.sample_size(10);
             group.bench_function(BenchmarkId::from_parameter(size), move |b| {
-                let mut b = b.to_async(Runtime::new().unwrap());
+                let mut b = b.to_async(new_runtime());
                 let tt = &transport;
                 b.iter_custom(|iters| async move {
                     let addr = ChannelAddr::any(tt.clone());
@@ -106,7 +116,7 @@ fn bench_message_rates(c: &mut Criterion) {
             let rate = *rate;
 
             group.bench_function(format!("rate_{}_{}mps", transport_name, rate), move |b| {
-                let mut b = b.to_async(Runtime::new().unwrap());
+                let mut b = b.to_async(new_runtime());
                 b.iter_custom(|iters| async move {
                     let total_msgs = iters * rate;
                     let addr = ChannelAddr::any(transport.clone());
@@ -169,6 +179,66 @@ fn bench_message_rates(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_message_sizes, bench_message_rates);
+// Try to replicate https://www.internalfb.com/phabricator/paste/view/P1903314366
+fn bench_channel_ping_pong(c: &mut Criterion) {
+    let transport = ChannelTransport::Unix;
+
+    for size in [1usize, 1_000_000usize] {
+        let mut group = c.benchmark_group("channel_ping_pong".to_string());
+        let transport = transport.clone();
+        group.throughput(Throughput::Bytes((size * 2) as u64)); // send and receive
+        group.sampling_mode(criterion::SamplingMode::Flat);
+        group.sample_size(100);
+        group.bench_function(BenchmarkId::from_parameter(size), move |b| {
+            let mut b = b.to_async(new_runtime());
+            b.iter_custom(|iters| channel_ping_pong(transport.clone(), size, iters as usize));
+        });
+        group.finish();
+    }
+}
+
+async fn channel_ping_pong(
+    transport: ChannelTransport,
+    message_size: usize,
+    num_iter: usize,
+) -> Duration {
+    let (client_addr, mut client_rx) = channel::serve::<Bytes>(ChannelAddr::any(transport.clone()))
+        .await
+        .unwrap();
+    let (server_addr, mut server_rx) = channel::serve::<Bytes>(ChannelAddr::any(transport.clone()))
+        .await
+        .unwrap();
+
+    let _server_handle: tokio::task::JoinHandle<Result<(), anyhow::Error>> =
+        tokio::spawn(async move {
+            let client_tx = channel::dial(client_addr)?;
+            loop {
+                let message = server_rx.recv().await?;
+                client_tx.post(message);
+            }
+        });
+
+    let client_handle: tokio::task::JoinHandle<Result<(), anyhow::Error>> =
+        tokio::spawn(async move {
+            let server_tx = channel::dial(server_addr)?;
+            let message = Bytes::from(vec![0u8; message_size]);
+            for _ in 0..num_iter {
+                server_tx.post(message.clone() /*cheap */);
+                client_rx.recv().await?;
+            }
+            Ok(())
+        });
+
+    let start = Instant::now();
+    client_handle.await.unwrap().unwrap();
+    start.elapsed()
+}
+
+criterion_group!(
+    benches,
+    bench_message_sizes,
+    bench_message_rates,
+    bench_channel_ping_pong
+);
 
 criterion_main!(benches);
