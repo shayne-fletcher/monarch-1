@@ -6,18 +6,40 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-//! A simple socket channel implementation, using a simple framing
-//! protocol with no multiplexing. TCP channels serialize messages
-//! using bincode, and frames each message with a 32-bit length,
-//! followed by that many bytes of serialized data, e.g.:
+//! A simple socket channel implementation using a single-stream
+//! framing protocol. Each frame is encoded as an 8-byte
+//! **big-endian** length prefix (u64), followed by exactly that many
+//! bytes of payload.
 //!
+//! Message frames are serialized with `bincode`; ack frames are
+//! represented directly as an 8-byte big-endian sequence number.
+//!
+//! Message frame (example):
 //! ```text
-//! +---- len: u32 ----+---- data --------------------+
-//! | \x00\x00\x00\x0b |  11-bytes of serialized data |
-//! +------------------+------------------------------+
+//! +------------------ len: u64 (BE) ------------------+--------------------- data -------------+
+//! | \x00\x00\x00\x00\x00\x00\x00\x0B                  | 11 bytes of bincode-serialized message |
+//! +---------------------------------------------------+----------------------------------------+
 //! ```
 //!
-//! Thus, each socket connection is a sequence of such framed messages.
+//! ACK frame (wire format):
+//! ```text
+//! +------------------ len: u64 (BE) ------------------+---------------- 8-byte ACK (u64 BE) ---+
+//! | \x00\x00\x00\x00\x00\x00\x00\x08                  | <acknowledged sequence number bytes>   |
+//! +---------------------------------------------------+----------------------------------------+
+//! ```
+//!
+//! I/O is handled by `FrameReader`/`FrameWrite`, which are
+//! cancellation-safe and avoid extra copies. Helper fns
+//! `serialize_ack(u64) -> Bytes` and `deserialize_ack(Bytes) ->
+//! Result<u64, usize>` convert to/from the ACK payload.
+//!
+//! ### Limits & EOF semantics
+//! * **Max frame size:** frames larger than
+//!   `config::CODEC_MAX_FRAME_LENGTH` are rejected with
+//!   `io::ErrorKind::InvalidData`.
+//! * **EOF handling:** `FrameReader::next()` returns `Ok(None)` only
+//!   when EOF occurs exactly on a frame boundary. If EOF happens
+//!   mid-frame, it returns `Err(io::ErrorKind::UnexpectedEof)`.
 
 use std::any::type_name;
 use std::collections::VecDeque;
