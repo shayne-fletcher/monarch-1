@@ -3174,10 +3174,10 @@ mod tests {
         // trigger a connection.
         let (return_channel_tx, return_channel_rx) = oneshot::channel();
         net_tx.try_post(100, return_channel_tx).unwrap();
-        let (mut sink, mut stream) = take_receiver(&receiver_storage).await;
-        verify_stream(&mut stream, &[(0, 100)], None, line!()).await;
+        let (mut reader, mut writer) = take_receiver2(&receiver_storage).await;
+        verify_stream2(&mut reader, &[(0u64, 100u64)], None, line!()).await;
         // ack it
-        sink.send(serialize_ack(0)).await.unwrap();
+        writer = send_frame2(writer, serialize_ack(0)).await;
         // confirm Tx received ack
         //
         // Using `is_err` to confirm the message is delivered/acked is confusing,
@@ -3188,12 +3188,12 @@ mod tests {
         // Although Tx did not actually send seq=1, we still ack it from Rx to
         // pretend Tx already sent it, just it did not know it was sent
         // successfully.
-        sink.send(serialize_ack(1)).await.unwrap();
+        writer = send_frame2(writer, serialize_ack(1)).await;
 
         let (return_channel_tx, return_channel_rx) = oneshot::channel();
         net_tx.try_post(101, return_channel_tx).unwrap();
         // Verify the message is sent to Rx.
-        verify_message(&mut stream, (1, 101), line!()).await;
+        verify_message2(&mut reader, (1u64, 101u64), line!()).await;
         // although we did not ack the message after it is sent, since we already
         // acked it previously, Tx will treat it as acked, and considered the
         // message delivered successfully.
@@ -3216,11 +3216,11 @@ mod tests {
         let mut tx_status = tx.status().clone();
         // send a message
         tx.try_post(100, unused_return_channel()).unwrap();
-        let (mut sink, mut stream) = take_receiver(&receiver_storage).await;
+        let (mut reader, mut writer) = take_receiver2(&receiver_storage).await;
         // Confirm message is sent to rx.
-        verify_stream(&mut stream, &[(0, 100)], None, line!()).await;
+        verify_stream2(&mut reader, &[(0u64, 100u64)], None, line!()).await;
         // ack it
-        sink.send(serialize_ack(0)).await.unwrap();
+        writer = send_frame2(writer, serialize_ack(0)).await;
         RealClock.sleep(Duration::from_secs(3)).await;
         // Channel should be still alive because ack was sent.
         assert!(!tx_status.has_changed().unwrap());
@@ -3228,7 +3228,7 @@ mod tests {
 
         tx.try_post(101, unused_return_channel()).unwrap();
         // Confirm message is sent to rx.
-        verify_message(&mut stream, (1, 101), line!()).await;
+        verify_message2(&mut reader, (1u64, 101u64), line!()).await;
 
         if disconnect_before_ack {
             // Prevent link from reconnect
