@@ -170,6 +170,41 @@ impl<W: AsyncWrite + Unpin> FrameWrite<W> {
         let Self { writer, .. } = self;
         writer
     }
+
+    /// Writes a single frame into the underlying writer and returns
+    /// it.
+    ///
+    /// This is a convenience for the common pattern:
+    /// `FrameWrite::new(writer, bytes).send().await?.complete()`.
+    ///
+    /// Frame writes are atomic: either the entire frame is sent, or
+    /// an error is returned. No partial frames are observed by the
+    /// receiver.
+    ///
+    /// # Arguments
+    ///
+    /// * `writer` — the `AsyncWrite` sink to write into.
+    /// * `bytes` — the serialized frame body to send.
+    ///
+    /// # Returns
+    ///
+    /// On success, returns the underlying writer so the caller can
+    /// continue using it for further frames. On error, returns the
+    /// I/O error from the underlying write.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use bytes::Bytes;
+    ///
+    /// // `writer` is any AsyncWrite + Unpin (e.g. a tokio `WriteHalf`)
+    /// let writer = FrameWrite::write_frame(writer, Bytes::from_static(b"hello")).await?;
+    /// ```
+    pub async fn write_frame(writer: W, bytes: Bytes) -> std::io::Result<W> {
+        let mut fw = FrameWrite::new(writer, bytes);
+        fw.send().await?;
+        Ok(fw.complete())
+    }
 }
 
 #[cfg(test)]
@@ -208,4 +243,26 @@ mod tests {
     }
 
     // todo: test cancellation, frame size
+
+    #[tokio::test]
+    async fn test_write_frame_smoke() {
+        let (a, b) = tokio::io::duplex(4096);
+        let (r, _w_unused) = tokio::io::split(a);
+        let (_r_unused, w) = tokio::io::split(b);
+
+        let mut reader = FrameReader::new(r, 1024);
+
+        let w = FrameWrite::write_frame(w, Bytes::from_static(b"hello"))
+            .await
+            .unwrap();
+        let _ = FrameWrite::write_frame(w, Bytes::from_static(b"world"))
+            .await
+            .unwrap();
+
+        let f1 = reader.next().await.unwrap().unwrap();
+        let f2 = reader.next().await.unwrap().unwrap();
+
+        assert_eq!(f1.as_ref(), b"hello");
+        assert_eq!(f2.as_ref(), b"world");
+    }
 }
