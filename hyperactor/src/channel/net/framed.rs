@@ -209,8 +209,14 @@ impl<W: AsyncWrite + Unpin> FrameWrite<W> {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::task::Context;
+    use std::task::Poll;
+
+    use bytes::Bytes;
     use rand::Rng;
     use rand::thread_rng;
+    use tokio::io::AsyncWrite;
     use tokio::io::AsyncWriteExt;
 
     use super::*;
@@ -308,5 +314,109 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
-    // todo: test cancellation, frame size
+    /// A wrapper around an `AsyncWrite` that throttles how many bytes
+    /// may be written per poll.
+    ///
+    /// We are going to use this to simulate partial writes to test
+    /// cancellation safety: when the budget is 0, `poll_write`
+    /// returns `Poll::Pending` and calls the waker so the task is
+    /// scheduled to be polled again later.
+    struct Throttled<W> {
+        inner: W,
+        // Number of bytes allowed to be written in the next poll. If
+        // 0, writes return `Poll::Pending`.
+        budget: usize,
+    }
+
+    impl<W> Throttled<W> {
+        fn new(inner: W) -> Self {
+            Self {
+                inner,
+                budget: usize::MAX,
+            }
+        }
+
+        fn set_budget(&mut self, n: usize) {
+            self.budget = n;
+        }
+    }
+
+    impl<W: AsyncWrite + Unpin> AsyncWrite for Throttled<W> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            // No budget left this poll. Return "not ready" and ask to
+            // be polled again later.
+            if self.budget == 0 {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            let n = buf.len().min(self.budget);
+            self.budget -= n;
+            // Delegate a write of the first `n` bytes to the inner
+            // writer.
+            Pin::new(&mut self.inner).poll_write(cx, &buf[..n])
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            // Delegate to `inner` for flushing.
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            // Delegate to `inner` (ensure resources are released and
+            // `EOF` is signaled downstream).
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn test_writer_cancellation_resume() {
+        let (a, b) = tokio::io::duplex(4096);
+        let (r, _wu) = tokio::io::split(a);
+        let (_ru, w) = tokio::io::split(b);
+
+        let w = Throttled::new(w);
+        // 256 bytes, all = 0x2A ('*'), "the answer"
+        let body = Bytes::from_static(&[42u8; 256]);
+        let mut reader = FrameReader::new(r, 1024 * 1024);
+        let mut fw = FrameWrite::new(w, body.clone());
+
+        // Allow only the 8-byte length to be written, then cancel.
+        fw.writer.set_budget(8);
+        let fut = fw.send();
+        tokio::select! {
+            _ = fut => panic!("send unexpectedly completed"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+        }
+        // The `fut` is dropped here i.e. "cancellation".
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), async {
+                reader.next().await
+            })
+            .await
+            .is_err(),
+            "a full frame isn't available yet, so reader.next().await should block"
+        );
+
+        // Now allow the remaining body to flush and complete the
+        // frame.
+        fw.writer.set_budget(usize::MAX);
+        fw.send().await.unwrap();
+        let mut w = fw.complete();
+        let got = reader.next().await.unwrap().unwrap();
+        assert_eq!(got, body);
+
+        // Shutdown and test for EOF on boundary.
+        w.shutdown().await.unwrap();
+        assert!(reader.next().await.unwrap().is_none());
+    }
+
+    // todo: frame size
 }
