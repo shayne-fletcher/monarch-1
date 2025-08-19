@@ -2577,15 +2577,6 @@ mod tests {
         (join_handle, reader, writer, rx, cancel_token)
     }
 
-    async fn send_frame<W>(writer: W, bytes: bytes::Bytes) -> W
-    where
-        W: AsyncWrite + Unpin,
-    {
-        let mut fw = FrameWrite::new(writer, bytes);
-        fw.send().await.unwrap();
-        fw.complete()
-    }
-
     async fn write_stream<M, W>(
         mut writer: W,
         session_id: u64,
@@ -2866,7 +2857,9 @@ mod tests {
             .await;
 
             for i in 0u64..5u64 {
-                writer = send_frame(writer, serialize_ack(i)).await;
+                writer = FrameWrite::write_frame(writer, serialize_ack(i))
+                    .await
+                    .unwrap();
             }
             // Wait for the acks to be processed by NetTx.
             RealClock.sleep(Duration::from_secs(3)).await;
@@ -2927,7 +2920,9 @@ mod tests {
                 // In the last iteration, ack part of the messages. This should
                 // prune them from future resent.
                 if i == n - 1 {
-                    writer = send_frame(writer, serialize_ack(1)).await;
+                    writer = FrameWrite::write_frame(writer, serialize_ack(1))
+                        .await
+                        .unwrap();
                     // Wait for the acks to be processed by NetTx.
                     RealClock.sleep(Duration::from_secs(3)).await;
                 }
@@ -2983,9 +2978,15 @@ mod tests {
                 if i == n - 1 {
                     // Intentionally ack 1 again to verify it is okay to ack
                     // messages that was already acked.
-                    writer = send_frame(writer, serialize_ack(1)).await;
-                    writer = send_frame(writer, serialize_ack(2)).await;
-                    writer = send_frame(writer, serialize_ack(3)).await;
+                    writer = FrameWrite::write_frame(writer, serialize_ack(1))
+                        .await
+                        .unwrap();
+                    writer = FrameWrite::write_frame(writer, serialize_ack(2))
+                        .await
+                        .unwrap();
+                    writer = FrameWrite::write_frame(writer, serialize_ack(3))
+                        .await
+                        .unwrap();
                     // Wait for the acks to be processed by NetTx.
                     RealClock.sleep(Duration::from_secs(3)).await;
                 }
@@ -3017,7 +3018,9 @@ mod tests {
 
                 // In the last iteration, ack part of the messages from the 2nd send.
                 if i == n - 1 {
-                    writer = send_frame(writer, serialize_ack(7)).await;
+                    writer = FrameWrite::write_frame(writer, serialize_ack(7))
+                        .await
+                        .unwrap();
                     // Wait for the acks to be processed by NetTx.
                     RealClock.sleep(Duration::from_secs(3)).await;
                 }
@@ -3061,7 +3064,9 @@ mod tests {
         let (mut reader, mut writer) = take_receiver(&receiver_storage).await;
         verify_stream(&mut reader, &[(0u64, 100u64)], None, line!()).await;
         // ack it
-        writer = send_frame(writer, serialize_ack(0)).await;
+        writer = FrameWrite::write_frame(writer, serialize_ack(0))
+            .await
+            .unwrap();
         // confirm Tx received ack
         //
         // Using `is_err` to confirm the message is delivered/acked is confusing,
@@ -3072,7 +3077,9 @@ mod tests {
         // Although Tx did not actually send seq=1, we still ack it from Rx to
         // pretend Tx already sent it, just it did not know it was sent
         // successfully.
-        let _ = send_frame(writer, serialize_ack(1)).await;
+        let _ = FrameWrite::write_frame(writer, serialize_ack(1))
+            .await
+            .unwrap();
 
         let (return_channel_tx, return_channel_rx) = oneshot::channel();
         net_tx.try_post(101, return_channel_tx).unwrap();
@@ -3104,7 +3111,9 @@ mod tests {
         // Confirm message is sent to rx.
         verify_stream(&mut reader, &[(0u64, 100u64)], None, line!()).await;
         // ack it
-        let _ = send_frame(writer, serialize_ack(0)).await;
+        let _ = FrameWrite::write_frame(writer, serialize_ack(0))
+            .await
+            .unwrap();
         RealClock.sleep(Duration::from_secs(3)).await;
         // Channel should be still alive because ack was sent.
         assert!(!tx_status.has_changed().unwrap());
