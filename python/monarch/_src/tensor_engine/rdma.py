@@ -20,7 +20,7 @@ except ImportError as e:
     raise e
 from typing import Dict
 
-from monarch._src.actor.actor_mesh import Actor, MonarchContext
+from monarch._src.actor.actor_mesh import Actor, context
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
 from monarch._src.actor.proc_mesh import get_or_spawn_controller, ProcMesh
@@ -72,7 +72,7 @@ def _ensure_init_rdma_manager() -> Shared[None]:
     async def task() -> None:
         await (
             await get_or_spawn_controller("rdma_controller", RdmaController)
-        ).init_rdma_on_mesh.call_one(none_throws(MonarchContext.get().proc_mesh))
+        ).init_rdma_on_mesh.call_one(none_throws(context().actor_instance.proc_mesh))
 
     return PythonTask.from_coroutine(task()).spawn()
 
@@ -120,12 +120,12 @@ class RDMABuffer:
             storage = data.untyped_storage()
             addr: int = storage.data_ptr()
             size = storage.element_size() * data.numel()
-            ctx = MonarchContext.get()
+            ctx = context()
             self._buffer: _RdmaBuffer = _RdmaBuffer.create_rdma_buffer_blocking(
                 addr=addr,
                 size=size,
-                proc_id=ctx.proc_id,
-                client=ctx.mailbox,
+                proc_id=ctx.actor_instance.proc_id,
+                client=ctx.actor_instance._mailbox,
             )
         # TODO - specific exception
         except Exception as e:
@@ -164,8 +164,8 @@ class RDMABuffer:
                 f"offset + size ({offset + size}) must be <= dst.numel() ({dst.numel()})"
             )
 
-        local_proc_id = MonarchContext.get().proc_id
-        client = MonarchContext.get().mailbox
+        local_proc_id = context().actor_instance.proc_id
+        client = context().actor_instance._mailbox
 
         async def read_into_nonblocking() -> Optional[int]:
             await _ensure_init_rdma_manager()
@@ -213,8 +213,8 @@ class RDMABuffer:
                 f"size + offset ({size + offset}) must be <= src.numel() ({src.numel()})"
             )
 
-        local_proc_id = MonarchContext.get().proc_id
-        client = MonarchContext.get().mailbox
+        local_proc_id = context().actor_instance.proc_id
+        client = context().actor_instance._mailbox
 
         async def write_from_nonblocking() -> None:
             await _ensure_init_rdma_manager()

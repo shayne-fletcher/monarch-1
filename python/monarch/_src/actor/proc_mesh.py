@@ -46,7 +46,7 @@ from monarch._rust_bindings.monarch_hyperactor.proc_mesh import (
 )
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
-from monarch._src.actor.actor_mesh import _Actor, Actor, ActorMesh, MonarchContext
+from monarch._src.actor.actor_mesh import _Actor, Actor, ActorMesh, context
 
 from monarch._src.actor.allocator import (
     AllocateMixin,
@@ -301,6 +301,8 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         hy_proc_mesh = PythonTask.from_coroutine(task()).spawn()
 
         pm = ProcMesh(hy_proc_mesh, shape)
+        if _attach_controller_controller:
+            pm._controller_controller = context().actor_instance._controller_controller
 
         async def task(
             pm: "ProcMesh",
@@ -322,9 +324,6 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
                 await setup_actor.setup.call()
 
             return hy_proc_mesh
-
-        if _attach_controller_controller:
-            pm._controller_controller = _get_controller_controller()
 
         setup_actor = None
         if setup is not None:
@@ -369,7 +368,7 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         service = ActorMesh._create(
             Class,
             actor_mesh,
-            MonarchContext.get().mailbox,
+            context().actor_instance._mailbox,
             self._shape,
             self,
             self._controller_controller,
@@ -650,12 +649,6 @@ _controller_controller: Optional["_ControllerController"] = None
 # region is not blocking: it spawns a separate task to do the init, assigns the
 # Shared[_ControllerController] from that task to the global and releases the lock.
 def _get_controller_controller() -> "_ControllerController":
-    # Check the MonarchContext first -- this way, remote actors that spawn new proc meshes
-    # will use the original ControllerController instead of creating a new one.
-    if (
-        controller_controller := MonarchContext.get().controller_controller
-    ) is not None:
-        return controller_controller
     global _controller_controller, _cc_proc_mesh
     with _cc_init:
         if _controller_controller is None:
@@ -688,6 +681,6 @@ def get_or_spawn_controller(
     Returns:
         A Future that resolves to a reference to the actor.
     """
-    return _get_controller_controller().get_or_spawn.call_one(
+    return context().actor_instance._controller_controller.get_or_spawn.call_one(
         name, Class, *args, **kwargs
     )

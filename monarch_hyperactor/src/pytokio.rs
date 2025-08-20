@@ -183,14 +183,13 @@ impl PyPythonTask {
 
     #[staticmethod]
     fn from_coroutine(py: Python<'_>, coro: PyObject) -> PyResult<PyPythonTask> {
-        // MonarchContext.get() used inside a PythonTask should inherit the value of
-        // MonarchContext from the context in which the PythonTask was constructed.
+        // context() used inside a PythonTask should inherit the value of
+        // context() from the context in which the PythonTask was constructed.
         // We need to do this manually because the value of the contextvar isn't
         // maintained inside the tokio runtime.
         let monarch_context = py
             .import("monarch._src.actor.actor_mesh")?
-            .getattr("MonarchContext")?
-            .call_method0("get")?
+            .call_method0("context")?
             .unbind();
         PyPythonTask::new(async move {
             let (coroutine_iterator, none) = Python::with_gil(|py| {
@@ -206,7 +205,7 @@ impl PyPythonTask {
             loop {
                 let action: PyResult<Action> = Python::with_gil(|py| {
                     // We may be executing in a new thread at this point, so we need to set the value
-                    // of MonarchContext.
+                    // of context().
                     let _context = py
                         .import("monarch._src.actor.actor_mesh")?
                         .getattr("_context")?;
@@ -220,7 +219,7 @@ impl PyPythonTask {
                             .call_method1("throw", (pyerr.into_value(py),)),
                     };
 
-                    // Reset MonarchContext so that when this tokio thread yields, it has its original state.
+                    // Reset context() so that when this tokio thread yields, it has its original state.
                     _context.call_method1("set", (old_context,))?;
                     match result {
                         Ok(task) => Ok(Action::Wait(

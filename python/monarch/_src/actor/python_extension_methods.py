@@ -17,14 +17,18 @@ class PatchRustClass:
         self.rust_class = rust_class
 
     def __call__(self, python_class: Type[T]) -> Type[T]:
-        assert self.rust_class.__module__ == python_class.__module__
-        assert self.rust_class.__name__ == python_class.__name__
+        rust_name = f"{self.rust_class.__module__}.{self.rust_class.__name__}"
+        python_name = f"{python_class.__module__}.{python_class.__name__}"
+        if rust_name != python_name:
+            raise ValueError(f"mismatched type names {rust_name} != {python_name}")
         for name, implementation in python_class.__dict__.items():
             if hasattr(self.rust_class, name):
                 # do not patch in the stub methods that
                 # are already defined by the rust implementation
                 continue
-            if not callable(implementation):
+            if not callable(implementation) and not isinstance(
+                implementation, property
+            ):
                 continue
             setattr(self.rust_class, name, implementation)
         return cast(Type[T], self.rust_class)

@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox, PortReceiver
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
-from monarch._rust_bindings.monarch_hyperactor.shape import Shape
+from monarch._src.actor.actor_mesh import Context
 
 
 def run_on_tokio(
@@ -61,9 +61,7 @@ class MyActor:
 
     async def handle(
         self,
-        mailbox: Mailbox,
-        rank: int,
-        shape: Shape,
+        ctx: Context,
         method: MethodSpecifier,
         message: bytes,
         panic_flag: PanicFlag,
@@ -74,7 +72,7 @@ class MyActor:
             case MethodSpecifier.Init():
                 # Since this actor is spawn from the root proc mesh, the rank
                 # passed from init should be the rank on the root mesh.
-                self._rank_on_root_mesh = rank
+                self._rank_on_root_mesh = ctx.message_rank.rank
                 response_port.send(None)
                 return None
             case MethodSpecifier.ReturnsResponse(name=_):

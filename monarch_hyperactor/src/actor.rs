@@ -625,15 +625,11 @@ impl Handler<PythonMessage> for PythonActor {
         let (sender, receiver) = oneshot::channel();
 
         let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
-            let mailbox = mailbox(py, cx);
-            let (rank, shape) = cx.cast_info();
             let awaitable = self.actor.call_method(
                 py,
                 "handle",
                 (
-                    mailbox,
-                    rank,
-                    PyShape::from(shape),
+                    crate::mailbox::Context::new(py, cx),
                     resolved.method,
                     resolved.bytes,
                     PanicFlag {

@@ -14,7 +14,7 @@ import sys
 from dataclasses import dataclass
 from typing import cast, Dict, Generator, List, Optional, Tuple, Union
 
-from monarch._src.actor.actor_mesh import Actor, DebugContext, MonarchContext
+from monarch._src.actor.actor_mesh import Actor, context, DebugContext
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.pdb_wrapper import DebuggerWrite, PdbWrapper
 from monarch._src.actor.proc_mesh import get_or_spawn_controller
@@ -569,7 +569,7 @@ def debug_controller() -> DebugController:
         return get_or_spawn_controller("debug_controller", DebugController).get()
 
 
-def remote_breakpointhook():
+def remote_breakpointhook() -> None:
     frame = inspect.currentframe()
     assert frame is not None
     frame = frame.f_back
@@ -586,11 +586,12 @@ def remote_breakpointhook():
             "exists on both your client and worker processes."
         )
 
-    ctx = MonarchContext.get()
+    ctx = context()
+    rank = ctx.message_rank
     pdb_wrapper = PdbWrapper(
-        ctx.point.rank,
-        ctx.point.shape.coordinates(ctx.point.rank),
-        ctx.mailbox.actor_id,
+        rank.rank,
+        rank.shape.coordinates(rank.rank),
+        ctx.actor_instance.actor_id,
         debug_controller(),
     )
     DebugContext.set(DebugContext(pdb_wrapper))

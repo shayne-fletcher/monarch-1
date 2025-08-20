@@ -157,9 +157,7 @@ async def test_accumulator() -> None:
 class MyActor:
     async def handle(
         self,
-        mailbox: Mailbox,
-        rank: int,
-        shape: Shape,
+        ctx: Any,
         method: MethodSpecifier,
         message: bytes,
         panic_flag: PanicFlag,

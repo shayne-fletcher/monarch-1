@@ -16,8 +16,10 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::future::join_all;
 use hyperactor::Actor;
+use hyperactor::ActorHandle;
 use hyperactor::ActorId;
 use hyperactor::ActorRef;
+use hyperactor::Instance;
 use hyperactor::Mailbox;
 use hyperactor::Named;
 use hyperactor::RemoteMessage;
@@ -79,24 +81,24 @@ pub(crate) fn global_router() -> &'static MailboxRouter {
     GLOBAL_ROUTER.get_or_init(MailboxRouter::new)
 }
 
-/// Global mailbox used by the root client to send messages.
+/// Context use by root client to send messages.
 /// This mailbox allows us to open ports before we know which proc the
 /// messages will be sent to.
-pub fn global_mailbox() -> Mailbox {
-    static GLOBAL_MAILBOX: OnceLock<Mailbox> = OnceLock::new();
-    GLOBAL_MAILBOX
-        .get_or_init(|| {
-            let world_id = WorldId(ShortUuid::generate().to_string());
-            let client_proc_id = ProcId::Ranked(world_id.clone(), 0);
-            let client_proc = Proc::new(
-                client_proc_id.clone(),
-                BoxedMailboxSender::new(global_router().clone()),
-            );
-            global_router().bind(world_id.clone().into(), client_proc.clone());
-
-            client_proc.attach("client").expect("root mailbox creation")
-        })
-        .clone()
+pub fn global_root_client() -> &'static Instance<()> {
+    static GLOBAL_INSTANCE: OnceLock<(Instance<()>, ActorHandle<()>)> = OnceLock::new();
+    let (instance, _) = GLOBAL_INSTANCE.get_or_init(|| {
+        let world_id = WorldId(ShortUuid::generate().to_string());
+        let client_proc_id = ProcId::Ranked(world_id.clone(), 0);
+        let client_proc = Proc::new(
+            client_proc_id.clone(),
+            BoxedMailboxSender::new(global_router().clone()),
+        );
+        global_router().bind(world_id.clone().into(), client_proc.clone());
+        client_proc
+            .instance("client")
+            .expect("root instance create")
+    });
+    instance
 }
 
 type ActorEventRouter = Arc<DashMap<ActorMeshName, mpsc::UnboundedSender<ActorSupervisionEvent>>>;

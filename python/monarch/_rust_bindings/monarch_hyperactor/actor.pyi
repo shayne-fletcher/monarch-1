@@ -266,9 +266,7 @@ class PortProtocol(Generic[R], Protocol):
 class Actor(Protocol):
     async def handle(
         self,
-        mailbox: Mailbox,
-        rank: int,
-        shape: Shape,
+        context: Any,
         method: MethodSpecifier,
         message: bytes,
         panic_flag: PanicFlag,
