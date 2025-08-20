@@ -47,12 +47,20 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
         }
     }
 
-    /// Read the next frame from the underlying reader. If the frame exceeds
-    /// the configured maximum length, `next` returns an `io::ErrorKind::InvalidData`
-    /// error.
+    /// Read the next frame from the underlying reader. If the frame
+    /// exceeds the configured maximum length, `next` returns an
+    /// `io::ErrorKind::InvalidData` error.
     ///
-    /// The method is cancellation safe in the sense that, if it is used in a branch
-    /// of a `tokio::select!` block, frames are never dropped.
+    /// The method is cancellation safe in the sense that, if it is
+    /// used in a branch of a `tokio::select!` block, frames are never
+    /// dropped.
+    ///
+    /// # Errors
+    ///
+    /// * Returns `io::ErrorKind::InvalidData` if a frame exceeds
+    ///   `max_frame_length`. **This error is fatal:** once returned,
+    ///   the `FrameReader` must be dropped; the underlying connection
+    ///   is no longer valid.
     pub async fn next(&mut self) -> io::Result<Option<Bytes>> {
         loop {
             match &mut self.state {
@@ -106,9 +114,9 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
     }
 }
 
-/// A Writer for message frames. FrameWrite requires the user to drive
+/// A Writer for message frames. `FrameWrite` requires the user to drive
 /// the underlying state machines through (possibly) successive calls to
-/// `send`, retaining cancellation safety. The FrameWrite owns the underlying
+/// `send`, retaining cancellation safety. The `FrameWrite` owns the underlying
 /// writer until the frame has been written to completion.
 pub struct FrameWrite<W> {
     writer: W,
@@ -418,5 +426,67 @@ mod tests {
         assert!(reader.next().await.unwrap().is_none());
     }
 
-    // todo: frame size
+    #[tokio::test]
+    async fn test_reader_accepts_exact_max_len_frames() {
+        const MAX: usize = 1024;
+        const BUFSIZ: usize = 8 + MAX; // BUFSIZ (bytes) = 8 (len) + MAX (body)
+        let (a, b) = tokio::io::duplex(BUFSIZ);
+        let (r, _wu) = tokio::io::split(a);
+        let (_ru, mut w) = tokio::io::split(b);
+        let mut reader = FrameReader::new(r, MAX);
+
+        let bytes_written = Bytes::from(vec![0xAB; MAX]);
+        w = FrameWrite::write_frame(w, bytes_written.clone())
+            .await
+            .unwrap();
+
+        let bytes_read = reader.next().await.unwrap().unwrap();
+        assert_eq!(bytes_read.len(), MAX);
+        assert_eq!(bytes_read, bytes_written);
+
+        w.shutdown().await.unwrap();
+        assert!(reader.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_reader_rejects_over_max_len_frames() {
+        const MAX: usize = 1024;
+        const BUFSIZ: usize = 8 + MAX; // BUFSIZ (bytes) = 8 (len) + MAX (body)
+        let (a, b) = tokio::io::duplex(BUFSIZ);
+        let (r, _wu) = tokio::io::split(a);
+        let (_ru, mut w) = tokio::io::split(b);
+        let mut reader = FrameReader::new(r, MAX - 1);
+
+        let bytes_written = Bytes::from(vec![0xAB; MAX]);
+        w = FrameWrite::write_frame(w, bytes_written).await.unwrap();
+
+        let err = reader.next().await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        // Do NOT try to use `reader` beyond this point! There has
+        // been a protocol violation: `InvalidData` means the stream
+        // is corrupted and the only valid thing you can do with it is
+        // `drop` it.
+        drop(reader);
+
+        w.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_reader_accepts_zero_len_frames() {
+        const MAX: usize = 0;
+        const BUFSIZ: usize = 8 + MAX; // BUFSIZ (bytes) = 8 (len) + MAX (body)
+        let (a, b) = tokio::io::duplex(BUFSIZ);
+        let (r, _wu) = tokio::io::split(a);
+        let (_ru, mut w) = tokio::io::split(b);
+        let mut reader = FrameReader::new(r, MAX);
+
+        w = FrameWrite::write_frame(w, Bytes::new()).await.unwrap();
+        assert_eq!(reader.next().await.unwrap().unwrap().len(), 0);
+        w = FrameWrite::write_frame(w, Bytes::new()).await.unwrap();
+        assert_eq!(reader.next().await.unwrap().unwrap().len(), 0);
+
+        w.shutdown().await.unwrap();
+        assert!(reader.next().await.unwrap().is_none());
+    }
 }
