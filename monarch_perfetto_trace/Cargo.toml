@@ -9,7 +9,8 @@ license = "BSD-3-Clause"
 
 [dependencies]
 anyhow = "1.0.98"
-protobuf = "3.7.2"
+prost = { version = "0.13.4", default-features = false }
 serde = { version = "1.0.219", features = ["derive", "rc"] }
 serde_json = { version = "1.0.140", features = ["alloc", "float_roundtrip", "raw_value", "unbounded_depth"] }
+tracing-perfetto-sdk-schema = "0.12.0"
 valuable = { version = "0.1", features = ["derive"] }
