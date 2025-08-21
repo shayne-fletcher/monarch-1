@@ -798,20 +798,26 @@ mod property_tests {
     }
 
     // Theorem: `FrameWrite::send` is cancel-safe.
-    // That is, it yields the correct frame even if cancelled and
-    // restarted at any poll boundary, as long as progress eventually
-    // continues.
     //
-    // Setup:
-    // - `Gate` meters write budget, shared across attempts.
-    // - `SharedWriter` wraps the `WriteHalf`, so attempts share a
-    //   handle.
-    // - `on_pending` drips budget from a fuzzed sequence with a
-    //   fallback to ensure completion.
+    // Matches the cancel-safety contract from `test_utils::cancel_safe`:
+    // - State remains valid across cancellations.
+    // - Restartability: a fresh `send` can resume from shared state.
+    // - No partial side effects: either no frame is observed, or the
+    //   complete frame is observed.
+    //
+    // Semi-formal:
+    //   ∀ drip sequences D, ∀ finite cancellation schedules C:
+    //     if Σ D ≥ 8 + |body|, then
+    //       restarting `send(body)` under C eventually yields Ok(())
+    //       and the reader observes exactly one frame = `body`.
+    //
+    // Intuition: Even if the future is cancelled at any
+    // `Poll::Pending`, shared state (`Gate` + `SharedWriter`) ensures
+    // eventual completion with the correct frame, provided enough
+    // budget is dripped.
     proptest! {
         #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
         #[test]
-        #[ignore] // temporary: re-enable once merge/build is sorted
         fn framewrite_cancellation_is_safe(drips in budget_drips()) {
             // proptest! generates a plain `#[test]`, not
             // `#[tokio::test]`, so no runtime is provided
@@ -866,14 +872,14 @@ mod property_tests {
                         //   `assert_cancel_safe_async` can cancel at
                         //   any Pending boundary, drop it, and then
                         //   retry from the same shared world state.
-                        // - Map `Result<(), io::Error>` → `Result<(),
-                        //   io::ErrorKind>` so the `expected` value
-                        //   (`Ok(())`) is comparable (requires
+                        // - Map `Result<(), io::Error>` →
+                        //   `Result<(),()>` so the `expected` value
+                        //   (`Ok(())`) is equality comparable (requires
                         //   `PartialEq`).
                         {
                             let bw = BudgetedWriter::new(shared.clone(), gate.clone());
                             let mut fw = FrameWrite::new(bw, body.clone());
-                            async move { fw.send().await.map(|_| ()).map_err(|e| e.kind()) }
+                            async move { fw.send().await.map_err(|_| ()) }
                         },
                         Ok(()),
                         // `step`: invoked on each `Poll::Pending` to
