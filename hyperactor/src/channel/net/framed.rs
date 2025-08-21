@@ -221,15 +221,350 @@ impl<W: AsyncWrite + Unpin, B: Buf> FrameWrite<W, B> {
 }
 
 #[cfg(test)]
-mod tests {
+mod test_support {
+    use std::io;
     use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use std::task::Context;
     use std::task::Poll;
+    use std::task::Waker;
+
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// A wrapper around an `AsyncWrite` that throttles how many bytes
+    /// may be written per poll.
+    ///
+    /// We are going to use this to simulate partial writes to test
+    /// cancellation safety: when the budget is 0, `poll_write`
+    /// returns `Poll::Pending` and calls the waker so the task is
+    /// scheduled to be polled again later.
+    #[cfg(test)]
+    pub(crate) struct Throttled<W> {
+        pub(crate) inner: W,
+        // Number of bytes allowed to be written in the next poll. If
+        // 0, writes return `Poll::Pending`.
+        pub(crate) budget: usize,
+    }
+
+    #[cfg(test)]
+    impl<W> Throttled<W> {
+        pub(crate) fn new(inner: W) -> Self {
+            Self {
+                inner,
+                budget: usize::MAX,
+            }
+        }
+
+        pub(crate) fn set_budget(&mut self, n: usize) {
+            self.budget = n;
+        }
+    }
+
+    #[cfg(test)]
+    impl<W: AsyncWrite + Unpin> AsyncWrite for Throttled<W> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            // No budget left this poll. Return "not ready" and ask to
+            // be polled again later.
+            if self.budget == 0 {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            let n = buf.len().min(self.budget);
+            self.budget -= n;
+            // Delegate a write of the first `n` bytes to the inner
+            // writer.
+            Pin::new(&mut self.inner).poll_write(cx, &buf[..n])
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            // Delegate to `inner` for flushing.
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            // Delegate to `inner` (ensure resources are released and
+            // `EOF` is signaled downstream).
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    /// A cloneable writer that delegates to a shared inner `W`.
+    pub(crate) struct SharedWriter<W>(pub(crate) Arc<Mutex<W>>);
+
+    impl<W> SharedWriter<W> {
+        /// Create a new cloneable writer.
+        pub(crate) fn new(w: W) -> Self {
+            Self(Arc::new(Mutex::new(w)))
+        }
+
+        /// Acquire a blocking lock on the inner writer.
+        ///
+        /// This returns a [`MutexGuard`] giving mutable access to the
+        /// underlying writer `W`. The guard releases the lock when it
+        /// is dropped.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the mutex is poisoned (i.e., another thread
+        /// holding the lock panicked).
+        pub(crate) fn lock_guard(&self) -> std::sync::MutexGuard<'_, W> {
+            self.0.lock().unwrap()
+        }
+    }
+
+    // Manual clone avoids needlessly deriving a `Clone` bound on `W`.
+    impl<W> Clone for SharedWriter<W> {
+        fn clone(&self) -> Self {
+            Self(self.0.clone())
+        }
+    }
+
+    impl<W: AsyncWrite + Unpin> AsyncWrite for SharedWriter<W> {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let mut w = self.0.lock().unwrap();
+            Pin::new(&mut *w).poll_write(cx, buf)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            let mut w = self.0.lock().unwrap();
+            Pin::new(&mut *w).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            let mut w = self.0.lock().unwrap();
+            Pin::new(&mut *w).poll_shutdown(cx)
+        }
+    }
+
+    /// A shared, waker-aware budget gate for coordinating progress
+    /// between async tasks.
+    ///
+    /// The gate tracks an atomic `budget` of "units" (e.g., bytes
+    /// allowed to write). Callers try to consume budget with
+    /// [`Gate::take_chunk`]. If none is available (the gate is
+    /// closed), `take_chunk` stores the task’s [`Waker`] and returns
+    /// `0`, so the caller can yield `Poll::Pending`.
+    ///
+    /// When more budget is added via [`Gate::add`], the counter is
+    /// bumped atomically and the parked waker (if any) is woken,
+    /// scheduling the blocked task to be polled again.
+    ///
+    /// Concurrency:
+    ///
+    /// - `budget` is an [`AtomicUsize`] so producers/consumers can
+    ///   update without a global lock.
+    /// - The waker lives behind a [`Mutex<Option<Waker>>`] to update
+    ///   safely; we only support a single waiter (sufficient for
+    ///   tests).
+    /// - `take_chunk` uses a CAS loop so concurrent consumers don’t
+    ///   underflow/wrap.
+    ///
+    /// Typical flow:
+    /// - A budgeted writer's `poll_write` calls `take_chunk(want,
+    ///   cx)`. If it gets `0`, it returns `Poll::Pending`.
+    /// - An external driver (timer/test) calls `add(n)` to replenish
+    ///   budget.
+    /// - On the next poll, the writer observes budget and makes
+    ///   progress.
+    #[derive(Clone)]
+    pub(crate) struct Gate(pub(crate) Arc<GateInner>);
+    pub(crate) struct GateInner {
+        pub(crate) budget: AtomicUsize,
+        pub(crate) waker: Mutex<Option<Waker>>,
+    }
+
+    impl Gate {
+        /// Create a new `Gate` with zero initial budget and no
+        /// registered waker.
+        ///
+        /// The returned gate starts in the “closed” state: any call
+        /// to [`Gate::take_chunk`] will return `0` until budget is
+        /// added via [`Gate::add`]. Once budget is added, tasks may
+        /// consume it and will be woken if they had previously parked
+        /// on the gate.
+        pub(crate) fn new() -> Self {
+            Self(Arc::new(GateInner {
+                budget: AtomicUsize::new(0),
+                waker: Mutex::new(None),
+            }))
+        }
+
+        /// Add `n` units of budget and wake any parked task.
+        ///
+        /// Increments the internal counter atomically. If a task had
+        /// previously called [`Gate::take_chunk`] and parked its
+        /// waker because no budget was available, that waker is
+        /// removed and signaled here. On its next poll, the task will
+        /// observe the replenished budget and continue making
+        /// progress.
+        pub(crate) fn add(&self, n: usize) {
+            self.0.budget.fetch_add(n, Ordering::AcqRel);
+            if let Some(w) = self.0.waker.lock().unwrap().take() {
+                w.wake(); // schedule waiter
+            }
+        }
+
+        /// Try to consume up to `want` units of budget.
+        ///
+        /// - If some budget is available, atomically subtracts the
+        ///   granted amount (up to `want`) and returns it.
+        /// - If no budget is available, stores the current task’s
+        ///   [`Waker`] so it can be notified when [`Gate::add`]
+        ///   replenishes the pool, then returns `0`. The caller
+        ///   should yield `Poll::Pending`.
+        ///
+        /// Internally this uses a CAS loop to prevent underflow when
+        /// multiple tasks contend for the budget. Before parking the
+        /// waker, it re-checks the budget under the lock to avoid a
+        /// lost wakeup race where budget arrives just as the task was
+        /// about to sleep.
+        ///
+        /// Typical usage is inside an I/O primitive’s `poll_write`:
+        /// if `take_chunk` returns `0`, the writer yields pending;
+        /// otherwise it writes the granted slice of the buffer.
+        pub(crate) fn take_chunk(&self, want: usize, cx: &mut Context<'_>) -> usize {
+            loop {
+                let have = self.0.budget.load(Ordering::Acquire);
+                if have == 0 {
+                    // Park waker, but re-check budget under the lock
+                    // to avoid lost wakeups.
+                    let mut slot = self.0.waker.lock().unwrap();
+                    // If budget arrived while we were preparing to
+                    // park, don’t park; try again.
+                    if self.0.budget.load(Ordering::Acquire) > 0 {
+                        continue;
+                    }
+                    *slot = Some(cx.waker().clone());
+                    return 0;
+                }
+                let grant = have.min(want);
+                // Safe subtraction via CAS so we never underflow.
+                if self
+                    .0
+                    .budget
+                    .compare_exchange_weak(have, have - grant, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    return grant;
+                }
+                // raced; retry
+            }
+        }
+    }
+
+    /// A writer wrapper that enforces progress via a shared [`Gate`].
+    ///
+    /// Both the budget pool *and* the underlying writer are shared:
+    /// - All clones of `BudgetedWriter` point to the same [`Gate`],
+    ///   so cancellation in one attempt and resumption in another
+    ///   draw from the same counter.
+    /// - They also share the same underlying writer via
+    ///   [`SharedWriter<W>`] (`Arc<Mutex<W>>`), so writes are
+    ///   serialized and coordinated across tasks.
+    ///
+    /// This makes `BudgetedWriter` a useful test harness for
+    /// cancellation-safety: multiple futures may be spawned and
+    /// cancelled, but they all compete for the same writer and
+    /// budget.
+    pub(crate) struct BudgetedWriter<W> {
+        inner: SharedWriter<W>,
+        gate: Gate,
+    }
+
+    impl<W> BudgetedWriter<W> {
+        /// Construct from a shared writer handle.
+        pub(crate) fn new(inner: SharedWriter<W>, gate: Gate) -> Self {
+            Self { inner, gate }
+        }
+
+        /// Convenience: wrap a raw writer and also return the shared
+        /// handle (useful if you want to build multiple wrappers that
+        /// share the writer).
+        pub(crate) fn from_writer(writer: W, gate: Gate) -> (SharedWriter<W>, Self) {
+            let inner = SharedWriter::new(writer);
+            let me = Self {
+                inner: inner.clone(),
+                gate,
+            };
+            (inner, me)
+        }
+
+        /// Access the underlying shared writer (e.g., if you need to
+        /// flush/shutdown elsewhere).
+        pub(crate) fn inner(&self) -> &SharedWriter<W> {
+            &self.inner
+        }
+    }
+
+    impl<W: AsyncWrite + Unpin> AsyncWrite for BudgetedWriter<W> {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            // Ask the gate how much we’re allowed to write now.
+            let n = self.gate.take_chunk(buf.len(), cx);
+            if n == 0 {
+                return Poll::Pending;
+            }
+            // Synchronous lock is fine: `poll_*` must not await; we only hold it for the call.
+            let mut guard = self.inner.lock_guard();
+            Pin::new(&mut *guard).poll_write(cx, &buf[..n])
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            let mut guard = self.inner.lock_guard();
+            Pin::new(&mut *guard).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            let mut guard = self.inner.lock_guard();
+            Pin::new(&mut *guard).poll_shutdown(cx)
+        }
+    }
+
+    /// Generate a random drip sequence of budget increments.
+    ///
+    /// Each element is the number of units to add in one step.
+    /// - Sequence length: 1 to 8 steps
+    /// - Each step adds between 0 and 8 units
+    ///
+    /// Mathematically:
+    ///   len(drips) ∈ [1, 8],
+    ///   ∀ i, drips[i] ∈ [0, 8].
+    ///
+    /// Useful for fuzzing `BudgetedWriter` or `FrameWrite` under
+    /// cancellation/resumption: the budget is replenished in small,
+    /// irregular bursts instead of a single large chunk.
+    pub fn budget_drips() -> impl Strategy<Value = Vec<usize>> {
+        // length: 1..=8, step: 1..=8 (no zeros)
+        prop::collection::vec(1..=8usize, 1..=8)
+    }
+}
+
+#[cfg(test)]
+mod tests {
 
     use bytes::Bytes;
     use rand::Rng;
     use rand::thread_rng;
-    use tokio::io::AsyncWrite;
+    use test_support::Throttled;
     use tokio::io::AsyncWriteExt;
 
     use super::*;
@@ -329,67 +664,6 @@ mod tests {
         // Reading back the frame will manifest an error.
         let err = reader.next().await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
-    }
-
-    /// A wrapper around an `AsyncWrite` that throttles how many bytes
-    /// may be written per poll.
-    ///
-    /// We are going to use this to simulate partial writes to test
-    /// cancellation safety: when the budget is 0, `poll_write`
-    /// returns `Poll::Pending` and calls the waker so the task is
-    /// scheduled to be polled again later.
-    struct Throttled<W> {
-        inner: W,
-        // Number of bytes allowed to be written in the next poll. If
-        // 0, writes return `Poll::Pending`.
-        budget: usize,
-    }
-
-    impl<W> Throttled<W> {
-        fn new(inner: W) -> Self {
-            Self {
-                inner,
-                budget: usize::MAX,
-            }
-        }
-
-        fn set_budget(&mut self, n: usize) {
-            self.budget = n;
-        }
-    }
-
-    impl<W: AsyncWrite + Unpin> AsyncWrite for Throttled<W> {
-        fn poll_write(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<std::io::Result<usize>> {
-            // No budget left this poll. Return "not ready" and ask to
-            // be polled again later.
-            if self.budget == 0 {
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-            let n = buf.len().min(self.budget);
-            self.budget -= n;
-            // Delegate a write of the first `n` bytes to the inner
-            // writer.
-            Pin::new(&mut self.inner).poll_write(cx, &buf[..n])
-        }
-
-        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            // Delegate to `inner` for flushing.
-            Pin::new(&mut self.inner).poll_flush(cx)
-        }
-
-        fn poll_shutdown(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            // Delegate to `inner` (ensure resources are released and
-            // `EOF` is signaled downstream).
-            Pin::new(&mut self.inner).poll_shutdown(cx)
-        }
     }
 
     #[tokio::test]
@@ -497,5 +771,144 @@ mod tests {
 
         w.shutdown().await.unwrap();
         assert!(reader.next().await.unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use proptest::prelude::*;
+
+    use super::test_support::*;
+    use super::*;
+    use crate::assert_cancel_safe_async;
+
+    // Theorem: For all generated drip sequences `drips`, the
+    // following hold:
+    //   1. 1 ≤ len(drips) ≤ 8
+    //   2. ∀ i ∈ [0, len(drips)), 0 ≤ drips[i] ≤ 8
+    proptest! {
+        #[test]
+        fn test_budget_sequence(drips in budget_drips()) {
+            // 1. length bound
+            prop_assert!((1..=8).contains(&drips.len()));
+
+            // 2. value bounds; lower bound is tautological for usize
+            prop_assert!(drips.iter().all(|&n| n <= 8));
+        }
+    }
+
+    // Theorem: `FrameWrite::send` is cancel-safe.
+    // That is, it yields the correct frame even if cancelled and
+    // restarted at any poll boundary, as long as progress eventually
+    // continues.
+    //
+    // Setup:
+    // - `Gate` meters write budget, shared across attempts.
+    // - `SharedWriter` wraps the `WriteHalf`, so attempts share a
+    //   handle.
+    // - `on_pending` drips budget from a fuzzed sequence with a
+    //   fallback to ensure completion.
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+        #[test]
+        #[ignore] // temporary: re-enable once merge/build is sorted
+        fn framewrite_cancellation_is_safe(drips in budget_drips()) {
+            // proptest! generates a plain `#[test]`, not
+            // `#[tokio::test]`, so no runtime is provided
+            // automatically. Hence here we build a small
+            // current-thread runtime with time enabled to drive the
+            // async code.
+            let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+            // Block the async test body in this runtime.
+            rt.block_on(async move {
+                let (a, b) = tokio::io::duplex(4096);
+                let (r, _wu) = tokio::io::split(a);
+                let (_ru, w) = tokio::io::split(b);
+
+                let gate = Gate::new();
+                let shared = SharedWriter::new(w);
+
+                // Small body for fewer polls; termination should
+                // occur due to the fallback `total_need` (len-prefix
+                // + body), wakeups via `Gate::add`, and the outer
+                // timeout. Still hedged: bugs in wakeup/budget logic
+                // could in theory stall progress, hence the timeout.
+                let body = Bytes::from_static(&[42u8; 64]);
+                let mut reader = FrameReader::new(r, 1024 * 1024);
+
+                // Seed the drip sequence with 8 so the 8-byte length
+                // prefix can always be written. Without this, leading
+                // zeros can stall the prefix, inflate the number of
+                // pending polls (O(P²) across cancel points), and
+                // waste fuzz time without exercising the
+                // cancel/resume path on the body.
+                let mut drips = drips.clone();
+                drips.insert(0, 8);
+
+                let idx = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let total_need = 8 + body.len();
+
+                // Wrap the whole run in a 2s timeout. This does not
+                // affect the success criterion (theorem is about
+                // eventual completion), but acts as a guardrail: if
+                // wakeups or budget logic regresses and the future
+                // stalls forever, the test fails quickly instead of
+                // hanging the fuzz run.
+                #[allow(clippy::disallowed_methods)]
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    assert_cancel_safe_async!(
+                        // `mk`: Build a *fresh* send future each attempt.
+                        // - We clone `shared` and `gate` (both
+                        //   `Arc`-backed), so the underlying writer +
+                        //   budget pool persist across cancellations.
+                        // - We construct a new `FrameWrite` each time
+                        //   (the future under test), so
+                        //   `assert_cancel_safe_async` can cancel at
+                        //   any Pending boundary, drop it, and then
+                        //   retry from the same shared world state.
+                        // - Map `Result<(), io::Error>` → `Result<(),
+                        //   io::ErrorKind>` so the `expected` value
+                        //   (`Ok(())`) is comparable (requires
+                        //   `PartialEq`).
+                        {
+                            let bw = BudgetedWriter::new(shared.clone(), gate.clone());
+                            let mut fw = FrameWrite::new(bw, body.clone());
+                            async move { fw.send().await.map(|_| ()).map_err(|e| e.kind()) }
+                        },
+                        Ok(()),
+                        // `step`: invoked on each `Poll::Pending` to
+                        // advance external state.
+                        // - Index into the fuzzed `drips` sequence
+                        //   (shared via `idx`).
+                        // - Add that budget to the shared `Gate`,
+                        //   waking any waiter.
+                        // - If we run out of drips, fall back to
+                        //   `total_need` to guarantee eventual
+                        //   completion.
+                        // - Returned future performs the actual
+                        //   `gate.add` each tick.
+                        {
+                            let gate = gate.clone();
+                            let idx = idx.clone();
+                            move || {
+                                let i = idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let add = *drips.get(i).unwrap_or(&total_need);
+                                let gate = gate.clone();
+                                async move { gate.add(add) }
+                            }
+                        }
+
+                    );
+                    // At this point `fw.send()` has completed
+                    // successfully, so the frame must be fully
+                    // written to the wire. Verifying that the next
+                    // read yields exactly `body` checks the
+                    // postcondition of `send()`.
+                    let got = reader.next().await.unwrap().unwrap();
+                    assert_eq!(got, body);
+                }
+                ).await.expect("cancel-safety run timed out");
+            });
+        }
     }
 }
