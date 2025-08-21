@@ -223,6 +223,7 @@ impl<W: AsyncWrite + Unpin, B: Buf> FrameWrite<W, B> {
 #[cfg(test)]
 mod test_support {
     use std::io;
+    use std::io::IoSlice;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -339,6 +340,20 @@ mod test_support {
         ) -> Poll<io::Result<usize>> {
             let mut w = self.0.lock().unwrap();
             Pin::new(&mut *w).poll_write(cx, buf)
+        }
+
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            bufs: &[IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            let mut w = self.0.lock().unwrap();
+            Pin::new(&mut *w).poll_write_vectored(cx, bufs)
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            let mut w = self.0.lock().unwrap();
+            Pin::new(&mut *w).is_write_vectored()
         }
 
         fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -518,14 +533,51 @@ mod test_support {
             cx: &mut Context<'_>,
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
-            // Ask the gate how much we’re allowed to write now.
+            // Ask the gate how much we're allowed to write now.
             let n = self.gate.take_chunk(buf.len(), cx);
             if n == 0 {
                 return Poll::Pending;
             }
-            // Synchronous lock is fine: `poll_*` must not await; we only hold it for the call.
+            // Synchronous lock is fine: `poll_*` must not await; we
+            // only hold it for the call.
             let mut guard = self.inner.lock_guard();
             Pin::new(&mut *guard).poll_write(cx, &buf[..n])
+        }
+
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            bufs: &[IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            // Total bytes we *could* write this call.
+            let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+            // Check with the gate how many bytes we're allowed to
+            // write.
+            let grant = self.gate.take_chunk(total_len, cx);
+            if grant == 0 {
+                return Poll::Pending;
+            }
+            // Build a truncated view of `bufs` whose total length ≤
+            // grant. We may end with a shortened last slice.
+            let mut left = grant;
+            let mut granted: Vec<IoSlice<'_>> = Vec::with_capacity(bufs.len());
+            for s in bufs {
+                if left == 0 {
+                    break;
+                }
+                let take = s.len().min(left);
+                if take > 0 {
+                    granted.push(IoSlice::new(&s[..take]));
+                    left -= take;
+                }
+            }
+
+            let mut guard = self.inner.lock_guard();
+            Pin::new(&mut *guard).poll_write_vectored(cx, &granted)
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            self.inner.is_write_vectored()
         }
 
         fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
