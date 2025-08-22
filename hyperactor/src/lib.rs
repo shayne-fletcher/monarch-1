@@ -173,9 +173,15 @@ pub use serde_json;
 #[doc(inline)]
 pub use signal_handler::SignalCleanupGuard;
 #[doc(inline)]
+pub use signal_handler::SignalDisposition;
+#[doc(inline)]
+pub use signal_handler::query_signal_disposition;
+#[doc(inline)]
 pub use signal_handler::register_signal_cleanup;
 #[doc(inline)]
 pub use signal_handler::register_signal_cleanup_scoped;
+#[doc(inline)]
+pub use signal_handler::sigpipe_disposition;
 #[doc(inline)]
 pub use signal_handler::unregister_signal_cleanup;
 // Re-exported to support tracing in hyperactor_macros codegen.
