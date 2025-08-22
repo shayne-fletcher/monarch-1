@@ -47,60 +47,28 @@ use crate::runtime::get_tokio_runtime;
     module = "monarch._rust_bindings.monarch_hyperactor.alloc"
 )]
 pub struct PyAlloc {
-    pub inner: Arc<Mutex<Option<PyAllocWrapper>>>,
+    pub inner: Option<Box<dyn Alloc + Sync + Send>>,
 }
 
 impl PyAlloc {
     /// Create a new PyAlloc with provided boxed trait.
     pub fn new(inner: Box<dyn Alloc + Sync + Send>) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Some(PyAllocWrapper { inner }))),
-        }
+        Self { inner: Some(inner) }
     }
 
     /// Take the internal Alloc object.
-    pub fn take(&self) -> Option<PyAllocWrapper> {
-        self.inner.lock().unwrap().take()
+    pub fn take(&mut self) -> Option<Box<dyn Alloc + Sync + Send>> {
+        self.inner.take()
     }
 }
 
 #[pymethods]
 impl PyAlloc {
     fn __repr__(&self) -> PyResult<String> {
-        let data = self.inner.lock().unwrap();
-        match &*data {
+        match &self.inner {
             None => Ok("Alloc(None)".to_string()),
             Some(wrapper) => Ok(format!("Alloc({})", wrapper.shape())),
         }
-    }
-}
-
-/// Internal wrapper to translate from a dyn Alloc to an impl Alloc. Used
-/// to support polymorphism in the Python bindings.
-pub struct PyAllocWrapper {
-    inner: Box<dyn Alloc + Sync + Send>,
-}
-
-#[async_trait]
-impl Alloc for PyAllocWrapper {
-    async fn next(&mut self) -> Option<ProcState> {
-        self.inner.next().await
-    }
-
-    fn extent(&self) -> &Extent {
-        self.inner.extent()
-    }
-
-    fn world_id(&self) -> &WorldId {
-        self.inner.world_id()
-    }
-
-    fn transport(&self) -> ChannelTransport {
-        self.inner.transport()
-    }
-
-    async fn stop(&mut self) -> Result<(), AllocatorError> {
-        self.inner.stop().await
     }
 }
 

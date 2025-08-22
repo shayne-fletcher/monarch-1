@@ -125,7 +125,7 @@ pub struct PyProcMesh {
     unhealthy_event: Arc<Mutex<Unhealthy<ProcEvent>>>,
 }
 
-fn allocate_proc_mesh(alloc: &PyAlloc) -> PyResult<PyPythonTask> {
+fn allocate_proc_mesh(alloc: &mut PyAlloc) -> PyResult<PyPythonTask> {
     let alloc = match alloc.take() {
         Some(alloc) => alloc,
         None => {
@@ -136,7 +136,7 @@ fn allocate_proc_mesh(alloc: &PyAlloc) -> PyResult<PyPythonTask> {
     };
     PyPythonTask::new(async move {
         let world_id = alloc.world_id().clone();
-        let mesh = ProcMesh::allocate(alloc)
+        let mesh = ProcMesh::allocate_boxed(alloc)
             .await
             .map_err(|err| PyException::new_err(err.to_string()))?;
         Ok(PyProcMesh::monitored(mesh, world_id))
@@ -270,7 +270,7 @@ impl PyProcMesh {
     fn allocate_nonblocking<'py>(
         _cls: &Bound<'_, PyType>,
         _py: Python<'py>,
-        alloc: &PyAlloc,
+        alloc: &mut PyAlloc,
     ) -> PyResult<PyPythonTask> {
         allocate_proc_mesh(alloc)
     }

@@ -124,11 +124,16 @@ struct EventState {
 }
 
 impl ProcMesh {
+    pub async fn allocate(
+        alloc: impl Alloc + Send + Sync + 'static,
+    ) -> Result<Self, AllocatorError> {
+        ProcMesh::allocate_boxed(Box::new(alloc)).await
+    }
     /// Allocate a new ProcMesh from the provided allocator. Allocate returns
     /// after the mesh has been successfully (and fully) allocated, returning
     /// early on any allocation failure.
-    pub async fn allocate(
-        mut alloc: impl Alloc + Send + Sync + 'static,
+    pub async fn allocate_boxed(
+        mut alloc: Box<dyn Alloc + Send + Sync>,
     ) -> Result<Self, AllocatorError> {
         // We wait for the full allocation to be running before returning the mesh.
         let shape = alloc.shape().clone();
@@ -334,7 +339,7 @@ impl ProcMesh {
 
         Ok(Self {
             event_state: Some(EventState {
-                alloc: Box::new(alloc),
+                alloc,
                 supervision_events,
             }),
             actor_event_router: Arc::new(DashMap::new()),
