@@ -6,6 +6,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#![cfg(unix)]
+
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -130,6 +132,11 @@ impl GlobalSignalManager {
                 signal_hook_tokio::Signals::new([signal::SIGINT as i32, signal::SIGTERM as i32])
             {
                 if let Some(signal) = signals.next().await {
+                    // If parent died, stdout/stderr are broken pipes
+                    // that cause uninterruptible sleep on write.
+                    // Detect and redirect to file to prevent hanging.
+                    crate::stdio_redirect::handle_broken_pipes();
+
                     tracing::info!("received signal: {}", signal);
 
                     get_signal_manager().execute_all_cleanups().await;
@@ -178,7 +185,11 @@ impl GlobalSignalManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         callbacks.insert(id, callback);
-        tracing::info!("registered signal cleanup callback with ID: {}", id);
+        tracing::info!(
+            "process {} registered signal cleanup callback with ID: {}",
+            std::process::id(),
+            id
+        );
         id
     }
 
