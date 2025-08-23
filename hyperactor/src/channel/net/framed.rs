@@ -234,6 +234,8 @@ mod test_support {
     use std::task::Waker;
 
     use proptest::prelude::*;
+    use serde_multipart::Message;
+    use serde_multipart::Part;
 
     use super::*;
 
@@ -608,6 +610,45 @@ mod test_support {
         // length: 1..=8, step: 1..=8 (no zeros)
         prop::collection::vec(1..=8usize, 1..=8)
     }
+
+    /// Generate a single multipart `Part` with up to `max_len` bytes.
+    /// Includes empty parts to exercise edge cases and boundary
+    /// slicing.
+    pub fn multipart_part(max_len: usize) -> impl Strategy<Value = Part> {
+        proptest::collection::vec(any::<u8>(), 0..=max_len).prop_map(Part::from)
+    }
+
+    /// Generate a `Message` that is either unipart or true multipart
+    /// (body + 0..=3 additional parts). Kept small for fast tests.
+    pub fn multipart_message() -> impl Strategy<Value = Message> {
+        let max_parts = 4usize; // total parts = 1..=4
+        let max_len = 64usize; // bytes per part
+
+        prop_oneof![
+            // Unipart (compat path): body only
+            multipart_part(max_len).prop_map(|body| Message::from_body_and_parts(body, vec![])),
+            // Multipart: body + 1..=3 extra parts
+            (
+                multipart_part(max_len),
+                proptest::collection::vec(multipart_part(max_len), 1..=max_parts - 1)
+            )
+                .prop_map(|(body, parts)| Message::from_body_and_parts(body, parts)),
+        ]
+    }
+
+    /// Generate a `Message` that is *strictly* multipart (body +
+    /// 1..=3 additional parts). Use this when you want to force the
+    /// vectored path every time.
+    pub fn multipart_message_only() -> impl Strategy<Value = Message> {
+        let max_parts = 4usize; // total parts = 2..=4
+        let max_len = 64usize;
+
+        (
+            multipart_part(max_len),
+            proptest::collection::vec(multipart_part(max_len), 1..=max_parts - 1),
+        )
+            .prop_map(|(body, parts)| Message::from_body_and_parts(body, parts))
+    }
 }
 
 #[cfg(test)]
@@ -846,6 +887,47 @@ mod property_tests {
 
             // 2. value bounds; lower bound is tautological for usize
             prop_assert!(drips.iter().all(|&n| n <= 8));
+        }
+    }
+
+    proptest! {
+        // Sanity: multipart_message() yields either unipart or 1..=3
+        // extra parts, frames to the advertised length, and
+        // round-trips via from_framed().
+        #[test]
+        fn test_multipart_message_shape(msg in test_support::multipart_message()) {
+            // Parts count bounds (unipart allowed)
+            prop_assert!(msg.num_parts() <= 3);
+
+            // `frame_len` matches actual framed length
+            let mut framed = msg.clone().framed();
+            let framed_bytes = framed.copy_to_bytes(framed.remaining());
+            prop_assert_eq!(framed_bytes.len(), msg.frame_len());
+
+            // round-trip `framed` → `Message` → `framed` produces
+            // identical bytes
+            let rt = serde_multipart::Message::from_framed(framed_bytes.clone()).unwrap();
+            let mut rt_framed = rt.framed();
+            let rt_bytes = rt_framed.copy_to_bytes(rt_framed.remaining());
+            prop_assert_eq!(rt_bytes, framed_bytes);
+        }
+
+        // Sanity: multipart_message_only() always yields *strictly*
+        // multipart (≥1 extra part), and also round-trips and
+        // length-checks as above.
+        #[test]
+        fn test_multipart_message_only_shape(msg in test_support::multipart_message_only()) {
+            // Strictly multipart.
+            prop_assert!(msg.num_parts() >= 1 && msg.num_parts() <= 3);
+
+            let mut framed = msg.clone().framed();
+            let framed_bytes = framed.copy_to_bytes(framed.remaining());
+            prop_assert_eq!(framed_bytes.len(), msg.frame_len());
+
+            let rt = serde_multipart::Message::from_framed(framed_bytes.clone()).unwrap();
+            let mut rt_framed = rt.framed();
+            let rt_bytes = rt_framed.copy_to_bytes(rt_framed.remaining());
+            prop_assert_eq!(rt_bytes, framed_bytes);
         }
     }
 
