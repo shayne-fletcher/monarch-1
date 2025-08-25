@@ -11,7 +11,6 @@
 use std::time::Duration;
 use std::time::Instant;
 
-use bytes::Bytes;
 use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::Throughput;
@@ -37,7 +36,6 @@ use serde::Serialize;
 use serde_multipart::Part;
 use tokio::runtime;
 use tokio::runtime::Runtime;
-use tokio::select;
 use tokio::sync::oneshot;
 
 fn new_runtime() -> Runtime {

@@ -714,6 +714,7 @@ impl<T: Message> Buffer<T> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn send(
         &self,
         item: (T, PortHandle<Undeliverable<T>>),

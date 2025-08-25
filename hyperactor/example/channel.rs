@@ -6,7 +6,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use bytes::Bytes;
 use hyperactor::Named;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
@@ -59,7 +58,8 @@ async fn main() -> Result<(), anyhow::Error> {
 
     for _ in 0..10 {
         // Warmup
-        let t = Instant::now();
+        #[allow(clippy::disallowed_methods)]
+        let _t = Instant::now();
         server_tx.post(message.clone() /*cheap */);
         client_rx.recv().await?;
     }
@@ -68,9 +68,11 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut total_bytes_sent = 0usize;
     let mut total_bytes_received = 0usize;
 
+    #[allow(clippy::disallowed_methods)]
     let start = Instant::now();
     for _ in 0..num_iter {
         total_bytes_sent += message.0.len();
+        #[allow(clippy::disallowed_methods)]
         let start = Instant::now();
         server_tx.post(message.clone() /*cheap */);
         total_bytes_received += client_rx.recv().await?.0.len();
