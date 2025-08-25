@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -22,7 +21,6 @@ use hyperactor_mesh::alloc::AllocSpec;
 use hyperactor_mesh::alloc::Allocator;
 use hyperactor_mesh::alloc::AllocatorError;
 use hyperactor_mesh::alloc::LocalAllocator;
-use hyperactor_mesh::alloc::ProcState;
 use hyperactor_mesh::alloc::ProcessAllocator;
 use hyperactor_mesh::alloc::remoteprocess::RemoteProcessAlloc;
 use hyperactor_mesh::alloc::remoteprocess::RemoteProcessAllocHost;
