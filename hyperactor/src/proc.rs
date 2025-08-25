@@ -1617,6 +1617,7 @@ impl InstanceCell {
     }
 
     /// Get parent instance cell, if it exists.
+    #[allow(dead_code)]
     fn get_parent_cell(&self) -> Option<InstanceCell> {
         self.inner.parent.upgrade()
     }
