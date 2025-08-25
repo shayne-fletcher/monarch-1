@@ -137,7 +137,7 @@ impl Shape {
     ///
     /// # Errors
     /// Returns an error if `dims == 0` or `dims >= self.rank()`.
-    pub fn select_iter(&self, dims: usize) -> Result<SelectIterator, ShapeError> {
+    pub fn select_iter(&self, dims: usize) -> Result<SelectIterator<'_>, ShapeError> {
         let num_dims = self.slice().num_dim();
         if dims == 0 || dims >= num_dims {
             return Err(ShapeError::SliceError(SliceError::IndexOutOfRange {

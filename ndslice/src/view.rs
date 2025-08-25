@@ -180,7 +180,7 @@ impl Extent {
     }
 
     /// Iterate points in this extent.
-    pub fn points(&self) -> ExtentPointsIterator {
+    pub fn points(&self) -> ExtentPointsIterator<'_> {
         ExtentPointsIterator {
             extent: self,
             pos: CartesianIterator::new(self.sizes().to_vec()),
