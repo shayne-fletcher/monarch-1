@@ -13,7 +13,6 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::Cursor;
-use std::str::FromStr;
 use std::sync::LazyLock;
 
 use enum_as_inner::EnumAsInner;
