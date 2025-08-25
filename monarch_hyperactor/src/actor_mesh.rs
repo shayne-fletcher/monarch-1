@@ -6,7 +6,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -168,7 +167,8 @@ impl PythonActorMesh {
 )]
 pub(crate) struct PythonActorMeshImpl {
     inner: SharedCell<RootActorMesh<'static, PythonActor>>,
-    client: PyMailbox,
+    #[allow(dead_code)]
+    client: PyMailbox, // Never read.
     _keepalive: Keepalive,
     monitor: tokio::task::JoinHandle<()>,
     health_state: Arc<RootHealthState>,
