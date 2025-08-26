@@ -42,7 +42,6 @@ use monarch_types::PickledPyObject;
 use monarch_types::py_global;
 use ndslice::Extent;
 use ndslice::Point;
-use ndslice::shape::Shape;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyEOFError;
 use pyo3::exceptions::PyRuntimeError;
@@ -59,6 +58,7 @@ use crate::proc::PyActorId;
 use crate::pytokio::PyPythonTask;
 use crate::pytokio::PythonTask;
 use crate::runtime::signal_safe_block_on;
+use crate::shape::PyPoint;
 use crate::shape::PyShape;
 #[derive(Clone, Debug)]
 #[pyclass(
