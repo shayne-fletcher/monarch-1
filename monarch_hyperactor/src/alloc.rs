@@ -21,13 +21,13 @@ use hyperactor_mesh::alloc::AllocSpec;
 use hyperactor_mesh::alloc::Allocator;
 use hyperactor_mesh::alloc::AllocatorError;
 use hyperactor_mesh::alloc::LocalAllocator;
+use hyperactor_mesh::alloc::ProcState;
 use hyperactor_mesh::alloc::ProcessAllocator;
 use hyperactor_mesh::alloc::remoteprocess::RemoteProcessAlloc;
 use hyperactor_mesh::alloc::remoteprocess::RemoteProcessAllocHost;
 use hyperactor_mesh::alloc::remoteprocess::RemoteProcessAllocInitializer;
 use hyperactor_mesh::alloc::sim::SimAllocator;
 use ndslice::Extent;
-use ndslice::Shape;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -37,7 +37,6 @@ use tokio::process::Command;
 use crate::channel::PyChannelAddr;
 use crate::pytokio::PyPythonTask;
 use crate::runtime::get_tokio_runtime;
-use crate::shape::PyShape;
 
 /// Convert a PyDict to an Extent
 fn pydict_to_extent(shape: &Bound<'_, PyDict>) -> PyResult<Extent> {
