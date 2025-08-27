@@ -239,7 +239,7 @@ impl MessageEnvelope {
     }
 
     /// Deserialize the message in the envelope to the provided type T.
-    pub fn deserialized<T: DeserializeOwned>(&self) -> Result<T, anyhow::Error> {
+    pub fn deserialized<T: DeserializeOwned + Named>(&self) -> Result<T, anyhow::Error> {
         self.data.deserialized()
     }
 
@@ -1999,7 +1999,12 @@ impl<M: RemoteMessage> SerializedSender for UnboundedSender<M> {
         headers: Attrs,
         serialized: Serialized,
     ) -> Result<bool, SerializedSenderError> {
-        match serialized.deserialized() {
+        // Here, the stack ensures that this port is only instantiated for M-typed messages.
+        // This does not protect against bad senders (e.g., encoding wrongly-typed messages),
+        // but it is required as we have some usages that rely on representational equivalence
+        // to provide type indexing, specifically in `IndexedErasedUnbound` which is used to
+        // support port aggregation.
+        match serialized.deserialized_unchecked() {
             Ok(message) => {
                 self.sender.send(headers.clone(), message).map_err(|err| {
                     SerializedSenderError {
