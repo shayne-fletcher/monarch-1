@@ -6,6 +6,29 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+//! The purpose of this module is to provide data structures to efficiently
+//! describe subsets of nonnegative integers, called *ranks*, represented by
+//! `usize` values. Ranks are organized into multi-dimensional spaces in which
+//! each discrete point is a rank, mapped in row-major order.
+//!
+//! These dimensions represent a space that carry semantic meaning, such that
+//! ranks are usually sub-set along some dimension of the space. For example,
+//! ranks may be organized into a space with dimensions "replica", "host", "gpu",
+//! and we'd expect to subset along these dimensions, for example to select all
+//! GPUs in a given replica.
+//!
+//! This alignment helps provide a simple and efficient representation, internally
+//! in the form of [`crate::Slice`], comprising an offset, sizes, and strides that
+//! index into the space.
+//!
+//! - [`Extent`]: the *shape* of the space, naming each dimension and specifying
+//!               their sizes.
+//! - [`Point`]: a specific coordinate in an extent, together with its linearized rank.
+//! - [`Region`]: a (possibly sparse) hyper-rectangle of ranks within a larger extent.
+//!               Since it is always rectangular, it also defines its own extent.
+//! - [`View`]: a collection of items indexed by [`Region`]. Views provide standard
+//!             manipulation operations and use ranks as an efficient indexing scheme.
+
 use std::ops::Index;
 use std::sync::Arc;
 
@@ -405,32 +428,86 @@ pub enum ViewError {
         dim: String,
         size: usize,
     },
+
+    #[error(transparent)]
+    ExtentError(#[from] ExtentError),
+
+    #[error("invalid range: selected ranks {selected} not a subset of base {base} ")]
+    InvalidRange { base: Region, selected: Region },
 }
 
-/// A view is a collection of ranks, organized into an extent.
+/// `Region` describes a region of a possibly-larger space of ranks, organized into
+/// a hyperrect.  
+///
+/// Internally, region consist of a set of labels and a [`Slice`], as it allows for
+/// a compact but useful representation of the ranks. However, this representation
+/// may change in the future.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct View {
+pub struct Region {
     labels: Vec<String>,
     slice: Slice,
 }
 
-impl View {
-    /// The extent of this view. Every point in this space is defined.
+impl Region {
+    /// The labels of the dimensions of this region.
+    pub fn labels(&self) -> &[String] {
+        &self.labels
+    }
+
+    /// The slice representing this region.
+    /// Note: this representation may change.
+    pub fn slice(&self) -> &Slice {
+        &self.slice
+    }
+
+    /// Convert this region into its constituent labels and slice.
+    pub fn into_inner(self) -> (Vec<String>, Slice) {
+        (self.labels, self.slice)
+    }
+
+    /// Returns the extent of the region.
     pub fn extent(&self) -> Extent {
         Extent::new(self.labels.clone(), self.slice.sizes().to_vec()).unwrap()
     }
 
-    /// Iterate over the ranks in this view. The iterator returns both each rank,
-    /// as well as the corresponding point in the extent of this view.
-    pub fn iter(&self) -> ViewIterator {
-        ViewIterator {
-            extent: self.extent(),
-            pos: self.slice.iter(),
+    /// Returns `true` if this region is a subset of `other`, i.e., if `other`
+    /// contains at least all of the ranks in this region.
+    fn is_subset(&self, other: &Region) -> bool {
+        let mut left = self.slice.iter().peekable();
+        let mut right = other.slice.iter().peekable();
+
+        loop {
+            match (left.peek(), right.peek()) {
+                (Some(l), Some(r)) => {
+                    if l < r {
+                        return false;
+                    } else if l == r {
+                        left.next();
+                        right.next();
+                    } else {
+                        // r < l
+                        right.next();
+                    }
+                }
+                (Some(_), None) => return false,
+                (None, _) => return true,
+            }
         }
     }
 }
 
-impl std::fmt::Display for View {
+// We would make this impl<T: Viewable> From<T> for View,
+// except this conflicts with the blanket impl for From<&T> for View.
+impl From<Extent> for Region {
+    fn from(extent: Extent) -> Self {
+        Region {
+            labels: extent.labels().to_vec(),
+            slice: extent.to_slice(),
+        }
+    }
+}
+
+impl std::fmt::Display for Region {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let n = self.labels.len();
         for i in 0..n {
@@ -443,7 +520,86 @@ impl std::fmt::Display for View {
     }
 }
 
-/// The iterator over views.
+/// A View is a collection of items in a space indexed by a [`Region`].
+pub trait View: Sized {
+    /// The type of item in this view.
+    type Item;
+
+    /// The type of sub-view produced by manipulating (e.g., slicing) this view.
+    type View: View;
+
+    /// The ranks contained in this view.
+    fn region(&self) -> Region;
+
+    /// Retrieve the item corresponding to the given `rank` in the [`Region`]
+    /// of this view. An implementation *MUST* return a value for all ranks
+    /// defined in this view.
+    fn get(&self, rank: usize) -> Option<Self::Item>;
+
+    /// Constructs a new view with the provided ranks. This is mainly used
+    /// by combinators on Views themselves. The set of ranks passed in
+    /// must be a subset of the ranks of the base view.
+    fn with_region(&self, region: Region) -> Result<Self::View, ViewError>;
+}
+
+/// A [`Region`] is also a View.
+impl View for Region {
+    /// The type of item is the rank in the underlying space.
+    type Item = usize;
+
+    /// The type of sub-view is also a [`Region`].
+    type View = Region;
+
+    fn region(&self) -> Region {
+        self.clone()
+    }
+
+    fn with_region(&self, region: Region) -> Result<Region, ViewError> {
+        if region.is_subset(self) {
+            Ok(region)
+        } else {
+            Err(ViewError::InvalidRange {
+                base: self.clone(),
+                selected: region,
+            })
+        }
+    }
+
+    fn get(&self, rank: usize) -> Option<Self::Item> {
+        self.slice.get(rank).ok()
+    }
+}
+
+/// An [`Extent`] is also a View.
+impl View for Extent {
+    /// The type of item is the rank itself.
+    type Item = usize;
+
+    /// The type of sub-view can be a [`Region`], since
+    /// [`Extent`] can only describe a complete space.
+    type View = Region;
+
+    fn region(&self) -> Region {
+        Region {
+            labels: self.labels().to_vec(),
+            slice: self.to_slice(),
+        }
+    }
+
+    fn with_region(&self, region: Region) -> Result<Region, ViewError> {
+        self.region().with_region(region)
+    }
+
+    fn get(&self, rank: usize) -> Option<Self::Item> {
+        if rank < self.num_ranks() {
+            Some(rank)
+        } else {
+            None
+        }
+    }
+}
+
+/// An iterator over views.
 pub struct ViewIterator {
     extent: Extent,     // Note that `extent` and...
     pos: SliceIterator, // ... `pos` share the same `Slice`.
@@ -451,7 +607,6 @@ pub struct ViewIterator {
 
 impl Iterator for ViewIterator {
     type Item = (Point, usize);
-
     fn next(&mut self) -> Option<Self::Item> {
         // This is a rank in the base space.
         let rank = self.pos.next()?;
@@ -462,51 +617,8 @@ impl Iterator for ViewIterator {
     }
 }
 
-/// Viewable is a common trait implemented for data structures from which views
-/// may be created. This allows us to provide a consistent API for constructing
-/// and composing views.
-pub trait Viewable {
-    /// The labels of the dimensions in this view.
-    fn labels(&self) -> Vec<String>;
-
-    /// The slice representing this view.
-    /// Note: this representation may change.
-    fn slice(&self) -> Slice;
-}
-
-impl Viewable for View {
-    fn labels(&self) -> Vec<String> {
-        self.labels.clone()
-    }
-
-    fn slice(&self) -> Slice {
-        self.slice.clone()
-    }
-}
-
-impl Viewable for Extent {
-    fn labels(&self) -> Vec<String> {
-        self.labels().to_vec()
-    }
-
-    fn slice(&self) -> Slice {
-        self.to_slice()
-    }
-}
-
-// We would make this impl<T: Viewable> From<T> for View,
-// except this conflicts with the blanket impl for From<&T> for View.
-impl From<Extent> for View {
-    fn from(extent: Extent) -> Self {
-        View {
-            labels: extent.labels().to_vec(),
-            slice: extent.slice(),
-        }
-    }
-}
-
 /// Extension methods for view construction.
-pub trait ViewExt: Viewable {
+pub trait ViewExt: View {
     /// Construct a view comprising the range of points along the provided dimension.
     ///
     /// ## Examples
@@ -532,7 +644,7 @@ pub trait ViewExt: Viewable {
     ///     8
     /// );
     /// ```
-    fn range<R: Into<Range>>(&self, dim: &str, range: R) -> Result<View, ViewError>;
+    fn range<R: Into<Range>>(&self, dim: &str, range: R) -> Result<Self::View, ViewError>;
 
     /// Group by view on `dim`. The returned iterator enumerates all groups
     /// as views in the extent of `dim` to the last dimension of the view.
@@ -569,18 +681,27 @@ pub trait ViewExt: Viewable {
     ///     (extent!(host = 2, gpu = 8).point(vec![0, 0]).unwrap(), 16)
     /// );
     /// ```
-    fn group_by(&self, dim: &str) -> Result<impl Iterator<Item = View>, ViewError>;
+    fn group_by(&self, dim: &str) -> Result<impl Iterator<Item = Self::View>, ViewError>;
+
+    /// The extent of this view. Every point in this space is defined.
+    fn extent(&self) -> Extent;
+
+    /// Iterate over all points in this region.
+    fn iter(&self) -> impl Iterator<Item = (Point, Self::Item)> + '_;
+
+    /// Iterate over the values in the region.
+    fn values(&self) -> impl Iterator<Item = Self::Item> + '_;
 }
 
-impl<T: Viewable> ViewExt for T {
-    fn range<R: Into<Range>>(&self, dim: &str, range: R) -> Result<View, ViewError> {
+impl<T: View> ViewExt for T {
+    fn range<R: Into<Range>>(&self, dim: &str, range: R) -> Result<Self::View, ViewError> {
+        let (labels, slice) = self.region().into_inner();
         let range = range.into();
-        let dim = self
-            .labels()
+        let dim = labels
             .iter()
             .position(|l| dim == l)
             .ok_or_else(|| ViewError::InvalidDim(dim.to_string()))?;
-        let (mut offset, mut sizes, mut strides) = self.slice().into_inner();
+        let (mut offset, mut sizes, mut strides) = slice.into_inner();
         let (begin, end, step) = range.resolve(sizes[dim]);
         if end <= begin {
             return Err(ViewError::EmptyRange {
@@ -595,36 +716,56 @@ impl<T: Viewable> ViewExt for T {
         strides[dim] *= step;
         let slice = Slice::new(offset, sizes, strides).unwrap();
 
-        Ok(View {
-            labels: self.labels().clone(),
-            slice,
-        })
+        self.with_region(Region { labels, slice })
     }
 
-    fn group_by(&self, dim: &str) -> Result<impl Iterator<Item = View>, ViewError> {
-        let dim = self
-            .labels()
+    fn group_by(&self, dim: &str) -> Result<impl Iterator<Item = Self::View>, ViewError> {
+        let (labels, slice) = self.region().into_inner();
+
+        let dim = labels
             .iter()
             .position(|l| dim == l)
             .ok_or_else(|| ViewError::InvalidDim(dim.to_string()))?;
 
-        let (offset, sizes, strides) = self.slice().into_inner();
-        let mut ranks = Slice::new(offset, sizes[..dim].to_vec(), strides[..dim].to_vec())
+        let (offset, sizes, strides) = slice.into_inner();
+        let mut ranks_iter = Slice::new(offset, sizes[..dim].to_vec(), strides[..dim].to_vec())
             .unwrap()
             .iter();
 
-        let labels = self.labels()[dim..].to_vec();
+        let labels = labels[dim..].to_vec();
         let sizes = sizes[dim..].to_vec();
         let strides = strides[dim..].to_vec();
 
         Ok(std::iter::from_fn(move || {
-            let rank = ranks.next()?;
+            let rank = ranks_iter.next()?;
             let slice = Slice::new(rank, sizes.clone(), strides.clone()).unwrap();
-            Some(View {
-                labels: labels.clone(),
-                slice,
-            })
+            // These are always valid sub-views.
+            Some(
+                self.with_region(Region {
+                    labels: labels.clone(),
+                    slice,
+                })
+                .unwrap(),
+            )
         }))
+    }
+
+    fn extent(&self) -> Extent {
+        let (labels, slice) = self.region().into_inner();
+        Extent::new(labels, slice.sizes().to_vec()).unwrap()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (Point, Self::Item)> + '_ {
+        let points = ViewIterator {
+            extent: self.extent(),
+            pos: self.region().slice().iter(),
+        };
+
+        points.map(|(point, _)| (point.clone(), self.get(point.rank()).unwrap()))
+    }
+
+    fn values(&self) -> impl Iterator<Item = Self::Item> + '_ {
+        (0usize..self.extent().num_ranks()).map(|rank| self.get(rank).unwrap())
     }
 }
 
@@ -700,7 +841,7 @@ mod test {
             let view = $view;
             assert_eq!(view.extent(), $extent);
             let expected: Vec<_> = vec![$(($extent.point(vec![$($coord),+]).unwrap(), $rank)),*];
-            let actual: Vec<_> = view.iter().collect();
+            let actual: Vec<_> = ViewExt::iter(&view).collect();
             assert_eq!(actual, expected);
         };
     }
@@ -948,5 +1089,16 @@ mod test {
             6 => 14;
             7 => 15;
         );
+    }
+
+    #[test]
+    fn test_view_values() {
+        let extent = extent!(x = 4, y = 4);
+        assert_eq!(
+            extent.values().collect::<Vec<_>>(),
+            (0..16).collect::<Vec<_>>()
+        );
+        let region = extent.range("y", 1).unwrap();
+        assert_eq!(region.values().collect::<Vec<_>>(), vec![1, 5, 9, 13]);
     }
 }
