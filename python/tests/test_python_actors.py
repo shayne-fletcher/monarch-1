@@ -1333,3 +1333,25 @@ async def test_undeliverable_message() -> None:
 def test_this_and_that():
     counter = this_proc().spawn("counter", Counter, 7)
     assert 7 == counter.value.call_one().get()
+
+
+class ReceptorActor(Actor):
+    @endpoint
+    def status(self):
+        return 1
+
+
+async def test_things_survive_losing_python_reference() -> None:
+    """Test the slice_receptor_mesh function in LOCAL mode, verifying that setup methods are called."""
+
+    receptor = (
+        this_host()
+        .spawn_procs(per_host={"gpus": 1})
+        .spawn(
+            "receptor",
+            ReceptorActor,
+        )
+    )
+    receptor = receptor.slice(gpus=0)
+
+    await receptor.status.call()

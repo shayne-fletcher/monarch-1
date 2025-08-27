@@ -6,6 +6,7 @@
 
 # pyre-unsafe
 
+import abc
 import collections
 import contextvars
 import functools
@@ -14,6 +15,7 @@ import itertools
 import logging
 import random
 import traceback
+from abc import abstractmethod, abstractproperty
 from dataclasses import dataclass
 from traceback import TracebackException
 from typing import (
@@ -111,8 +113,8 @@ class Point(HyPoint, collections.abc.Mapping):
 
 
 @rust_struct("monarch_hyperactor::mailbox::Instance")
-class Instance:
-    @property
+class Instance(abc.ABC):
+    @abstractproperty
     def _mailbox(self) -> Mailbox:
         """
         This can be removed once we fix all the uses of mailbox to just use context instead.
@@ -126,37 +128,12 @@ class Instance:
         """
         return self.actor_id.proc_id
 
-    @property
+    @abstractproperty
     def actor_id(self) -> ActorId:
         """
         The actor_id of the current actor.
         """
         ...
-
-    @property
-    def rank(self) -> Point:
-        """
-        Every actor is spawned over some mesh of processes. This identifies the point in that mesh where
-        the current actor was spawned. In other words, it is the `monarch.current_rank()` of
-        The actors __init__ message.
-        """
-        ...
-
-    @rank.setter
-    def rank(self, value: Point) -> Point: ...
-
-    @property
-    def proc_mesh(self) -> "ProcMesh":
-        """
-        The proc mesh over which all actors in this mesh were launched.
-        """
-        ...
-
-    @proc_mesh.setter
-    def proc_mesh(self, value: "ProcMesh") -> None: ...
-
-    @proc_mesh.setter
-    def proc_mesh(self, value: "ProcMesh") -> None: ...
 
     @property
     def proc(self) -> "ProcMesh":
@@ -166,13 +143,24 @@ class Instance:
 
         return self.proc_mesh.slice(**self.rank)
 
-    @property
-    def _controller_controller(self) -> "_ControllerController": ...
+    """
+    Every actor is spawned over some mesh of processes. This identifies the point in that mesh where
+    the current actor was spawned. In other words, it is the `monarch.current_rank()` of
+    The actors __init__ message.
+    """
+    rank: Point
+    proc_mesh: "ProcMesh"
+    _controller_controller: "_ControllerController"
 
-    @_controller_controller.setter
-    def _controller_controller(
-        self, value: "Optional[_ControllerController]"
-    ) -> None: ...
+    # this property is used to hold the handles to actors and processes launched by this actor
+    # in order to keep them alive until this actor exits.
+    _children: "Optional[List[ActorMesh | ProcMesh]]"
+
+    def _add_child(self, child: "ActorMesh | ProcMesh") -> None:
+        if self._children is None:
+            self._children = [child]
+        else:
+            self._children.append(child)
 
 
 @rust_struct("monarch_hyperactor::mailbox::Context")
