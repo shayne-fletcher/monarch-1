@@ -87,9 +87,7 @@ async fn client(
     #[allow(clippy::disallowed_methods)]
     let start = Instant::now();
     for i in 0usize.. {
-        if let Some(num_iter) = num_iter
-            && i >= num_iter
-        {
+        if num_iter.is_some_and(|n| i >= n) {
             break;
         }
 
