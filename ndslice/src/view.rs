@@ -30,6 +30,7 @@
 //!             manipulation operations and use ranks as an efficient indexing scheme.
 
 use std::ops::Index;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -38,7 +39,10 @@ use thiserror::Error;
 
 use crate::Range;
 use crate::Slice;
+use crate::SliceError;
 use crate::SliceIterator;
+use crate::parse::Parser;
+use crate::parse::ParserError;
 use crate::slice::CartesianIterator;
 
 /// Errors that can occur when constructing or validating an `Extent`.
@@ -442,13 +446,20 @@ pub enum ViewError {
 /// Internally, region consist of a set of labels and a [`Slice`], as it allows for
 /// a compact but useful representation of the ranks. However, this representation
 /// may change in the future.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct Region {
     labels: Vec<String>,
     slice: Slice,
 }
 
 impl Region {
+    fn empty() -> Region {
+        Region {
+            labels: Vec::new(),
+            slice: Slice::new(0, Vec::new(), Vec::new()).unwrap(),
+        }
+    }
+
     /// The labels of the dimensions of this region.
     pub fn labels(&self) -> &[String] {
         &self.labels
@@ -472,7 +483,7 @@ impl Region {
 
     /// Returns `true` if this region is a subset of `other`, i.e., if `other`
     /// contains at least all of the ranks in this region.
-    fn is_subset(&self, other: &Region) -> bool {
+    pub fn is_subset(&self, other: &Region) -> bool {
         let mut left = self.slice.iter().peekable();
         let mut right = other.slice.iter().peekable();
 
@@ -509,14 +520,66 @@ impl From<Extent> for Region {
 
 impl std::fmt::Display for Region {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.slice.offset() != 0 {
+            write!(f, "{}+", self.slice.offset())?;
+        }
         let n = self.labels.len();
         for i in 0..n {
-            write!(f, "{}={}", self.labels[i], self.slice.sizes()[i])?;
+            write!(
+                f,
+                "{}={}/{}",
+                self.labels[i],
+                self.slice.sizes()[i],
+                self.slice.strides()[i]
+            )?;
             if i != n - 1 {
                 write!(f, ",")?;
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RegionParseError {
+    #[error(transparent)]
+    ParserError(#[from] ParserError),
+
+    #[error(transparent)]
+    SliceError(#[from] SliceError),
+}
+
+impl FromStr for Region {
+    type Err = RegionParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut parser = Parser::new(s, &["+", "=", ",", "/"]);
+
+        let offset: usize = if let Ok(offset) = parser.try_parse() {
+            parser.expect("+")?;
+            offset
+        } else {
+            0
+        };
+        let mut labels = Vec::new();
+        let mut sizes = Vec::new();
+        let mut strides = Vec::new();
+        while !parser.is_empty() {
+            // Don't allow trailing commas
+            if !labels.is_empty() {
+                parser.expect(",")?;
+            }
+            labels.push(parser.next_or_err("label")?.to_string());
+            parser.expect("=")?;
+            sizes.push(parser.try_parse()?);
+            parser.expect("/")?;
+            strides.push(parser.try_parse()?);
+        }
+
+        Ok(Region {
+            labels,
+            slice: Slice::new(offset, sizes, strides)?,
+        })
     }
 }
 
@@ -536,10 +599,10 @@ pub trait View: Sized {
     /// defined in this view.
     fn get(&self, rank: usize) -> Option<Self::Item>;
 
-    /// Constructs a new view with the provided ranks. This is mainly used
+    /// Subsets this view with the provided ranks. This is mainly used
     /// by combinators on Views themselves. The set of ranks passed in
     /// must be a subset of the ranks of the base view.
-    fn with_region(&self, region: Region) -> Result<Self::View, ViewError>;
+    fn subset(&self, region: Region) -> Result<Self::View, ViewError>;
 }
 
 /// A [`Region`] is also a View.
@@ -554,7 +617,7 @@ impl View for Region {
         self.clone()
     }
 
-    fn with_region(&self, region: Region) -> Result<Region, ViewError> {
+    fn subset(&self, region: Region) -> Result<Region, ViewError> {
         if region.is_subset(self) {
             Ok(region)
         } else {
@@ -586,8 +649,8 @@ impl View for Extent {
         }
     }
 
-    fn with_region(&self, region: Region) -> Result<Region, ViewError> {
-        self.region().with_region(region)
+    fn subset(&self, region: Region) -> Result<Region, ViewError> {
+        self.region().subset(region)
     }
 
     fn get(&self, rank: usize) -> Option<Self::Item> {
@@ -716,7 +779,7 @@ impl<T: View> ViewExt for T {
         strides[dim] *= step;
         let slice = Slice::new(offset, sizes, strides).unwrap();
 
-        self.with_region(Region { labels, slice })
+        self.subset(Region { labels, slice })
     }
 
     fn group_by(&self, dim: &str) -> Result<impl Iterator<Item = Self::View>, ViewError> {
@@ -741,7 +804,7 @@ impl<T: View> ViewExt for T {
             let slice = Slice::new(rank, sizes.clone(), strides.clone()).unwrap();
             // These are always valid sub-views.
             Some(
-                self.with_region(Region {
+                self.subset(Region {
                     labels: labels.clone(),
                     slice,
                 })
@@ -1100,5 +1163,28 @@ mod test {
         );
         let region = extent.range("y", 1).unwrap();
         assert_eq!(region.values().collect::<Vec<_>>(), vec![1, 5, 9, 13]);
+    }
+
+    use proptest::prelude::*;
+
+    use crate::strategy::gen_slice;
+
+    prop_compose! {
+        fn gen_region()(slice in gen_slice(5, 1024)) -> Region {
+            let labels = (0..slice.num_dim()).map(|d| format!("dim{}", d)).collect();
+            Region {labels, slice}
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn test_region_parser(region in gen_region()) {
+            // Roundtrip display->parse correctly and preserves equality.
+            assert_eq!(
+                region,
+                region.to_string().parse::<Region>().unwrap(),
+                "failed to roundtrip region {}", region
+            );
+        }
     }
 }
