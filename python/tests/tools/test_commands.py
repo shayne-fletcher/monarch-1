@@ -7,8 +7,10 @@
 # pyre-strict
 
 import asyncio
+import tempfile
 import unittest
 from datetime import timedelta
+from pathlib import Path
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -19,7 +21,9 @@ from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/con
     Config,
     defaults,
 )
+from monarch.tools.config.workspace import Workspace
 from monarch.tools.mesh_spec import MeshSpec, ServerSpec
+
 from torchx.specs import AppDef, AppDryRunInfo, AppState, AppStatus, Role
 
 CMD_INFO = "monarch.tools.commands.info"
@@ -40,14 +44,45 @@ class TestCommands(unittest.TestCase):
 
     def test_create_dryrun(self) -> None:
         scheduler = "slurm"
-        config = defaults.config(scheduler)
-        config.dryrun = True
-        config.appdef = defaults.component_fn(scheduler)()
+        config = Config(
+            scheduler,
+            dryrun=True,
+            appdef=defaults.component_fn(scheduler)(),
+        )
 
         dryrun_info = commands.create(config)
         # need only assert that the return type of dryrun is a dryrun info object
         # since we delegate to torchx for job submission
         self.assertIsInstance(dryrun_info, AppDryRunInfo)
+
+    def test_create_dryrun_with_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            (tmpdir / "github" / "torch").mkdir(parents=True)
+            (tmpdir / "github" / "torchtitan").mkdir(parents=True)
+
+            scheduler = "slurm"
+            config = Config(
+                scheduler,
+                dryrun=True,
+                appdef=defaults.component_fn(scheduler)(),
+                workspace=Workspace(
+                    dirs=[
+                        tmpdir / "github" / "torch",
+                        tmpdir / "github" / "torchtitan",
+                    ],
+                ),
+            )
+
+            dryrun_info = commands.create(config)
+            assert isinstance(dryrun_info, AppDryRunInfo)
+
+            app = dryrun_info._app
+            assert app is not None
+
+            for role in app.roles:
+                self.assertIn("WORKSPACE_DIR", role.env)
+                self.assertIn("PYTHONPATH", role.env)
 
     @mock.patch(
         "torchx.schedulers.slurm_scheduler.SlurmScheduler.schedule",
@@ -55,7 +90,7 @@ class TestCommands(unittest.TestCase):
     )
     def test_create(self, mock_schedule: mock.MagicMock) -> None:
         scheduler = "slurm"
-        config = defaults.config(scheduler)
+        config = Config(scheduler)
         config.appdef = defaults.component_fn(scheduler)()
         server_handle = commands.create(config)
 

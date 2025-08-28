@@ -11,11 +11,12 @@ import asyncio
 import inspect
 import logging
 import os
+import tempfile
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Union
 
 from monarch.tools.colors import CYAN, ENDC
-
 from monarch.tools.components.hyperactor import DEFAULT_NAME
 
 from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/config/meta:defaults
@@ -23,6 +24,8 @@ from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/con
     defaults,
 )
 from monarch.tools.mesh_spec import mesh_spec_from_metadata, ServerSpec
+from monarch.tools.utils import MONARCH_HOME
+
 from torchx.runner import Runner  # @manual=//torchx/runner:lib_core
 from torchx.specs import AppDef, AppDryRunInfo, AppState, CfgVal, parse_app_handle
 from torchx.specs.builders import parse_args
@@ -127,8 +130,18 @@ def create(
 
     with torchx_runner() as runner:
         appdef: AppDef = AppDef(name, config.appdef.roles, config.appdef.metadata)
+        if not config.workspace.dirs and not config.workspace.env:
+            info = runner.dryrun(appdef, scheduler, cfg, workspace=None)
+        else:
+            with tempfile.TemporaryDirectory(dir=MONARCH_HOME("out")) as tmpdir:
+                # multi-directory workspace is not supported natively in torchx; so merge into a single one
+                # TODO (kiuk@) may be able to delete bootstrap workspace copy (as the job is created)
+                #   since proc_mesh.sync_workspace() can do this without having to merge the workspace
+                workspace_out = Path(tmpdir) / "workspace"
+                config.workspace.merge(workspace_out)
+                config.workspace.set_env_vars(appdef)
 
-        info = runner.dryrun(appdef, scheduler, cfg, config.workspace)
+                info = runner.dryrun(appdef, scheduler, cfg, str(workspace_out))
 
         info_json_fmt = AppDryRunInfo(
             info.request,

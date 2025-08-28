@@ -1167,7 +1167,7 @@ class LsActor(Actor):
         return os.listdir(self.workspace)
 
 
-# oss_skip: TODO kiuk@ investigate why this fails in CI with FileNotFound error on rust-side
+# oss_skip: TODO kiuk@ fails in CI due to rsync binary not found
 @pytest.mark.oss_skip
 async def test_sync_workspace() -> None:
     # create two workspaces: one for local and one for remote
