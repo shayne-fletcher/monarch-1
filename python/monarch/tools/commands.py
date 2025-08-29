@@ -188,7 +188,11 @@ def info(server_handle: str) -> Optional[ServerSpec]:
 
         # null-guard since some schedulers do not fill replica_status
         if host_status := replica_status.get(role.name):
-            spec.hostnames = [h.hostname for h in host_status]
+            # make sure the hostnames are sorted by their respective node indexes
+            # this makes ServerSpec.host0 return hostname of node 0
+            spec.hostnames = [
+                h.hostname for h in sorted(host_status, key=lambda h: h.id)
+            ]
             # the mesh status is based on the "least progressive" replica status
             spec.state = min(h.state for h in host_status)
 

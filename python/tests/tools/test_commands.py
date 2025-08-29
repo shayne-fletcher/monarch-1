@@ -24,7 +24,8 @@ from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/con
 from monarch.tools.config.workspace import Workspace
 from monarch.tools.mesh_spec import MeshSpec, ServerSpec
 
-from torchx.specs import AppDef, AppDryRunInfo, AppState, AppStatus, Role
+from torchx.specs import AppDef, AppDryRunInfo, AppState, AppStatus, Role, RoleStatus
+from torchx.specs.api import ReplicaState, ReplicaStatus
 
 CMD_INFO = "monarch.tools.commands.info"
 CMD_CREATE = "monarch.tools.commands.create"
@@ -112,7 +113,30 @@ class TestCommands(unittest.TestCase):
     def test_info(
         self, mock_status: mock.MagicMock, mock_describe: mock.MagicMock
     ) -> None:
-        appstatus = AppStatus(state=AppState.RUNNING)
+        def replica_status(idx: int, hostname: str) -> ReplicaStatus:
+            return ReplicaStatus(
+                role="trainer",
+                state=ReplicaState.RUNNING,
+                id=idx,
+                hostname=hostname,
+            )
+
+        appstatus = AppStatus(
+            state=AppState.RUNNING,
+            roles=[
+                RoleStatus(
+                    role="trainer",
+                    replicas=[
+                        # make hostname and id sort in reverse order so that
+                        # we can assert the hostnames are sorted in id order
+                        replica_status(idx=3, hostname="node_a"),
+                        replica_status(idx=2, hostname="node_b"),
+                        replica_status(idx=1, hostname="node_c"),
+                        replica_status(idx=0, hostname="node_d"),
+                    ],
+                )
+            ],
+        )
         mock_status.return_value = appstatus
 
         appdef = AppDef(
@@ -132,6 +156,8 @@ class TestCommands(unittest.TestCase):
         )
         mock_describe.return_value = appdef
 
+        server_info = commands.info("slurm:///job-id")
+
         self.assertEqual(
             ServerSpec(
                 name="monarch_test_123",
@@ -140,6 +166,8 @@ class TestCommands(unittest.TestCase):
                 meshes=[
                     MeshSpec(
                         name="trainer",
+                        state=ReplicaState.RUNNING,
+                        hostnames=["node_d", "node_c", "node_b", "node_a"],
                         num_hosts=4,
                         host_type="gpu.medium",
                         gpus=2,
@@ -147,8 +175,12 @@ class TestCommands(unittest.TestCase):
                     )
                 ],
             ),
-            commands.info("slurm:///job-id"),
+            server_info,
         )
+
+        # node_d is node 0
+        assert server_info
+        self.assertEqual("node_d", server_info.host0("trainer"))
 
 
 UNUSED = "__UNUSED__"
