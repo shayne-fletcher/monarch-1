@@ -16,8 +16,6 @@ import unittest
 from pathlib import Path
 from typing import Generator
 
-import pytest
-
 from monarch._rust_bindings.monarch_hyperactor.alloc import AllocConstraints, AllocSpec
 from monarch._rust_bindings.monarch_hyperactor.channel import (
     ChannelAddr,
@@ -74,8 +72,6 @@ class TestSyncWorkspace(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmpdir)
 
-    # oss_skip: TODO kiuk@ fails in CI due to rsync binary not found
-    @pytest.mark.oss_skip  # pyre-ignore[56]
     async def test_sync_workspace(self) -> None:
         local_workspace_dir = self.tmpdir / "local" / "github" / "torch"
         local_workspace_dir.mkdir(parents=True)
