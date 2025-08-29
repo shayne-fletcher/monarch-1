@@ -15,5 +15,6 @@ We hope this becomes the book we wish we had when we started working with Monarc
 ./channels/index
 ./mailboxes/index
 ./references/index
+./appendix/index
 ./SUMMARY.md
 ```
