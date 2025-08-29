@@ -202,7 +202,7 @@ impl Extent {
         Slice::new_row_major(self.sizes())
     }
 
-    /// Iterate over this extens labels and sizes.
+    /// Iterate over this extent's labels and sizes.
     pub fn iter(&self) -> impl Iterator<Item = (String, usize)> + use<'_> {
         self.labels()
             .iter()
@@ -441,7 +441,7 @@ pub enum ViewError {
 }
 
 /// `Region` describes a region of a possibly-larger space of ranks, organized into
-/// a hyperrect.  
+/// a hyperrect.
 ///
 /// Internally, region consist of a set of labels and a [`Slice`], as it allows for
 /// a compact but useful representation of the ranks. However, this representation
