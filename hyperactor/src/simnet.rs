@@ -967,7 +967,7 @@ mod tests {
     #[tokio::test]
     async fn test_simnet_config() {
         // Tests that we can create a simnet, config latency between distances and sample latencies between procs.
-        let ext = extent!(region = 1, dc = 1, zone = 1, rack = 4, host = 4, gpu = 8);
+        let ext = extent!(region = 1, dc = 2, zone = 2, rack = 4, host = 4, gpu = 8);
 
         let alice = id!(world[0]);
         let bob = id!(world[1]);

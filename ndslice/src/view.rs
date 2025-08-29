@@ -29,7 +29,6 @@
 //! - [`View`]: a collection of items indexed by [`Region`]. Views provide standard
 //!             manipulation operations and use ranks as an efficient indexing scheme.
 
-use std::ops::Index;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -131,60 +130,141 @@ impl Extent {
         self.labels().iter().position(|l| l == label)
     }
 
-    /// Creates a `Point` in this extent with the given coordinates.
-    ///
-    /// Returns an error if the coordinate dimensionality does not
-    /// match.
-    pub fn point(&self, coords: Vec<usize>) -> Result<Point, PointError> {
-        if coords.len() != self.len() {
+    // Computes the row-major logical rank of the given coordinates
+    // in this extent.
+    //
+    // ```text
+    // Σ (coord[i] × ∏(sizes[j] for j > i))
+    // ```
+    //
+    // where 'coord' is the point's coordinate and 'sizes' is the
+    // extent's dimension sizes.
+    pub fn rank_of_coords(&self, coords: &[usize]) -> Result<usize, PointError> {
+        let sizes = self.sizes();
+        if coords.len() != sizes.len() {
             return Err(PointError::DimMismatch {
-                expected: self.len(),
+                expected: sizes.len(),
                 actual: coords.len(),
             });
         }
-
-        Ok(Point {
-            coords,
-            extent: Extent {
-                inner: Arc::clone(&self.inner),
-            },
-        })
+        let mut stride = 1;
+        let mut result = 0;
+        for (&c, &size) in coords.iter().rev().zip(sizes.iter().rev()) {
+            if c >= size {
+                return Err(PointError::OutOfRangeIndex { size, index: c });
+            }
+            result += c * stride;
+            stride *= size;
+        }
+        Ok(result)
     }
 
-    /// Returns the point corresponding to the provided rank in this extent.
-    pub fn point_of_rank(&self, mut rank: usize) -> Result<Point, PointError> {
-        if rank >= self.num_ranks() {
-            return Err(PointError::OutOfRange {
-                size: self.len(),
-                rank,
-            });
-        }
-
-        let mut stride: usize = self.sizes().iter().product();
-        let mut coords = vec![0; self.len()];
-        for (i, size) in self.sizes().iter().enumerate() {
-            stride /= size;
-            coords[i] = rank / stride;
-            rank %= stride;
-        }
-
+    /// Creates a [`Point`] in this extent from the given coordinate
+    /// vector.
+    ///
+    /// The coordinates are interpreted in **row-major** order against
+    /// `self.sizes()`. This constructor does not store the
+    /// coordinates; it computes the linear **rank** and returns a
+    /// `Point` that stores `{ rank, extent }`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`PointError::DimMismatch`] if `coords.len() != self.len()`.
+    /// - [`PointError::OutOfRangeIndex`] if any coordinate `coords[i]
+    ///   >= self.sizes()[i]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ndslice::extent;
+    ///
+    /// let ext = extent!(x = 2, y = 3, z = 4);
+    /// let p = ext.point(vec![1, 2, 3]).unwrap();
+    /// assert_eq!(p.rank(), 1 * (3 * 4) + 2 * 4 + 3); // row-major
+    /// assert_eq!(p.coords(), vec![1, 2, 3]);
+    /// ```
+    ///
+    /// Dimension mismatch:
+    /// ```
+    /// use ndslice::PointError;
+    /// use ndslice::extent;
+    ///
+    /// let ext = extent!(x = 2, y = 3);
+    /// let err = ext.point(vec![1]).unwrap_err();
+    /// matches!(err, PointError::DimMismatch { .. });
+    /// ```
+    ///
+    /// Coordinate out of range:
+    /// ```
+    /// use ndslice::PointError;
+    /// use ndslice::extent;
+    ///
+    /// let ext = extent!(x = 2, y = 3);
+    /// let err = ext.point(vec![1, 3]).unwrap_err(); // y size is 3, max index is 2
+    /// matches!(err, PointError::OutOfRangeIndex { .. });
+    /// ```
+    pub fn point(&self, coords: Vec<usize>) -> Result<Point, PointError> {
         Ok(Point {
-            coords,
+            rank: self.rank_of_coords(&coords)?,
             extent: self.clone(),
         })
     }
 
-    /// The number of dimensions in the extent.
+    /// Returns the [`Point`] corresponding to the given linearized
+    /// `rank` within this extent, using row-major order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PointError::OutOfRangeRank`] if `rank >=
+    /// self.num_ranks()`, i.e. when the requested rank lies outside
+    /// the bounds of this extent.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ndslice::extent;
+    ///
+    /// let ext = extent!(x = 2, y = 3);
+    /// assert_eq!(ext.num_ranks(), 6);
+    ///
+    /// let p = ext.point_of_rank(4).unwrap();
+    /// assert_eq!(p.coords(), vec![1, 1]); // row-major: x=1, y=1
+    /// assert_eq!(p.rank(), 4);
+    ///
+    /// assert!(ext.point_of_rank(6).is_err()); // out of range
+    /// ```
+    pub fn point_of_rank(&self, rank: usize) -> Result<Point, PointError> {
+        let total = self.num_ranks();
+        if rank >= total {
+            return Err(PointError::OutOfRangeRank { total, rank });
+        }
+        Ok(Point {
+            rank,
+            extent: self.clone(),
+        })
+    }
+
+    /// Returns the number of dimensions in this extent.
+    ///
+    /// For example, an extent defined as `(x=2, y=3, z=4)` has
+    /// dimensionality 3.
     pub fn len(&self) -> usize {
         self.sizes().len()
     }
 
-    /// Whether the extent has zero dimensionbs.
+    /// Returns true if this extent has zero dimensions.
+    ///
+    /// A 0-dimensional extent corresponds to the scalar case: a
+    /// coordinate space with exactly one rank (the empty tuple `[]`).
     pub fn is_empty(&self) -> bool {
         self.sizes().is_empty()
     }
 
-    /// The number of ranks in the extent.
+    /// Returns the total number of ranks (points) in this extent.
+    ///
+    /// This is the product of all dimension sizes, i.e. the number of
+    /// distinct coordinates in row-major order.
     pub fn num_ranks(&self) -> usize {
         self.sizes().iter().product()
     }
@@ -243,9 +323,21 @@ pub struct ExtentPointsIterator<'a> {
 impl<'a> Iterator for ExtentPointsIterator<'a> {
     type Item = Point;
 
+    /// Advances the iterator and returns the next [`Point`] in
+    /// row-major order.
+    ///
+    /// Internally, this takes the next coordinate tuple from the
+    /// underlying [`CartesianIterator`], converts it into a
+    /// linearized rank using [`Extent::rank_of_coords`], and packages
+    /// both into a `Point`.
+    ///
+    /// If the extent has been fully traversed, or if the coordinates
+    /// are invalid for the extent, `None` is returned.
     fn next(&mut self) -> Option<Self::Item> {
+        let coords = self.pos.next()?;
+        let rank = self.extent.rank_of_coords(&coords).ok()?;
         Some(Point {
-            coords: self.pos.next()?,
+            rank,
             extent: self.extent.clone(),
         })
     }
@@ -268,52 +360,155 @@ pub enum PointError {
         actual: usize,
     },
 
-    /// The point is out of range for the extent.
-    #[error("out of range: size of extent is {size}; does not contain rank {rank}")]
-    OutOfRange { size: usize, rank: usize },
+    /// The provided rank is outside the valid range for the extent.
+    ///
+    /// Ranks are the linearized row-major indices of all points in
+    /// the extent, spanning the half-open interval `[0, total)`. This
+    /// error occurs when a rank greater than or equal to `total` is
+    /// requested.
+    #[error("out of range: total ranks {total}; does not contain rank {rank}")]
+    OutOfRangeRank {
+        /// The total number of valid ranks in the extent.
+        total: usize,
+        /// The rank that was requested but not valid.
+        rank: usize,
+    },
+
+    /// A coordinate index is outside the valid range for its
+    /// dimension.
+    ///
+    /// Each dimension of an extent has a size `size`, with valid
+    /// indices spanning the half-open interval `[0, size)`. This
+    /// error occurs when a coordinate `index` is greater than or
+    /// equal to `size`.
+    #[error("out of range: dim size {size}; does not contain index {index}")]
+    OutOfRangeIndex {
+        /// The size of the offending dimension.
+        size: usize,
+        /// The invalid coordinate index that was requested.
+        index: usize,
+    },
 }
 
 /// `Point` represents a specific coordinate within the
-/// multi-dimensional space defined by an `Extent`.
+/// multi-dimensional space defined by an [`Extent`].
 ///
-/// Coordinate values can be accessed by indexing:
+/// A `Point` can be viewed in two equivalent ways:
+/// - **Coordinates**: a tuple of indices, one per dimension,
+///   retrievable with [`Point::coord`] and [`Point::coords`].
+/// - **Rank**: a single linearized index into the extent's row-major
+///   ordering, retrievable with [`Point::rank`].
+///
+/// Internally, a `Point` stores:
+/// - A `rank`: the row-major linearized index of this point.
+/// - An `extent`: the extent that defines its dimensionality and
+///   sizes.
+///
+/// These fields are private; use the accessor methods instead.
+///
+/// # Examples
 ///
 /// ```
 /// use ndslice::extent;
 ///
 /// let ext = extent!(zone = 2, host = 4, gpu = 8);
 /// let point = ext.point(vec![1, 2, 3]).unwrap();
-/// assert_eq!(point[0], 1);
-/// assert_eq!(point[1], 2);
-/// assert_eq!(point[2], 3);
+///
+/// // Coordinate-based access
+/// assert_eq!(point.coord(0), 1);
+/// assert_eq!(point.coord(1), 2);
+/// assert_eq!(point.coord(2), 3);
+///
+/// // Rank-based access
+/// assert_eq!(point.rank(), 1 * (4 * 8) + 2 * 8 + 3);
 /// ```
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Hash, Debug)]
 pub struct Point {
-    coords: Vec<usize>,
+    rank: usize,
     extent: Extent,
 }
 
-impl Index<usize> for Point {
-    type Output = usize;
+/// An iterator over the coordinates of a [`Point`] in row-major
+/// order.
+///
+/// Yields each coordinate component one at a time, without allocating
+/// a full coordinate vector.
+///
+/// The iteration is deterministic: the `i`-th call to `next()`
+/// returns the coordinate along axis `i`.
+///
+/// # Examples
+/// ```
+/// use ndslice::extent;
+///
+/// let ext = extent!(x = 2, y = 3);
+/// let point = ext.point(vec![1, 2]).unwrap();
+///
+/// let coords: Vec<_> = point.coords_iter().collect();
+/// assert_eq!(coords, vec![1, 2]);
+/// ```
+pub struct CoordIter<'a> {
+    sizes: &'a [usize],
+    rank: usize,
+    stride: usize,
+    axis: usize,
+}
 
-    /// Returns the coordinate value for the given dimension index.
-    /// This allows using `point[0]` syntax instead of
-    /// `point.coords()[0]`.
-    fn index(&self, dim: usize) -> &Self::Output {
-        &self.coords[dim]
+impl<'a> Iterator for CoordIter<'a> {
+    type Item = usize;
+
+    /// Computes and returns the coordinate for the current axis, then
+    /// advances the iterator.
+    ///
+    /// Returns `None` once all dimensions have been exhausted.
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.axis >= self.sizes.len() {
+            return None;
+        }
+        self.stride /= self.sizes[self.axis];
+        let q = self.rank / self.stride;
+        self.rank %= self.stride;
+        self.axis += 1;
+        Some(q)
+    }
+
+    /// Returns the exact number of coordinates remaining.
+    ///
+    /// Since the dimensionality of the [`Point`] is known up front,
+    /// this always returns `(n, Some(n))` where `n` is the number of
+    /// axes not yet yielded.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.sizes.len().saturating_sub(self.axis);
+        (rem, Some(rem))
     }
 }
 
+impl ExactSizeIterator for CoordIter<'_> {}
+
 impl<'a> IntoIterator for &'a Point {
     type Item = usize;
-    type IntoIter = std::iter::Cloned<std::slice::Iter<'a, usize>>;
+    type IntoIter = CoordIter<'a>;
 
-    /// Iterates over the coordinate values of this point.
+    /// Iterate over the coordinate values of a [`Point`] (without
+    /// allocating).
     ///
-    /// This allows using `for coord in &point { ... }` syntax to
-    /// iterate through each dimension's coordinate value.
+    /// This allows using a `Point` directly in a `for` loop:
+    ///
+    /// ```
+    /// use ndslice::extent;
+    ///
+    /// let ext = extent!(x = 2, y = 3);
+    /// let point = ext.point(vec![1, 2]).unwrap();
+    ///
+    /// let coords: Vec<_> = (&point).into_iter().collect();
+    /// assert_eq!(coords, vec![1, 2]);
+    ///
+    /// for coord in &point {
+    ///     println!("{}", coord);
+    /// }
+    /// ```
     fn into_iter(self) -> Self::IntoIter {
-        self.coords.iter().cloned()
+        self.coords_iter()
     }
 }
 
@@ -353,64 +548,115 @@ impl InExtent for Vec<usize> {
 }
 
 impl Point {
-    /// Returns a reference to the coordinate vector for this point.
-    pub fn coords(&self) -> &Vec<usize> {
-        &self.coords
+    pub fn coords_iter(&self) -> CoordIter<'_> {
+        CoordIter {
+            sizes: self.extent.sizes(),
+            rank: self.rank,
+            stride: self.extent.sizes().iter().product(),
+            axis: 0,
+        }
     }
 
-    /// Returns a reference to the extent associated with this point.
+    /// Returns the coordinate of this [`Point`] along the given axis.
+    ///
+    /// The axis index `i` must be less than the number of dimensions
+    /// in the [`Extent`], otherwise this function will panic.
+    /// Computes only the `i`-th coordinate from the point's row-major
+    /// `rank`, avoiding materialization of the full coordinate
+    /// vector.
+    ///
+    /// # Examples
+    /// ```
+    /// use ndslice::extent;
+    ///
+    /// let ext = extent!(x = 2, y = 3);
+    /// let point = ext.point(vec![1, 2]).unwrap();
+    /// assert_eq!(point.coord(0), 1); // x
+    /// assert_eq!(point.coord(1), 2); // y
+    /// ```
+    pub fn coord(&self, i: usize) -> usize {
+        self.coords_iter()
+            .nth(i)
+            .expect("coord(i): axis out of bounds")
+    }
+
+    /// Returns the full coordinate vector for this [`Point`]
+    /// (allocates).
+    ///
+    /// The vector contains one coordinate per dimension of the
+    /// [`Extent`], reconstructed from the point's row-major `rank`.
+    ///
+    /// # Examples
+    /// ```
+    /// use ndslice::extent;
+    ///
+    /// let ext = extent!(x = 2, y = 3);
+    /// let point = ext.point(vec![1, 2]).unwrap();
+    /// assert_eq!(point.coords(), vec![1, 2]);
+    /// ```
+    pub fn coords(&self) -> Vec<usize> {
+        self.coords_iter().collect()
+    }
+
+    /// Returns the linearized row-major rank of this [`Point`] within
+    /// its [`Extent`].
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    /// Returns the [`Extent`] that defines the coordinate space of
+    /// this [`Point`].
     pub fn extent(&self) -> &Extent {
         &self.extent
     }
 
-    /// Computes the row-major logical rank of this point within its
-    /// extent.
+    /// Returns the number of dimensions in this [`Point`]'s
+    /// [`Extent`].
     ///
-    /// ```text
-    /// Σ (coord[i] × ∏(sizes[j] for j > i))
+    /// This corresponds to the dimensionality of the coordinate
+    /// space, i.e. how many separate axes (labels) are present.
+    ///
+    /// # Examples
     /// ```
+    /// use ndslice::extent;
     ///
-    /// where `coord` is the point's coordinate and `sizes` is the
-    /// extent's dimension sizes.
-    pub fn rank(&self) -> usize {
-        let mut stride = 1;
-        let mut result = 0;
-        for (c, size) in self
-            .coords
-            .iter()
-            .rev()
-            .zip(self.extent().sizes().iter().rev())
-        {
-            result += *c * stride;
-            stride *= size;
-        }
-
-        result
-    }
-
-    /// The dimensionality of this point.
+    /// let ext = extent!(x = 2, y = 3, z = 4);
+    /// let point = ext.point(vec![1, 2, 3]).unwrap();
+    /// assert_eq!(point.len(), 3); // x, y, z
+    /// ```
     pub fn len(&self) -> usize {
-        self.coords.len()
+        self.extent.len()
     }
 
-    /// Is this the 0d constant `[]`?
+    /// Returns `true` if this [`Point`] lies in a 0-dimensional
+    /// [`Extent`].
+    ///
+    /// A 0-D extent has no coordinate axes and exactly one valid
+    /// point (the empty tuple `[]`).
+    ///
+    /// # Examples
+    /// ```
+    /// use ndslice::extent;
+    ///
+    /// let ext = extent!();
+    /// let point = ext.point(vec![]).unwrap();
+    /// assert!(point.is_empty());
+    /// assert_eq!(point.len(), 0);
+    /// ```
     pub fn is_empty(&self) -> bool {
-        self.coords.is_empty()
+        self.extent.len() == 0
     }
 }
 
 impl std::fmt::Display for Point {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let n = self.coords.len();
-        for i in 0..n {
-            write!(
-                f,
-                "{}={}/{}",
-                self.extent.labels()[i],
-                self.coords[i],
-                self.extent.sizes()[i]
-            )?;
-            if i != n - 1 {
+        let labels = self.extent.labels();
+        let sizes = self.extent.sizes();
+        let coords = self.coords();
+
+        for i in 0..labels.len() {
+            write!(f, "{}={}/{}", labels[i], coords[i], sizes[i])?;
+            if i + 1 != labels.len() {
                 write!(f, ",")?;
             }
         }
@@ -885,15 +1131,14 @@ mod test {
         let p6 = extent.point_of_rank(6 * 5 + 1).unwrap();
         assert_eq!(p6.coords(), &[1, 0, 1]);
         assert_eq!(p6.rank(), 6 * 5 + 1);
-        assert_eq!(p6[0], 1);
-        assert_eq!(p6[1], 0);
-        assert_eq!(p6[2], 1);
+        assert_eq!(p6.coord(0), 1);
+        assert_eq!(p6.coord(1), 0);
+        assert_eq!(p6.coord(2), 1);
 
         assert_eq!(extent.points().collect::<Vec<_>>().len(), 4 * 5 * 6);
         for (rank, point) in extent.points().enumerate() {
-            let &[x, y, z] = &**point.coords() else {
-                panic!("invalid coords");
-            };
+            let c = point.coords();
+            let (x, y, z) = (c[0], c[1], c[2]);
             assert_eq!(z + y * 6 + x * 6 * 5, rank);
             assert_eq!(point.rank(), rank);
         }
@@ -1002,9 +1247,9 @@ mod test {
         let extent = Extent::new(vec!["x".into(), "y".into(), "z".into()], vec![4, 5, 6]).unwrap();
         let point = extent.point(vec![1, 2, 3]).unwrap();
 
-        assert_eq!(point[0], 1);
-        assert_eq!(point[1], 2);
-        assert_eq!(point[2], 3);
+        assert_eq!(point.coord(0), 1);
+        assert_eq!(point.coord(1), 2);
+        assert_eq!(point.coord(2), 3);
     }
 
     #[test]
@@ -1013,7 +1258,7 @@ mod test {
         let extent = Extent::new(vec!["x".into(), "y".into()], vec![4, 5]).unwrap();
         let point = extent.point(vec![1, 2]).unwrap();
 
-        let _ = point[5]; // Should panic
+        let _ = point.coord(5); // Should panic
     }
 
     #[test]
@@ -1167,6 +1412,7 @@ mod test {
 
     use proptest::prelude::*;
 
+    use crate::strategy::gen_extent;
     use crate::strategy::gen_slice;
 
     prop_compose! {
@@ -1185,6 +1431,23 @@ mod test {
                 region.to_string().parse::<Region>().unwrap(),
                 "failed to roundtrip region {}", region
             );
+        }
+    }
+
+    proptest! {
+        // `Point.coord(i)` and `(&Point).into_iter()` must agree with
+        // `coords()`.
+        #[test]
+        fn point_coord_and_iter_agree(extent in gen_extent(0..=4, 8)) {
+            for p in extent.points() {
+                let via_coords = p.coords();
+                let via_into_iter: Vec<_> = (&p).into_iter().collect();
+                prop_assert_eq!(via_into_iter, via_coords.clone(), "coord_iter mismatch for {}", p);
+
+                for (i, &coord) in via_coords.iter().enumerate() {
+                    prop_assert_eq!(p.coord(i), coord, "coord(i) mismatch at axis {} for {}", i, p);
+                }
+            }
         }
     }
 }
