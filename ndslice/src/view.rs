@@ -1299,13 +1299,42 @@ mod test {
     }
 
     #[test]
+    fn extent_label_helpers() {
+        let e = extent!(zone = 3, host = 2, gpu = 4);
+        for (i, (lbl, sz)) in e.iter().enumerate() {
+            assert_eq!(e.position(&lbl), Some(i));
+            assert_eq!(e.size(&lbl), Some(sz));
+        }
+        assert_eq!(e.position("nope"), None);
+        assert_eq!(e.size("nope"), None);
+    }
+
+    #[test]
     fn test_extent_0d() {
         let e = Extent::new(vec![], vec![]).unwrap();
         assert_eq!(e.num_ranks(), 1);
+
         let points: Vec<_> = e.points().collect();
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].coords(), &[]);
         assert_eq!(points[0].rank(), 0);
+
+        // Iterator invariants for 0-D point.
+        let mut it = (&points[0]).into_iter();
+        assert_eq!(it.len(), 0);
+        assert!(it.next().is_none()); // no items
+        assert!(it.next().is_none()); // fused
+    }
+
+    #[test]
+    fn extent_unity_equiv_to_0d() {
+        let e = Extent::unity();
+        assert!(e.is_empty());
+        assert_eq!(e.num_ranks(), 1);
+        let pts: Vec<_> = e.points().collect();
+        assert_eq!(pts.len(), 1);
+        assert_eq!(pts[0].rank(), 0);
+        assert!(pts[0].coords().is_empty());
     }
 
     #[test]
@@ -1410,6 +1439,21 @@ mod test {
         assert_eq!(region.values().collect::<Vec<_>>(), vec![1, 5, 9, 13]);
     }
 
+    #[test]
+    fn region_is_subset_algebra() {
+        let e = extent!(x = 5, y = 4);
+        let a = e.range("x", 1..4).unwrap(); // 3×4
+        let b = a.range("y", 1..3).unwrap(); // 3×2 (subset of a)
+        let c = e.range("x", 0..2).unwrap(); // 2×4 (overlaps, not subset of a)
+
+        assert!(b.region().is_subset(&a.region()));
+        assert!(b.region().is_subset(&e.region()));
+        assert!(a.region().is_subset(&e.region()));
+
+        assert!(!c.region().is_subset(&a.region()));
+        assert!(c.region().is_subset(&e.region()));
+    }
+
     use proptest::prelude::*;
 
     use crate::strategy::gen_extent;
@@ -1447,6 +1491,106 @@ mod test {
                 for (i, &coord) in via_coords.iter().enumerate() {
                     prop_assert_eq!(p.coord(i), coord, "coord(i) mismatch at axis {} for {}", i, p);
                 }
+            }
+        }
+
+        // `points().count()` must equal `num_ranks()`.
+        #[test]
+        fn points_count_matches_num_ranks(extent in gen_extent(0..=4, 8)) {
+            let c = extent.points().count();
+            prop_assert_eq!(c, extent.num_ranks(), "count {} != num_ranks {}", c, extent.num_ranks());
+        }
+
+        // `CoordIter` must report an exact size, decreasing by one on
+        // each iteration, ending at zero, and yield the same sequence
+        // as `coords()`.
+        #[test]
+        fn coord_iter_exact_size_invariants(extent in gen_extent(0..=4, 8)) {
+            for p in extent.points() {
+                let mut it = (&p).into_iter();
+
+                // Initial length matches dimensionality; size_hint
+                // agrees.
+                let mut remaining = p.len();
+                prop_assert_eq!(it.len(), remaining);
+                prop_assert_eq!(it.size_hint(), (remaining, Some(remaining)));
+
+                // Track yielded coords to compare with p.coords()
+                let mut yielded = Vec::with_capacity(remaining);
+
+                // len() decreases by 1 per step; size_hint stays
+                // consistent.
+                while let Some(v) = it.next() {
+                    yielded.push(v);
+                    remaining -= 1;
+                    prop_assert_eq!(it.len(), remaining);
+                    prop_assert_eq!(it.size_hint(), (remaining, Some(remaining)));
+                }
+
+                // Exhausted: zero remaining, fused behavior (keeps
+                // returning None).
+                prop_assert_eq!(remaining, 0);
+                prop_assert!(it.next().is_none());
+                prop_assert!(it.next().is_none());
+
+                // Sequence equals full coords() reconstruction.
+                prop_assert_eq!(yielded, p.coords());
+            }
+        }
+
+        // `rank_of_coords` must reject coordinate vectors of the
+        // wrong length with a `PointError::DimMismatch` that reports
+        // both the expected and actual dimensionality.
+        #[test]
+        fn rank_of_coords_dim_mismatch(extent in gen_extent(0..=4, 8)) {
+            let want = extent.len();
+            // Pick a wrong coords length for the extent.
+            let wrong = if want == 0 { 1 } else { want - 1 };
+            let bad = vec![0usize; wrong];
+
+            match extent.rank_of_coords(&bad).unwrap_err() {
+                PointError::DimMismatch { expected, actual } => {
+                    prop_assert_eq!(expected, want, "expected len mismatch");
+                    prop_assert_eq!(actual, wrong, "actual len mismatch");
+                }
+                other => prop_assert!(false, "expected DimMismatch, got {:?}", other),
+            }
+        }
+
+        // `rank_of_coords` must reject coordinates with an index ≥
+        // the dimension's size, producing
+        // `PointError::OutOfRangeIndex` that reports both the
+        // dimension size and the offending index.
+        #[test]
+        fn rank_of_coords_out_of_range_index(extent in gen_extent(1..=4, 8)) {
+            // `extent` has at least 1 dim here.
+            let sizes = extent.sizes().to_vec();
+            // Start with a valid zero vector.
+            let mut coords = vec![0usize; sizes.len()];
+            // Bump one axis out of range.
+            let axis = 0usize;
+            coords[axis] = sizes[axis];
+
+            match extent.rank_of_coords(&coords).unwrap_err() {
+                PointError::OutOfRangeIndex { size, index } => {
+                    prop_assert_eq!(size, sizes[axis], "reported size mismatch");
+                    prop_assert_eq!(index, sizes[axis], "reported index mismatch");
+                }
+                other => prop_assert!(false, "expected OutOfRangeIndex, got {:?}", other),
+            }
+        }
+
+        /// `point_of_rank` must reject `rank == num_ranks()` (first OOB),
+        /// returning `OutOfRangeRank` with the correct fields.
+        #[test]
+        fn point_of_rank_out_of_range(extent in gen_extent(0..=4, 8)) {
+            let total = extent.num_ranks(); // first invalid rank
+            match extent.point_of_rank(total).unwrap_err() {
+                PointError::OutOfRangeRank { total: t, rank: r } => {
+                    prop_assert_eq!(t, total, "reported total mismatch");
+                    prop_assert_eq!(r, total, "reported rank mismatch");
+                }
+                other => prop_assert!(false, "expected OutOfRangeRank, got {:?}", other),
             }
         }
     }
