@@ -11,6 +11,7 @@ import io
 import pdb  # noqa
 import socket
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from typing import Dict, TYPE_CHECKING
@@ -29,31 +30,41 @@ class DebuggerWrite:
     lineno: int | None
 
 
+@contextmanager
+def _debug_controller_request_ctx():
+    try:
+        with fake_sync_state():
+            yield
+    except Exception as e:
+        raise bdb.BdbQuit from e
+
+
 class PdbWrapper(pdb.Pdb):
     def __init__(
         self,
         rank: int,
         coords: Dict[str, int],
         actor_id: ActorId,
-        client_ref: "DebugController",
+        controller: "DebugController",
         header: str | None = None,
     ):
         self.rank = rank
         self.coords = coords
         self.header = header
         self.actor_id = actor_id
-        self.client_ref = client_ref
+        self.controller = controller
         # pyre-ignore
         super().__init__(stdout=WriteWrapper(self), stdin=ReadWrapper.create(self))
         self._first = True
 
     def set_trace(self, frame=None):
-        self.client_ref.debugger_session_start.broadcast(
-            self.rank,
-            self.coords,
-            socket.getfqdn(socket.gethostname()),
-            self.actor_id.actor_name,
-        )
+        with _debug_controller_request_ctx():
+            self.controller.debugger_session_start.call_one(
+                self.rank,
+                self.coords,
+                socket.getfqdn(socket.gethostname()),
+                self.actor_id.actor_name,
+            ).get()
         if self.header:
             self.message(self.header)
         super().set_trace(frame)
@@ -70,9 +81,10 @@ class PdbWrapper(pdb.Pdb):
             super().do_clear(arg)
 
     def end_debug_session(self):
-        self.client_ref.debugger_session_end.broadcast(
-            self.actor_id.actor_name, self.rank
-        )
+        with _debug_controller_request_ctx():
+            self.controller.debugger_session_end.call_one(
+                self.actor_id.actor_name, self.rank
+            ).get()
         # Once the debug client actor is notified of the session being over,
         # we need to prevent any additional requests being sent for the session
         # by redirecting stdin and stdout.
@@ -91,8 +103,8 @@ class ReadWrapper(io.RawIOBase):
         self.session = session
 
     def readinto(self, b):
-        with fake_sync_state():
-            response = self.session.client_ref.debugger_read.call_one(
+        with _debug_controller_request_ctx():
+            response = self.session.controller.debugger_read.call_one(
                 self.session.actor_id.actor_name, self.session.rank, len(b)
             ).get()
             if response == "detach":
@@ -128,15 +140,16 @@ class WriteWrapper:
             function = f"{inspect.getmodulename(self.session.curframe.f_code.co_filename)}.{self.session.curframe.f_code.co_name}"
             # pyre-ignore
             lineno = self.session.curframe.f_lineno
-        self.session.client_ref.debugger_write.broadcast(
-            self.session.actor_id.actor_name,
-            self.session.rank,
-            DebuggerWrite(
-                s.encode(),
-                function,
-                lineno,
-            ),
-        )
+        with _debug_controller_request_ctx():
+            self.session.controller.debugger_write.call_one(
+                self.session.actor_id.actor_name,
+                self.session.rank,
+                DebuggerWrite(
+                    s.encode(),
+                    function,
+                    lineno,
+                ),
+            ).get()
 
     def flush(self):
         pass

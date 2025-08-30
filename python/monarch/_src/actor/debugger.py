@@ -11,6 +11,7 @@ import inspect
 import logging
 import os
 import sys
+from abc import abstractmethod
 from dataclasses import dataclass
 from typing import cast, Dict, Generator, List, Optional, Tuple, Union
 
@@ -19,19 +20,94 @@ from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.pdb_wrapper import DebuggerWrite, PdbWrapper
 from monarch._src.actor.proc_mesh import get_or_spawn_controller
 from monarch._src.actor.sync_state import fake_sync_state
+from pyre_extensions import none_throws
 from tabulate import tabulate
 
 
 logger = logging.getLogger(__name__)
 
+_MONARCH_DEBUG_SERVER_HOST_ENV_VAR = "MONARCH_DEBUG_SERVER_HOST"
+_MONARCH_DEBUG_SERVER_HOST_DEFAULT = "localhost"
+_MONARCH_DEBUG_SERVER_PORT_ENV_VAR = "MONARCH_DEBUG_SERVER_PORT"
+_MONARCH_DEBUG_SERVER_PORT_DEFAULT = "27000"
+_MONARCH_DEBUG_SERVER_PROTOCOL_ENV_VAR = "MONARCH_DEBUG_SERVER_PROTOCOL"
+_MONARCH_DEBUG_SERVER_PROTOCOL_DEFAULT = "tcp"
 
-async def _debugger_input(prompt=""):
-    return await asyncio.to_thread(input, prompt)
+
+def _get_debug_server_host():
+    return os.environ.get(
+        _MONARCH_DEBUG_SERVER_HOST_ENV_VAR, _MONARCH_DEBUG_SERVER_HOST_DEFAULT
+    )
 
 
-def _debugger_output(msg):
-    sys.stdout.write(msg)
-    sys.stdout.flush()
+def _get_debug_server_port():
+    return os.environ.get(
+        _MONARCH_DEBUG_SERVER_PORT_ENV_VAR, _MONARCH_DEBUG_SERVER_PORT_DEFAULT
+    )
+
+
+def _get_debug_server_protocol():
+    return os.environ.get(
+        _MONARCH_DEBUG_SERVER_PROTOCOL_ENV_VAR, _MONARCH_DEBUG_SERVER_PROTOCOL_DEFAULT
+    )
+
+
+class DebugIO:
+    @abstractmethod
+    async def input(self, prompt: str = "") -> str: ...
+
+    @abstractmethod
+    async def output(self, msg: str) -> None: ...
+
+    @abstractmethod
+    async def quit(self) -> None: ...
+
+
+class DebugStdIO(DebugIO):
+    async def input(self, prompt: str = "") -> str:
+        return await asyncio.to_thread(input, prompt)
+
+    async def output(self, msg: str) -> None:
+        sys.stdout.write(msg)
+        sys.stdout.flush()
+
+    async def quit(self) -> None:
+        pass
+
+
+class DebugIOError(RuntimeError):
+    def __init__(self):
+        super().__init__("Error encountered during debugger I/O operation.")
+
+
+class DebugCliIO(DebugIO):
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        self._reader = reader
+        self._writer = writer
+
+    async def input(self, prompt: str = "") -> str:
+        try:
+            await self.output(prompt)
+            msg = (await self._reader.readline()).decode()
+            # Incomplete read due to EOF
+            if not msg.endswith("\n"):
+                raise RuntimeError("Unexpected end of input.")
+            # Strip the newline to be consistent with the behavior of input()
+            return msg.strip("\n")
+        except Exception as e:
+            raise DebugIOError() from e
+
+    async def output(self, msg: str) -> None:
+        try:
+            self._writer.write(msg.encode())
+            await self._writer.drain()
+        except Exception as e:
+            raise DebugIOError() from e
+
+    async def quit(self) -> None:
+        await self.output("Quitting debug session...\n")
+        self._writer.close()
+        await self._writer.wait_closed()
 
 
 @dataclass
@@ -70,15 +146,19 @@ class DebugSession:
         self._function_lineno = None
         self._need_read = False
 
-    async def _event_loop(self, line=None, suppress_output=False):
+    async def _event_loop(self, debug_io: DebugIO, line=None, suppress_output=False):
         if not suppress_output:
             # If the user had previously attached to this debug session,
             # then it would have printed various messages from the
             # message queue. When the user re-attaches, we want to
             # print out all of the output that was printed since the
             # last command sent to this session.
+            if len(self._outputs_since_last_input) > 0:
+                await debug_io.output(
+                    f"<last pdb output for {self.actor_name} {self.rank} follows>\n"
+                )
             for output in self._outputs_since_last_input:
-                _debugger_output(output.payload.decode())
+                await debug_io.output(output.payload.decode())
 
         while True:
             # When the user inputs "detach", it uses up a "read" message
@@ -95,20 +175,29 @@ class DebugSession:
                 # Return to the main outer debug loop.
                 break
             elif message == "read":
-                break_after = False
-                if line is not None:
-                    break_after = True
-                else:
-                    line = await _debugger_input()
-                if line.strip("\n") == "detach":
-                    self._need_read = True
-                    break
-                else:
-                    self._outputs_since_last_input = []
-                    await self._pending_send_to_actor.put((line + "\n").encode())
-                    line = None
-                    if break_after:
+                try:
+                    break_after = False
+                    if line is not None:
+                        break_after = True
+                    else:
+                        line = await debug_io.input()
+                    if line == "detach":
+                        self._need_read = True
                         break
+                    else:
+                        await self._pending_send_to_actor.put((line + "\n").encode())
+                        # Cancel safety: don't clear the previous outputs until we know
+                        # the actor will receive the input.
+                        self._outputs_since_last_input = []
+                        line = None
+                        if break_after:
+                            break
+                except (DebugIOError, asyncio.CancelledError):
+                    # See earlier comment about this flag. If either of the awaits inside
+                    # the try block is cancelled, we need to redo the read without actually
+                    # reinserting "read" into the message queue.
+                    self._need_read = True
+                    raise
             elif message[0] == "write":
                 output = message[1]
                 # If the user sees this output but then detaches from the session,
@@ -116,11 +205,11 @@ class DebugSession:
                 # they can be printed again when the user re-attaches.
                 self._outputs_since_last_input.append(output)
                 if not suppress_output:
-                    _debugger_output(output.payload.decode())
+                    await debug_io.output(output.payload.decode())
 
         if not suppress_output:
-            print(
-                f"Detaching from debug session for rank {self.rank} ({self.hostname})"
+            await debug_io.output(
+                f"Detaching from debug session for {self.actor_name} {self.rank} ({self.hostname})\n"
             )
 
     def get_info(self):
@@ -131,14 +220,20 @@ class DebugSession:
             self.actor_name, self.rank, self.coords, self.hostname, function, lineno
         )
 
-    async def attach(self, line=None, suppress_output=False):
+    async def attach(self, debug_io: DebugIO, line=None, suppress_output=False):
         self._active = True
         if not suppress_output:
-            print(f"Attached to debug session for rank {self.rank} ({self.hostname})")
-        self._task = asyncio.create_task(self._event_loop(line, suppress_output))
+            await debug_io.output(
+                f"Attached to debug session for {self.actor_name} {self.rank} ({self.hostname})\n"
+            )
+        self._task = asyncio.create_task(
+            self._event_loop(debug_io, line, suppress_output)
+        )
         await self._task
         if not suppress_output:
-            print(f"Detached from debug session for rank {self.rank} ({self.hostname})")
+            await debug_io.output(
+                f"Detached from debug session for {self.actor_name} {self.rank} ({self.hostname})\n"
+            )
         self._active = False
 
     async def detach(self):
@@ -380,12 +475,12 @@ def _get_debug_input_transformer():
 
 class DebugCommand:
     @staticmethod
-    def parse(line: str) -> Union["DebugCommand", None]:
+    async def parse(debug_io: DebugIO, line: str) -> Union["DebugCommand", None]:
         try:
             tree = _get_debug_input_parser().parse(line)
             return _get_debug_input_transformer().transform(tree)
         except Exception as e:
-            print(f"Error parsing input: {e}")
+            await debug_io.output(f"Error parsing input: {e}\n")
             return None
 
 
@@ -431,6 +526,49 @@ class DebugController(Actor):
 
     def __init__(self) -> None:
         self.sessions = DebugSessions()
+        self._task_lock = asyncio.Lock()
+        self._task: asyncio.Task | None = None
+        self._debug_io: DebugIO = DebugStdIO()
+        self._server = asyncio.Future()
+        self._server_task = asyncio.create_task(self._serve())
+
+    async def _serve(self) -> None:
+        try:
+            if (proto := _get_debug_server_protocol()) != "tcp":
+                raise NotImplementedError(
+                    f"Network protocol {proto} not yet supported."
+                )
+            server = await asyncio.start_server(
+                self._handle_client,
+                _get_debug_server_host(),
+                _get_debug_server_port(),
+            )
+            async with server:
+                self._server.set_result(server)
+                await server.serve_forever()
+        except Exception as e:
+            if self._server.done():
+                self._server = asyncio.Future()
+            self._server.set_exception(e)
+            raise
+
+    async def _handle_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        # Make sure only one external debug process can
+        # be attached at a time. If a new request is
+        # received, the current task is cancelled.
+        async with self._task_lock:
+            if self._task is not None:
+                self._task.cancel()
+                try:
+                    await none_throws(self._task)
+                except (DebugIOError, asyncio.CancelledError):
+                    pass
+            self._debug_io = DebugCliIO(reader, writer)
+            self._task = asyncio.create_task(self._enter())
 
     @endpoint
     async def wait_pending_session(self):
@@ -438,85 +576,90 @@ class DebugController(Actor):
             await asyncio.sleep(1)
 
     @endpoint
-    async def list(self) -> List[DebugSessionInfo]:
+    async def list(self, print_output=True) -> List[DebugSessionInfo]:
         session_info = sorted(self.sessions.info())
-        print(
-            tabulate(
-                (
+        if print_output:
+            await self._debug_io.output(
+                tabulate(
                     (
-                        info.actor_name,
-                        info.rank,
-                        info.coords,
-                        info.hostname,
-                        info.function,
-                        info.lineno,
-                    )
-                    for info in session_info
-                ),
-                headers=[
-                    "Actor Name",
-                    "Rank",
-                    "Coords",
-                    "Hostname",
-                    "Function",
-                    "Line No.",
-                ],
-                tablefmt="grid",
+                        (
+                            info.actor_name,
+                            info.rank,
+                            info.coords,
+                            info.hostname,
+                            info.function,
+                            info.lineno,
+                        )
+                        for info in session_info
+                    ),
+                    headers=[
+                        "Actor Name",
+                        "Rank",
+                        "Coords",
+                        "Hostname",
+                        "Function",
+                        "Line No.",
+                    ],
+                    tablefmt="grid",
+                )
+                + "\n"
             )
-        )
         return session_info
 
-    @endpoint
-    async def enter(self) -> None:
+    async def _enter(self) -> None:
         await asyncio.sleep(0.5)
-        logger.info("Remote breakpoint hit. Entering monarch debugger...")
-        print("\n\n************************ MONARCH DEBUGGER ************************")
-        print("Enter 'help' for a list of commands.")
-        print("Enter 'list' to show all active breakpoints.\n")
+        await self._debug_io.output(
+            "\n\n************************ MONARCH DEBUGGER ************************\n"
+        )
+        await self._debug_io.output("Enter 'help' for a list of commands.\n")
+        await self._debug_io.output("Enter 'list' to show all active breakpoints.\n\n")
 
         while True:
             try:
-                user_input = await _debugger_input("monarch_dbg> ")
+                user_input = await self._debug_io.input("monarch_dbg> ")
                 if not user_input.strip():
                     continue
-                command = DebugCommand.parse(user_input)
+                command = await DebugCommand.parse(self._debug_io, user_input)
                 if isinstance(command, Help):
-                    print("monarch_dbg commands:")
-                    print("\tattach <actor_name> <rank> - attach to a debug session")
-                    print("\tlist - list all debug sessions")
-                    print("\tquit - exit the debugger, leaving all sessions in place")
-                    print(
+                    await self._debug_io.output("monarch_dbg commands:\n")
+                    await self._debug_io.output(
+                        "\tattach <actor_name> <rank> - attach to a debug session\n"
+                    )
+                    await self._debug_io.output("\tlist - list all debug sessions\n")
+                    await self._debug_io.output(
+                        "\tquit - exit the debugger, leaving all sessions in place\n"
+                    )
+                    await self._debug_io.output(
                         "\tcast <actor_name> ranks(...) <command> - send a command to a set of ranks on the specified actor mesh.\n"
                         "\t\tThe value inside ranks(...) can be a single rank (ranks(1)),\n"
                         "\t\ta list of ranks (ranks(1,4,6)), a range of ranks (ranks(start?:stop?:step?)),\n"
-                        "\t\tor a dict of dimensions (ranks(dim1=1:5:2,dim2=3, dim4=(3,6)))."
+                        "\t\tor a dict of dimensions (ranks(dim1=1:5:2,dim2=3, dim4=(3,6))).\n"
                     )
-                    print(
-                        "\tcontinue - tell all ranks to continue execution, then exit the debugger"
+                    await self._debug_io.output(
+                        "\tcontinue - clear all breakpoints and tell all ranks to continue\n"
                     )
-                    print("\thelp - print this help message")
+                    await self._debug_io.output("\thelp - print this help message\n")
                 elif isinstance(command, Attach):
-                    await self.sessions.get(command.actor_name, command.rank).attach()
+                    await self.sessions.get(command.actor_name, command.rank).attach(
+                        self._debug_io
+                    )
                 elif isinstance(command, ListCommand):
                     # pyre-ignore
                     await self.list._method(self)
                 elif isinstance(command, Continue):
-                    # Clear all breakpoints and make sure all ranks have
-                    # exited their debug sessions. If we sent "quit", it
-                    # would raise BdbQuit, crashing the process, which
-                    # probably isn't what we want.
                     await self._cast_input_and_wait("clear")
-                    while len(self.sessions) > 0:
-                        await self._cast_input_and_wait("c")
-                    return
+                    await self._cast_input_and_wait("c")
                 elif isinstance(command, Quit):
+                    await self._debug_io.quit()
                     return
                 elif isinstance(command, Cast):
                     await self._cast_input_and_wait(
                         command.command, (command.actor_name, command.ranks)
                     )
+            except (DebugIOError, asyncio.CancelledError):
+                raise
             except Exception as e:
-                print(f"Error processing command: {e}")
+                await self._debug_io.output(f"Error processing command: {e}\n")
 
     async def _cast_input_and_wait(
         self,
@@ -525,7 +668,7 @@ class DebugController(Actor):
     ) -> None:
         tasks = []
         for session in self.sessions.iter(selection):
-            tasks.append(session.attach(command, suppress_output=True))
+            tasks.append(session.attach(self._debug_io, command, suppress_output=True))
         await asyncio.gather(*tasks)
 
     ##########################################################################
@@ -537,6 +680,13 @@ class DebugController(Actor):
     async def debugger_session_start(
         self, rank: int, coords: Dict[str, int], hostname: str, actor_name: str
     ) -> None:
+        # Good enough for now to ensure that if the server for processing
+        # user interactions never starts, then the rank being debugged will
+        # fail instead of hanging indefinitely with no way to send it commands.
+        # Of course this isn't sufficient to handle the case where the server
+        # fails after the rank's debug session has successfully started.
+        # TODO: implement a heartbeat to prevent pdb sessions from hanging.
+        await self._server
         # Create a session if it doesn't exist
         if (actor_name, rank) not in self.sessions:
             self.sessions.insert(DebugSession(rank, coords, hostname, actor_name))
