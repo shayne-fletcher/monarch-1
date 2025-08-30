@@ -20,7 +20,6 @@ from typing import Generator, Optional
 from unittest import mock
 
 import cloudpickle
-import pytest
 
 import torch
 import torch.distributed as dist
@@ -595,7 +594,6 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                     AllocSpec(AllocConstraints(), host=1, gpu=1)
                 ).initialized
 
-    @pytest.mark.oss_skip  # pyre-ignore[56] TODO T228752279
     async def test_torchx_remote_alloc_initializer_no_match_label_1_mesh(self) -> None:
         server = ServerSpec(
             name=UNUSED,
@@ -606,12 +604,12 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                     name="x",
                     num_hosts=1,
                     transport="tcp",
-                    hostnames=["localhost"],
+                    hostnames=["0.0.0.0"],
                 )
             ],
         )
         port = get_free_port()
-        with remote_process_allocator(addr=f"tcp!{get_sockaddr('localhost', port)}"):
+        with remote_process_allocator(addr=f"tcp!{get_sockaddr('0.0.0.0', port)}"):
             with mock.patch(SERVER_READY, return_value=server):
                 initializer = TorchXRemoteAllocInitializer("local:///test", port=port)
                 allocator = RemoteAllocator(
@@ -626,7 +624,6 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assert_computed_world_size(results, 4)  # 1x4 mesh
 
-    @pytest.mark.oss_skip  # pyre-ignore[56] TODO T228752279
     async def test_torchx_remote_alloc_initializer_with_match_label(self) -> None:
         server = ServerSpec(
             name=UNUSED,
@@ -637,12 +634,12 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                     name="x",
                     num_hosts=1,
                     transport="tcp",
-                    hostnames=["localhost"],
+                    hostnames=["0.0.0.0"],
                 )
             ],
         )
         port = get_free_port()
-        with remote_process_allocator(addr=f"tcp!{get_sockaddr('localhost', port)}"):
+        with remote_process_allocator(addr=f"tcp!{get_sockaddr('0.0.0.0', port)}"):
             with mock.patch(SERVER_READY, return_value=server):
                 initializer = TorchXRemoteAllocInitializer("local:///test", port=port)
                 allocator = RemoteAllocator(
