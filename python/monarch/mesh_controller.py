@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from monarch.actor import ProcMesh
 
 from monarch._rust_bindings.monarch_hyperactor.shape import Point
+from monarch._src.actor.device_utils import _local_device_count
 
 from monarch.common.client import Client
 from monarch.common.controller_api import LogMessage, MessageResult
@@ -121,8 +122,17 @@ def _initialize_env(worker_point: Point, proc_id: str) -> None:
     worker_rank = worker_point.rank
     try:
         _, worker_env = _get_worker_exec_info()
-        local_rank = worker_point["gpus"]
-        gpus_per_host = worker_point.size("gpus")
+
+        if "gpus" in worker_point:
+            local_rank = worker_point["gpus"]
+            gpus_per_host = worker_point.size("gpus")
+        elif "gpu" in worker_point:
+            local_rank = worker_point["gpu"]
+            gpus_per_host = worker_point.size("gpu")
+        else:
+            gpus_per_host = _local_device_count()
+            local_rank = worker_rank % gpus_per_host
+
         num_worker_procs = worker_point.extent.nelements
         process_env = {
             **worker_env,
