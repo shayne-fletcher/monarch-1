@@ -8,7 +8,7 @@ import monarch
 import pytest
 import torch
 from monarch import remote
-from monarch.actor import Actor, as_endpoint, endpoint, proc_mesh
+from monarch.actor import Actor, as_endpoint, endpoint, proc_mesh, this_host
 from monarch.mesh_controller import spawn_tensor_engine
 
 

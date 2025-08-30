@@ -72,18 +72,20 @@ from monarch.tools.config.workspace import Workspace
 from monarch.tools.utils import conda as conda_utils
 
 
-HAS_TENSOR_ENGINE = False
-try:
-    # Torch is needed for tensor engine
-    import torch  # @manual
+@cache
+def _has_tensor_engine() -> bool:
+    try:
+        # Torch is needed for tensor engine
+        import torch  # @manual
 
-    # Confirm that rust bindings were built with tensor engine enabled
-    from monarch._rust_bindings.rdma import _RdmaManager  # noqa
+        # Confirm that rust bindings were built with tensor engine enabled
+        from monarch._rust_bindings.rdma import _RdmaManager  # noqa
 
-    # type: ignore[16]
-    HAS_TENSOR_ENGINE = torch.cuda.is_available()
-except ImportError:
-    logging.warning("Tensor engine is not available on this platform")
+        # type: ignore[16]
+        return torch.cuda.is_available()
+    except ImportError:
+        logging.warning("Tensor engine is not available on this platform")
+        return False
 
 
 if TYPE_CHECKING:
@@ -364,6 +366,9 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
     ) -> T:
         return self._spawn_nonblocking_on(self._proc_mesh, name, Class, *args, **kwargs)
 
+    def to_table(self) -> str:
+        return self._device_mesh.to_table()
+
     def _spawn_nonblocking_on(
         self,
         pm: "Shared[HyProcMesh]",
@@ -394,7 +399,7 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
 
     @property
     def _device_mesh(self) -> "DeviceMesh":
-        if not HAS_TENSOR_ENGINE:
+        if not _has_tensor_engine():
             raise RuntimeError(
                 "DeviceMesh is not available because tensor_engine was not compiled (USE_TENSOR_ENGINE=0)"
             )
