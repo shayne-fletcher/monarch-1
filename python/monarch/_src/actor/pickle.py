@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-unsafe
+
 import io
 import pickle
 from contextlib import contextmanager, ExitStack
@@ -15,6 +17,29 @@ try:
     import torch  # @manual
 except ImportError:
     torch = None
+
+
+_orig_function_getstate = cloudpickle.cloudpickle._function_getstate
+
+
+# To ensure that the debugger and tracebacks work on remote hosts
+# running code that was pickled by value, we need to monkeypatch
+# cloudpickle to set the `__loader__` attribute inside `__globals__`
+# for the unpickled function. That way, when the remote host tries
+# to load the source code for the function, it will use the RemoteImportLoader
+# to retrieve the source code from the root client, where it *ostensibly*
+# exists.
+def _function_getstate(func):
+    from monarch._src.actor.source_loader import RemoteImportLoader
+
+    state, slotstate = _orig_function_getstate(func)
+    slotstate["__globals__"]["__loader__"] = RemoteImportLoader(
+        func.__code__.co_filename
+    )
+    return state, slotstate
+
+
+cloudpickle.cloudpickle._function_getstate = _function_getstate
 
 
 class _Pickler(cloudpickle.Pickler):

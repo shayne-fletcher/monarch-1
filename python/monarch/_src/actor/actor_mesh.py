@@ -64,6 +64,7 @@ from monarch._rust_bindings.monarch_hyperactor.selection import Selection as HyS
 from monarch._rust_bindings.monarch_hyperactor.shape import Point as HyPoint, Shape
 from monarch._rust_bindings.monarch_hyperactor.supervision import SupervisionError
 from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
+from monarch._src.actor.debugger.pdb_wrapper import PdbWrapper
 from monarch._src.actor.endpoint import (
     Endpoint,
     EndpointProperty,
@@ -73,7 +74,6 @@ from monarch._src.actor.endpoint import (
     Selection,
 )
 from monarch._src.actor.future import DeprecatedNotAFuture, Future
-from monarch._src.actor.pdb_wrapper import PdbWrapper
 from monarch._src.actor.pickle import flatten, unflatten
 from monarch._src.actor.python_extension_methods import rust_struct
 from monarch._src.actor.shape import MeshTrait, NDSlice
@@ -870,7 +870,7 @@ class _Actor:
         DebugContext.set(DebugContext())
 
     def _post_mortem_debug(self, exc_tb) -> None:
-        from monarch._src.actor.debugger import debug_controller
+        from monarch._src.actor.debugger.debugger import debug_controller
 
         if (pdb_wrapper := DebugContext.get().pdb_wrapper) is not None:
             with fake_sync_state():

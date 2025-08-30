@@ -17,6 +17,8 @@ import sys
 from typing import cast, List, Optional, Tuple
 from unittest.mock import AsyncMock, patch
 
+import cloudpickle
+
 import monarch
 import monarch.actor as actor
 
@@ -24,7 +26,7 @@ import pytest
 
 import torch
 from monarch._src.actor.actor_mesh import Actor, ActorError, current_rank, IN_PAR
-from monarch._src.actor.debugger import (
+from monarch._src.actor.debugger.debugger import (
     _MONARCH_DEBUG_SERVER_HOST_ENV_VAR,
     _MONARCH_DEBUG_SERVER_PORT_ENV_VAR,
     Attach,
@@ -42,6 +44,7 @@ from monarch._src.actor.debugger import (
 )
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.proc_mesh import proc_mesh
+from monarch._src.actor.source_loader import SourceLoaderController
 
 from pyre_extensions import none_throws
 
@@ -231,9 +234,9 @@ async def test_debug() -> None:
     output_mock = AsyncMock()
     output_mock.side_effect = _patch_output
 
-    with patch("monarch._src.actor.debugger.DebugStdIO.input", new=input_mock), patch(
-        "monarch._src.actor.debugger.DebugStdIO.output", new=output_mock
-    ):
+    with patch(
+        "monarch._src.actor.debugger.debugger.DebugStdIO.input", new=input_mock
+    ), patch("monarch._src.actor.debugger.debugger.DebugStdIO.output", new=output_mock):
         proc = proc_mesh(hosts=2, gpus=2)
         debugee = await proc.spawn("debugee", DebugeeActor)
         debug_controller = actor.get_or_spawn_controller(
@@ -375,7 +378,9 @@ async def test_debug_multi_actor() -> None:
         "quit",
     ]
 
-    with patch("monarch._src.actor.debugger.DebugStdIO.input", side_effect=input_mock):
+    with patch(
+        "monarch._src.actor.debugger.debugger.DebugStdIO.input", side_effect=input_mock
+    ):
         proc = await proc_mesh(hosts=2, gpus=2)
         debugee_1 = await proc.spawn("debugee_1", DebugeeActor)
         debugee_2 = await proc.spawn("debugee_2", DebugeeActor)
@@ -1017,3 +1022,229 @@ async def test_debug_cli():
         monarch._src.actor.actor_mesh.ActorError, match="ValueError: bad rank"
     ):
         await fut
+
+
+class_closure_source = """class ClassClosure:
+    def __init__(self, arg):
+        self.arg = arg
+
+    def closure(self):
+        arg = self.arg
+
+        class Internal:
+            def __init__(self):
+                self.arg = arg
+# noqa           
+            def get_arg(self):
+                breakpoint()
+                return self.arg
+
+        return Internal
+"""
+
+function_closure_source = """def func_closure(arg, bp):
+    def func(internal):
+        if bp:
+            breakpoint()
+        return internal().get_arg() + arg
+    return func
+"""
+
+
+def load_class_closure():
+    with open(
+        os.path.join(os.environ["MONARCH_RESOURCES_DIR"], "class_closure.pkl"), "rb"
+    ) as f:
+        # Unpickle `ClassClosure(10).closure()``
+        return cloudpickle.load(f)
+
+
+def load_func_closure():
+    with open(
+        os.path.join(os.environ["MONARCH_RESOURCES_DIR"], "function_closure.pkl"), "rb"
+    ) as f:
+        # Unpickle `(func(5, True), func(5, False))`
+        return cloudpickle.load(f)
+
+
+class SourceLoaderControllerWithMockedSource(SourceLoaderController):
+    @endpoint
+    def get_source(self, filename: str) -> str:
+        if filename == "/tmp/monarch_test/class_closure.py":
+            return class_closure_source
+        elif filename == "/tmp/monarch_test/function_closure.py":
+            return function_closure_source
+        else:
+            raise ValueError(f"Test should not have requested source for {filename}")
+
+
+class ClosureDebugeeActor(Actor):
+    @endpoint
+    def debug_class_closure(self, class_closure) -> int:
+        return class_closure().get_arg()
+
+    @endpoint
+    def debug_func(self, func, class_closure) -> int:
+        return func(class_closure)
+
+
+# We have to run this test in a subprocess because it requires a special
+# instantiation of the debug controller singleton.
+@isolate_in_subprocess(
+    env={
+        "MONARCH_RESOURCES_DIR": ""
+        if not IN_PAR
+        else str(importlib.resources.files("monarch.python.tests")),
+        **debug_env,
+    }
+)
+@pytest.mark.timeout(60)
+async def test_debug_with_pickle_by_value():
+    """
+    This test tests debugger functionality when there are breakpoints in
+    code that has been pickled by value (as opposed to pickling by reference,
+    where the pickled representation is essentially just "from <module> import
+    <code>"). Cloudpickle will pickle by value for a few reasons, the primary
+    among them being:
+      - The function, class, etc. was defined in the __main__ module
+      - The function, class, etc. is a closure
+      - The function is a lambda
+    When code that was pickled by value hits a breakpoint, if the original file
+    that the code came from doesn't exist on the host, we need to do some special
+    handling inside `monarch._src.actor.debugger.pdb_wrapper` to make all the pdb
+    commands work as expected.
+
+    For this test, I created two files: /tmp/monarch_test/class_closure.py and
+    /tmp/monarch_test/function_closure.py. Their source code is contained in
+    the variables `class_closure_source` and `function_closure_source`,
+    respectively, above. In the test directory, I have saved class_closure.pkl,
+    which contains `cloudpickle.dumps(ClassClosure(10).closure())`, and
+    function_closure.pkl, which contains
+    `cloudpickle.dumps((func(5, True), func(5, False)))`.
+
+    The test unpickles these and sends them to an actor endpoint, in which
+    breakpoints will be hit and we can test the special pdb handling logic.
+    """
+
+    input_mock = AsyncMock()
+    input_mock.side_effect = [
+        "attach debugee 0",
+        "c",
+        "quit",
+        "attach debugee 0",
+        "bt",
+        "c",
+        "quit",
+        "attach debugee 0",
+        "b /tmp/monarch_test/class_closure:10",
+        "c",
+        "detach",
+        "quit",
+        "attach debugee 0",
+        "c",
+        "detach",
+        "quit",
+        "c",
+        "quit",
+    ]
+
+    outputs = []
+
+    def _patch_output(msg):
+        nonlocal outputs
+        outputs.append(msg)
+
+    output_mock = AsyncMock()
+    output_mock.side_effect = _patch_output
+
+    with patch(
+        "monarch._src.actor.debugger.debugger.DebugStdIO.input", new=input_mock
+    ), patch("monarch._src.actor.debugger.debugger.DebugStdIO.output", new=output_mock):
+        pm = proc_mesh(gpus=1, hosts=1)
+
+        debug_controller = actor.get_or_spawn_controller(
+            "debug_controller", DebugControllerForTesting
+        ).get()
+
+        # Spawn a special source loader that knows how to retrieve the source code
+        # for /tmp/monarch_test/class_closure.py and
+        # /tmp/monarch_test/function_closure.py
+        actor.get_or_spawn_controller(
+            "source_loader", SourceLoaderControllerWithMockedSource
+        ).get()
+
+        debugee = pm.spawn("debugee", ClosureDebugeeActor)
+
+        class_closure = load_class_closure()
+        func_bp_true, func_bp_false = load_func_closure()
+
+        fut = debugee.debug_class_closure.call_one(class_closure)
+        breakpoints = await _wait_for_breakpoints(debug_controller, 1)
+        assert breakpoints[0].function == "class_closure.get_arg"
+        assert breakpoints[0].lineno == 14
+
+        debug_controller.blocking_enter.call_one().get()
+
+        assert (
+            "> /tmp/monarch_test/class_closure.py(14)get_arg()\n-> return self.arg"
+            in outputs
+        )
+
+        await fut
+
+        fut = debugee.debug_func.call_one(func_bp_false, class_closure)
+        breakpoints = await _wait_for_breakpoints(debug_controller, 1)
+        assert breakpoints[0].function == "class_closure.get_arg"
+        assert breakpoints[0].lineno == 14
+
+        debug_controller.blocking_enter.call_one().get()
+
+        expected_backtrace = [
+            (
+                "  /tmp/monarch_test/function_closure.py(5)func()\n"
+                "-> return internal().get_arg() + arg"
+            ),
+            "\n",
+            "> /tmp/monarch_test/class_closure.py(14)get_arg()\n-> return self.arg",
+            "\n",
+            "(Pdb) ",
+        ]
+        start = outputs.index(expected_backtrace[0])
+        assert expected_backtrace == outputs[start : start + len(expected_backtrace)]  # noqa
+
+        await fut
+
+        fut = debugee.debug_func.call_one(func_bp_true, class_closure)
+        breakpoints = await _wait_for_breakpoints(debug_controller, 1)
+        assert breakpoints[0].function == "function_closure.func"
+        assert breakpoints[0].lineno == 5
+
+        debug_controller.blocking_enter.call_one().get()
+
+        assert (
+            "> /tmp/monarch_test/function_closure.py(5)func()\n-> return internal().get_arg() + arg"
+            in outputs
+        )
+        assert "Breakpoint 1 at /tmp/monarch_test/class_closure.py:10" in outputs
+        assert (
+            "> /tmp/monarch_test/class_closure.py(10)__init__()\n-> self.arg = arg"
+            in outputs
+        )
+
+        breakpoints = await _wait_for_breakpoints(debug_controller, 1)
+        assert breakpoints[0].function == "class_closure.__init__"
+        assert breakpoints[0].lineno == 10
+
+        debug_controller.blocking_enter.call_one().get()
+
+        breakpoints = await _wait_for_breakpoints(debug_controller, 1)
+        assert breakpoints[0].function == "class_closure.get_arg"
+        assert breakpoints[0].lineno == 14
+
+        debug_controller.blocking_enter.call_one().get()
+
+        breakpoints = debug_controller.list.call_one().get()
+        assert len(breakpoints) == 0
+
+        await fut
+        await pm.stop()

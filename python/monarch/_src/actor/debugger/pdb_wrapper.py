@@ -8,6 +8,8 @@
 import bdb
 import inspect
 import io
+import linecache
+import os
 import pdb  # noqa
 import socket
 import sys
@@ -20,7 +22,7 @@ from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._src.actor.sync_state import fake_sync_state
 
 if TYPE_CHECKING:
-    from monarch._src.actor.debugger import DebugController
+    from monarch._src.actor.debugger.debugger import DebugController
 
 
 @dataclass
@@ -79,6 +81,30 @@ class PdbWrapper(pdb.Pdb):
             super().clear_all_breaks()
         else:
             super().do_clear(arg)
+
+    def lookupmodule(self, filename):
+        filename = super().lookupmodule(filename)
+        if (
+            filename is not None
+            and not os.path.exists(filename)
+            and filename not in linecache.cache
+        ):
+            from monarch._src.actor.actor_mesh import ActorError
+            from monarch._src.actor.source_loader import load_remote_source
+
+            try:
+                with fake_sync_state():
+                    source = load_remote_source(filename)
+                    if source:
+                        linecache.cache[filename] = (
+                            len(source),
+                            None,
+                            source.splitlines(keepends=True),
+                            filename,
+                        )
+            except ActorError as e:
+                self.error(f"Failed querying root client host for source code: {e}")
+        return filename
 
     def end_debug_session(self):
         with _debug_controller_request_ctx():

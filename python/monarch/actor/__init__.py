@@ -23,7 +23,7 @@ from monarch._src.actor.actor_mesh import (
     send,
     ValueMesh,
 )
-from monarch._src.actor.debugger import debug_controller
+from monarch._src.actor.debugger.debugger import debug_controller
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
 
