@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 
 from typing import Dict, Generator, Sequence, Tuple, Union
 
-from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
+from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Shape, Slice
 
 from typing_extensions import Self
 
@@ -223,6 +223,10 @@ class MeshTrait(ABC):
     @property
     def sizes(self) -> dict[str, int]:
         return dict(zip(self._labels, self._ndslice.sizes))
+
+    @property
+    def extent(self) -> "Extent":
+        return Extent(self._labels, self._ndslice.sizes)
 
     def __len__(self) -> int:
         return len(self._ndslice)

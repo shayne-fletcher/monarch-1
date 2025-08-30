@@ -31,5 +31,5 @@ CLAUDE.md
 build/**
 docs/_build/**
 docs/build/**
-docs/generated/**
+docs/**/generated/**
 */sg_execution_times.rst

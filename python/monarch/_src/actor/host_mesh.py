@@ -77,6 +77,13 @@ class HostMesh(MeshTrait):
         alloc_handle = self._alloc(hosts, flat_per_host)
 
         new_extent = dict(zip(self._labels, self._ndslice.sizes))
+
+        conflicting_keys = set(per_host.keys()) & set(new_extent.keys())
+        if conflicting_keys:
+            raise ValueError(
+                f"host mesh already has dims {', '.join(sorted(conflicting_keys))}"
+            )
+
         new_extent.update(per_host)
         return ProcMesh.from_alloc(alloc_handle.reshape(new_extent), bootstrap)
 
@@ -101,3 +108,18 @@ class HostMesh(MeshTrait):
 
 def fake_in_process_host() -> "HostMesh":
     return HostMesh(Shape.unity(), LocalAllocator())
+
+
+def hosts_from_config(name: str):
+    """
+    Get the host mesh 'name' from the monarch configuration for the project.
+
+    This config can be modified so that the same code can create meshes from scheduler sources,
+    and different sizes etc.
+
+    WARNING: This function is a standin so that our getting_started example code works. The real implementation
+    needs an RFC design.
+    """
+
+    shape = Shape(["hosts"], NDSlice.new_row_major([2]))
+    return HostMesh(shape, ProcessAllocator(*_get_bootstrap_args()))

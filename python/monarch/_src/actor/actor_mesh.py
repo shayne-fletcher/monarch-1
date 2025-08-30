@@ -16,7 +16,10 @@ import logging
 import random
 import traceback
 from abc import abstractmethod, abstractproperty
+
 from dataclasses import dataclass
+from pprint import pformat
+from textwrap import indent
 from traceback import TracebackException
 from typing import (
     Any,
@@ -573,7 +576,8 @@ class ValueMesh(MeshTrait, Generic[R]):
         return iter(self.items())
 
     def __repr__(self) -> str:
-        return f"ValueMesh({self._shape})"
+        body = indent(pformat(tuple(self.items())), "  ")
+        return f"ValueMesh({self._shape.extent}):\n{body}"
 
     @property
     def _ndslice(self) -> NDSlice:
@@ -847,7 +851,6 @@ class _Actor:
             response_port.send(result)
         except Exception as e:
             self._post_mortem_debug(e.__traceback__)
-            traceback.print_exc()
             response_port.exception(ActorError(e))
         except BaseException as e:
             self._post_mortem_debug(e.__traceback__)

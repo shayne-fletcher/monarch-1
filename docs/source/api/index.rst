@@ -2,8 +2,9 @@ Python API
 ==========
 
 .. note::
-   This documents Monarch's public APIs.
+   This documents Monarch's **public APIs** - the stable, supported interfaces.
 
+   All can be imported as: ``from monarch import <name>``
 
 .. contents:: Quick Navigation
    :local:
@@ -180,3 +181,4 @@ All APIs in alphabetical order:
 * :py:func:`~monarch.timer`
 * :py:func:`~monarch.to_mesh`
 * :py:func:`~monarch.world_mesh`
+

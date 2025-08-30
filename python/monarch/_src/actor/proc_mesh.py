@@ -81,8 +81,7 @@ def _has_tensor_engine() -> bool:
         # Confirm that rust bindings were built with tensor engine enabled
         from monarch._rust_bindings.rdma import _RdmaManager  # noqa
 
-        # type: ignore[16]
-        return torch.cuda.is_available()
+        return True
     except ImportError:
         logging.warning("Tensor engine is not available on this platform")
         return False

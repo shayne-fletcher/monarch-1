@@ -20,6 +20,8 @@ from monarch._src.actor.actor_mesh import (
     current_rank,
     current_size,
     Point,
+    Port,
+    PortReceiver,
     send,
     ValueMesh,
 )
@@ -27,7 +29,12 @@ from monarch._src.actor.debugger.debugger import debug_controller
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
 
-from monarch._src.actor.host_mesh import HostMesh, this_host, this_proc
+from monarch._src.actor.host_mesh import (
+    HostMesh,
+    hosts_from_config,
+    this_host,
+    this_proc,
+)
 from monarch._src.actor.proc_mesh import (
     get_or_spawn_controller,
     local_proc_mesh,
@@ -60,4 +67,7 @@ __all__ = [
     "this_proc",
     "HostMesh",
     "context",
+    "hosts_from_config",
+    "Port",
+    "PortReceiver",
 ]

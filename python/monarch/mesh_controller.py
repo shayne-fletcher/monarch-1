@@ -212,6 +212,14 @@ class MeshClient(Client):
         # waited for the responses
         self.inner.drain_and_stop()
 
+    def _atexit(self) -> None:
+        # Calling self.shutdown may cause a deadlock if something is wrong with
+        # the networking. Or should we make shutdown() not wait indefinitely?
+        self._shutdown = True
+
+        # send shutdown message to stop other processes.
+        self.inner.stop_mesh()
+
     @property
     def _mesh_controller(self) -> Controller:
         return cast(Controller, self.inner)

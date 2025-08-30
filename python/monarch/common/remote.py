@@ -31,6 +31,7 @@ import torch
 from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Shape
 from monarch._src.actor.actor_mesh import Port
 from monarch._src.actor.endpoint import Selection
+from monarch._src.actor.future import Future
 
 from monarch.common import _coalescing, device_mesh, stream
 from monarch.common.future import Future as OldFuture
@@ -197,7 +198,7 @@ remote_identity = Remote(None, lambda x: x)
 
 def call_on_shard_and_fetch(
     remote: Endpoint[P, R], *args, shard: Dict[str, int] | None = None, **kwargs
-) -> OldFuture[R]:
+) -> Future[R]:
     # We have to flatten the tensors twice: first to discover
     # which mesh we are working on to shard it, and then again when doing the
     # dtensor_check in send. This complexity is a consequence of doing
@@ -209,17 +210,20 @@ def call_on_shard_and_fetch(
         checker.check_mesh_stream_local(device_mesh._active, stream._active)
 
         if not hasattr(checker.mesh.client, "_mesh_controller"):
-            return _old_call_on_shard_and_fetch(
-                cast("Remote[P, R]", remote),
-                *args,
-                shard=shard,
-                **kwargs,
+            return cast(
+                "Future[R]",
+                _old_call_on_shard_and_fetch(
+                    cast("Remote[P, R]", remote),
+                    *args,
+                    shard=shard,
+                    **kwargs,
+                ),
             )
 
         selected_slice = checker.mesh._process(shard)
         shard_mesh = checker.mesh._new_with_shape(Shape(["_"], selected_slice))
         with shard_mesh.activate():
-            return cast("OldFuture[R]", remote.call_one(*args, **kwargs))
+            return remote.call_one(*args, **kwargs)
 
 
 def _old_call_on_shard_and_fetch(

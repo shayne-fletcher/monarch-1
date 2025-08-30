@@ -1,8 +1,35 @@
 # Monarch 🦋
 
-**Monarch** is a distributed execution engine for PyTorch. Our overall goal is
-to deliver the high-quality user experience that people get from single-GPU
-PyTorch, but at cluster scale.
+**Monarch** is a distributed programming framework for PyTorch based on scalable
+actor messaging. It provides:
+
+1. Remote actors with scalable messaging: Actors are grouped into collections called meshes and messages can be broadcast to all members.
+2. Fault tolerance through supervision trees: Actors and processes for a tree and failures propagate up the tree, providing good default error behavior and enabling fine-grained fault recovery.
+3. Point-to-point RDMA transfers: cheap registration of any GPU or CPU memory in a process, with the one-sided tranfers based on libibverbs
+4. Distributed tensors: actors can work with tensor objects sharded across processes
+
+Monarch code imperatively describes how to create processes and actors using a simple python API:
+
+    from monarch.actor import Actor, endpoint, this_host
+
+    # spawn 8 trainer processes one for each gpu
+    training_procs = this_host().spawn_procs({"gpus": 8})
+
+
+    # define the actor to run on each process
+    class Trainer(Actor):
+        @endpoint
+        def train(self, step: int): ...
+
+
+    # create the trainers
+    trainers = training_procs.spawn("trainers", Trainer)
+
+    # tell all the trainers to to take a step
+    fut = trainers.train.call(step=0)
+
+    # wait for all trainers to complete
+    fut.get()
 
 > ⚠️ **Early Development Warning** Monarch is currently in an experimental
 > stage. You should expect bugs, incomplete features, and APIs that may change
@@ -11,28 +38,18 @@ PyTorch, but at cluster scale.
 > work. It's recommended that you signal your intention to contribute in the
 > issue tracker, either by filing a new issue or by claiming an existing one.
 
-## What is Monarch?
-
-Monarch extends PyTorch's capabilities to efficiently run on distributed systems. It maintains the familiar PyTorch API while handling the complexities of distributed execution, making it easier to scale your deep learning workloads across multiple GPUs and nodes.
-
-Key features:
-- **Familiar PyTorch API** - Use the same PyTorch code you're already familiar with
-- **Efficient Distribution** - Scale your models across multiple GPUs and nodes
-- **Simplified Communication** - Built-in primitives for distributed communication
-- **Performance Optimized** - Designed for high performance at scale
-
-**Note:** Monarch is currently only supported on Linux systems.
+Note: Monarch is currently only supported on Linux systems
 
 ## Getting Started
 
 Here are some suggested steps to get started with Monarch:
 
-1. **Learn the Basics**: Check out the [Getting Started](get_started) guide to learn the basics of Monarch
+1. **Installation**: Check out the [Install guide](installation) for getting monarch installed.
+2. **Getting Started**: The [getting started](./generated/examples/getting_started) provides an introduction to monarchs core API
 2. **Explore Examples**: Review the [Examples](./generated/examples/index) to see Monarch in action
 3. **Dive Deeper**: Explore the API Documentation for more detailed information:
     - [Python API](api/index)
     - [Rust API](rust-api)
-
 
 ```{toctree}
 :maxdepth: 2

@@ -1,8 +1,39 @@
 # Monarch 🦋
 
-**Monarch** is a distributed execution engine for PyTorch. Our overall goal is
-to deliver the high-quality user experience that people get from single-GPU
-PyTorch, but at cluster scale.
+**Monarch** is a distributed programming framework for PyTorch based on scalable
+actor messaging. It provides:
+
+1. Remote actors with scalable messaging: Actors are grouped into collections called meshes and messages can be broadcast to all members.
+2. Fault tolerance through supervision trees: Actors and processes for a tree and failures propagate up the tree, providing good default error behavior and enabling fine-grained fault recovery.
+3. Point-to-point RDMA transfers: cheap registration of any GPU or CPU memory in a process, with the one-sided tranfers based on libibverbs
+4. Distributed tensors: actors can work with tensor objects sharded across processes
+
+Monarch code imperatively describes how to create processes and actors using a simple python API:
+
+    from monarch.actor import Actor, endpoint, this_host
+
+    # spawn 8 trainer processes one for each gpu
+    training_procs = this_host().spawn_procs({"gpus": 8})
+
+
+    # define the actor to run on each process
+    class Trainer(Actor):
+        @endpoint
+        def train(self, step: int): ...
+
+
+    # create the trainers
+    trainers = training_procs.spawn("trainers", Trainer)
+
+    # tell all the trainers to to take a step
+    fut = trainers.train.call(step=0)
+
+    # wait for all trainers to complete
+    fut.get()
+
+
+
+The [introduction to monarch concepts](getting_started.html) provides an introduction to using these features.
 
 > ⚠️ **Early Development Warning** Monarch is currently in an experimental
 > stage. You should expect bugs, incomplete features, and APIs that may change

@@ -288,7 +288,7 @@ async fn ensure_mesh_healthy(unhealthy_event: &Mutex<Unhealthy<ProcEvent>>) -> R
             "proc mesh is stopped with reason: alloc is stopped".to_string(),
         )),
         Unhealthy::Crashed(event) => Err(SupervisionError::new_err(format!(
-            "proc mesh is stopped with reason: {:?}",
+            "proc mesh is stopped with reason: {}",
             event
         ))),
     }

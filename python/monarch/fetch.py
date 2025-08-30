@@ -11,9 +11,9 @@ This is a utility file for fetching a shard of a tensor from remote.
 
 from typing import cast, TypeVar
 
-from monarch.common.device_mesh import no_mesh
+from monarch.actor import Future
 
-from monarch.common.future import Future
+from monarch.common.device_mesh import no_mesh
 
 from monarch.common.remote import call_on_shard_and_fetch, remote_identity
 
