@@ -45,13 +45,17 @@ class Config:
         # workspace used to be Optional[str]
         # while we type it as class Workspace now, handle workspace=None and str for BC
         if self.workspace is None:
-            deprecation_msg = "Setting `workspace=None` is deprecated."
-            " Use `workspace=monarch.tools.config.workspace.Workspace(env=None)` instead."
+            deprecation_msg = (
+                "Setting `workspace=None` is deprecated."
+                " Use `workspace=monarch.tools.config.workspace.Workspace(env=None)` instead."
+            )
             warnings.warn(deprecation_msg, FutureWarning, stacklevel=2)
             self.workspace = Workspace.null()
         elif isinstance(self.workspace, str):
-            deprecation_msg = f"Setting `workspace='{self.workspace}'` is deprecated."
-            f" Use `workspace=monarch.tools.config.workspace.Workspace(dirs=['{self.workspace}'])` instead."
+            deprecation_msg = (
+                f"Setting `workspace='{self.workspace}'` is deprecated."
+                f" Use `workspace=monarch.tools.config.workspace.Workspace(dirs=['{self.workspace}'])` instead."
+            )
             warnings.warn(deprecation_msg, FutureWarning, stacklevel=2)
             # previous behavior (when workspace was a str pointing to the local project dir)
             # was to copy the local dir into $WORKSPACE_DIR. For example:
