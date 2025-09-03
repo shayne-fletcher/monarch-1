@@ -45,6 +45,7 @@ use ndslice::selection::ReifySlice;
 use ndslice::selection::normal;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_multipart::Part;
 use tokio::sync::mpsc;
 
 use crate::CommActor;
@@ -481,6 +482,7 @@ pub(crate) mod test_util {
         spawn = true,
         handlers = [
             Echo { cast = true },
+            Payload { cast = true },
             GetRank { cast = true },
             Error { cast = true },
             Relay,
@@ -523,6 +525,26 @@ pub(crate) mod test_util {
         async fn handle(&mut self, cx: &Context<Self>, message: Echo) -> Result<(), anyhow::Error> {
             let Echo(message, reply_port) = message;
             reply_port.send(cx, message)?;
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize, Named, Clone, Bind, Unbind)]
+    pub struct Payload {
+        pub part: Part,
+        #[binding(include)]
+        pub reply_port: PortRef<()>,
+    }
+
+    #[async_trait]
+    impl Handler<Payload> for TestActor {
+        async fn handle(
+            &mut self,
+            cx: &Context<Self>,
+            message: Payload,
+        ) -> Result<(), anyhow::Error> {
+            let Payload { reply_port, .. } = message;
+            reply_port.send(cx, ())?;
             Ok(())
         }
     }
@@ -1242,6 +1264,11 @@ mod tests {
     } // mod local
 
     mod process {
+
+        use bytes::Bytes;
+        use hyperactor::PortId;
+        use hyperactor::mailbox::MessageEnvelope;
+        use rand::Rng;
         use tokio::process::Command;
 
         use crate::alloc::process::ProcessAllocator;
@@ -1255,55 +1282,105 @@ mod tests {
         #[cfg(fbcode_build)] // we use an external binary, produced by buck
         actor_mesh_test_suite!(process_allocator());
 
-        // Set this test only for `mod process` because it leverages CODEC_MAX_FRAME_LENGTH
-        // to trigger the timeout error, and CODEC_MAX_FRAME_LENGTH only applies
-        // to NetTx/NetRx.
+        // This test is concerned with correctly reporting failures
+        // when message sizes exceed configured limits.
         #[cfg(fbcode_build)]
-        #[async_timed_test(timeout_secs = 60)]
-        async fn test_fail_sending_to_comm_actor_during_cast() {
-            let max_frame_length = 1000 * 1000 * 1000;
-            // Use temporary config for this test
+        // #[tracing_test::traced_test]
+        //#[tokio::test]
+        #[async_timed_test(timeout_secs = 30)]
+        async fn test_oversized_frames() {
+            // Reproduced from 'net.rs'.
+            #[derive(Debug, Serialize, Deserialize, PartialEq)]
+            enum Frame<M> {
+                Init(u64),
+                Message(u64, M),
+            }
+            // Calculate the frame length for the given message.
+            fn frame_length(src: &ActorId, dst: &PortId, pay: &Payload) -> usize {
+                let serialized = Serialized::serialize(pay).unwrap();
+                let envelope =
+                    MessageEnvelope::new(src.clone(), dst.clone(), serialized, Attrs::new());
+                let frame = Frame::Message(0u64, envelope);
+                let message = serde_multipart::serialize_illegal_bincode(&frame).unwrap();
+                message.frame_len()
+            }
+
+            // This process: short delivery timeout.
             let config = hyperactor::config::global::lock();
-            // Set to 1 sec because we want to timeout fast.
             let _guard1 = config.override_key(
                 hyperactor::config::MESSAGE_DELIVERY_TIMEOUT,
-                Duration::from_secs(1),
+                tokio::time::Duration::from_secs(5),
             );
+            // This process: max frame len, threshold for
+            // tracing::error!() writing frames, shared with remote.
             let _guard2 =
-                config.override_key(hyperactor::config::CODEC_MAX_FRAME_LENGTH, max_frame_length);
+                config.override_key(hyperactor::config::CODEC_MAX_FRAME_LENGTH, 1024usize);
+            // SAFETY: Ok here but generally not safe for concurrent
+            // access.
+            unsafe {
+                // Remote process: shared value for max frame length.
+                std::env::set_var("HYPERACTOR_CODEC_MAX_FRAME_LENGTH", "1024");
+            };
 
-            // One rank is enough for this test, because the timeout failure
-            // occurred in the `client->1st comm actor` channel, and thus will
-            // not be sent further to the rest of the network.
-            let extent = extent! {replica = 1 };
             let alloc = process_allocator()
                 .allocate(AllocSpec {
-                    extent,
+                    extent: extent!(replica = 1),
                     constraints: Default::default(),
                 })
                 .await
                 .unwrap();
-
             let mut proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
             let mut proc_events = proc_mesh.events().unwrap();
             let mut actor_mesh: RootActorMesh<TestActor> =
-                { proc_mesh.spawn("echo", &()).await.unwrap() };
-            let (reply_handle, _reply_receiver) = actor_mesh.open_port();
-            let payload = "a".repeat(max_frame_length + 1);
-            // Since the payload size is larger than the max frame length,
-            // the message will fail to send.
-            assert!(payload.len() > max_frame_length);
-            actor_mesh
-                .cast(
-                    proc_mesh.client(),
-                    sel!(*),
-                    Echo(payload, reply_handle.bind()),
-                )
-                .unwrap();
+                proc_mesh.spawn("ingest", &()).await.unwrap();
+            let (reply_handle, mut reply_receiver) = actor_mesh.open_port();
+            let dest = actor_mesh.get(0).unwrap();
 
-            // The undeliverable message will be turned into a proc event.
-            // Part of proc event's handling logic will forward the event
-            // to the mesh's event.
+            // Message sized to exactly max frame length.
+            let payload = Payload {
+                part: Part::from(Bytes::from(vec![0u8; 762])),
+                reply_port: reply_handle.bind(),
+            };
+            let frame_len = frame_length(
+                proc_mesh.client().actor_id(),
+                dest.port::<Payload>().port_id(),
+                &payload,
+            );
+            assert_eq!(frame_len, 1024);
+
+            // Send direct. A cast message is > 1024 bytes.
+            dest.send(proc_mesh.client(), payload).unwrap();
+            let result =
+                tokio::time::timeout(tokio::time::Duration::from_secs(2), reply_receiver.recv())
+                    .await;
+            assert!(result.is_ok(), "Operation should not time out");
+
+            // Message sized to max frame length + 1.
+            let payload = Payload {
+                part: Part::from(Bytes::from(vec![0u8; 763])),
+                reply_port: reply_handle.bind(),
+            };
+            let frame_len = frame_length(
+                proc_mesh.client().actor_id(),
+                dest.port::<Payload>().port_id(),
+                &payload,
+            );
+            assert_eq!(frame_len, 1025); // over the max frame len
+
+            // Send direct or cast. Either are guaranteed over the
+            // limit and will fail.
+            if rand::thread_rng().gen_bool(0.5) {
+                dest.send(proc_mesh.client(), payload).unwrap();
+            } else {
+                actor_mesh
+                    .cast(proc_mesh.client(), sel!(*), payload)
+                    .unwrap();
+            }
+
+            // We expect that the large message was written but the
+            // frame reader will reject it reading it back resulting
+            // in a failure to ack leading to a timeout leading to a
+            // supervision event.
             {
                 let event = proc_events.next().await.unwrap();
                 assert_matches!(event, ProcEvent::Crashed(_, _),);
