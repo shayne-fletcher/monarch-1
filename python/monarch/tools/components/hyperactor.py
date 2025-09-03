@@ -9,7 +9,8 @@ import getpass
 from typing import Optional
 
 from monarch.tools import mesh_spec
-from monarch.tools.config import UnnamedAppDef
+
+from monarch.tools.config import NOT_SET
 from monarch.tools.mesh_spec import mesh_spec_from_str
 from torchx import specs
 
@@ -18,6 +19,7 @@ _DEFAULT_MESHES = ["mesh_0:1:gpu.small"]
 _USER: str = getpass.getuser()
 
 DEFAULT_NAME: str = f"monarch-{_USER}"
+
 
 __version__ = "latest"  # TODO get version from monarch.__version_
 
@@ -28,7 +30,7 @@ def host_mesh(
     env: Optional[dict[str, str]] = None,
     port: int = mesh_spec.DEFAULT_REMOTE_ALLOCATOR_PORT,
     program: str = "monarch_bootstrap",  # installed with monarch wheel (as console script)
-) -> UnnamedAppDef:
+) -> specs.AppDef:
     """
     Args:
         name: the name of the monarch server job
@@ -39,7 +41,7 @@ def host_mesh(
         program: path to the binary that the remote process allocator spawns on an allocation request
     """
 
-    appdef = UnnamedAppDef()
+    appdef = specs.AppDef(name=NOT_SET)
 
     for mesh in [mesh_spec_from_str(mesh) for mesh in meshes]:
         mesh_role = specs.Role(

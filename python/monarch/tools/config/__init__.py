@@ -7,26 +7,22 @@
 # pyre-strict
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, TYPE_CHECKING
+from typing import Any
 
 from monarch.tools.config.workspace import Workspace
 
-# Defer the import of Role to avoid requiring torchx at import time
-if TYPE_CHECKING:
-    from torchx.specs import Role
-
+# Gracefully handle cases where torchx might not be installed
+# NOTE: this can be removed once torchx.specs moves to monarch.session
+try:
+    from torchx import specs
+except ImportError:
+    pass
 
 NOT_SET: str = "__NOT_SET__"
 
 
-@dataclass
-class UnnamedAppDef:
-    """
-    A TorchX AppDef without a name.
-    """
-
-    roles: List["Role"] = field(default_factory=list)
-    metadata: Dict[str, str] = field(default_factory=dict)
+def _empty_appdef() -> "specs.AppDef":
+    return specs.AppDef(name=NOT_SET)
 
 
 @dataclass
@@ -39,7 +35,7 @@ class Config:
     scheduler_args: dict[str, Any] = field(default_factory=dict)
     workspace: Workspace = field(default_factory=Workspace.null)
     dryrun: bool = False
-    appdef: UnnamedAppDef = field(default_factory=UnnamedAppDef)
+    appdef: "specs.AppDef" = field(default_factory=_empty_appdef)
 
     def __post_init__(self) -> None:
         # workspace used to be Optional[str]

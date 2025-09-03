@@ -6,12 +6,10 @@
 
 # pyre-strict
 import unittest
-from pathlib import Path
-from typing import Any, Callable
 
 from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/config/meta:defaults
     defaults,
-    UnnamedAppDef,
+    NOT_SET,
 )
 from torchx.specs import AppDef
 from torchx.specs.builders import _create_args_parser
@@ -43,7 +41,7 @@ class TestDefaults(unittest.TestCase):
             config = defaults.config(
                 scheduler,
             )
-            self.assertEqual(UnnamedAppDef(), config.appdef)
+            self.assertEqual(AppDef(name=NOT_SET), config.appdef)
 
     def test_default_scheduler_factories(self) -> None:
         # just make sure the common schedulers are present
@@ -56,23 +54,8 @@ class TestDefaults(unittest.TestCase):
 
         for scheduler in defaults.scheduler_factories():
             with self.subTest(scheduler=scheduler):
-                component_fn: Callable[..., UnnamedAppDef] = defaults.component_fn(
-                    scheduler
-                )
-
-                def _component_fn_wrapper(
-                    component_fn: Callable[..., UnnamedAppDef] = component_fn,
-                    *args: Any,
-                    **kwargs: Any,
-                ) -> AppDef:
-                    name = kwargs.pop("name", None)
-                    unnamed_appdef = component_fn(*args, **kwargs)
-                    return AppDef(
-                        name=name,
-                        roles=unnamed_appdef.roles,
-                        metadata=unnamed_appdef.metadata,
-                    )
+                component_fn = defaults.component_fn(scheduler)
 
                 # the following will fail if the component_fn is not a valid torchx component
                 with self.assertRaises(SystemExit):
-                    _create_args_parser(_component_fn_wrapper).parse_args(["--help"])
+                    _create_args_parser(component_fn).parse_args(["--help"])

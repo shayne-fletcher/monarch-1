@@ -9,8 +9,6 @@ import json
 import unittest
 from dataclasses import asdict
 
-from monarch.tools.config import UnnamedAppDef
-
 from monarch.tools.mesh_spec import (
     mesh_spec_from_metadata,
     mesh_spec_from_str,
@@ -30,7 +28,7 @@ class TestMeshSpec(unittest.TestCase):
         mesh_spec = MeshSpec(
             name="trainer", num_hosts=2, host_type="gpu.medium", gpus=2
         )
-        appdef = UnnamedAppDef()
+        appdef = specs.AppDef(name=UNUSED)
         tag_as_metadata(mesh_spec, appdef)
 
         self.assertDictEqual(
