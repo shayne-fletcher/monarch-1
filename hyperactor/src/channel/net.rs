@@ -541,6 +541,17 @@ impl<M: RemoteMessage> NetTx<M> {
                     },
                 ) if !outbox.is_empty() => {
                     let message = outbox.front_message().unwrap();
+                    let frame_len = message.frame_len();
+                    if frame_len > crate::config::global::get(crate::config::CODEC_MAX_FRAME_LENGTH)
+                    {
+                        tracing::error!(
+                            "attempt to write a message with a frame length {} exceeding the max length {}. \
+                             the frame will be rejected and ack will not arrive before timeout. \
+                             to fix this, increase the `CODEC_MAX_FRAME_LENGTH` configuration variable.",
+                            frame_len,
+                            crate::config::global::get(crate::config::CODEC_MAX_FRAME_LENGTH),
+                        );
+                    }
                     (
                         State::Running(Deliveries { outbox, unacked }),
                         Conn::Connected {

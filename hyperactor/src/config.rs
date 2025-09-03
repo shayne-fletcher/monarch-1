@@ -28,7 +28,7 @@ use crate::data::Encoding;
 // Declare configuration keys using the new attrs system with defaults
 declare_attrs! {
     /// Maximum frame length for codec
-    pub attr CODEC_MAX_FRAME_LENGTH: usize = 1024 * 1024 * 1024; // 1GB
+    pub attr CODEC_MAX_FRAME_LENGTH: usize = 10 * 1024 * 1024 * 1024; // 10 GiB
 
     /// Message delivery timeout
     pub attr MESSAGE_DELIVERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -324,10 +324,15 @@ pub mod global {
 mod tests {
     use super::*;
 
+    const CODEC_MAX_FRAME_LENGTH_DEFAULT: usize = 10 * 1024 * 1024 * 1024;
+
     #[test]
     fn test_default_config() {
         let config = Attrs::new();
-        assert_eq!(config[CODEC_MAX_FRAME_LENGTH], 1024 * 1024 * 1024);
+        assert_eq!(
+            config[CODEC_MAX_FRAME_LENGTH],
+            CODEC_MAX_FRAME_LENGTH_DEFAULT
+        );
         assert_eq!(config[MESSAGE_DELIVERY_TIMEOUT], Duration::from_secs(30));
         assert_eq!(
             config[MESSAGE_ACK_TIME_INTERVAL],
@@ -385,21 +390,20 @@ mod tests {
         // Reset global config to defaults to avoid interference from other tests
         global::reset_to_defaults();
 
-        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024 * 1024 * 1024);
+        assert_eq!(
+            global::get(CODEC_MAX_FRAME_LENGTH),
+            CODEC_MAX_FRAME_LENGTH_DEFAULT
+        );
         {
             let _guard = config.override_key(CODEC_MAX_FRAME_LENGTH, 1024);
             assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024);
-        }
-        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024 * 1024 * 1024);
-
-        {
-            let _guard = config.override_key(CODEC_MAX_FRAME_LENGTH, 1024);
-            assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024);
-
             // The configuration will be automatically restored when _guard goes out of scope
         }
 
-        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024 * 1024 * 1024);
+        assert_eq!(
+            global::get(CODEC_MAX_FRAME_LENGTH),
+            CODEC_MAX_FRAME_LENGTH_DEFAULT
+        );
     }
 
     #[test]
@@ -411,7 +415,10 @@ mod tests {
         assert!(config.is_empty());
 
         // But getters should still return the defaults from the keys
-        assert_eq!(config[CODEC_MAX_FRAME_LENGTH], 1024 * 1024 * 1024);
+        assert_eq!(
+            config[CODEC_MAX_FRAME_LENGTH],
+            CODEC_MAX_FRAME_LENGTH_DEFAULT
+        );
         assert_eq!(config[MESSAGE_DELIVERY_TIMEOUT], Duration::from_secs(30));
         assert_eq!(
             config[MESSAGE_ACK_TIME_INTERVAL],
@@ -430,7 +437,7 @@ mod tests {
         // Verify we can get defaults directly from keys
         assert_eq!(
             CODEC_MAX_FRAME_LENGTH.default(),
-            Some(&(1024 * 1024 * 1024))
+            Some(&(CODEC_MAX_FRAME_LENGTH_DEFAULT))
         );
         assert_eq!(
             MESSAGE_DELIVERY_TIMEOUT.default(),
@@ -479,7 +486,10 @@ mod tests {
         global::reset_to_defaults();
 
         // Test the new lock/override API for individual config values
-        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024 * 1024 * 1024);
+        assert_eq!(
+            global::get(CODEC_MAX_FRAME_LENGTH),
+            CODEC_MAX_FRAME_LENGTH_DEFAULT
+        );
         assert_eq!(
             global::get(MESSAGE_DELIVERY_TIMEOUT),
             Duration::from_secs(30)
@@ -496,7 +506,10 @@ mod tests {
         }
 
         // Values should be restored after guard is dropped
-        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024 * 1024 * 1024);
+        assert_eq!(
+            global::get(CODEC_MAX_FRAME_LENGTH),
+            CODEC_MAX_FRAME_LENGTH_DEFAULT
+        );
 
         // Test multiple overrides
         {
@@ -511,7 +524,10 @@ mod tests {
         }
 
         // All values should be restored
-        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024 * 1024 * 1024);
+        assert_eq!(
+            global::get(CODEC_MAX_FRAME_LENGTH),
+            CODEC_MAX_FRAME_LENGTH_DEFAULT
+        );
         assert_eq!(
             global::get(MESSAGE_DELIVERY_TIMEOUT),
             Duration::from_secs(30)
