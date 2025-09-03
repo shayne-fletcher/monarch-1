@@ -127,12 +127,22 @@ pub trait Actor: Sized + Send + Debug + 'static {
     async fn handle_undeliverable_message(
         &mut self,
         cx: &Instance<Self>,
-        Undeliverable(envelope): Undeliverable<MessageEnvelope>,
+        envelope: Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
-        assert_eq!(envelope.sender(), cx.self_id());
-
-        anyhow::bail!(UndeliverableMessageError::delivery_failure(&envelope));
+        handle_undeliverable_message(cx, envelope)
     }
+}
+
+/// Default implementation of [`Actor::handle_undeliverable_message`]. Defined
+/// as a free function so that `Actor` implementations that override
+/// [`Actor::handle_undeliverable_message`] can fallback to this default.
+pub fn handle_undeliverable_message<A: Actor>(
+    cx: &Instance<A>,
+    Undeliverable(envelope): Undeliverable<MessageEnvelope>,
+) -> Result<(), anyhow::Error> {
+    assert_eq!(envelope.sender(), cx.self_id());
+
+    anyhow::bail!(UndeliverableMessageError::delivery_failure(&envelope));
 }
 
 /// An actor that does nothing. It is used to represent "client only" actors,

@@ -536,7 +536,7 @@ impl Actor for PythonActor {
         })?;
 
         if !handled {
-            <Self as Actor>::handle_undeliverable_message(self, cx, envelope).await
+            hyperactor::actor::handle_undeliverable_message(cx, envelope)
         } else {
             Ok(())
         }

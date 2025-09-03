@@ -522,6 +522,16 @@ class Printer(Actor):
         sys.stdout.flush()
         sys.stderr.flush()
 
+    def _handle_undeliverable_message(
+        self, message: UndeliverableMessageEnvelope
+    ) -> bool:
+        # Don't throw an error on undeliverable messages. This actor is used in a test for
+        # stopping actor meshes, and if we throw an error here then there is a race between
+        # the asserted error that the mesh was stopped and the supervision error that a message
+        # wasn't delivered.
+        self._logger.error(f"Ignoring undeliverable message: {message}")
+        return True
+
 
 @pytest.mark.timeout(60)
 async def test_actor_log_streaming() -> None:
@@ -1388,9 +1398,6 @@ class UndeliverableMessageReceiver(Actor):
 
 
 class UndeliverableMessageSender(Actor):
-    def __init__(self, receiver: UndeliverableMessageReceiver):
-        self._receiver = receiver
-
     @endpoint
     def send_undeliverable(self) -> None:
         mailbox = context().actor_instance._mailbox
@@ -1406,6 +1413,11 @@ class UndeliverableMessageSender(Actor):
             PythonMessage(PythonMessageKind.Result(None), b"123"),
         )
 
+
+class UndeliverableMessageSenderWithOverride(UndeliverableMessageSender):
+    def __init__(self, receiver: UndeliverableMessageReceiver):
+        self._receiver = receiver
+
     def _handle_undeliverable_message(
         self, message: UndeliverableMessageEnvelope
     ) -> bool:
@@ -1416,15 +1428,28 @@ class UndeliverableMessageSender(Actor):
 
 
 @pytest.mark.timeout(60)
-async def test_undeliverable_message() -> None:
+async def test_undeliverable_message_with_override() -> None:
     pm = this_host().spawn_procs(per_host={"gpus": 1})
     receiver = pm.spawn("undeliverable_receiver", UndeliverableMessageReceiver)
-    sender = pm.spawn("undeliverable_sender", UndeliverableMessageSender, receiver)
+    sender = pm.spawn(
+        "undeliverable_sender", UndeliverableMessageSenderWithOverride, receiver
+    )
     sender.send_undeliverable.call().get()
     sender, dest, error_msg = receiver.get_messages.call_one().get()
     assert sender.actor_name == "undeliverable_sender"
     assert dest.actor_id.actor_name == "bogus"
     assert error_msg is not None
+    pm.stop().get()
+
+
+@pytest.mark.timeout(60)
+async def test_undeliverable_message_without_override() -> None:
+    pm = this_host().spawn_procs(per_host={"gpus": 1})
+    sender = pm.spawn("undeliverable_sender", UndeliverableMessageSender)
+    sender.send_undeliverable.call().get()
+    # Wait a few seconds to ensure that the undeliverable message is processed
+    # without crashing anything
+    await asyncio.sleep(5)
     pm.stop().get()
 
 
