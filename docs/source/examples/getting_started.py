@@ -5,8 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Monarch Getting Started Guide
-=============================
+Getting Started
+===============
 
 This guide introduces the core concepts of Monarch, a framework for building
 multi-machine training programs using actors. We'll cover:
@@ -407,7 +407,7 @@ o = torch.relu(linear.forward.rref(t))
 # further distributed computation.
 #
 # Distributed tensors also include ways of doing reductions and gathers across shards and moving tensors between processes.
-# See the guide for distributed tensors for more information including reductions across shards and moving tensors between processes.
+# See :doc:`distributed_tensors` for more information including reductions across shards and moving tensors between processes.
 # We eventually want it to be possible for an entirely training framework to be written in terms of distributed tensors.
 # However, currently the performance of messaging for distributed tensors is not optimized enough to make this practice. They are
 # still useful for interactive debugging.

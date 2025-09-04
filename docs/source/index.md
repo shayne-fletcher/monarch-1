@@ -55,10 +55,9 @@ Here are some suggested steps to get started with Monarch:
 :maxdepth: 2
 :caption: Contents
 :hidden:
-
-get_started
+installation
+./generated/examples/getting_started
 ./generated/examples/index
-books/books
 api/index
 rust-api
 ```

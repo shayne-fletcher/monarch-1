@@ -80,10 +80,6 @@ class Tensor(Referenceable, BaseTensor):
     in a device mesh. It provides the same interface as PyTorch tensors but
     enables distributed operations and communication patterns.
 
-    Args:
-        fake (torch.Tensor): A fake tensor representing the shape and type
-        mesh (DeviceMesh): The device mesh this tensor is distributed across
-        stream (Stream): The computation stream for this tensor
     """
 
     # pyre-fixme[13]: Attribute `stream` is never initialized.

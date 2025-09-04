@@ -1,4 +1,6 @@
-## Prerequisites
+## Installation
+
+### Prerequisites
 
 Before installing Monarch, ensure you have:
 
@@ -7,7 +9,6 @@ Before installing Monarch, ensure you have:
 - CUDA-compatible GPU(s)
 - Basic familiarity with PyTorch
 
-## Installation
 
 ### Quick Installation
 

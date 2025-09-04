@@ -1,4 +1,8 @@
-# Rust API
+# Internal APIs
+
+Internally monarch is implemented using a Rust library for actors called hyperactor.
+
+[This book](books/hyperactor-book/src/introduction) provides more details about its design.
 
 This page provides access to the Rust API documentation for Monarch.
 

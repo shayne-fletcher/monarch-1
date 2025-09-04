@@ -38,7 +38,6 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
     "sphinx.ext.viewcode",
-    "public_api_generator",  # Our custom extension for public API docs
 ]
 
 sphinx_gallery_conf = {

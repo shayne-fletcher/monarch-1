@@ -3,7 +3,7 @@ monarch.actor
 
 .. currentmodule:: monarch.actor
 
-The ``monarch.actor`` module provides the actor-based programming model for distributed computation.
+The ``monarch.actor`` module provides the actor-based programming model for distributed computation. See :doc:`../generated/examples/getting_started` for an overview.
 
 
 Creating Actors
@@ -39,8 +39,7 @@ Each publicly exposed function of the actor is annotated with `@endpoint`:
    :undoc-members:
    :show-inheritance:
    :inherited-members:
-
-    :exclude-members: __init__, get
+   :exclude-members: __init__, get
 
 .. autofunction:: endpoint
 

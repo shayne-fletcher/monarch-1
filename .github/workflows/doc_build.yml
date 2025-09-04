@@ -72,9 +72,6 @@ jobs:
 
         cd ..
 
-        # Verify the API sections were generated properly using dedicated script
-        python scripts/verify_api_docs.py
-
         # Copy Rust API docs to final location
         mkdir -p docs/build/html/rust-api
         cp -r target/doc/* docs/build/html/rust-api/
