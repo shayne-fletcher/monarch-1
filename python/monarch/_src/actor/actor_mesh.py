@@ -863,6 +863,7 @@ class _Actor:
                     ins.rank = ctx.message_rank
                     try:
                         self.instance = Class(*args, **kwargs)
+                        self._maybe_exit_debugger()
                     except Exception as e:
                         self._saved_error = ActorError(
                             e, f"Remote actor {Class}.__init__ call failed."
