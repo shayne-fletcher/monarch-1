@@ -9,6 +9,7 @@
 Monarch Actor API - Public interface for actor functionality.
 """
 
+from monarch._rust_bindings.monarch_hyperactor.shape import Extent
 from monarch._src.actor.actor_mesh import (
     Accumulator,
     Actor,
@@ -19,6 +20,7 @@ from monarch._src.actor.actor_mesh import (
     current_actor_name,
     current_rank,
     current_size,
+    Endpoint,
     Point,
     Port,
     PortReceiver,
@@ -70,4 +72,6 @@ __all__ = [
     "hosts_from_config",
     "Port",
     "PortReceiver",
+    "Endpoint",
+    "Extent",
 ]
