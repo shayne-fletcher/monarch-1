@@ -35,6 +35,7 @@ impl Message {
         }
     }
 
+    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         match self {
             Message::Hello(_) => true,

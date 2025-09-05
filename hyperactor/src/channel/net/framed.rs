@@ -123,7 +123,6 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
                     };
                     return Ok(Some(frame));
                 }
-                _ => panic!("impossible state"),
             }
         }
     }

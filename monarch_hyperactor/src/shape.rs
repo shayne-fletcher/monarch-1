@@ -6,8 +6,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::ops::Deref;
-
 use monarch_types::MapPyErr;
 use ndslice::Extent;
 use ndslice::Point;

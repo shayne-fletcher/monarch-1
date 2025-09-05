@@ -92,7 +92,7 @@ impl<'a> Parser<'a> {
     /// Try to parse the next token as a `T`. The token is consumed if on success.
     pub fn try_parse<T: FromStr>(&mut self) -> Result<T, ParserError> {
         let token = self.peek_or_err("a token")?;
-        let result = token.parse().map_err(|e| ParserError::WrongTokenType {
+        let result = token.parse().map_err(|_e| ParserError::WrongTokenType {
             expected_type: type_name::<T>(),
             actual: token.to_string(),
         });
@@ -120,7 +120,7 @@ impl<'a> Parser<'a> {
             .min_by_key(|&(_, v)| v)
         {
             Some((index, 0)) => Some((self.delims[index], &self.str[self.delims[index].len()..])),
-            Some((_, pos)) => Some((&self.str[..pos].trim(), &self.str[pos..])),
+            Some((_, pos)) => Some((self.str[..pos].trim(), &self.str[pos..])),
             None => Some((self.str.trim(), "")),
         }
     }
