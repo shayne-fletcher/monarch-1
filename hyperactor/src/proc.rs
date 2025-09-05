@@ -51,7 +51,6 @@ use crate::Actor;
 use crate::ActorRef;
 use crate::Handler;
 use crate::Message;
-use crate::Named;
 use crate::RemoteMessage;
 use crate::accum::ReducerSpec;
 use crate::actor::ActorError;

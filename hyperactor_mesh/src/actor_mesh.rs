@@ -1350,6 +1350,7 @@ mod tests {
 
             // Send direct. A cast message is > 1024 bytes.
             dest.send(proc_mesh.client(), payload).unwrap();
+            #[allow(clippy::disallowed_methods)]
             let result =
                 tokio::time::timeout(tokio::time::Duration::from_secs(2), reply_receiver.recv())
                     .await;

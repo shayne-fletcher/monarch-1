@@ -699,6 +699,7 @@ pub struct Region {
 }
 
 impl Region {
+    #[allow(dead_code)]
     fn empty() -> Region {
         Region {
             labels: Vec::new(),
@@ -848,6 +849,7 @@ pub trait View: Sized {
     /// Subsets this view with the provided ranks. This is mainly used
     /// by combinators on Views themselves. The set of ranks passed in
     /// must be a subset of the ranks of the base view.
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `ViewError`.
     fn subset(&self, region: Region) -> Result<Self::View, ViewError>;
 }
 
@@ -953,6 +955,7 @@ pub trait ViewExt: View {
     ///     8
     /// );
     /// ```
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `ViewError`.
     fn range<R: Into<Range>>(&self, dim: &str, range: R) -> Result<Self::View, ViewError>;
 
     /// Group by view on `dim`. The returned iterator enumerates all groups
@@ -990,16 +993,17 @@ pub trait ViewExt: View {
     ///     (extent!(host = 2, gpu = 8).point(vec![0, 0]).unwrap(), 16)
     /// );
     /// ```
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `ViewError`.
     fn group_by(&self, dim: &str) -> Result<impl Iterator<Item = Self::View>, ViewError>;
 
     /// The extent of this view. Every point in this space is defined.
     fn extent(&self) -> Extent;
 
     /// Iterate over all points in this region.
-    fn iter(&self) -> impl Iterator<Item = (Point, Self::Item)> + '_;
+    fn iter<'a>(&'a self) -> impl Iterator<Item = (Point, Self::Item)> + 'a;
 
     /// Iterate over the values in the region.
-    fn values(&self) -> impl Iterator<Item = Self::Item> + '_;
+    fn values<'a>(&'a self) -> impl Iterator<Item = Self::Item> + 'a;
 }
 
 impl<T: View> ViewExt for T {
