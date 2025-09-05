@@ -24,6 +24,7 @@ use hyperactor::proc::Proc;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 
 use crate::proc_mesh::mesh_agent::MeshAgent;
 
@@ -154,17 +155,33 @@ pub async fn bootstrap() -> anyhow::Error {
         let (serve_addr, mut rx) = channel::serve(listen_addr).await?;
         let tx = channel::dial(bootstrap_addr.clone())?;
 
-        tx.send(Process2Allocator(
-            bootstrap_index,
-            Process2AllocatorMessage::Hello(serve_addr),
-        ))
-        .await?;
-
+        let (rtx, mut return_channel) = oneshot::channel();
+        tx.try_post(
+            Process2Allocator(bootstrap_index, Process2AllocatorMessage::Hello(serve_addr)),
+            rtx,
+        )?;
         tokio::spawn(exit_if_missed_heartbeat(bootstrap_index, bootstrap_addr));
 
+        let mut the_msg;
+
+        tokio::select! {
+            msg = rx.recv() => {
+                the_msg = msg;
+            }
+            returned_msg = &mut return_channel => {
+                match returned_msg {
+                    Ok(msg) => {
+                        return Err(anyhow::anyhow!("Hello message was not delivered:{:?}", msg));
+                    }
+                    Err(_) => {
+                        the_msg = rx.recv().await;
+                    }
+                }
+            }
+        }
         loop {
             let _ = hyperactor::tracing::info_span!("wait_for_next_message_from_mesh_agent");
-            match rx.recv().await? {
+            match the_msg? {
                 Allocator2Process::StartProc(proc_id, listen_transport) => {
                     let (proc, mesh_agent) = MeshAgent::bootstrap(proc_id.clone()).await?;
                     let (proc_addr, proc_rx) =
@@ -206,6 +223,7 @@ pub async fn bootstrap() -> anyhow::Error {
                     std::process::exit(code);
                 }
             }
+            the_msg = rx.recv().await;
         }
     }
 
