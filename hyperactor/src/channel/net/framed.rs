@@ -140,15 +140,58 @@ pub struct FrameWrite<W, B> {
 
 impl<W: AsyncWrite + Unpin, B: Buf> FrameWrite<W, B> {
     /// Create a new frame writer, writing `body` to `writer`.
-    pub fn new(writer: W, body: B) -> Self {
+    ///
+    /// The frame is length-prefixed with an 8-byte big-endian `u64`.
+    ///
+    /// # Arguments
+    ///
+    /// * `writer` — the `AsyncWrite` sink to write into.
+    /// * `body` — the serialized frame body to send.
+    /// * `max_len` — maximum allowed frame length; frames larger than this
+    ///   yield an `io::ErrorKind::InvalidData`.
+    ///
+    /// # Returns
+    ///
+    /// On success, returns a new [`FrameWrite`] ready to write
+    /// `body`.
+    /// On error, returns the I/O error if the frame length exceeds
+    /// `max_len`.
+    /// frame length exceeds `max_len`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use bytes::Bytes;
+    /// use hyperactor::channel::net::framed::FrameWrite;
+    ///
+    /// // `writer` is any AsyncWrite + Unpin (e.g. a tokio `WriteHalf`)
+    /// let mut fw = FrameWrite::new(writer, Bytes::from_static(b"hello"), 1024)?;
+    /// fw.send().await?;
+    /// let writer = fw.complete();
+    /// ```
+    ///
+    /// # See also
+    ///
+    /// For a one-shot convenience wrapper, see [`write_frame`].
+    pub fn new(writer: W, body: B, max_len: usize) -> Result<Self, (W, io::Error)> {
+        let len = body.remaining();
+        if len > max_len {
+            return Err((
+                writer,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("frame length {} exceeds max {}", len, max_len),
+                ),
+            ));
+        }
         let mut len_buf = BytesMut::with_capacity(8);
-        len_buf.put_u64(body.remaining() as u64);
+        len_buf.put_u64(len as u64);
         let len_buf = len_buf.freeze();
-        Self {
+        Ok(Self {
             writer,
             len_buf,
             body,
-        }
+        })
     }
 
     /// Drive the underlying state machine. The frame is written when this
@@ -208,7 +251,7 @@ impl<W: AsyncWrite + Unpin, B: Buf> FrameWrite<W, B> {
     /// it.
     ///
     /// This is a convenience for the common pattern:
-    /// `FrameWrite::new(writer, bytes).send().await?.complete()`.
+    /// `FrameWrite::new(writer, bytes, max)?.send().await?.complete()`.
     ///
     /// Frame writes are atomic: either the entire frame is sent, or
     /// an error is returned. No partial frames are observed by the
@@ -218,12 +261,14 @@ impl<W: AsyncWrite + Unpin, B: Buf> FrameWrite<W, B> {
     ///
     /// * `writer` — the `AsyncWrite` sink to write into.
     /// * `bytes` — the serialized frame body to send.
+    /// * `max` — maximum allowed frame length; frames larger than this
+    ///   yield an `io::ErrorKind::InvalidData`.
     ///
     /// # Returns
     ///
     /// On success, returns the underlying writer so the caller can
-    /// continue using it for further frames. On error, returns the
-    /// I/O error from the underlying write.
+    /// continue using it for further frames. On error, returns both
+    /// the writer and the I/O error.
     ///
     /// # Examples
     ///
@@ -231,12 +276,16 @@ impl<W: AsyncWrite + Unpin, B: Buf> FrameWrite<W, B> {
     /// use bytes::Bytes;
     ///
     /// // `writer` is any AsyncWrite + Unpin (e.g. a tokio `WriteHalf`)
-    /// let writer = FrameWrite::write_frame(writer, Bytes::from_static(b"hello")).await?;
+    /// let writer = FrameWrite::write_frame(writer, Bytes::from_static(b"hello"), 10usize).await?;
     /// ```
-    pub async fn write_frame(writer: W, buf: B) -> std::io::Result<W> {
-        let mut fw = FrameWrite::new(writer, buf);
-        fw.send().await?;
-        Ok(fw.complete())
+    pub async fn write_frame(writer: W, buf: B, max: usize) -> Result<W, (W, io::Error)> {
+        let mut fw = FrameWrite::new(writer, buf, max)?;
+        let res = fw.send().await;
+        let writer = fw.complete();
+        match res {
+            Ok(()) => Ok(writer),
+            Err(e) => Err((writer, e)),
+        }
     }
 }
 
@@ -772,7 +821,9 @@ mod tests {
 
         for _ in 0..1024 {
             let body = random_buffer(MAX_LEN);
-            let mut frame_write = FrameWrite::new(writer.take().unwrap(), body.clone());
+            let mut frame_write = FrameWrite::new(writer.take().unwrap(), body.clone(), MAX_LEN)
+                .map_err(|(_, e)| e)
+                .unwrap();
             frame_write.send().await.unwrap();
             writer = Some(frame_write.complete());
 
@@ -783,19 +834,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_frame_smoke() {
+        const MAX_LEN: usize = 1024;
+
         let (a, b) = tokio::io::duplex(4096);
         let (r, _w_unused) = tokio::io::split(a);
         let (_r_unused, w) = tokio::io::split(b);
 
-        let mut reader = FrameReader::new(r, 1024);
+        let mut reader = FrameReader::new(r, MAX_LEN);
 
         eprintln!("write 1");
-        let w = FrameWrite::write_frame(w, Bytes::from_static(b"hello"))
+        let w = FrameWrite::write_frame(w, Bytes::from_static(b"hello"), MAX_LEN)
             .await
+            .map_err(|(_, e)| e)
             .unwrap();
         eprintln!("write 2");
-        let _ = FrameWrite::write_frame(w, Bytes::from_static(b"world"))
+        let _ = FrameWrite::write_frame(w, Bytes::from_static(b"world"), MAX_LEN)
             .await
+            .map_err(|(_, e)| e)
             .unwrap();
 
         eprintln!("read 1");
@@ -809,14 +864,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_reader_eof_at_boundary() {
+        const MAX_LEN: usize = 1024;
+
         let (a, b) = tokio::io::duplex(4096);
         let (r, _wu) = tokio::io::split(a);
         let (_ru, mut w) = tokio::io::split(b);
         let mut reader = FrameReader::new(r, 1024);
 
         // Write a complete frame.
-        w = FrameWrite::write_frame(w, Bytes::from_static(b"done"))
+        w = FrameWrite::write_frame(w, Bytes::from_static(b"done"), MAX_LEN)
             .await
+            .map_err(|(_, e)| e)
             .unwrap();
         // Now, shutdown the writer so the peer gets an EOF.
         w.shutdown().await.unwrap();
@@ -831,10 +889,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_reader_eof_mid_frame() {
+        const MAX_LEN: usize = 1024;
+
         let (a, b) = tokio::io::duplex(4096);
         let (r, _wu) = tokio::io::split(a);
         let (_ru, mut w) = tokio::io::split(b);
-        let mut reader = FrameReader::new(r, 1024);
+        let mut reader = FrameReader::new(r, MAX_LEN);
 
         // Start a frame of length 5.
         let mut len = bytes::BytesMut::with_capacity(8);
@@ -853,6 +913,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::disallowed_methods)]
     async fn test_writer_cancellation_resume() {
+        const MAX_LEN: usize = 1024 * 1024;
+
         let (a, b) = tokio::io::duplex(4096);
         let (r, _wu) = tokio::io::split(a);
         let (_ru, w) = tokio::io::split(b);
@@ -860,8 +922,10 @@ mod tests {
         let w = Throttled::new(w);
         // 256 bytes, all = 0x2A ('*'), "the answer"
         let body = Bytes::from_static(&[42u8; 256]);
-        let mut reader = FrameReader::new(r, 1024 * 1024);
-        let mut fw = FrameWrite::new(w, body.clone());
+        let mut reader = FrameReader::new(r, MAX_LEN);
+        let mut fw = FrameWrite::new(w, body.clone(), MAX_LEN)
+            .map_err(|(_, e)| e)
+            .unwrap();
 
         // Allow only the 8-byte length to be written, then cancel.
         fw.writer.set_budget(8);
@@ -903,8 +967,9 @@ mod tests {
         let mut reader = FrameReader::new(r, MAX);
 
         let bytes_written = Bytes::from(vec![0xAB; MAX]);
-        w = FrameWrite::write_frame(w, bytes_written.clone())
+        w = FrameWrite::write_frame(w, bytes_written.clone(), MAX)
             .await
+            .map_err(|(_, e)| e)
             .unwrap();
 
         let bytes_read = reader.next().await.unwrap().unwrap();
@@ -925,7 +990,10 @@ mod tests {
         let mut reader = FrameReader::new(r, MAX - 1);
 
         let bytes_written = Bytes::from(vec![0xAB; MAX]);
-        w = FrameWrite::write_frame(w, bytes_written).await.unwrap();
+        w = FrameWrite::write_frame(w, bytes_written, MAX)
+            .await
+            .map_err(|(_, e)| e)
+            .unwrap();
 
         let err = reader.next().await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
@@ -948,9 +1016,15 @@ mod tests {
         let (_ru, mut w) = tokio::io::split(b);
         let mut reader = FrameReader::new(r, MAX);
 
-        w = FrameWrite::write_frame(w, Bytes::new()).await.unwrap();
+        w = FrameWrite::write_frame(w, Bytes::new(), 0)
+            .await
+            .map_err(|(_, e)| e)
+            .unwrap();
         assert_eq!(reader.next().await.unwrap().unwrap().len(), 0);
-        w = FrameWrite::write_frame(w, Bytes::new()).await.unwrap();
+        w = FrameWrite::write_frame(w, Bytes::new(), 0)
+            .await
+            .map_err(|(_, e)| e)
+            .unwrap();
         assert_eq!(reader.next().await.unwrap().unwrap().len(), 0);
 
         w.shutdown().await.unwrap();
@@ -1104,7 +1178,7 @@ mod property_tests {
                         //   `PartialEq`).
                         {
                             let bw = BudgetedWriter::new(shared.clone(), gate.clone());
-                            let mut fw = FrameWrite::new(bw, body.clone());
+                            let mut fw = FrameWrite::new(bw, body.clone(), 1024).map_err(|(_, e)| e).unwrap();
                             async move { fw.send().await.map_err(|_| ()) }
                         },
                         Ok(()),
@@ -1231,7 +1305,7 @@ mod property_tests {
                         {
                             let bw = BudgetedWriter::new(shared.clone(), make_gate.clone());
                             let body = msg.clone().framed(); // multipart → vectored path
-                            let mut fw = FrameWrite::new(bw, body);
+                            let mut fw = FrameWrite::new(bw, body, MB).map_err(|(_, e)| e).unwrap();
                             async move { fw.send().await.map_err(|_| ()) }
                         },
                         Ok(()),
@@ -1346,7 +1420,7 @@ mod property_tests {
                         {
                             let bw = BudgetedWriter::new(shared.clone(), make_gate.clone());
                             let body = msg.clone().framed(); // may or may not be multipart
-                            let mut fw = FrameWrite::new(bw, body);
+                            let mut fw = FrameWrite::new(bw, body, MB).map_err(|(_, e)| e).unwrap();
                             async move { fw.send().await.map_err(|_| ()) }
                         },
                         Ok(()),

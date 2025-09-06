@@ -220,6 +220,28 @@ impl<M: RemoteMessage> NetTx<M> {
             }
         }
 
+        impl<M: RemoteMessage> QueuedMessage<M> {
+            /// Attempt to deserialize this queued frame as a
+            /// `Frame::Message<M>` and return it to the original
+            /// sender. Falls back to logging if the frame is not a
+            /// message or deserialization fails.
+            pub(crate) fn try_return(self) {
+                match serde_multipart::deserialize_bincode::<Frame<M>>(self.message) {
+                    Ok(Frame::Message(_, msg)) => {
+                        let _ = self.return_channel.send(msg);
+                    }
+                    Ok(_) => {
+                        tracing::debug!(
+                            "queued frame was not a Frame::Message; dropping without return"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to deserialize queued frame for return: {e}");
+                    }
+                }
+            }
+        }
+
         #[derive(Derivative)]
         #[derivative(Debug)]
         struct Outbox<'a, M: RemoteMessage> {
@@ -534,36 +556,55 @@ impl<M: RemoteMessage> NetTx<M> {
                     ),
                 },
                 (
-                    State::Running(Deliveries { outbox, unacked }),
+                    State::Running(Deliveries {
+                        mut outbox,
+                        unacked,
+                    }),
                     Conn::Connected {
                         reader,
                         write_state: WriteState::Idle(writer),
                         ..
                     },
                 ) if !outbox.is_empty() => {
-                    let message = outbox.front_message().unwrap();
-                    let frame_len = message.frame_len();
-                    if frame_len > crate::config::global::get(crate::config::CODEC_MAX_FRAME_LENGTH)
-                    {
-                        tracing::error!(
-                            "attempt to write a message with a frame length {} exceeding the max length {}. \
-                             the frame will be rejected and ack will not arrive before timeout. \
-                             to fix this, increase the `CODEC_MAX_FRAME_LENGTH` configuration variable.",
-                            frame_len,
-                            crate::config::global::get(crate::config::CODEC_MAX_FRAME_LENGTH),
-                        );
+                    let max = config::global::get(config::CODEC_MAX_FRAME_LENGTH);
+                    let len = outbox.front_size().expect("not empty");
+                    let message = outbox.front_message().expect("not empty");
+
+                    match FrameWrite::new(writer, message.framed(), max) {
+                        Ok(fw) => (
+                            State::Running(Deliveries { outbox, unacked }),
+                            Conn::Connected {
+                                reader,
+                                write_state: WriteState::Writing(fw, ()),
+                            },
+                        ),
+                        Err((writer, e)) => {
+                            debug_assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+                            tracing::error!(
+                                "rejecting oversize frame: len={} > max={}. \
+                                 ack will not arrive before timeout; increase CODEC_MAX_FRAME_LENGTH to allow.",
+                                len,
+                                max
+                            );
+                            // Reject and return.
+                            outbox.pop_front().expect("not empty").try_return();
+                            let error_msg =
+                                format!("{log_id}: oversized frame was rejected. closing channel");
+                            tracing::error!(error_msg);
+                            // Close the channel (avoid sequence
+                            // violations).
+                            (
+                                State::Closing {
+                                    deliveries: Deliveries { outbox, unacked },
+                                    reason: error_msg,
+                                },
+                                Conn::Connected {
+                                    reader,
+                                    write_state: WriteState::Idle(writer),
+                                },
+                            )
+                        }
                     }
-                    (
-                        State::Running(Deliveries { outbox, unacked }),
-                        Conn::Connected {
-                            reader,
-                            // Dequeue the next message to be sent:
-                            write_state: WriteState::Writing(
-                                FrameWrite::new(writer, message.framed()),
-                                (),
-                            ),
-                        },
-                    )
                 }
                 (
                     State::Running(Deliveries {
@@ -731,7 +772,12 @@ impl<M: RemoteMessage> NetTx<M> {
                                 let message =
                                     serialize_bincode(&Frame::<M>::Init(session_id)).unwrap();
 
-                                let mut write = FrameWrite::new(stream, message.framed());
+                                let mut write = FrameWrite::new(
+                                    stream,
+                                    message.framed(),
+                                    config::global::get(config::CODEC_MAX_FRAME_LENGTH),
+                                )
+                                .expect("enough length");
                                 let initialized = write.send().await.is_ok();
                                 let stream = write.complete();
 
@@ -815,17 +861,7 @@ impl<M: RemoteMessage> NetTx<M> {
                     .deque
                     .drain(..)
                     .chain(outbox.deque.drain(..))
-                    .filter_map(|queued_msg| {
-                        serde_multipart::deserialize_bincode(queued_msg.message.clone())
-                            .ok()
-                            .and_then(|frame| match frame {
-                                Frame::Message(_, msg) => Some((queued_msg.return_channel, msg)),
-                                _ => None,
-                            })
-                    })
-                    .for_each(|(return_channel, msg)| {
-                        let _ = return_channel.send(msg);
-                    });
+                    .for_each(|queued| queued.try_return());
                 while let Ok((msg, return_channel, _)) = receiver.try_recv() {
                     let _ = return_channel.send(msg);
                 }
@@ -1110,7 +1146,20 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
                         );
                     }
                 };
-                self.write_state = WriteState::Writing(FrameWrite::new(writer, ack), next.seq);
+                match FrameWrite::new(
+                    writer,
+                    ack,
+                    config::global::get(config::CODEC_MAX_FRAME_LENGTH),
+                ) {
+                    Ok(fw) => {
+                        self.write_state = WriteState::Writing(fw, next.seq);
+                    }
+                    Err((writer, e)) => {
+                        debug_assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+                        tracing::error!("failed to create ack frame (should be tiny): {e}");
+                        self.write_state = WriteState::Idle(writer);
+                    }
+                }
             }
 
             tokio::select! {
@@ -1253,8 +1302,11 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
             let result = async {
                 let ack = serialize_response(NetRxResponse::Ack(final_next.seq - 1))
                     .map_err(anyhow::Error::from)?;
-                self.write_state =
-                    WriteState::Writing(FrameWrite::new(writer, ack), final_next.seq);
+
+                let max = config::global::get(config::CODEC_MAX_FRAME_LENGTH);
+                let fw =
+                    FrameWrite::new(writer, ack, max).map_err(|(_, e)| anyhow::Error::from(e))?;
+                self.write_state = WriteState::Writing(fw, final_next.seq);
                 self.write_state.send().await.map_err(anyhow::Error::from)
             };
 
@@ -1280,8 +1332,22 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
             };
             match serialize_response(NetRxResponse::Reject) {
                 Ok(data) => {
-                    self.write_state = WriteState::Writing(FrameWrite::new(writer, data), 0);
-                    let _ = self.write_state.send().await;
+                    match FrameWrite::new(
+                        writer,
+                        data,
+                        config::global::get(config::CODEC_MAX_FRAME_LENGTH),
+                    ) {
+                        Ok(fw) => {
+                            self.write_state = WriteState::Writing(fw, 0);
+                            let _ = self.write_state.send().await;
+                        }
+                        Err((w, e)) => {
+                            debug_assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+                            tracing::debug!("failed to create reject frame (should be tiny): {e}");
+                            self.write_state = WriteState::Idle(w);
+                            // drop the reject; we're closing anyway
+                        }
+                    }
                 }
                 Err(_) => (),
             };
@@ -2607,7 +2673,7 @@ mod tests {
                                     }
                                 }
                             }
-                            let mut fw  = FrameWrite::new(writer, data);
+                            let mut fw  = FrameWrite::new(writer, data, config::global::get(config::CODEC_MAX_FRAME_LENGTH)).unwrap();
                             if fw.send().await.is_err() {
                                 break;
                             }
@@ -2753,7 +2819,13 @@ mod tests {
         if init {
             let message =
                 serde_multipart::serialize_bincode(&Frame::<u64>::Init(session_id)).unwrap();
-            let mut fw = FrameWrite::new(writer, message.framed());
+            let mut fw = FrameWrite::new(
+                writer,
+                message.framed(),
+                config::global::get(config::CODEC_MAX_FRAME_LENGTH),
+            )
+            .map_err(|(_w, e)| e)
+            .unwrap();
             fw.send().await.unwrap();
             writer = fw.complete();
         }
@@ -2762,7 +2834,13 @@ mod tests {
             let message =
                 serde_multipart::serialize_bincode(&Frame::<M>::Message(*seq, message.clone()))
                     .unwrap();
-            let mut fw = FrameWrite::new(writer, message.framed());
+            let mut fw = FrameWrite::new(
+                writer,
+                message.framed(),
+                config::global::get(config::CODEC_MAX_FRAME_LENGTH),
+            )
+            .map_err(|(_w, e)| e)
+            .unwrap();
             fw.send().await.unwrap();
             writer = fw.complete();
         }
@@ -3028,8 +3106,10 @@ mod tests {
                 writer = FrameWrite::write_frame(
                     writer,
                     serialize_response(NetRxResponse::Ack(i)).unwrap(),
+                    1024,
                 )
                 .await
+                .map_err(|(_, e)| e)
                 .unwrap();
             }
             // Wait for the acks to be processed by NetTx.
@@ -3094,8 +3174,10 @@ mod tests {
                     writer = FrameWrite::write_frame(
                         writer,
                         serialize_response(NetRxResponse::Ack(1)).unwrap(),
+                        1024,
                     )
                     .await
+                    .map_err(|(_, e)| e)
                     .unwrap();
                     // Wait for the acks to be processed by NetTx.
                     RealClock.sleep(Duration::from_secs(3)).await;
@@ -3155,20 +3237,26 @@ mod tests {
                     writer = FrameWrite::write_frame(
                         writer,
                         serialize_response(NetRxResponse::Ack(1)).unwrap(),
+                        1024,
                     )
                     .await
+                    .map_err(|(_, e)| e)
                     .unwrap();
                     writer = FrameWrite::write_frame(
                         writer,
                         serialize_response(NetRxResponse::Ack(2)).unwrap(),
+                        1024,
                     )
                     .await
+                    .map_err(|(_, e)| e)
                     .unwrap();
                     writer = FrameWrite::write_frame(
                         writer,
                         serialize_response(NetRxResponse::Ack(3)).unwrap(),
+                        1024,
                     )
                     .await
+                    .map_err(|(_, e)| e)
                     .unwrap();
                     // Wait for the acks to be processed by NetTx.
                     RealClock.sleep(Duration::from_secs(3)).await;
@@ -3204,8 +3292,10 @@ mod tests {
                     writer = FrameWrite::write_frame(
                         writer,
                         serialize_response(NetRxResponse::Ack(7)).unwrap(),
+                        1024,
                     )
                     .await
+                    .map_err(|(_, e)| e)
                     .unwrap();
                     // Wait for the acks to be processed by NetTx.
                     RealClock.sleep(Duration::from_secs(3)).await;
@@ -3250,10 +3340,14 @@ mod tests {
         let (mut reader, mut writer) = take_receiver(&receiver_storage).await;
         verify_stream(&mut reader, &[(0u64, 100u64)], None, line!()).await;
         // ack it
-        writer =
-            FrameWrite::write_frame(writer, serialize_response(NetRxResponse::Ack(0)).unwrap())
-                .await
-                .unwrap();
+        writer = FrameWrite::write_frame(
+            writer,
+            serialize_response(NetRxResponse::Ack(0)).unwrap(),
+            1024,
+        )
+        .await
+        .map_err(|(_, e)| e)
+        .unwrap();
         // confirm Tx received ack
         //
         // Using `is_err` to confirm the message is delivered/acked is confusing,
@@ -3264,9 +3358,14 @@ mod tests {
         // Although Tx did not actually send seq=1, we still ack it from Rx to
         // pretend Tx already sent it, just it did not know it was sent
         // successfully.
-        let _ = FrameWrite::write_frame(writer, serialize_response(NetRxResponse::Ack(1)).unwrap())
-            .await
-            .unwrap();
+        let _ = FrameWrite::write_frame(
+            writer,
+            serialize_response(NetRxResponse::Ack(1)).unwrap(),
+            1024,
+        )
+        .await
+        .map_err(|(_, e)| e)
+        .unwrap();
 
         let (return_channel_tx, return_channel_rx) = oneshot::channel();
         net_tx.try_post(101, return_channel_tx).unwrap();
@@ -3298,9 +3397,14 @@ mod tests {
         // Confirm message is sent to rx.
         verify_stream(&mut reader, &[(0u64, 100u64)], None, line!()).await;
         // ack it
-        let _ = FrameWrite::write_frame(writer, serialize_response(NetRxResponse::Ack(0)).unwrap())
-            .await
-            .unwrap();
+        let _ = FrameWrite::write_frame(
+            writer,
+            serialize_response(NetRxResponse::Ack(0)).unwrap(),
+            config::global::get(config::CODEC_MAX_FRAME_LENGTH),
+        )
+        .await
+        .map_err(|(_, e)| e)
+        .unwrap();
         RealClock.sleep(Duration::from_secs(3)).await;
         // Channel should be still alive because ack was sent.
         assert!(!tx_status.has_changed().unwrap());
@@ -3544,9 +3648,14 @@ mod tests {
 
         {
             let (_reader, writer) = take_receiver(&receiver_storage).await;
-            let _ =
-                FrameWrite::write_frame(writer, serialize_response(NetRxResponse::Reject).unwrap())
-                    .await;
+            let _ = FrameWrite::write_frame(
+                writer,
+                serialize_response(NetRxResponse::Reject).unwrap(),
+                1024,
+            )
+            .await
+            .map_err(|(_, e)| e);
+
             // Wait for response to be processed by NetTx before dropping reader/writer. Otherwise
             // the channel will be closed and we will get the wrong error.
             RealClock.sleep(tokio::time::Duration::from_secs(3)).await;

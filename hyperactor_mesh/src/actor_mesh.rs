@@ -1285,8 +1285,7 @@ mod tests {
         // This test is concerned with correctly reporting failures
         // when message sizes exceed configured limits.
         #[cfg(fbcode_build)]
-        // #[tracing_test::traced_test]
-        //#[tokio::test]
+        //#[tracing_test::traced_test]
         #[async_timed_test(timeout_secs = 30)]
         async fn test_oversized_frames() {
             // Reproduced from 'net.rs'.
@@ -1307,18 +1306,12 @@ mod tests {
 
             // This process: short delivery timeout.
             let config = hyperactor::config::global::lock();
-            let _guard1 = config.override_key(
-                hyperactor::config::MESSAGE_DELIVERY_TIMEOUT,
-                tokio::time::Duration::from_secs(5),
-            );
-            // This process: max frame len, threshold for
-            // tracing::error!() writing frames, shared with remote.
+            // This process (write): max frame len for frame writes.
             let _guard2 =
                 config.override_key(hyperactor::config::CODEC_MAX_FRAME_LENGTH, 1024usize);
-            // SAFETY: Ok here but generally not safe for concurrent
-            // access.
+            // Remote process (read): max frame len for frame reads.
+            // SAFETY: Ok here but not safe for concurrent access.
             unsafe {
-                // Remote process: shared value for max frame length.
                 std::env::set_var("HYPERACTOR_CODEC_MAX_FRAME_LENGTH", "1024");
             };
 
@@ -1378,10 +1371,8 @@ mod tests {
                     .unwrap();
             }
 
-            // We expect that the large message was written but the
-            // frame reader will reject it reading it back resulting
-            // in a failure to ack leading to a timeout leading to a
-            // supervision event.
+            // The undeliverable supervision event that happens next
+            // does not depend on a timeout.
             {
                 let event = proc_events.next().await.unwrap();
                 assert_matches!(event, ProcEvent::Crashed(_, _),);
