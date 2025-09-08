@@ -29,7 +29,6 @@
 //! - [`View`]: a collection of items indexed by [`Region`]. Views provide standard
 //!             manipulation operations and use ranks as an efficient indexing scheme.
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -299,18 +298,88 @@ impl Extent {
     }
 }
 
+/// Label formatting utilities shared across `Extent`, `Region`, and
+/// `Point`.
+///
+/// - [`is_safe_ident`] determines whether a label can be printed
+///   bare, i.e. consists only of `[A-Za-z0-9_]+`.
+/// - [`fmt_label`] returns the label unchanged if it is safe,
+///   otherwise quotes it using Rust string-literal syntax (via
+///   `format!("{:?}", s)`).
+///
+/// This ensures a consistent, unambiguous display format across all
+/// types.
+mod labels {
+    /// A "safe" identifier consists only of ASCII alphanumeric chars
+    /// or underscores (`[A-Za-z0-9_]+`). These can be displayed
+    /// without quotes.
+    pub(super) fn is_safe_ident(s: &str) -> bool {
+        s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    /// Render a label according to the quoting rule:
+    /// - Safe identifiers are returned as-is.
+    /// - Otherwise the label is quoted using Rust string literal
+    ///   syntax (via `format!("{:?}", s)`).
+    pub(super) fn fmt_label(s: &str) -> String {
+        if is_safe_ident(s) {
+            s.to_string()
+        } else {
+            format!("{:?}", s)
+        }
+    }
+}
+
+/// Formats an `Extent` as a compact map‐literal:
+/// ```text
+/// {label: size, label: size, ...}
+/// ```
+/// # Grammar
+///
+/// ```text
+/// Extent   := "{" [ Pair ( "," Pair )* ] "}"
+/// Pair     := Label ": " Size
+/// Label    := SafeIdent | Quoted
+/// SafeIdent:= [A-Za-z0-9_]+
+/// Quoted   := "\"" ( [^"\\] | "\\" . )* "\""
+/// Size     := [0-9]+
+/// ```
+///
+/// # Quoting rules
+///
+/// - Labels that are **not** `SafeIdent` are rendered using Rust
+///   string literal syntax (via `format!("{:?}", label)`), e.g.
+///   `"dim/0"` or `"x y"`.
+/// - "Safe" means ASCII alphanumeric or underscore (`[A-Za-z0-9_]+`).
+///   Everything else is quoted. This keeps common identifiers
+///   unquoted and unambiguous.
+///
+/// # Examples
+///
+/// ```text
+/// {x: 4, y: 5, z: 6}
+/// {"dim/0": 3, "dim,1": 5}
+/// {}
+/// ```
+///
+/// Implementation note: label rendering goes through `fmt_label`,
+/// which emits the label as-is for safe idents, otherwise as a Rust
+/// string literal.
 impl std::fmt::Display for Extent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let n = self.sizes().len();
         write!(f, "{{")?;
-        for i in 0..n {
-            write!(f, "'{}': {}", self.labels()[i], self.sizes()[i])?;
-            if i != n - 1 {
+        for i in 0..self.sizes().len() {
+            write!(
+                f,
+                "{}: {}",
+                labels::fmt_label(&self.labels()[i]),
+                self.sizes()[i]
+            )?;
+            if i + 1 != self.sizes().len() {
                 write!(f, ", ")?;
             }
         }
-        write!(f, "}}")?;
-        Ok(())
+        write!(f, "}}")
     }
 }
 
@@ -648,6 +717,41 @@ impl Point {
     }
 }
 
+/// Formats a `Point` as a comma-separated list of per-axis
+/// coordinates against the point’s extent:
+/// ```text
+/// label=coord/size[,label=coord/size,...]
+/// ```
+///
+/// # Grammar
+/// ```text
+/// Point    := Pair ( "," Pair )*
+/// Pair     := Label "=" Coord "/" Size
+/// Label    := SafeIdent | Quoted
+/// SafeIdent:= [A-Za-z0-9_]+
+/// Quoted   := "\"" ( [^"\\] | "\\" . )* "\""   // Rust string-literal style
+/// Coord    := [0-9]+
+/// Size     := [0-9]+
+/// ```
+///
+/// # Quoting rules
+/// - Labels that are **not** `SafeIdent` are rendered using Rust
+///   string-literal syntax (via `labels::fmt_label`), e.g. `"dim/0"` or
+///   `"x y"`.
+/// - "Safe" means ASCII alphanumeric or underscore (`[A-Za-z0-9_]+`).
+///   Everything else is quoted.
+/// - Coordinates are shown in row-major order and each is paired with
+///   that axis’s size from the point’s extent.
+///
+/// # Examples
+/// ```text
+/// x=1/4,y=2/5,z=3/6
+/// "dim/0"=1/3,"dim,1"=2/5
+/// ```
+///
+/// Implementation note: label rendering is delegated to
+/// `labels::fmt_label` to keep quoting behavior consistent with
+/// `Extent` and `Region`.
 impl std::fmt::Display for Point {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let labels = self.extent.labels();
@@ -655,7 +759,13 @@ impl std::fmt::Display for Point {
         let coords = self.coords();
 
         for i in 0..labels.len() {
-            write!(f, "{}={}/{}", labels[i], coords[i], sizes[i])?;
+            write!(
+                f,
+                "{}={}/{}",
+                labels::fmt_label(&labels[i]),
+                coords[i],
+                sizes[i]
+            )?;
             if i + 1 != labels.len() {
                 write!(f, ",")?;
             }
@@ -708,6 +818,13 @@ impl Region {
             labels: Vec::new(),
             slice: Slice::new(0, Vec::new(), Vec::new()).unwrap(),
         }
+    }
+
+    /// Crate-local constructor to build arbitrary regions (incl.
+    /// non-contiguous / offset). Keeps the public API constrained
+    /// while letting tests/strategies explore more cases.
+    pub(crate) fn new(labels: Vec<String>, slice: Slice) -> Self {
+        Self { labels, slice }
     }
 
     /// The labels of the dimensions of this region.
@@ -811,21 +928,59 @@ impl From<Extent> for Region {
     }
 }
 
+/// Formats a `Region` in a compact rectangular syntax:
+/// ```text
+/// [offset+]label=size/stride[,label=size/stride,...]
+/// ```
+/// # Grammar
+///
+/// ```text
+/// Region   := [ Offset "+" ] Pair ( "," Pair )*
+/// Offset   := [0-9]+
+/// Pair     := Label "=" Size "/" Stride
+/// Label    := SafeIdent | Quoted
+/// SafeIdent:= [A-Za-z0-9_]+
+/// Quoted   := "\"" ( [^"\\] | "\\" . )* "\""   // Rust string literal style
+/// Size     := [0-9]+
+/// Stride   := [0-9]+
+/// ```
+///
+/// # Quoting rules
+///
+/// - Labels that are **not** `SafeIdent` are rendered using Rust
+///   string-literal syntax (via `format!("{:?}", label)`).
+/// - "Safe" means ASCII alphanumeric or underscore
+///   (`[A-Za-z0-9_]+`). Everything else is quoted.
+/// - The optional `Offset+` prefix appears only when the slice offset
+///   is nonzero.
+///
+/// # Examples
+///
+/// ```text
+/// x=2/1,y=3/2
+/// 8+"dim/0"=4/1,"dim,1"=5/4
+/// ```
+///
+/// # Notes
+///
+/// This format is both human-readable and machine-parsable. The
+/// corresponding [`FromStr`] implementation accepts exactly this
+/// grammar, including quoted labels. The quoting rule makes
+/// round-trip unambiguous.
 impl std::fmt::Display for Region {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.slice.offset() != 0 {
             write!(f, "{}+", self.slice.offset())?;
         }
-        let n = self.labels.len();
-        for i in 0..n {
+        for i in 0..self.labels.len() {
             write!(
                 f,
                 "{}={}/{}",
-                self.labels[i],
+                labels::fmt_label(&self.labels[i]),
                 self.slice.sizes()[i],
                 self.slice.strides()[i]
             )?;
-            if i != n - 1 {
+            if i + 1 != self.labels.len() {
                 write!(f, ",")?;
             }
         }
@@ -842,7 +997,27 @@ pub enum RegionParseError {
     SliceError(#[from] SliceError),
 }
 
-impl FromStr for Region {
+/// Parses a `Region` from the textual form emitted by
+/// [`Display`](Self::fmt).
+///
+/// The accepted syntax and quoting rules are exactly those documented
+/// on `Display`: comma-separated `label=size/stride` pairs with an
+/// optional `offset+` prefix, and labels that are either safe
+/// identifiers or Rust string literals.
+///
+/// Returns a `RegionParseError` on malformed input.
+///
+/// # Examples
+/// ```
+/// use ndslice::view::Region;
+///
+/// let r: Region = "x=2/1,y=3/2".parse().unwrap();
+/// assert_eq!(r.labels(), &["x", "y"]);
+///
+/// let q: Region = "8+\"dim/0\"=4/1".parse().unwrap();
+/// assert_eq!(q.labels(), &["dim/0"]);
+/// ```
+impl std::str::FromStr for Region {
     type Err = RegionParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -854,15 +1029,24 @@ impl FromStr for Region {
         } else {
             0
         };
+
         let mut labels = Vec::new();
         let mut sizes = Vec::new();
         let mut strides = Vec::new();
+
         while !parser.is_empty() {
-            // Don't allow trailing commas
             if !labels.is_empty() {
                 parser.expect(",")?;
             }
-            labels.push(parser.next_or_err("label")?.to_string());
+
+            // Accept either a quoted label output or a bare token.
+            let label = if parser.peek_char() == Some('"') {
+                parser.parse_string_literal()?
+            } else {
+                parser.next_or_err("label")?.to_string()
+            };
+            labels.push(label);
+
             parser.expect("=")?;
             sizes.push(parser.try_parse()?);
             parser.expect("/")?;
@@ -1202,9 +1386,24 @@ macro_rules! extent {
 
 #[cfg(test)]
 mod test {
+    use super::labels::*;
     use super::*;
     use crate::Shape;
     use crate::shape;
+
+    #[test]
+    fn test_is_safe_ident() {
+        assert!(is_safe_ident("x"));
+        assert!(is_safe_ident("gpu_0"));
+        assert!(!is_safe_ident("dim/0"));
+        assert!(!is_safe_ident("x y"));
+        assert!(!is_safe_ident("x=y"));
+    }
+    #[test]
+    fn test_fmt_label() {
+        assert_eq!(fmt_label("x"), "x");
+        assert_eq!(fmt_label("dim/0"), "\"dim/0\"");
+    }
 
     #[test]
     fn test_points_basic() {
@@ -1390,7 +1589,10 @@ mod test {
     #[test]
     fn test_extent_display() {
         let extent = Extent::new(vec!["x".into(), "y".into(), "z".into()], vec![4, 5, 6]).unwrap();
-        assert_eq!(format!("{}", extent), "{'x': 4, 'y': 5, 'z': 6}");
+        assert_eq!(format!("{}", extent), "{x: 4, y: 5, z: 6}");
+
+        let extent = Extent::new(vec!["dim/0".into(), "dim/1".into()], vec![4, 5]).unwrap();
+        assert_eq!(format!("{}", extent), "{\"dim/0\": 4, \"dim/1\": 5}");
 
         let empty_extent = Extent::new(vec![], vec![]).unwrap();
         assert_eq!(format!("{}", empty_extent), "{}");
@@ -1446,6 +1648,19 @@ mod test {
         let empty_extent = Extent::new(vec![], vec![]).unwrap();
         let empty_point = empty_extent.point(vec![]).unwrap();
         assert_eq!(format!("{}", empty_point), "");
+    }
+
+    #[test]
+    fn test_point_display_with_quoted_labels() {
+        // Labels include characters ("/", ",") that force quoting.
+        let ext = Extent::new(vec!["dim/0".into(), "dim,1".into()], vec![3, 5]).unwrap();
+
+        // Extent::Display should quote both labels.
+        assert_eq!(format!("{}", ext), "{\"dim/0\": 3, \"dim,1\": 5}");
+
+        // Point::Display should also quote labels consistently.
+        let p = ext.point(vec![1, 2]).unwrap();
+        assert_eq!(format!("{}", p), "\"dim/0\"=1/3,\"dim,1\"=2/5");
     }
 
     #[test]
@@ -1592,24 +1807,121 @@ mod test {
     use proptest::prelude::*;
 
     use crate::strategy::gen_extent;
-    use crate::strategy::gen_slice;
-
-    prop_compose! {
-        fn gen_region()(slice in gen_slice(5, 1024)) -> Region {
-            let labels = (0..slice.num_dim()).map(|d| format!("dim{}", d)).collect();
-            Region {labels, slice}
-        }
-    }
+    use crate::strategy::gen_region;
+    use crate::strategy::gen_region_strided;
 
     proptest! {
         #[test]
-        fn test_region_parser(region in gen_region()) {
+        fn test_region_parser(region in gen_region(1..=5, 1024)) {
             // Roundtrip display->parse correctly and preserves equality.
             assert_eq!(
                 region,
                 region.to_string().parse::<Region>().unwrap(),
                 "failed to roundtrip region {}", region
             );
+        }
+    }
+
+    // Property: `Region::Display` and `FromStr` remain a lossless
+    // round-trip even when the slice has a nonzero offset.
+    //
+    // - Construct a region, then force its slice to have `offset =
+    //   8`.
+    // - Convert that region to a string via `Display`.
+    // - Parse it back via `FromStr`.
+    //
+    // The parsed region must equal the original, showing that
+    // offsets are encoded and decoded consistently in the textual
+    // format.
+    proptest! {
+        #[test]
+        fn region_parser_with_offset_roundtrips(region in gen_region(1..=4, 8)) {
+            let (labels, slice) = region.clone().into_inner();
+            let region_off = Region {
+                labels,
+                slice: Slice::new(8, slice.sizes().to_vec(), slice.strides().to_vec()).unwrap(),
+            };
+            let s = region_off.to_string();
+            let parsed: Region = s.parse().unwrap();
+            prop_assert_eq!(parsed, region_off);
+        }
+    }
+
+    // Property: For any randomly generated strided `Region`,
+    // converting it to a string with `Display` and parsing it back
+    // with `FromStr` yields the same region.
+    //
+    // This ensures that:
+    // - Strided layouts (with arbitrary steps and begins) are
+    //   faithfully represented by the textual format.
+    // - Offsets, sizes, and strides survive the round-trip without
+    //   loss.
+    // - Quoting rules for labels remain consistent.
+    proptest! {
+        #[test]
+        fn region_strided_display_parse_roundtrips(
+            region in gen_region_strided(1..=4, 6, 3, 16)
+        ) {
+            // Example: 122+"d/0"=1/30,"d/1"=5/6,"d/2"=4/1
+            //
+            // Decoding:
+            // - `122+` is the slice offset.
+            // - Each "label=size/stride" shows the post-slice size
+            //   and stride.
+            //   Sizes are reduced by `ceil((base_size - begin) /
+            //   step)`.
+            //   Strides are the base row-major strides, each
+            //   multiplied by its step.
+            let s = region.to_string();
+            let parsed: Region = s.parse().unwrap();
+            prop_assert_eq!(parsed, region);
+        }
+    }
+
+    // Property: `Region::Display` faithfully reflects its underlying
+    // `Slice`.
+    //
+    // - The offset printed as `offset+` must equal
+    //   `region.slice().offset()`.
+    // - Each `label=size/stride` entry must show the size and stride
+    //   from the underlying slice.
+    //
+    // This ensures that the textual representation is consistent
+    // with the region’s internal geometry.
+    proptest! {
+        #[test]
+        fn region_strided_display_matches_slice(
+            region in gen_region_strided(1..=4, 6, 3, 16)
+        ) {
+            let s = region.to_string();
+            let slice = region.slice();
+
+            // Check offset if present
+            if slice.offset() != 0 {
+                let prefix: Vec<_> = s.split('+').collect();
+                prop_assert!(prefix.len() > 1, "expected offset+ form in {}", s);
+                let offset_str = prefix[0];
+                let offset_val: usize = offset_str.parse().unwrap();
+                prop_assert_eq!(offset_val, slice.offset(), "offset mismatch in {}", s);
+            } else {
+                prop_assert!(!s.contains('+'), "unexpected +offset in {}", s);
+            }
+
+            // Collect all size/stride pairs from the string
+            let body = s.split('+').next_back().unwrap(); // after offset if any
+            let parts: Vec<_> = body.split(',').collect();
+            prop_assert_eq!(parts.len(), slice.sizes().len());
+
+            for (i, part) in parts.iter().enumerate() {
+                // part looks like label=size/stride
+                let rhs = part.split('=').nth(1).unwrap();
+                let mut nums = rhs.split('/');
+                let size_val: usize = nums.next().unwrap().parse().unwrap();
+                let stride_val: usize = nums.next().unwrap().parse().unwrap();
+
+                prop_assert_eq!(size_val, slice.sizes()[i], "size mismatch at dim {} in {}", i, s);
+                prop_assert_eq!(stride_val, slice.strides()[i], "stride mismatch at dim {} in {}", i, s);
+            }
         }
     }
 
