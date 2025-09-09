@@ -6,6 +6,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::mem;
+use std::mem::MaybeUninit;
+use std::ptr;
+
 use futures::Future;
 use ndslice::view;
 use ndslice::view::Region;
@@ -96,7 +100,7 @@ impl<T: Clone + 'static> view::Ranked for ValueMesh<T> {
 }
 
 // `FromIterator` cant't work for `ValueMesh`: it has no way to carry
-// the required `Region`, and it can’t fail if the iterator length
+// the required `Region`, and it can't fail if the iterator length
 // mismatches. This trait provides a "mesh-aware" collect: consume an
 // iterator and a `Region`, and build a `ValueMesh<T>` with
 // cardinality validated.
@@ -180,6 +184,170 @@ impl<I: Iterator<Item = (usize, T)>, T> TryCollectIndexedMesh<T> for I {
 
         // All present and in-bounds: unwrap and build unchecked.
         let ranks: Vec<T> = buf.into_iter().map(Option::unwrap).collect();
+        Ok(ValueMesh::new_unchecked(region, ranks))
+    }
+}
+
+/// Optimized variant of [`TryCollectIndexedMesh`].
+///
+/// Collect `(rank, value)` pairs into a `ValueMesh<T>` for `region`,
+/// using a raw buffer (`MaybeUninit<T>`) plus a compact bitset
+/// instead of `Vec<Option<T>>`. This avoids per-element `Option`
+/// overhead and extra moves, which can be important when `T` is
+/// large.
+///
+/// Semantics are identical to the reference version:
+/// - every rank `0..region.num_ranks()` must be provided exactly
+///   once,
+/// - out-of-bounds ranks (`rank >= num_ranks()`) error,
+/// - duplicates are allowed, with **last write winning**.
+pub trait TryCollectIndexedMeshOpt<T>: Iterator<Item = (usize, T)> + Sized {
+    fn try_collect_indexed_opt(self, region: view::Region) -> crate::v1::Result<ValueMesh<T>>;
+}
+
+impl<I: Iterator<Item = (usize, T)>, T> TryCollectIndexedMeshOpt<T> for I {
+    fn try_collect_indexed_opt(self, region: view::Region) -> crate::v1::Result<ValueMesh<T>> {
+        let n = region.num_ranks();
+
+        // Allocate uninitialized buffer for T.
+        // Note: Vec<MaybeUninit<T>>'s Drop will only free the
+        // allocation; it never runs T's destructor. We must
+        // explicitly drop any initialized elements (DropGuard) or
+        // convert into Vec<T>.
+        let mut buf: Vec<MaybeUninit<T>> = Vec::with_capacity(n);
+        // SAFETY: set `len = n` to treat the buffer as n uninit slots
+        // of `MaybeUninit<T>`. We never read before `ptr::write`,
+        // drop only slots marked initialized (bitset), and convert to
+        // `Vec<T>` only once all 0..n are initialized (guard enforces
+        // this).
+        unsafe {
+            buf.set_len(n);
+        }
+
+        // Compact bitset for occupancy.
+        let words = n.div_ceil(64);
+        let mut bits = vec![0u64; words];
+        let mut filled = 0usize;
+
+        // Capture raw pointers for the guard to avoid borrow
+        // conflicts.
+        let buf_ptr: *mut MaybeUninit<T> = buf.as_mut_ptr();
+        let bits_ptr: *const u64 = bits.as_ptr();
+
+        #[inline]
+        fn is_set(bits: &[u64], i: usize) -> bool {
+            (bits[i / 64] >> (i % 64)) & 1 == 1
+        }
+
+        #[inline]
+        fn set_bit(bits: &mut [u64], i: usize) -> bool {
+            let w = i / 64;
+            let b = 1u64 << (i % 64);
+            let was_set = bits[w] & b != 0;
+            bits[w] |= b;
+            !was_set
+        }
+
+        // Drop guard: cleans up initialized elements on early exit.
+        // Stores raw pointers (not `&mut`/`&`), so we don’t hold rust
+        // borrows for the whole scope. This allows mutating
+        // `buf`/`bits` inside the loop while still letting the guard
+        // access them if dropped early.
+        struct DropGuard<T> {
+            buf: *mut MaybeUninit<T>,
+            bits: *const u64,
+            n: usize,
+        }
+
+        impl<T> Drop for DropGuard<T> {
+            fn drop(&mut self) {
+                // SAFETY: `buf` points to `n` contiguous
+                // MaybeUninit<T> elements allocated above. `bits`
+                // points to the bitset that tracks which slots were
+                // initialized. We only drop slots whose bit is set.
+                // No aliasing issues: this runs at
+                // unwind/early-return.
+                for i in 0..self.n {
+                    let word = i / 64;
+                    let bit = 1u64 << (i % 64);
+                    // SAFETY: word < ceil(n/64). We only read the
+                    // bitset.
+                    let w = unsafe { *self.bits.add(word) };
+                    if (w & bit) != 0 {
+                        // SAFETY: buf.add(i) is within allocation;
+                        // that slot was initialized.
+                        unsafe { ptr::drop_in_place((*self.buf.add(i)).as_mut_ptr()) }
+                    }
+                }
+            }
+        }
+
+        let guard = DropGuard {
+            buf: buf_ptr,
+            bits: bits_ptr,
+            n,
+        };
+
+        for (rank, value) in self {
+            if rank >= n {
+                // Out-of-bounds → error
+                return Err(crate::v1::Error::InvalidRankCardinality {
+                    expected: n,
+                    actual: rank + 1,
+                });
+            }
+
+            if is_set(&bits, rank) {
+                // Duplicate: last write wins; drop old value.
+                //
+                // SAFETY: A set bit means we previously initialized
+                // `buf[rank]` via `ptr::write`, so `as_mut_ptr()`
+                // yields a valid `*mut T` for that slot. We have
+                // unique mutable access to `buf` here; the guard only
+                // holds raw pointers (no Rust borrows), so there are
+                // no aliasing conflicts. We drop the previous `T` at
+                // most once per duplicate before overwriting.
+                unsafe { ptr::drop_in_place(buf[rank].as_mut_ptr()) }
+            } else {
+                filled += 1;
+                set_bit(&mut bits, rank);
+            }
+
+            // SAFETY: writing an owned `value` into `buf[rank]`.
+            // - If the bit was clear, the slot was uninitialized so
+            //   writing is valid.
+            // - If the bit was set, we just dropped the previous `T`
+            //   so slot is uninitialized again.
+            // We have unique mutable access to `buf` here; the guard
+            // holds only raw pointers (no Rust borrows), so no
+            // aliasing. After this write, `buf[rank]` is initialized.
+            unsafe { ptr::write(buf[rank].as_mut_ptr(), value) };
+        }
+
+        if filled != n {
+            // Missing ranks: actual = number of distinct ranks seen.
+            return Err(crate::v1::Error::InvalidRankCardinality {
+                expected: n,
+                actual: filled,
+            });
+        }
+
+        // Success: prevent guard from dropping
+        mem::forget(guard);
+
+        // SAFETY: all n slots are initialized
+        let ranks = unsafe {
+            let ptr = buf.as_mut_ptr() as *mut T;
+            let len = buf.len();
+            let cap = buf.capacity();
+            // Prevent `buf` (Vec<MaybeUninit<T>>) from freeing the
+            // allocation. Ownership of the buffer is about to be
+            // transferred to `Vec<T>` via `from_raw_parts`.
+            // Forgetting avoids a double free.
+            mem::forget(buf);
+            Vec::from_raw_parts(ptr, len, cap)
+        };
+
         Ok(ValueMesh::new_unchecked(region, ranks))
     }
 }
@@ -411,4 +579,70 @@ mod tests {
 
         assert_eq!(mesh.values().collect::<Vec<_>>(), vec![7, 88, 9]);
     }
+
+    #[test]
+    fn try_collect_indexed_opt_ok_shuffled() {
+        let region: Region = extent!(x = 2, y = 3).into();
+        let pairs = vec![(3, 30), (0, 0), (5, 50), (2, 20), (1, 10), (4, 40)];
+        let mesh = pairs
+            .into_iter()
+            .try_collect_indexed_opt(region.clone())
+            .unwrap();
+
+        assert_eq!(mesh.region().num_ranks(), 6);
+        assert_eq!(
+            mesh.values().collect::<Vec<_>>(),
+            vec![0, 10, 20, 30, 40, 50]
+        );
+    }
+
+    #[test]
+    fn try_collect_indexed_opt_missing_rank_is_error() {
+        let region: Region = extent!(x = 2, y = 2).into(); // 4
+        let pairs = vec![(0, 100), (1, 101), (2, 102)]; // missing 3
+        let err = pairs
+            .into_iter()
+            .try_collect_indexed_opt(region)
+            .unwrap_err();
+
+        match err {
+            crate::v1::Error::InvalidRankCardinality { expected, actual } => {
+                assert_eq!(expected, 4);
+                assert_eq!(actual, 3);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_collect_indexed_opt_out_of_bounds_is_error() {
+        let region: Region = extent!(x = 2, y = 2).into(); // valid ranks 0..=3
+        let pairs = vec![(0, 1), (4, 9)]; // 4 is out-of-bounds
+        let err = pairs
+            .into_iter()
+            .try_collect_indexed_opt(region)
+            .unwrap_err();
+
+        match err {
+            crate::v1::Error::InvalidRankCardinality { expected, actual } => {
+                assert_eq!(expected, 4);
+                assert_eq!(actual, 5); // offending index + 1
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_collect_indexed_opt_duplicate_last_write_wins() {
+        let region: Region = extent!(x = 1, y = 3).into(); // 3
+        let pairs = vec![(0, 7), (1, 8), (1, 88), (2, 9)]; // dup rank 1
+        let mesh = pairs
+            .into_iter()
+            .try_collect_indexed_opt(region.clone())
+            .unwrap();
+
+        assert_eq!(mesh.values().collect::<Vec<_>>(), vec![7, 88, 9]);
+    }
+
+    // TODO: add property tests to cross-check opt vs reference
 }
