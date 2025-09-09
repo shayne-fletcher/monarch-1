@@ -59,6 +59,12 @@ impl<'a> Parser<'a> {
         self.split().map(|(token, _)| token)
     }
 
+    /// Peek the next raw char (no trimming). Useful to detect a
+    /// starting quote.
+    pub fn peek_char(&self) -> Option<char> {
+        self.str.chars().next()
+    }
+
     /// Like `peek`, but return a parsing error if the parser has reached the
     /// end of its input.
     pub fn peek_or_err(&self, expected: &'static str) -> Result<&'a str, ParserError> {
@@ -123,6 +129,66 @@ impl<'a> Parser<'a> {
             Some((_, pos)) => Some((self.str[..pos].trim(), &self.str[pos..])),
             None => Some((self.str.trim(), "")),
         }
+    }
+
+    /// Parse a double-quoted string literal, returning the unescaped
+    /// contents. Supports \" \\ \n \r \t escapes. Leaves the rest of
+    /// the input intact.
+    pub fn parse_string_literal(&mut self) -> Result<String, ParserError> {
+        let mut s = self.str;
+
+        if !s.starts_with('"') {
+            let tok = self.peek_or_err("\"")?;
+            return Err(ParserError::WrongToken {
+                expected: "\"",
+                actual: tok.to_string(),
+            });
+        }
+
+        // Skip the opening quote
+        s = &s[1..];
+        let mut out = String::new();
+        let mut consumed = 1; // We already consumed the opening quote.
+
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            consumed += c.len_utf8();
+            match c {
+                '\\' => {
+                    // Escape sequence.
+                    if let Some(e) = chars.next() {
+                        consumed += e.len_utf8();
+                        match e {
+                            '\\' => out.push('\\'),
+                            '"' => out.push('"'),
+                            'n' => out.push('\n'),
+                            'r' => out.push('\r'),
+                            't' => out.push('\t'),
+                            other => {
+                                // Pass through unknown escapes
+                                // verbatim.
+                                out.push('\\');
+                                out.push(other);
+                            }
+                        }
+                    } else {
+                        return Err(ParserError::UnexpectedEndOfInput {
+                            expected: "escape sequence",
+                        });
+                    }
+                }
+                '"' => {
+                    // closing quote
+                    self.str = &self.str[consumed..];
+                    return Ok(out);
+                }
+                _ => out.push(c),
+            }
+        }
+
+        Err(ParserError::UnexpectedEndOfInput {
+            expected: "closing quote",
+        })
     }
 }
 

@@ -42,6 +42,7 @@ use crate::selection::Selection;
 use crate::selection::dsl;
 use crate::shape::Range;
 use crate::view::Extent;
+use crate::view::Region;
 
 /// Generates a random [`Slice`] with up to `max_dims` dimensions,
 /// where each dimension has a size between 1 and `max_len`
@@ -94,6 +95,86 @@ pub fn gen_extent(
             .collect::<Vec<_>>();
         Extent::new(labels, sizes).unwrap()
     })
+}
+
+/// Generate a random [`Region`] strategy for property tests.
+///
+/// This builds on [`gen_extent`], producing a region with the same
+/// randomly chosen dimensionality and sizes, but wrapped as a full
+/// [`Region`] (with labels and strides).
+///
+/// - `dims`: inclusive range of allowed dimensionalities (e.g.
+///   `1..=4`)
+/// - `max_len`: maximum size of any dimension
+pub fn gen_region(
+    dims: std::ops::RangeInclusive<usize>,
+    max_len: usize,
+) -> impl proptest::strategy::Strategy<Value = Region> {
+    gen_extent(dims, max_len).prop_map(Into::into)
+}
+
+/// Generate a random [`Region`] strategy with striding for property
+/// tests.
+///
+/// Similar to [`gen_region`], but each dimension may additionally use
+/// a non-unit step. This produces regions whose underlying slice has
+/// non-contiguous strides, useful for testing strided layouts.
+///
+/// - `dims`: inclusive range of allowed dimensionalities (e.g.
+///   `1..=4`)
+/// - `max_len`: maximum size of any dimension
+/// - `max_step`: maximum stride step size applied to each dimension
+/// - `_max_offset`: reserved for future use (currently ignored)
+pub fn gen_region_strided(
+    dims: std::ops::RangeInclusive<usize>,
+    max_len: usize,
+    max_step: usize,
+    _max_offset: usize,
+) -> impl Strategy<Value = Region> {
+    use crate::view::ViewExt;
+
+    prop::collection::vec(1..=max_len, dims)
+        .prop_flat_map(move |sizes| {
+            let n = sizes.len();
+            let labels: Vec<String> = (0..n).map(|i| format!("d/{}", i)).collect();
+
+            let steps_raw = prop::collection::vec(1..=max_step.max(1), n);
+            let begins_unclamped = prop::collection::vec(proptest::num::usize::ANY, n);
+
+            (Just((labels, sizes)), steps_raw, begins_unclamped)
+        })
+        .prop_map(move |((labels, sizes), steps_raw, begins_unclamped)| {
+            // 1) Make steps obey the divisibility chain: step[i] %
+            // step[i+1] == 0
+            let mut steps = steps_raw;
+            if !steps.is_empty() {
+                // innermost is free
+                let last = steps.len() - 1;
+                steps[last] = steps[last].max(1).min(max_step.max(1));
+                // Each outer step is an integer multiple of the next
+                // inner step.
+                for i in (0..last).rev() {
+                    let inner = steps[i + 1].max(1);
+                    let max_mult = (max_step / inner).max(1);
+                    // Clamp current to be a multiple of `inner`
+                    // within [inner, max_step].
+                    let m = ((steps[i].max(1) - 1) % max_mult) + 1;
+                    steps[i] = inner.saturating_mul(m);
+                }
+            }
+
+            // 2) Build from a row-major region and compose per-axis
+            // ranges
+            let mut region: Region = Extent::new(labels.clone(), sizes.clone()).unwrap().into();
+            for i in 0..sizes.len() {
+                let begin = begins_unclamped[i] % sizes[i]; // in [0, size-1]
+                let step = steps[i].max(1);
+                region = region
+                    .range(&labels[i], Range(begin, None, step))
+                    .expect("range stayed rectangular");
+            }
+            region
+        })
 }
 
 /// Generates a pair `(base, subview)` where:
