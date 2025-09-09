@@ -359,8 +359,11 @@ mod tests {
     use futures::executor::block_on;
     use futures::future;
     use ndslice::extent;
+    use ndslice::strategy::gen_region;
     use ndslice::view::Ranked;
     use ndslice::view::ViewExt;
+    use proptest::prelude::*;
+    use proptest::strategy::ValueTree;
 
     use super::*;
 
@@ -644,5 +647,161 @@ mod tests {
         assert_eq!(mesh.values().collect::<Vec<_>>(), vec![7, 88, 9]);
     }
 
-    // TODO: add property tests to cross-check opt vs reference
+    /// This uses the bit-mixing portion of Sebastiano Vigna's
+    /// [SplitMix64 algorithm](https://prng.di.unimi.it/splitmix64.c)
+    /// to generate a high-quality 64-bit hash from a usize index.
+    /// Unlike the full SplitMix64 generator, this is stateless - we
+    /// accept an arbitrary x as input and apply the mix function to
+    /// turn `x` deterministically into a "randomized" u64. input
+    /// always produces the same output.
+    fn hash_key(x: usize) -> u64 {
+        let mut z = x as u64 ^ 0x9E3779B97F4A7C15;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+
+    /// Shuffle a slice deterministically, using a hash of indices as
+    /// the key.
+    ///
+    /// Each position `i` is assigned a pseudo-random 64-bit key (from
+    /// `key(i)`), the slice is sorted by those keys, and the
+    /// resulting permutation is applied in place.
+    ///
+    /// The permutation is fully determined by the sequence of indices
+    /// `0..n` and the chosen `key` function. Running it twice on the
+    /// same input yields the same "random-looking" arrangement.
+    ///
+    /// This is going to be used (below) for property tests: it gives
+    /// the effect of a shuffle without introducing global RNG state,
+    /// and ensures that duplicate elements are still ordered
+    /// consistently (so we can test "last write wins" semantics in
+    /// collectors).
+    fn pseudo_shuffle<'a, T: 'a>(v: &'a mut [T], key: impl Fn(usize) -> u64 + Copy) {
+        // Build perm.
+        let mut with_keys: Vec<(u64, usize)> = (0..v.len()).map(|i| (key(i), i)).collect();
+        with_keys.sort_by_key(|&(k, _)| k);
+        let perm: Vec<usize> = with_keys.into_iter().map(|(_, i)| i).collect();
+
+        // In-place permutation using a cycle based approach (e.g.
+        // https://www.geeksforgeeks.org/dsa/permute-the-elements-of-an-array-following-given-order/).
+        let mut seen = vec![false; v.len()];
+        for i in 0..v.len() {
+            if seen[i] {
+                continue;
+            }
+            let mut a = i;
+            while !seen[a] {
+                seen[a] = true;
+                let b = perm[a];
+                // Short circuit on the cycle's start index.
+                if b == i {
+                    break;
+                }
+                v.swap(a, b);
+                a = b;
+            }
+        }
+    }
+
+    // Property: Optimized and reference collectors yield the same
+    // `ValueMesh` on complete inputs, even with duplicates.
+    //
+    // - Begin with a complete set of `(rank, value)` pairs covering
+    //   all ranks of the region.
+    // - Add extra pairs at arbitrary ranks (up to `extra_len`), which
+    //   necessarily duplicate existing entries when `extra_len > 0`.
+    // - Shuffle the combined pairs deterministically.
+    // - Collect using both the reference (`try_collect_indexed`) and
+    //   optimized (`try_collect_indexed_opt`) implementations.
+    //
+    // Both collectors must succeed and produce identical results.
+    // This demonstrates that the optimized version preserves
+    // last-write-wins semantics and agrees exactly with the reference
+    // behavior.
+    proptest! {
+        #[test]
+        fn try_collect_opt_equivalence(region in gen_region(1..=4, 6), extra_len in 0usize..=12) {
+            let n = region.num_ranks();
+
+            // Start with one pair per rank (coverage guaranteed).
+            let mut pairs: Vec<(usize, i64)> = (0..n).map(|r| (r, r as i64)).collect();
+
+            // Add some extra duplicates of random in-bounds ranks.
+            // Their values differ so last-write-wins is observable.
+            let extras = proptest::collection::vec(0..n, extra_len)
+                .new_tree(&mut proptest::test_runner::TestRunner::default())
+                .unwrap()
+                .current();
+            for (k, r) in extras.into_iter().enumerate() {
+                pairs.push((r, (n as i64) + (k as i64)));
+            }
+
+            // Deterministic "shuffle" to fix iteration order across
+            // both collectors.
+            pseudo_shuffle(&mut pairs, hash_key);
+
+            // Reference vs optimized.
+            let mesh_ref = pairs.clone().into_iter().try_collect_indexed(region.clone()).unwrap();
+            let mesh_opt = pairs.into_iter().try_collect_indexed_opt(region.clone()).unwrap();
+
+            prop_assert_eq!(mesh_ref.region(), mesh_opt.region());
+            prop_assert_eq!(mesh_ref.values().collect::<Vec<_>>(), mesh_opt.values().collect::<Vec<_>>());
+        }
+    }
+
+    // Property: Optimized and reference collectors report identical
+    // errors when ranks are missing.
+    //
+    // - Begin with a complete set of `(rank, value)` pairs.
+    // - Remove one rank so coverage is incomplete.
+    // - Shuffle deterministically.
+    // - Collect with both implementations.
+    //
+    // Both must fail with `InvalidRankCardinality` describing the
+    // same expected vs. actual counts.
+    proptest! {
+        #[test]
+        fn try_collect_opt_missing_rank_errors_match(region in gen_region(1..=4, 6)) {
+            let n = region.num_ranks();
+            // Base complete.
+            let mut pairs: Vec<(usize, i64)> = (0..n).map(|r| (r, r as i64)).collect();
+            // Drop one distinct rank.
+            if n > 0 {
+                let drop_idx = 0usize; // Deterministic, fine for the property.
+                pairs.remove(drop_idx);
+            }
+            // Shuffle deterministically.
+            pseudo_shuffle(&mut pairs, hash_key);
+
+            let ref_err  = pairs.clone().into_iter().try_collect_indexed(region.clone()).unwrap_err();
+            let opt_err  = pairs.into_iter().try_collect_indexed_opt(region).unwrap_err();
+            assert_eq!(format!("{ref_err:?}"), format!("{opt_err:?}"));
+        }
+    }
+
+    // Property: Optimized and reference collectors report identical
+    // errors when given out-of-bounds ranks.
+    //
+    // - Construct a set of `(rank, value)` pairs.
+    // - Include at least one pair whose rank is ≥
+    //   `region.num_ranks()`.
+    // - Shuffle deterministically.
+    // - Collect with both implementations.
+    //
+    // Both must fail with `InvalidRankCardinality`, and the reported
+    // error values must match exactly.
+    proptest! {
+        #[test]
+        fn try_collect_opt_out_of_bound_errors_match(region in gen_region(1..=4, 6)) {
+            let n = region.num_ranks();
+            // One valid, then one out-of-bound.
+            let mut pairs = vec![(0usize, 0i64), (n, 123i64)];
+            pseudo_shuffle(&mut pairs, hash_key);
+
+            let ref_err = pairs.clone().into_iter().try_collect_indexed(region.clone()).unwrap_err();
+            let opt_err = pairs.into_iter().try_collect_indexed_opt(region).unwrap_err();
+            assert_eq!(format!("{ref_err:?}"), format!("{opt_err:?}"));
+        }
+    }
 }
