@@ -245,7 +245,9 @@ async def test_debug() -> None:
 
         fut = debugee.to_debug.call()
         await debug_controller.wait_pending_session.call_one()
-        breakpoints = await _wait_for_breakpoints(debug_controller, 4)
+        # This can take a while during stress testing with many instances of the test
+        # running in parallel, so the timeout is set to 60 seconds.
+        breakpoints = await _wait_for_breakpoints(debug_controller, 4, timeout_sec=60)
 
         initial_linenos = {}
         for i in range(len(breakpoints)):
@@ -343,8 +345,7 @@ async def test_debug() -> None:
             assert breakpoints[i].rank == rank
 
         await debug_controller.blocking_enter.call_one()
-        breakpoints = await debug_controller.list.call_one(print_output=False)
-        assert len(breakpoints) == 0
+        await _wait_for_breakpoints(debug_controller, 0)
 
         with pytest.raises(
             monarch._src.actor.actor_mesh.ActorError, match="ValueError: bad rank"
@@ -1231,8 +1232,7 @@ async def test_debug_with_pickle_by_value():
 
         debug_controller.blocking_enter.call_one().get()
 
-        breakpoints = debug_controller.list.call_one().get()
-        assert len(breakpoints) == 0
+        await _wait_for_breakpoints(debug_controller, 0)
 
         await fut
         await pm.stop()
