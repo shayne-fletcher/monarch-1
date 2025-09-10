@@ -352,9 +352,88 @@ impl<I: Iterator<Item = (usize, T)>, T> TryCollectIndexedMeshOpt<T> for I {
     }
 }
 
+/// Extension trait that provides collection-like mapping for meshes.
+///
+/// Applies an element-wise transform and builds a new [`ValueMesh`]
+/// with the same [`Region`](crate::view::Region) and iteration order
+/// as `self`.
+///
+/// Guarantees:
+/// - Region (shape) is unchanged.
+/// - Element count equals `self.region().num_ranks()`.
+/// - Iteration order matches `self.values()`.
+///
+/// Variants:
+/// - `map_values`: consumes `self`, passes `T` by value.
+/// - `map_values_ref`: borrows `self`, passes `&T`.
+/// - `try_map_values`: short-circuits on the first `Err`.
+pub trait MeshMapExt: view::Ranked {
+    /// Consumes the mesh and maps each value; region and iteration
+    /// order are preserved.
+    fn map_values<U>(self, f: impl Fn(Self::Item) -> U) -> ValueMesh<U>
+    where
+        Self: Sized,
+        U: 'static;
+
+    /// Maps each element by reference (`&T`); region and iteration
+    /// order are preserved.
+    fn map_values_ref<U>(&self, f: impl Fn(&Self::Item) -> U) -> ValueMesh<U>
+    where
+        U: 'static;
+
+    /// Fallible map that short-circuits on the first error; region
+    /// and iteration order are preserved.
+    fn try_map_values<U, E>(
+        self,
+        f: impl Fn(Self::Item) -> Result<U, E>,
+    ) -> Result<ValueMesh<U>, E>
+    where
+        Self: Sized,
+        U: 'static;
+}
+
+impl<T> MeshMapExt for ValueMesh<T>
+where
+    T: Clone + 'static,
+{
+    fn map_values<U: 'static>(self, f: impl Fn(T) -> U) -> ValueMesh<U> {
+        let region = self.region.clone();
+        let ranks = self.ranks.into_iter().map(f).collect();
+        ValueMesh::new_unchecked(region, ranks)
+    }
+
+    fn map_values_ref<U>(&self, f: impl Fn(&Self::Item) -> U) -> ValueMesh<U>
+    where
+        U: 'static,
+    {
+        let region = self.region.clone();
+        let ranks = self.ranks.iter().map(f).collect();
+        ValueMesh::new_unchecked(region, ranks)
+    }
+
+    fn try_map_values<U: 'static, E>(
+        self,
+        f: impl Fn(T) -> Result<U, E>,
+    ) -> Result<ValueMesh<U>, E> {
+        let region = self.region.clone();
+        let mut out = Vec::with_capacity(self.ranks.len());
+        for t in self.ranks {
+            out.push(f(t)?);
+        }
+        Ok(ValueMesh::new_unchecked(region, out))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::RawWaker;
+    use std::task::RawWakerVTable;
+    use std::task::Waker;
 
     use futures::executor::block_on;
     use futures::future;
@@ -803,5 +882,95 @@ mod tests {
             let opt_err = pairs.into_iter().try_collect_indexed_opt(region).unwrap_err();
             assert_eq!(format!("{ref_err:?}"), format!("{opt_err:?}"));
         }
+    }
+
+    #[test]
+    fn map_values_preserves_region_and_order() {
+        let region: Region = extent!(rows = 2, cols = 3).into();
+        let vm = ValueMesh::new_unchecked(region.clone(), vec![0, 1, 2, 3, 4, 5]);
+
+        let doubled = vm.map_values(|x| x * 2);
+        assert_eq!(doubled.region, region);
+        assert_eq!(doubled.ranks, vec![0, 2, 4, 6, 8, 10]);
+    }
+
+    #[test]
+    fn map_values_ref_borrows_and_preserves() {
+        let region: Region = extent!(n = 4).into();
+        let vm = ValueMesh::new_unchecked(
+            region.clone(),
+            vec!["a".to_string(), "b".into(), "c".into(), "d".into()],
+        );
+
+        let lens = vm.map_values_ref(|s| s.len());
+        assert_eq!(lens.region, region);
+        assert_eq!(lens.ranks, vec![1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn try_map_values_short_circuits_on_error() {
+        let region = extent!(n = 4).into();
+        let vm = ValueMesh::new_unchecked(region, vec![1, 2, 3, 4]);
+
+        let res: Result<ValueMesh<i32>, &'static str> =
+            vm.try_map_values(|x| if x == 3 { Err("boom") } else { Ok(x + 10) });
+
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "boom");
+    }
+
+    // -- Helper to poll `core::future::Ready` without a runtime
+    fn noop_waker() -> Waker {
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+        fn wake(_: *const ()) {}
+        fn wake_by_ref(_: *const ()) {}
+        fn drop(_: *const ()) {}
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+        // SAFETY: The raw waker never dereferences its data pointer
+        // (`null`), and all vtable fns are no-ops. It's only used to
+        // satisfy `Context` for polling already-ready futures in
+        // tests.
+        unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+    }
+
+    fn poll_now<F: Future>(mut fut: F) -> F::Output {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        // SAFETY: `fut` is a local stack variable that we never move
+        // after pinning, and we only use it to poll immediately
+        // within this scope. This satisfies the invariants of
+        // `Pin::new_unchecked`.
+        let mut fut = unsafe { Pin::new_unchecked(&mut fut) };
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => v,
+            Poll::Pending => unreachable!("Ready futures must complete immediately"),
+        }
+    }
+    // --
+
+    #[test]
+    fn async_map_values_ready_futures() {
+        let region: Region = extent!(r = 2, c = 2).into();
+        let vm = ValueMesh::new_unchecked(region.clone(), vec![10, 20, 30, 40]);
+
+        // Map to `core::future::Ready` futures.
+        let pending = vm.map_values(|x| core::future::ready(x + 1));
+        assert_eq!(pending.region, region);
+
+        // Drive the ready futures without a runtime and collect results.
+        let results: Vec<_> = pending.ranks.into_iter().map(poll_now).collect();
+        assert_eq!(results, vec![11, 21, 31, 41]);
+    }
+
+    #[test]
+    fn single_element_mesh_works() {
+        let region: Region = extent!(n = 1).into();
+        let vm = ValueMesh::new_unchecked(region.clone(), vec![7]);
+
+        let out = vm.map_values(|x| x * x);
+        assert_eq!(out.region, region);
+        assert_eq!(out.ranks, vec![49]);
     }
 }
