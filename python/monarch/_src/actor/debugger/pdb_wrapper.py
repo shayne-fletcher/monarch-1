@@ -22,7 +22,7 @@ from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._src.actor.sync_state import fake_sync_state
 
 if TYPE_CHECKING:
-    from monarch._src.actor.debugger.debugger import DebugController
+    from monarch._src.actor.debugger.debug_controller import DebugController
 
 
 @dataclass

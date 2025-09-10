@@ -13,6 +13,7 @@ from monarch.tools.commands import (
     bounce,
     component_args_from_cli,
     create,
+    debug,
     info,
     kill,
     stop,
@@ -22,6 +23,8 @@ from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/con
     Config,
     defaults,
 )
+
+from monarch.tools.debug_env import _get_debug_server_host, _get_debug_server_port
 from torchx.specs.finder import get_component
 
 
@@ -141,6 +144,25 @@ class StopCmd:
         stop(args.server_handle)
 
 
+class DebugCmd:
+    def add_arguments(self, subparser: argparse.ArgumentParser) -> None:
+        subparser.add_argument(
+            "--host",
+            type=str,
+            default=_get_debug_server_host(),
+            help="Hostname where the debug server is running",
+        )
+        subparser.add_argument(
+            "--port",
+            type=int,
+            default=_get_debug_server_port(),
+            help="Port that the debug server is listening on",
+        )
+
+    def run(self, args: argparse.Namespace) -> None:
+        debug(args.host, args.port)
+
+
 def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Monarch CLI")
     subparser = parser.add_subparsers(title="COMMANDS")
@@ -149,6 +171,7 @@ def get_parser() -> argparse.ArgumentParser:
         "create": CreateCmd(),
         "info": InfoCmd(),
         "kill": KillCmd(),
+        "debug": DebugCmd(),
         # --- placeholder subcommands (not yet implemented) ---
         "bounce": BounceCmd(),
         "stop": StopCmd(),
@@ -162,6 +185,9 @@ def get_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] = sys.argv[1:]) -> None:
     parser = get_parser()
     args = parser.parse_args(argv)
+    if not hasattr(args, "func"):
+        parser.print_help()
+        sys.exit(1)
     args.func(args)
 
 

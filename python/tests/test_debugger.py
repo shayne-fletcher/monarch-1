@@ -26,25 +26,29 @@ import pytest
 
 import torch
 from monarch._src.actor.actor_mesh import Actor, ActorError, current_rank, IN_PAR
-from monarch._src.actor.debugger.debugger import (
-    _MONARCH_DEBUG_SERVER_HOST_ENV_VAR,
-    _MONARCH_DEBUG_SERVER_PORT_ENV_VAR,
+from monarch._src.actor.debugger.debug_command import (
     Attach,
     Cast,
     Continue,
     DebugCommand,
-    DebugController,
-    DebugSession,
-    DebugSessionInfo,
-    DebugSessions,
-    DebugStdIO,
     Help,
     ListCommand,
     Quit,
 )
+from monarch._src.actor.debugger.debug_controller import DebugController
+from monarch._src.actor.debugger.debug_io import DebugStdIO
+from monarch._src.actor.debugger.debug_session import (
+    DebugSession,
+    DebugSessionInfo,
+    DebugSessions,
+)
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.proc_mesh import proc_mesh
 from monarch._src.actor.source_loader import SourceLoaderController
+from monarch.tools.debug_env import (
+    _MONARCH_DEBUG_SERVER_HOST_ENV_VAR,
+    _MONARCH_DEBUG_SERVER_PORT_ENV_VAR,
+)
 
 from pyre_extensions import none_throws
 
@@ -111,8 +115,8 @@ def run_test_from_name():
     getattr(sys.modules[__name__], sys.argv[1])()
 
 
-debug_cli_bin = (
-    str(importlib.resources.files("monarch.python.tests").joinpath("debug_cli_bin"))
+cli_bin = (
+    str(importlib.resources.files("monarch.python.tests").joinpath("cli_bin"))
     if IN_PAR
     else ""
 )
@@ -235,8 +239,8 @@ async def test_debug() -> None:
     output_mock.side_effect = _patch_output
 
     with patch(
-        "monarch._src.actor.debugger.debugger.DebugStdIO.input", new=input_mock
-    ), patch("monarch._src.actor.debugger.debugger.DebugStdIO.output", new=output_mock):
+        "monarch._src.actor.debugger.debug_io.DebugStdIO.input", new=input_mock
+    ), patch("monarch._src.actor.debugger.debug_io.DebugStdIO.output", new=output_mock):
         proc = proc_mesh(hosts=2, gpus=2)
         debugee = await proc.spawn("debugee", DebugeeActor)
         debug_controller = actor.get_or_spawn_controller(
@@ -380,7 +384,7 @@ async def test_debug_multi_actor() -> None:
     ]
 
     with patch(
-        "monarch._src.actor.debugger.debugger.DebugStdIO.input", side_effect=input_mock
+        "monarch._src.actor.debugger.debug_io.DebugStdIO.input", side_effect=input_mock
     ):
         proc = await proc_mesh(hosts=2, gpus=2)
         debugee_1 = await proc.spawn("debugee_1", DebugeeActor)
@@ -775,7 +779,7 @@ async def test_debug_command_parser_invalid_inputs(invalid_input):
 
 
 # See earlier comment
-@isolate_in_subprocess(env={"MONARCH_DEBUG_CLI_BIN": debug_cli_bin, **debug_env})
+@isolate_in_subprocess(env={"MONARCH_CLI_BIN": cli_bin, **debug_env})
 @pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
@@ -815,7 +819,8 @@ async def test_debug_cli():
         cmd = None
         if IN_PAR:
             cmd = [
-                os.environ["MONARCH_DEBUG_CLI_BIN"],
+                os.environ["MONARCH_CLI_BIN"],
+                "debug",
                 "--host",
                 os.environ[_MONARCH_DEBUG_SERVER_HOST_ENV_VAR],
                 "--port",
@@ -823,9 +828,8 @@ async def test_debug_cli():
             ]
         elif any(shutil.which(nc_cmd) for nc_cmd in ["ncat", "nc", "netcat"]):
             cmd = [
-                sys.executable,
-                "-m",
-                "monarch.debug_cli",
+                "monarch",
+                "debug",
                 "--host",
                 os.environ[_MONARCH_DEBUG_SERVER_HOST_ENV_VAR],
                 "--port",
@@ -1147,8 +1151,8 @@ async def test_debug_with_pickle_by_value():
     output_mock.side_effect = _patch_output
 
     with patch(
-        "monarch._src.actor.debugger.debugger.DebugStdIO.input", new=input_mock
-    ), patch("monarch._src.actor.debugger.debugger.DebugStdIO.output", new=output_mock):
+        "monarch._src.actor.debugger.debug_io.DebugStdIO.input", new=input_mock
+    ), patch("monarch._src.actor.debugger.debug_io.DebugStdIO.output", new=output_mock):
         pm = proc_mesh(gpus=1, hosts=1)
 
         debug_controller = actor.get_or_spawn_controller(

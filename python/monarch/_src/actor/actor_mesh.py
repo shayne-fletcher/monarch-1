@@ -953,7 +953,7 @@ class _Actor:
         DebugContext.set(DebugContext())
 
     def _post_mortem_debug(self, exc_tb) -> None:
-        from monarch._src.actor.debugger.debugger import debug_controller
+        from monarch._src.actor.debugger.debug_controller import debug_controller
 
         if (pdb_wrapper := DebugContext.get().pdb_wrapper) is not None:
             with fake_sync_state():

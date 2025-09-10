@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-unsafe
+
 """
 Debugging Python Actors with pdb in Monarch
 ============================================
@@ -87,11 +89,11 @@ if __name__ == "__main__":
 # %%
 # Using the Monarch Debugger
 # ---------------------------
-# To access the debugger, from a separate terminal, run:
+# To access the debugger, from a separate terminal with conda activated and monarch installed, run:
 #
 # .. code-block:: sh
 #
-#     python -m monarch.debug_cli
+#     monarch debug
 #
 # There are two optional flags:
 #

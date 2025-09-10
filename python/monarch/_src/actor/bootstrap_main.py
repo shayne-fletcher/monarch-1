@@ -61,7 +61,7 @@ def invoke_main():
     except Exception as e:
         logging.warning(f"Failed to set up py-spy: {e}")
 
-    from monarch._src.actor.debugger.debugger import remote_breakpointhook
+    from monarch._src.actor.debugger.breakpoint import remote_breakpointhook
 
     sys.breakpointhook = remote_breakpointhook
 
