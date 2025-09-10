@@ -14,7 +14,7 @@ import torch
 
 from setuptools import Command, find_packages, setup
 
-from setuptools_rust import Binding, RustExtension
+from setuptools_rust import Binding, RustBin, RustExtension
 from torch.utils.cpp_extension import (
     BuildExtension,
     CppExtension,
@@ -120,6 +120,11 @@ with open("README.md", encoding="utf8") as f:
     readme = f.read()
 
 rust_extensions = [
+    RustBin(
+        target="process_allocator",
+        path="monarch_hyperactor/Cargo.toml",
+        debug=False,
+    ),
     RustExtension(
         "monarch._rust_bindings",
         binding=Binding.PyO3,
