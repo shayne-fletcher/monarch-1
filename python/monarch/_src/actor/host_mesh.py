@@ -52,13 +52,21 @@ class HostMesh(MeshTrait):
     interfaces with the underlying resource allocator of your choice.
     """
 
-    def __init__(self, shape: Shape, allocator: AllocateMixin):
+    def __init__(
+        self,
+        shape: Shape,
+        allocator: AllocateMixin,
+        alloc_constraints: Optional[AllocConstraints] = None,
+    ):
         self._allocator = allocator
+        self._alloc_constraints = alloc_constraints
         self._shape = shape
         self._spawned = 0
 
     def _alloc(self, hosts: int, gpus: int) -> "AllocHandle":
-        spec: AllocSpec = AllocSpec(AllocConstraints(), hosts=hosts, gpus=gpus)
+        spec: AllocSpec = AllocSpec(
+            self._alloc_constraints or AllocConstraints(), hosts=hosts, gpus=gpus
+        )
         return self._allocator.allocate(spec)
 
     def spawn_procs(
