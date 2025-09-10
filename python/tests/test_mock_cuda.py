@@ -9,7 +9,13 @@ from unittest import main, TestCase
 
 import pytest
 import torch
-import monarch.common.mock_cuda  # usort: skip
+
+
+# Avoid importing if the test is not run.
+def mock_cuda():
+    import monarch.common.mock_cuda
+
+    return monarch.common.mock_cuda
 
 
 def simple_forward_backward(device: str) -> None:
@@ -37,7 +43,7 @@ class TestMockCuda(TestCase):
         return super().setUp()
 
     def test_output_is_garbage(self):
-        with monarch.common.mock_cuda.mock_cuda_guard():
+        with mock_cuda().mock_cuda_guard():
             x = torch.arange(9, device="cuda", dtype=torch.float32).reshape(3, 3)
             y = 2 * torch.eye(3, device="cuda")
             true_output = torch.tensor(
@@ -46,6 +52,8 @@ class TestMockCuda(TestCase):
             self.assertFalse(torch.equal((x @ y).cpu(), true_output))
 
     def test_simple_forward_backward(self):
+        # Make sure that any side-effects from importing mock_cuda are applied here too:
+        mock_cuda()
         # This test just makes sure that the forward and backward pass work
         # and don't crash.
         simple_forward_backward("cuda")
@@ -58,7 +66,7 @@ class TestMockCuda(TestCase):
         self.assertTrue(torch.allclose(cpu_dw, real_dw.cpu()))
         self.assertTrue(torch.allclose(cpu_db, real_db.cpu()))
 
-        with monarch.common.mock_cuda.mock_cuda_guard():
+        with mock_cuda().mock_cuda_guard():
             mocked_y, mocked_dw, mocked_db = simple_forward_backward("cuda")
             self.assertFalse(torch.allclose(cpu_y, mocked_y.cpu()))
             self.assertFalse(torch.allclose(cpu_dw, mocked_dw.cpu()))
