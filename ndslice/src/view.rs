@@ -36,6 +36,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::Range;
+use crate::Shape; // exclusively for `impl From<Shape> for Extent`
 use crate::Slice;
 use crate::SliceError;
 use crate::SliceIterator;
@@ -86,6 +87,19 @@ where
 struct ExtentData {
     labels: Vec<String>,
     sizes: Vec<usize>,
+}
+
+impl From<&Shape> for Extent {
+    fn from(s: &Shape) -> Self {
+        // Safe: Shape guarantees labels.len() == sizes.len().
+        Extent::new(s.labels().to_vec(), s.slice().sizes().to_vec()).unwrap()
+    }
+}
+
+impl From<Shape> for Extent {
+    fn from(s: Shape) -> Self {
+        Extent::from(&s)
+    }
 }
 
 impl Extent {

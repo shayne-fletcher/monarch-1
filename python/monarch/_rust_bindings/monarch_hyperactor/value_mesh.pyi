@@ -6,10 +6,14 @@
 
 # pyre-strict
 
-from typing import final
+from typing import Any, final
+
+from monarch._rust_bindings.monarch_hyperactor.shape import Shape
 
 @final
 class ValueMesh:
     """Mesh holding values per rank."""
 
-    ...
+    def __init__(self, shape: Shape, values: list[Any]) -> None: ...
+    def __len__(self) -> int: ...
+    def values(self) -> list[Any]: ...

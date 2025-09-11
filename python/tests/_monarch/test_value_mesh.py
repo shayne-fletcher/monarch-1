@@ -8,9 +8,18 @@
 
 from unittest import TestCase
 
+from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
 from monarch._rust_bindings.monarch_hyperactor.value_mesh import ValueMesh
 
 
 class TestValueMesh(TestCase):
-    def test_value_mesh(self) -> None:
-        self.assertTrue(True)
+    def test_construct(self) -> None:
+        shape = Shape(["n"], Slice.new_row_major([3]))
+        vm = ValueMesh(shape, [10, 20, 30])
+        self.assertIsInstance(vm, ValueMesh)
+
+    def test_len_and_values(self) -> None:
+        shape = Shape(["n"], Slice.new_row_major([3]))
+        vm = ValueMesh(shape, [10, 20, 30])
+        self.assertEqual(len(vm), 3)
+        self.assertEqual(vm.values(), [10, 20, 30])
