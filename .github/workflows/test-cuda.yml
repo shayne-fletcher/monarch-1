@@ -39,11 +39,6 @@ jobs:
         # Setup test environment
         setup_test_environment
 
-        # Install cargo binaries
-        mkdir cargo_bin && mv ${RUNNER_ARTIFACT_DIR}/cargo_bin/* cargo_bin
-        chmod +x cargo_bin/process_allocator
-        export PATH=$(pwd)/cargo_bin:$PATH
-
         # Setup Tensor Engine dependencies
         setup_tensor_engine
 

@@ -59,15 +59,6 @@ setup_tensor_engine() {
     dnf install -y libibverbs rdma-core libmlx5 libibverbs-devel rdma-core-devel
 }
 
-# Build process allocator binary
-build_process_allocator() {
-    echo "Building process allocator binary..."
-    cargo build --manifest-path monarch_hyperactor/Cargo.toml --release
-    mkdir -p "${RUNNER_ARTIFACT_DIR}"/cargo_bin
-    mv target/release/process_allocator "${RUNNER_ARTIFACT_DIR}"/cargo_bin
-}
-
-
 # Common setup for build workflows (environment + system deps + rust)
 setup_build_environment() {
     local python_version=${1:-3.10}

@@ -37,9 +37,6 @@ jobs:
         # Setup Tensor Engine
         setup_tensor_engine
 
-        # Build the process allocator binary
-        build_process_allocator
-
         export CUDA_LIB_DIR=/usr/lib64
 
         # Build monarch (CUDA version)
