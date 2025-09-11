@@ -9,6 +9,7 @@
 use std::mem;
 use std::mem::MaybeUninit;
 use std::ptr;
+use std::ptr::NonNull;
 
 use futures::Future;
 use ndslice::view;
@@ -140,99 +141,185 @@ impl<T> view::BuildFromRegionIndexed<T> for ValueMesh<T> {
         let mut bits = vec![0u64; words];
         let mut filled = 0usize;
 
-        // Capture raw pointers for the guard to avoid borrow
-        // conflicts.
-        let buf_ptr: *mut MaybeUninit<T> = buf.as_mut_ptr();
-        let bits_ptr: *const u64 = bits.as_ptr();
-
-        #[inline]
-        fn is_set(bits: &[u64], i: usize) -> bool {
-            (bits[i / 64] >> (i % 64)) & 1 == 1
-        }
-
-        #[inline]
-        fn set_bit(bits: &mut [u64], i: usize) -> bool {
-            let w = i / 64;
-            let b = 1u64 << (i % 64);
-            let was_set = bits[w] & b != 0;
-            bits[w] |= b;
-            !was_set
-        }
-
         // Drop guard: cleans up initialized elements on early exit.
-        // Stores raw pointers (not `&mut`/`&`), so we don’t hold rust
-        // borrows for the whole scope. This allows mutating
-        // `buf`/`bits` inside the loop while still letting the guard
-        // access them if dropped early.
+        // Stores raw, non-borrowed pointers (`NonNull`), so we don’t
+        // hold Rust references for the whole scope. This allows
+        // mutating `buf`/`bits` inside the loop while still letting
+        // the guard access them if dropped early.
         struct DropGuard<T> {
-            buf: *mut MaybeUninit<T>,
-            bits: *const u64,
-            n: usize,
+            buf: NonNull<MaybeUninit<T>>,
+            bits: NonNull<u64>,
+            n_elems: usize,
+            n_words: usize,
+            disarm: bool,
+        }
+
+        impl<T> DropGuard<T> {
+            /// # Safety
+            /// - `buf` points to `buf.len()` contiguous
+            ///   `MaybeUninit<T>` and outlives the guard.
+            /// - `bits` points to `bits.len()` contiguous `u64` words
+            ///   and outlives the guard.
+            /// - For every set bit `i` in `bits`, `buf[i]` has been
+            ///   initialized with a valid `T` (and on duplicates, the
+            ///   previous `T` at `i` was dropped before overwrite).
+            /// - While the guard is alive, caller may mutate
+            ///   `buf`/`bits` (the guard holds only raw pointers; it
+            ///   does not create Rust borrows).
+            /// - On drop (when not disarmed), the guard will read
+            ///   `bits`, mask tail bits in the final word, and
+            ///   `drop_in_place` each initialized `buf[i]`—never
+            ///   accessing beyond `buf.len()` / `bits.len()`.
+            /// - If a slice is empty, the stored pointer may be
+            ///   `dangling()`; it is never dereferenced when the
+            ///   corresponding length is zero.
+            unsafe fn new(buf: &mut [MaybeUninit<T>], bits: &mut [u64]) -> Self {
+                let n_elems = buf.len();
+                let n_words = bits.len();
+                // Invariant typically: n_words == (n_elems + 63) / 64
+                // but we don't *require* it; tail is masked in Drop.
+                Self {
+                    buf: NonNull::new(buf.as_mut_ptr()).unwrap_or_else(NonNull::dangling),
+                    bits: NonNull::new(bits.as_mut_ptr()).unwrap_or_else(NonNull::dangling),
+                    n_elems,
+                    n_words,
+                    disarm: false,
+                }
+            }
+
+            #[inline]
+            fn disarm(&mut self) {
+                self.disarm = true;
+            }
         }
 
         impl<T> Drop for DropGuard<T> {
             fn drop(&mut self) {
-                // SAFETY: `buf` points to `n` contiguous
-                // MaybeUninit<T> elements allocated above. `bits`
-                // points to the bitset that tracks which slots were
-                // initialized. We only drop slots whose bit is set.
-                // No aliasing issues: this runs at
-                // unwind/early-return.
-                for i in 0..self.n {
-                    let word = i / 64;
-                    let bit = 1u64 << (i % 64);
-                    // SAFETY: word < ceil(n/64). We only read the
-                    // bitset.
-                    let w = unsafe { *self.bits.add(word) };
-                    if (w & bit) != 0 {
-                        // SAFETY: buf.add(i) is within allocation;
-                        // that slot was initialized.
-                        unsafe { ptr::drop_in_place((*self.buf.add(i)).as_mut_ptr()) }
+                if self.disarm {
+                    return;
+                }
+
+                // SAFETY:
+                // - `self.buf` points to `n_elems` contiguous
+                //   `MaybeUninit<T>` slots (or may be dangling if
+                //   `n_elems == 0`); `self.bits` points to `n_words`
+                //   contiguous `u64` words (or may be dangling if
+                //   `n_words == 0`).
+                // - Loop bounds ensure `w < n_words` when reading
+                //   `*bits_base.add(w)`.
+                // - For the final word we mask unused tail bits so
+                //   any computed index `i = w * 64 + tz` always
+                //   satisfies `i < n_elems` before we dereference
+                //   `buf_base.add(i)`.
+                // - Only slots whose bits are set are dropped, so no
+                //   double-drops.
+                // - No aliasing with active Rust borrows: the guard
+                //   holds raw pointers and runs in `Drop` after the
+                //   fill loop.
+                unsafe {
+                    let buf_base = self.buf.as_ptr();
+                    let bits_base = self.bits.as_ptr();
+
+                    for w in 0..self.n_words {
+                        // Load word.
+                        let mut word = *bits_base.add(w);
+
+                        // Mask off bits beyond `n_elems` in the final
+                        // word (if any).
+                        if w == self.n_words.saturating_sub(1) {
+                            let used_bits = self.n_elems.saturating_sub(w * 64);
+                            if used_bits < 64 {
+                                let mask = if used_bits == 0 {
+                                    0
+                                } else {
+                                    (1u64 << used_bits) - 1
+                                };
+                                word &= mask;
+                            }
+                        }
+
+                        // Fast scan set bits.
+                        while word != 0 {
+                            let tz = word.trailing_zeros() as usize;
+                            let i = w * 64 + tz;
+                            debug_assert!(i < self.n_elems);
+
+                            let slot = buf_base.add(i);
+                            // Drop the initialized element.
+                            ptr::drop_in_place((*slot).as_mut_ptr());
+
+                            // clear the bit we just handled
+                            word &= word - 1;
+                        }
                     }
                 }
             }
         }
 
-        let guard = DropGuard {
-            buf: buf_ptr,
-            bits: bits_ptr,
-            n,
-        };
+        // SAFETY:
+        // - `buf` and `bits` are freshly allocated Vecs with
+        //   capacity/len set to cover exactly `n_elems` and `n_words`,
+        //   so their `.as_mut_ptr()` is valid for that many elements.
+        // - Both slices live at least as long as the guard, and are
+        //   not moved until after the guard is disarmed.
+        // - No aliasing occurs: the guard holds only raw pointers and
+        //   the fill loop mutates through those same allocations.
+        let mut guard = unsafe { DropGuard::new(&mut buf, &mut bits) };
 
         for (rank, value) in pairs {
-            if rank >= n {
-                // Out-of-bounds.
+            // Single bounds check up front.
+            if rank >= guard.n_elems {
                 return Err(crate::v1::Error::InvalidRankCardinality {
-                    expected: n,
+                    expected: guard.n_elems,
                     actual: rank + 1,
                 });
             }
 
-            if is_set(&bits, rank) {
-                // Duplicate: last write wins; drop old value.
-                //
-                // SAFETY: A set bit means we previously initialized
-                // `buf[rank]` via `ptr::write`, so `as_mut_ptr()`
-                // yields a valid `*mut T` for that slot. We have
-                // unique mutable access to `buf` here; the guard only
-                // holds raw pointers (no Rust borrows), so there are
-                // no aliasing conflicts. We drop the previous `T` at
-                // most once per duplicate before overwriting.
-                unsafe { ptr::drop_in_place(buf[rank].as_mut_ptr()) }
-            } else {
-                filled += 1;
-                set_bit(&mut bits, rank);
-            }
+            // Compute word index and bit mask once.
+            let w = rank / 64;
+            let b = rank % 64;
+            let mask = 1u64 << b;
 
-            // SAFETY: writing an owned `value` into `buf[rank]`.
-            // - If the bit was clear, the slot was uninitialized so
-            //   writing is valid.
-            // - If the bit was set, we just dropped the previous `T`
-            //   so slot is uninitialized again.
-            // We have unique mutable access to `buf` here; the guard
-            // holds only raw pointers (no Rust borrows), so no
-            // aliasing. After this write, `buf[rank]` is initialized.
-            unsafe { ptr::write(buf[rank].as_mut_ptr(), value) };
+            // SAFETY:
+            // - `rank < guard.n_elems` was checked above, so
+            //   `buf_slot = buf.add(rank)` is within the
+            //   `Vec<MaybeUninit<T>>` allocation.
+            // - `w = rank / 64` and `bits.len() == (n + 63) / 64`
+            //   ensure `bits_ptr = bits.add(w)` is in-bounds.
+            // - If `(word & mask) != 0`, then this slot was
+            //   previously initialized;
+            //   `drop_in_place((*buf_slot).as_mut_ptr())` is valid and
+            //   leaves the slot uninitialized.
+            // - If the bit was clear, we set it and count `filled +=
+            //   1`.
+            // - `(*buf_slot).write(value)` is valid in both cases:
+            //   either writing into an uninitialized slot or
+            //   immediately after dropping the prior `T`.
+            // - No aliasing with Rust references: the guard holds raw
+            //   pointers and we have exclusive ownership of
+            //   `buf`/`bits` within this function.
+            unsafe {
+                // Pointers from the guard (no long-lived & borrows).
+                let bits_ptr = guard.bits.as_ptr().add(w);
+                let buf_slot = guard.buf.as_ptr().add(rank);
+
+                // Read the current word.
+                let word = *bits_ptr;
+
+                if (word & mask) != 0 {
+                    // Duplicate: drop old value before overwriting.
+                    core::ptr::drop_in_place((*buf_slot).as_mut_ptr());
+                    // (Bit already set; no need to set again; don't
+                    // bump `filled`.)
+                } else {
+                    // First time we see this rank.
+                    *bits_ptr = word | mask;
+                    filled += 1;
+                }
+
+                // Write new value into the slot.
+                (*buf_slot).write(value);
+            }
         }
 
         if filled != n {
@@ -243,8 +330,8 @@ impl<T> view::BuildFromRegionIndexed<T> for ValueMesh<T> {
             });
         }
 
-        // Success: prevent guard from dropping
-        mem::forget(guard);
+        // Success: prevent cleanup.
+        guard.disarm();
 
         // SAFETY: all n slots are initialized
         let ranks = unsafe {
