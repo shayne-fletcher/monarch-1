@@ -388,7 +388,7 @@ mod tests {
         while !created.is_empty() {
             let proc_state = alloc.next().await.unwrap();
             match proc_state {
-                alloc::ProcState::Created { create_key, .. } => {
+                alloc::ProcState::Created { .. } => {
                     // created.insert(create_key);
                 }
                 alloc::ProcState::Stopped { create_key, .. } => {

@@ -682,7 +682,7 @@ impl ProcEvents {
                         continue;
                     };
 
-                    let Some((proc_id, (rank, _create_key))) = self.ranks.iter().find(|(proc_id, (_, key))| key == &create_key) else {
+                    let Some((proc_id, (rank, _create_key))) = self.ranks.iter().find(|(_proc_id, (_, key))| key == &create_key) else {
                         tracing::warn!("received stop event for unmapped proc {}", create_key);
                         continue;
                     };
