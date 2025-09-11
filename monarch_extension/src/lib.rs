@@ -90,6 +90,11 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "monarch_hyperactor.supervision",
     )?)?;
 
+    monarch_hyperactor::value_mesh::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_hyperactor.value_mesh",
+    )?)?;
+
     #[cfg(feature = "tensor_engine")]
     {
         client::register_python_bindings(&get_or_add_new_module(
