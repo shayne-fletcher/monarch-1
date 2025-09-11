@@ -1221,6 +1221,68 @@ where
     }
 }
 
+/// Map-by-value into any mesh `M`.
+pub trait MapIntoExt: Ranked {
+    fn map_into<M, U>(&self, f: impl Fn(Self::Item) -> U) -> M
+    where
+        Self: Sized,
+        M: BuildFromRegion<U>,
+    {
+        let region = self.region().clone();
+        let n = region.num_ranks();
+        let values: Vec<U> = (0..n).map(|i| f(self.get(i).unwrap())).collect();
+        M::build_dense_unchecked(region, values)
+    }
+
+    fn try_map_into<M, U, E>(self, f: impl Fn(Self::Item) -> Result<U, E>) -> Result<M, E>
+    where
+        Self: Sized,
+        M: BuildFromRegion<U>,
+    {
+        let region = self.region().clone();
+        let n = region.num_ranks();
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            out.push(f(self.get(i).unwrap())?);
+        }
+        Ok(M::build_dense_unchecked(region, out))
+    }
+}
+
+/// Blanket impl: enables `.map_into(...)` and `.try_map_into`` on any
+/// `Ranked`.
+impl<T: Ranked> MapIntoExt for T {}
+
+/// Map-by-reference into any mesh `M` (no clone required).
+pub trait MapIntoRefExt: RankedRef {
+    fn map_into_ref<M, U>(&self, f: impl Fn(&Self::Item) -> U) -> M
+    where
+        M: BuildFromRegion<U>,
+    {
+        let region = self.region().clone();
+        let n = region.num_ranks();
+        let values: Vec<U> = (0..n).map(|i| f(self.get_ref(i).unwrap())).collect();
+        M::build_dense_unchecked(region, values)
+    }
+
+    fn try_map_into_ref<M, U, E>(&self, f: impl Fn(&Self::Item) -> Result<U, E>) -> Result<M, E>
+    where
+        M: BuildFromRegion<U>,
+    {
+        let region = self.region().clone();
+        let n = region.num_ranks();
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            out.push(f(self.get_ref(i).unwrap())?);
+        }
+        Ok(M::build_dense_unchecked(region, out))
+    }
+}
+
+/// Blanket impl: enables `.map_into_ref(...)` and
+/// `.try_map_into_ref(...)` on any `RankedRef`.
+impl<T: RankedRef> MapIntoRefExt for T {}
+
 /// A View is a collection of items in a space indexed by a [`Region`].
 pub trait View: Sized {
     /// The type of item in this view.
@@ -1318,6 +1380,12 @@ pub trait Ranked: Sized {
     /// `ranks.len() == region.num_ranks()` and that
     /// `region.is_subset(self.region())`.`
     fn sliced(&self, region: Region, ranks: impl Iterator<Item = Self::Item>) -> Self;
+}
+
+/// Access items by reference (no clone). Types that can expose
+/// internal storage implement this.
+pub trait RankedRef: Ranked {
+    fn get_ref(&self, rank: usize) -> Option<&Self::Item>;
 }
 
 impl<T: Ranked> View for T {
