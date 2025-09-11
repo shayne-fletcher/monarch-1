@@ -1256,7 +1256,7 @@ mod test {
     fn set_procstate_expectations(alloc: &mut MockAlloc, extent: Extent) {
         alloc.expect_extent().return_const(extent.clone());
         let mut create_keys = Vec::new();
-        for (i, point) in extent.points().enumerate() {
+        for point in extent.points() {
             let create_key = ShortUuid::generate();
             create_keys.push(create_key.clone());
             alloc.expect_next().times(1).return_once(move || {
@@ -1267,12 +1267,16 @@ mod test {
                 })
             });
         }
-        for i in 0..extent.num_ranks() {
-            let proc_id = format!("test[{}]", i).parse().unwrap();
+        for (i, create_key) in create_keys
+            .iter()
+            .take(extent.num_ranks())
+            .cloned()
+            .enumerate()
+        {
+            let proc_id = format!("test[{i}]").parse().unwrap();
             let mesh_agent = ActorRef::<ProcMeshAgent>::attest(
-                format!("test[{}].mesh_agent[{}]", i, i).parse().unwrap(),
+                format!("test[{i}].mesh_agent[{i}]").parse().unwrap(),
             );
-            let create_key = create_keys[i].clone();
             alloc.expect_next().times(1).return_once(move || {
                 Some(ProcState::Running {
                     create_key,
@@ -1282,8 +1286,7 @@ mod test {
                 })
             });
         }
-        for i in 0..extent.num_ranks() {
-            let create_key = create_keys[i].clone();
+        for create_key in create_keys.iter().take(extent.num_ranks()).cloned() {
             alloc.expect_next().times(1).return_once(|| {
                 Some(ProcState::Stopped {
                     create_key,
@@ -2100,11 +2103,7 @@ mod test_alloc {
                     created.insert(create_key);
                     proc_points.insert(point);
                 }
-                ProcState::Running {
-                    create_key,
-                    proc_id,
-                    ..
-                } => {
+                ProcState::Running { create_key, .. } => {
                     assert!(created.remove(&create_key));
                     running_procs.insert(create_key);
                 }
@@ -2361,11 +2360,7 @@ mod test_alloc {
                     created.insert(create_key);
                     proc_points.insert(point);
                 }
-                ProcState::Running {
-                    create_key,
-                    proc_id,
-                    ..
-                } => {
+                ProcState::Running { create_key, .. } => {
                     assert!(created.remove(&create_key));
                     started_procs.insert(create_key);
                 }

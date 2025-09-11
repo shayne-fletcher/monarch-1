@@ -31,6 +31,7 @@ pub fn global() -> &'static Router {
 /// bookeeping relevant to meshes.
 pub struct Router {
     router: MailboxRouter,
+    #[allow(dead_code)] // `servers` isn't read
     servers: Mutex<HashMap<ChannelTransport, ChannelAddr>>,
 }
 
@@ -55,6 +56,7 @@ impl Router {
     /// Serve this router on the provided transport, returning the address.
     /// Servers are memoized, and we maintain only one per transport; thus
     /// subsequent calls using the same transport will return the same address.
+    #[allow(dead_code)]
     pub async fn serve(&self, transport: &ChannelTransport) -> Result<ChannelAddr, ChannelError> {
         let mut servers = self.servers.lock().await;
         if let Some(addr) = servers.get(transport) {

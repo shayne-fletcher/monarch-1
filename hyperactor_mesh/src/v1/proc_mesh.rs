@@ -25,6 +25,7 @@ use hyperactor::mailbox;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxServer;
 use ndslice::view;
+use ndslice::view::MapIntoRefExt;
 use ndslice::view::Region;
 use serde::Deserialize;
 use serde::Serialize;
@@ -55,6 +56,7 @@ pub struct ProcRef {
 impl ProcRef {
     /// Pings the proc, returning whether it is alive. This will be replaced by a
     /// finer-grained lifecycle status in the near future.
+    #[allow(dead_code)]
     async fn status(&self, caps: &(impl cap::CanSend + cap::CanOpenPort)) -> v1::Result<bool> {
         let (port, mut rx) = mailbox::open_port(caps);
         self.agent
@@ -110,28 +112,17 @@ impl ProcMeshRef {
         })
     }
 
-    /// Maps over all of the ProcRefs in the mesh, returning a new
-    /// ValueMesh with the mapped values. This is infallible because
-    /// the mapping is 1:1 with the ranks.
-    fn mapped<F, R>(&self, f: F) -> ValueMesh<R>
-    where
-        F: Fn(&ProcRef) -> R,
-    {
-        ValueMesh::new_unchecked(self.region.clone(), self.ranks.iter().map(f).collect())
-    }
-
     /// The current statuses of procs in this mesh.
+    #[allow(dead_code)]
     async fn status(
         &self,
         caps: &(impl cap::CanSend + cap::CanOpenPort),
     ) -> v1::Result<ValueMesh<bool>> {
-        self.mapped(|proc_ref| {
+        let vm: ValueMesh<_> = self.map_into_ref(|proc_ref| {
             let proc_ref = proc_ref.clone();
             async move { proc_ref.status(caps).await }
-        })
-        .join()
-        .await
-        .transpose()
+        });
+        vm.join().await.transpose()
     }
 
     /// Allocate a new ProcMeshRef from the provided alloc.
@@ -219,6 +210,7 @@ impl ProcMeshRef {
     }
 
     /// Spawn an actor on all of the procs in this mesh, returning a new ActorMesh.
+    #[allow(dead_code)]
     async fn spawn<A: Actor + RemoteActor>(
         &self,
         caps: &(impl cap::CanSend + cap::CanOpenPort),
@@ -296,6 +288,12 @@ impl view::Ranked for ProcMeshRef {
 
     fn sliced(&self, region: Region, nodes: impl Iterator<Item = ProcRef>) -> Self {
         Self::new(self.name.clone(), region, nodes.collect()).unwrap()
+    }
+}
+
+impl view::RankedRef for ProcMeshRef {
+    fn get_ref(&self, rank: usize) -> Option<&Self::Item> {
+        self.ranks.get(rank)
     }
 }
 

@@ -136,7 +136,7 @@ impl Alloc for SimAlloc {
     }
 
     fn spec(&self) -> &AllocSpec {
-        &self.inner.spec()
+        self.inner.spec()
     }
 
     fn extent(&self) -> &Extent {
