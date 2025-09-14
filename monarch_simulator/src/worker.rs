@@ -824,8 +824,7 @@ mod tests {
     async fn worker_reduce() -> Result<()> {
         simnet::start();
         let proc = Proc::local();
-        //let (client, controller_ref, mut controller_rx) = proc.attach_actor("controller")?;
-        let client = proc.attach("client")?;
+        let (client, _handle) = proc.instance("client")?;
 
         let world_size = 4;
         let fabric = Arc::new(Fabric::new());

@@ -76,6 +76,7 @@ class PoolDeviceMeshProvider:
         self._hosts = hosts
         self._gpus = gpus
         self._mesh_map: dict[MeshWorld, DeviceMesh | None] = {}
+        self._create_count = 0
         self._proc = proc
         # Root client is not used to create device meshes.
         # It is only used to pull the world status.
@@ -132,12 +133,14 @@ class PoolDeviceMeshProvider:
                     # Either controller world is not ready or worker world is not ready
                     continue
 
-                # Create a new device mesh
+                # Previously this grafted a child actor ("new_with_parent") to the root client.
+                # This is not a legal thing to do to: instead, we create a unique controller
+                # actor name based on the root client.
+                controller_actor_name = f"{self._root_client.actor_id.actor_name}.backend_controller_{self._create_count}"
+                self._create_count += 1
                 backend_ctrl = RustController(
                     proc=self._proc,
-                    client_actor=ClientActor.new_with_parent(
-                        self._proc, self._root_client.actor_id
-                    ),
+                    client_actor=ClientActor(self._proc, controller_actor_name),
                     controller_id=controller_id,
                     worker_world_name=worker_world,
                 )

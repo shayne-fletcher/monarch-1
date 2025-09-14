@@ -96,9 +96,7 @@ def sim_mesh(n_meshes: int, hosts: int, gpus_per_host: int) -> List[DeviceMesh]:
         # Create a new device mesh
         backend_ctrl = RustController(
             proc=client_proc,
-            client_actor=ClientActor.new_with_parent(
-                client_proc, root_client_actor.actor_id
-            ),
+            client_actor=ClientActor(client_proc, "backend_controller"),
             controller_id=controller_id,
             worker_world_name=f"mesh_{i}_worker",
         )
@@ -282,6 +280,8 @@ class PoolDeviceMeshProvider:
         )
         self._mesh_world_state = mesh_world_state
         self._simulator_client = simulator_client
+        # Keep track of this to create unique controller ids.
+        self._num_meshes_created = 0
 
     def new_mesh(self, timeout_in_sec: Optional[int] = None) -> DeviceMesh:
         mesh_world_to_create = next(
@@ -298,12 +298,13 @@ class PoolDeviceMeshProvider:
         # Create a new device mesh
         backend_ctrl = RustController(
             proc=self._client_proc,
-            client_actor=ClientActor.new_with_parent(
-                self._client_proc, self._root_client_actor.actor_id
+            client_actor=ClientActor(
+                self._client_proc, f"backend_controller_{self._num_meshes_created}"
             ),
             controller_id=controller_id,
             worker_world_name=worker_world,
         )
+        self._num_meshes_created += 1
         client = Client(
             backend_ctrl,
             self._hosts_per_mesh * self._gpus_per_host,
