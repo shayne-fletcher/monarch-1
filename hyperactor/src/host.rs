@@ -41,15 +41,9 @@
 //! ```
 
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::str::FromStr;
-use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures::Future;
-use tokio::process::Child;
-use tokio::process::Command;
-use tokio::sync::Mutex;
 
 use crate::Actor;
 use crate::ActorHandle;
@@ -62,46 +56,18 @@ use crate::actor::RemoteActor;
 use crate::channel;
 use crate::channel::ChannelAddr;
 use crate::channel::ChannelError;
-use crate::channel::ChannelTransport;
-use crate::channel::Rx;
 use crate::channel::Tx;
+use crate::host_types::HostError;
 use crate::mailbox::BoxableMailboxSender;
 use crate::mailbox::DialMailboxRouter;
-use crate::mailbox::IntoBoxedMailboxSender as _;
+use crate::mailbox::IntoBoxedMailboxSender;
 use crate::mailbox::MailboxClient;
 use crate::mailbox::MailboxSender;
 use crate::mailbox::MailboxServer;
 use crate::mailbox::MailboxServerHandle;
 use crate::mailbox::MessageEnvelope;
 use crate::mailbox::Undeliverable;
-
-/// The type of error produced by host operations.
-#[derive(Debug, thiserror::Error)]
-pub enum HostError {
-    /// A channel error occurred during a host operation.
-    #[error(transparent)]
-    ChannelError(#[from] ChannelError),
-
-    /// The named proc already exists and cannot be spawned.
-    #[error("proc '{0}' already exists")]
-    ProcExists(String),
-
-    /// Failures occuring while spawning a subprocess.
-    #[error("proc '{0}' failed to spawn process: {1}")]
-    ProcessSpawnFailure(ProcId, #[source] std::io::Error),
-
-    /// Failures occuring while spawning a management actor in a proc.
-    #[error("failed to spawn agent on proc '{0}': {1}")]
-    AgentSpawnFailure(ProcId, #[source] anyhow::Error),
-
-    /// An input parameter was missing.
-    #[error("parameter '{0}' missing: {1}")]
-    MissingParameter(String, std::env::VarError),
-
-    /// An input parameter was invalid.
-    #[error("parameter '{0}' invalid: {1}")]
-    InvalidParameter(String, anyhow::Error),
-}
+use crate::proc_manager::ProcManager;
 
 /// A host, managing the lifecycle of several procs, and their backend
 /// routing, as described in this module's documentation.
@@ -211,179 +177,6 @@ impl MailboxSender for ProcOrDial {
     }
 }
 
-/// A trait describing a manager of procs, responsible for bootstrapping
-/// procs on a host, and managing their lifetimes. The manager spawns an
-/// `Agent`-typed actor on each proc, responsible for managing the proc.
-#[async_trait]
-pub trait ProcManager {
-    /// The type of agent actor launched on the proc.
-    type Agent: Actor + RemoteActor;
-
-    /// The preferred transport for this ProcManager.
-    /// In practice this will be [`ChannelTransport::Local`]
-    /// for testing, and [`ChannelTransport::Unix`] for external
-    /// processes.
-    fn transport(&self) -> ChannelTransport;
-
-    /// Spawn a new proc with the provided proc id. The proc
-    /// should use the provided forwarder address for messages
-    /// destined outside of the proc. The returned address accepts
-    /// messages destined for the proc.
-    ///
-    /// An agent actor is also spawned, and the corresponding actor
-    /// ref is returned.
-    async fn spawn(
-        &self,
-        proc_id: ProcId,
-        forwarder_addr: ChannelAddr,
-    ) -> Result<(ChannelAddr, ActorRef<Self::Agent>), HostError>;
-
-    // TODO: full lifecycle management; perhaps mimick the Command API.
-}
-
-/// A ProcManager that spawns into local (in-process) procs. Used for
-/// testing.
-pub struct LocalProcManager<A: Actor> {
-    procs: Arc<Mutex<HashMap<ProcId, Proc>>>,
-    params: A::Params,
-}
-
-impl<A: Actor> LocalProcManager<A> {
-    /// Create a new in-process proc manager with the given agent
-    /// params.
-    pub fn new(params: A::Params) -> Self {
-        Self {
-            procs: Arc::new(Mutex::new(HashMap::new())),
-            params,
-        }
-    }
-}
-
-#[async_trait]
-impl<A> ProcManager for LocalProcManager<A>
-where
-    A: Actor + RemoteActor + Binds<A>,
-    A::Params: Sync + Clone,
-{
-    type Agent = A;
-
-    fn transport(&self) -> ChannelTransport {
-        ChannelTransport::Local
-    }
-
-    async fn spawn(
-        &self,
-        proc_id: ProcId,
-        forwarder_addr: ChannelAddr,
-    ) -> Result<(ChannelAddr, ActorRef<A>), HostError> {
-        let transport = forwarder_addr.transport();
-        let proc = Proc::new(
-            proc_id.clone(),
-            MailboxClient::dial(forwarder_addr)?.into_boxed(),
-        );
-        let (proc_addr, rx) = channel::serve(ChannelAddr::any(transport)).await?;
-        self.procs
-            .lock()
-            .await
-            .insert(proc_id.clone(), proc.clone());
-        let _handle = proc.clone().serve(rx);
-        let agent_handle = proc
-            .spawn("agent", self.params.clone())
-            .await
-            .map_err(|e| HostError::AgentSpawnFailure(proc_id, e))?;
-        Ok((proc_addr, agent_handle.bind()))
-    }
-}
-
-/// A ProcManager that manages each proc as a separate process.
-/// It follows a simple protocol:
-///
-/// Each process is launched with the following environment variables:
-/// - `HYPERACTOR_HOST_BACKEND_ADDR`: the backend address to which all messages are forwarded,
-/// - `HYPERACTOR_HOST_PROC_ID`: the proc id to assign the launched proc, and
-/// - `HYPERACTOR_HOST_CALLBACK_ADDR`: the channel address with which to return the proc's address
-///
-/// The launched proc should also spawn an actor to manage it - the details of this are
-/// implementation dependent, and outside the scope of the process manager.
-///
-/// The function [`boot_proc`] provides a convenient implementation of the
-/// protocol.
-pub struct ProcessProcManager<A> {
-    cmd: Arc<Mutex<Command>>,
-    children: Arc<Mutex<HashMap<ProcId, Child>>>,
-    _phantom: PhantomData<A>,
-}
-
-impl<A> ProcessProcManager<A> {
-    /// Create a new ProcessProcManager that runs the provided
-    /// command.
-    pub fn new(cmd: Command) -> Self {
-        Self {
-            cmd: Arc::new(Mutex::new(cmd)),
-            children: Arc::new(Mutex::new(HashMap::new())),
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<A> Drop for ProcessProcManager<A> {
-    fn drop(&mut self) {
-        // When the manager is dropped, `children` is dropped, which
-        // drops each `Child` handle. With `kill_on_drop(true)`, the OS
-        // will SIGKILL the processes. Nothing else to do here.
-    }
-}
-
-#[async_trait]
-impl<A: Actor + RemoteActor> ProcManager for ProcessProcManager<A> {
-    type Agent = A;
-
-    fn transport(&self) -> ChannelTransport {
-        ChannelTransport::Unix
-    }
-
-    async fn spawn(
-        &self,
-        proc_id: ProcId,
-        forwarder_addr: ChannelAddr,
-    ) -> Result<(ChannelAddr, ActorRef<A>), HostError> {
-        let mut cmd = self.cmd.lock().await;
-
-        let (callback_addr, mut callback_rx) =
-            channel::serve(ChannelAddr::any(ChannelTransport::Unix)).await?;
-
-        cmd.env("HYPERACTOR_HOST_BACKEND_ADDR", forwarder_addr.to_string());
-        cmd.env("HYPERACTOR_HOST_PROC_ID", proc_id.to_string());
-        cmd.env("HYPERACTOR_HOST_CALLBACK_ADDR", callback_addr.to_string());
-
-        // Lifetime strategy: mark the child with
-        // `kill_on_drop(true)` so the OS will send SIGKILL if the
-        // handle is dropped and retain the `Child` in
-        // `self.children`, tying its lifetime to the manager/host.
-        //
-        // This is the simplest viable policy to avoid orphaned
-        // subprocesses in CI; more sophisticated lifecycle control
-        // (graceful shutdown, restart) will be layered on later.
-
-        // Kill the child when its handle is dropped.
-        cmd.kill_on_drop(true);
-
-        let child = cmd
-            .spawn()
-            .map_err(|e| HostError::ProcessSpawnFailure(proc_id.clone(), e))?;
-
-        // Retain the handle so it lives for the life of the
-        // manager/host.
-        {
-            let mut children = self.children.lock().await;
-            children.insert(proc_id.clone(), child);
-        }
-
-        // Now wait for the callback, providing the address.
-        Ok(callback_rx.recv().await?)
-    }
-}
-
 /// Boot a process in a ProcessProcManager<A>. Should be called from processes spawned
 /// by the process manager. `boot_proc` will spawn the provided actor type (with parameters)
 /// onto the newly created Proc, and bind its handler. This allows the user to install an agent to
@@ -465,15 +258,20 @@ pub mod testing {
 mod tests {
     use std::sync::Arc;
 
+    use tokio::process::Command;
+
     use super::testing::EchoActor;
     use super::*;
     use crate::channel::ChannelTransport;
     use crate::context::Mailbox;
+    use crate::host_types::HostError;
+    use crate::proc_manager::LocalProcManager;
+    use crate::proc_manager::ProcessProcManager;
 
     #[tokio::test]
     async fn test_basic() {
         let proc_manager = LocalProcManager::<()>::new(());
-        let procs = Arc::clone(&proc_manager.procs);
+        let procs = Arc::clone(&proc_manager.procs());
         let (mut host, _handle) =
             Host::serve(proc_manager, ChannelAddr::any(ChannelTransport::Local))
                 .await
