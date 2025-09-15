@@ -537,7 +537,7 @@ impl Proc {
     /// Call `abort` on the `JoinHandle` associated with the given
     /// root actor. If successful return `Some(root.clone())` else
     /// `None`.
-    pub fn abort_root_actor(&self, root: &ActorId) -> Option<ActorId> {
+    pub fn abort_root_actor(&self, root: &ActorId) -> Option<impl Future<Output = ActorId>> {
         self.state()
             .ledger
             .roots
@@ -545,15 +545,23 @@ impl Proc {
             .into_iter()
             .flat_map(|e| e.upgrade())
             .map(|cell| {
+                let r1 = root.clone();
+                let r2 = root.clone();
                 // `start` was called on the actor's instance
                 // immediately following `root`'s insertion into the
-                // ledger. Since `Instance::start()` is infallible we
-                // know the cell's task handle has been set so it's
-                // safe to `unwrap`.
-                let h = cell.actor_task_handle().unwrap();
-                tracing::debug!("{}: aborting {:?}", root, h);
-                h.abort();
-                root.clone()
+                // ledger. `Instance::start()` is infallible and should
+                // complete quickly, so calling `wait()` on `actor_task_handle`
+                // should be safe (i.e., not hang forever).
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        let h = cell.inner.actor_task_handle.wait();
+                        tracing::debug!("{}: aborting {:?}", r1, h);
+                        h.abort()
+                    })
+                    .await
+                    .unwrap();
+                    r2
+                }
             })
             .next()
     }
@@ -643,16 +651,20 @@ impl Proc {
             .iter()
             .filter(|(actor_id, _)| !stopped_actors.contains(actor_id))
             .map(|(actor_id, _)| {
-                let _: Option<ActorId> = self.abort_root_actor(actor_id);
-                // If `is_none(&_)` then the proc's `ledger.roots`
-                // contains an entry that wasn't a root or, the
-                // associated actor's instance cell was already
-                // dropped when we went to call `abort()` on the
-                // cell's task handle.
+                let f = self.abort_root_actor(actor_id);
+                async move {
+                    let _ = if let Some(f) = f { Some(f.await) } else { None };
+                    // If `is_none(&_)` then the proc's `ledger.roots`
+                    // contains an entry that wasn't a root or, the
+                    // associated actor's instance cell was already
+                    // dropped when we went to call `abort()` on the
+                    // cell's task handle.
 
-                actor_id.clone()
+                    actor_id.clone()
+                }
             })
             .collect();
+        let aborted_actors = futures::future::join_all(aborted_actors).await;
 
         tracing::info!(
             "destroy_and_wait: {} actors stopped, {} actors aborted",
@@ -1533,6 +1545,7 @@ impl InstanceCell {
     }
 
     /// The actor's join handle.
+    #[allow(dead_code)]
     pub(crate) fn actor_task_handle(&self) -> Option<&JoinHandle<()>> {
         self.inner.actor_task_handle.get()
     }

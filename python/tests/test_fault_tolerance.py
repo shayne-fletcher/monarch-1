@@ -134,33 +134,17 @@ class TestFaultTolerance(TestCase):
 
         self.assertEqual(len(unhealthy_meshes), 1)
 
-        # World status will transition to unhealthy
-        has_unhealth = False
-        unhealthy_statuses = []
-        while not has_unhealth:
+        for _ in range(20):
             statuses = provider._root_client.world_status()
-            for _, status in statuses.items():
-                if DeviceMeshStatus(status) == DeviceMeshStatus.UNHEALTHY:
-                    has_unhealth = True
-                    unhealthy_statuses = statuses
-                    break
-            time.sleep(1)
-
-        # Unhealthy worlds will be evicted
-        has_unhealth = True
-        healthy_statuses = []
-        while has_unhealth:
-            has_unhealth = False
-            statuses = provider._root_client.world_status()
-            healthy_statuses = statuses
-            for _, status in statuses.items():
-                if DeviceMeshStatus(status) == DeviceMeshStatus.UNHEALTHY:
-                    has_unhealth = True
-                    break
-            time.sleep(1)
-
-        # A worker world will be evicted
-        self.assertEqual(len(healthy_statuses), len(unhealthy_statuses) - 1)
+            # The 4th worker and controller worlds should have been evicted.
+            if len(statuses) != 6:
+                time.sleep(1)
+                continue
+            else:
+                for status in statuses.values():
+                    assert DeviceMeshStatus(status) == DeviceMeshStatus.LIVE
+                return
+        raise RuntimeError(f"Unexpected world statuses: {statuses}")
 
     def test_worker_supervision_failure(self) -> None:
         meshes, bootstrap = local_meshes(meshes=1)
