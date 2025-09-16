@@ -350,7 +350,13 @@ impl<T> view::BuildFromRegionIndexed<T> for ValueMesh<T> {
     }
 }
 
-impl<T: Clone + 'static> view::RankedRef for ValueMesh<T> {
+impl<T> view::RankedRef for ValueMesh<T> {
+    type Item = T;
+
+    fn region(&self) -> &Region {
+        &self.region
+    }
+
     fn get_ref(&self, rank: usize) -> Option<&Self::Item> {
         self.ranks.get(rank)
     }
@@ -911,5 +917,27 @@ mod tests {
         let out: ValueMesh<_> = vm.map_into(|x| x * x);
         assert_eq!(out.region, region);
         assert_eq!(out.ranks, vec![49]);
+    }
+
+    #[test]
+    fn map_into_ref_with_non_clone_field() {
+        // A type that intentionally does NOT implement Clone.
+        #[derive(Debug, PartialEq, Eq)]
+        struct NotClone(i32);
+
+        let region: Region = extent!(x = 3).into();
+        let values = vec![(10, NotClone(1)), (20, NotClone(2)), (30, NotClone(3))];
+        let mesh: ValueMesh<(i32, NotClone)> =
+            values.into_iter().collect_mesh(region.clone()).unwrap();
+        // Compiles: mesh is `RankedRef`
+        let _: &dyn ndslice::view::RankedRef<Item = (i32, NotClone)> = &mesh;
+        // Would fail if uncommented (mesh is not `Ranked` since `T: !Clone`):
+        // let _: &dyn ndslice::view::Ranked<Item = (i32, NotClone)> = &mesh;
+
+        // It does implement `RankedRef` though so we can
+        // `.map_into_ref()`. Project out the first field.
+        let projected: ValueMesh<i32> = mesh.map_into_ref(|t| t.0);
+        assert_eq!(projected.values().collect::<Vec<_>>(), vec![10, 20, 30]);
+        assert_eq!(projected.region(), &region);
     }
 }

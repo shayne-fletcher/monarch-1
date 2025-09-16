@@ -357,6 +357,12 @@ impl view::Ranked for ProcMeshRef {
 }
 
 impl view::RankedRef for ProcMeshRef {
+    type Item = ProcRef;
+
+    fn region(&self) -> &Region {
+        &self.region
+    }
+
     fn get_ref(&self, rank: usize) -> Option<&Self::Item> {
         self.ranks.get(rank)
     }

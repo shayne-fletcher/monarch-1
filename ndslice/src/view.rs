@@ -1270,7 +1270,7 @@ impl<T: Ranked> MapIntoExt for T {}
 
 /// Map-by-reference into any mesh `M` (no clone required).
 pub trait MapIntoRefExt: RankedRef {
-    fn map_into_ref<M, U>(&self, f: impl Fn(&Self::Item) -> U) -> M
+    fn map_into_ref<M, U>(&self, f: impl Fn(&<Self as RankedRef>::Item) -> U) -> M
     where
         M: BuildFromRegion<U>,
     {
@@ -1280,7 +1280,10 @@ pub trait MapIntoRefExt: RankedRef {
         M::build_dense_unchecked(region, values)
     }
 
-    fn try_map_into_ref<M, U, E>(&self, f: impl Fn(&Self::Item) -> Result<U, E>) -> Result<M, E>
+    fn try_map_into_ref<M, U, E>(
+        &self,
+        f: impl Fn(&<Self as RankedRef>::Item) -> Result<U, E>,
+    ) -> Result<M, E>
     where
         M: BuildFromRegion<U>,
     {
@@ -1393,13 +1396,29 @@ pub trait Ranked: Sized {
     /// Construct a new Ranked containing the ranks in this view that are
     /// part of region. The caller guarantees that
     /// `ranks.len() == region.num_ranks()` and that
-    /// `region.is_subset(self.region())`.`
+    /// `region.is_subset(self.region())`.
     fn sliced(&self, region: Region, ranks: impl Iterator<Item = Self::Item>) -> Self;
 }
 
-/// Access items by reference (no clone). Types that can expose
-/// internal storage implement this.
-pub trait RankedRef: Ranked {
+/// Borrowed (by-reference) access to items in a ranked view.
+///
+/// This trait is the counterpart to [`Ranked`], which provides owned
+/// access (`get` ->`Self::Item`). `RankedRef` instead allows
+/// implementors that can expose their internal storage to let callers
+/// borrow items directly without requiring `Clone` on the element
+/// type.
+///
+/// A type may implement `RankedRef` even if it cannot implement
+/// [`Ranked`], for example when its items are not `Clone`. This
+/// enables APIs like [`MapIntoRefExt`] that can transform meshes by
+/// reference only.
+pub trait RankedRef {
+    type Item;
+
+    /// The ranks contained in this view.
+    fn region(&self) -> &Region;
+
+    /// Return the item at `rank`
     fn get_ref(&self, rank: usize) -> Option<&Self::Item>;
 }
 
