@@ -139,3 +139,10 @@ static_assertions::assert_type_eq_all!(
     <PassthroughActorTest as hyperactor::Actor>::Params,
     PassthroughActorTest
 );
+
+// Test struct support for Handler derive
+#[derive(Handler, Debug, Named)]
+struct SimpleStructMessage {
+    field1: String,
+    field2: u32,
+}

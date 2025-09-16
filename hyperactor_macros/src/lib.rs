@@ -74,6 +74,7 @@ enum Variant {
         field_names: Vec<Ident>,
         field_types: Vec<Type>,
         field_flags: Vec<FieldFlag>,
+        is_struct: bool,
     },
     /// An anonymous variant (i.e., `MyVariant(..)`).
     Anon {
@@ -81,6 +82,7 @@ enum Variant {
         name: Ident,
         field_types: Vec<Type>,
         field_flags: Vec<FieldFlag>,
+        is_struct: bool,
     },
 }
 
@@ -88,6 +90,14 @@ impl Variant {
     /// The number of fields in the variant.
     fn len(&self) -> usize {
         self.field_types().len()
+    }
+
+    /// Returns whether this variant was defined as a struct.
+    fn is_struct(&self) -> bool {
+        match self {
+            Variant::Named { is_struct, .. } => *is_struct,
+            Variant::Anon { is_struct, .. } => *is_struct,
+        }
     }
 
     /// The name of the enum containing the variant.
@@ -118,7 +128,12 @@ impl Variant {
     fn qualified_name(&self) -> proc_macro2::TokenStream {
         let enum_name = self.enum_name();
         let name = self.name();
-        quote! { #enum_name::#name }
+
+        if self.is_struct() {
+            quote! { #enum_name }
+        } else {
+            quote! { #enum_name::#name }
+        }
     }
 
     /// Names of the fields in the variant. Anonymous variants are named
@@ -333,71 +348,114 @@ fn parse_field_flag(field: &Field) -> FieldFlag {
     FieldFlag::None
 }
 
-/// Parse a message enum into its constituent messages.
-fn parse_message_enum(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
-    let variants = if let Data::Enum(data_enum) = &input.data {
-        &data_enum.variants
-    } else {
-        return Err(syn::Error::new_spanned(
-            input,
-            "handlers can only be derived for enums",
-        ));
-    };
+/// Parse a message enum or struct into its constituent messages.
+fn parse_messages(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
+    match &input.data {
+        Data::Enum(data_enum) => {
+            let mut messages = Vec::new();
 
-    let mut messages = Vec::new();
+            for variant in &data_enum.variants {
+                let name = variant.ident.clone();
+                let attrs = &variant.attrs;
 
-    for variant in variants {
-        let name = variant.ident.clone();
-        let attrs = &variant.attrs;
+                let message_variant = match &variant.fields {
+                    syn::Fields::Unnamed(fields_) => Variant::Anon {
+                        enum_name: input.ident.clone(),
+                        name,
+                        field_types: fields_
+                            .unnamed
+                            .iter()
+                            .map(|field| field.ty.clone())
+                            .collect(),
+                        field_flags: fields_.unnamed.iter().map(parse_field_flag).collect(),
+                        is_struct: false,
+                    },
+                    syn::Fields::Named(fields_) => Variant::Named {
+                        enum_name: input.ident.clone(),
+                        name,
+                        field_names: fields_
+                            .named
+                            .iter()
+                            .map(|field| field.ident.clone().unwrap())
+                            .collect(),
+                        field_types: fields_.named.iter().map(|field| field.ty.clone()).collect(),
+                        field_flags: fields_.named.iter().map(parse_field_flag).collect(),
+                        is_struct: false,
+                    },
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            variant,
+                            indoc! {r#"
+                                `Handler` currently only supports named or tuple struct variants
 
-        let message_variant = match &variant.fields {
-            syn::Fields::Unnamed(fields_) => Variant::Anon {
-                enum_name: input.ident.clone(),
-                name,
-                field_types: fields_
-                    .unnamed
-                    .iter()
-                    .map(|field| field.ty.clone())
-                    .collect(),
-                field_flags: fields_.unnamed.iter().map(parse_field_flag).collect(),
-            },
-            syn::Fields::Named(fields_) => Variant::Named {
-                enum_name: input.ident.clone(),
-                name,
-                field_names: fields_
-                    .named
-                    .iter()
-                    .map(|field| field.ident.clone().unwrap())
-                    .collect(),
-                field_types: fields_.named.iter().map(|field| field.ty.clone()).collect(),
-                field_flags: fields_.named.iter().map(parse_field_flag).collect(),
-            },
-            _ => {
-                return Err(syn::Error::new_spanned(
-                    variant,
-                    indoc! {r#"
-                      `Handler` currently only supports named or tuple struct variants
+                                = help use `MyCall(Arg1Type, Arg2Type, ..)`,
+                                = help use `MyCall { arg1: Arg1Type, arg2: Arg2Type, .. }`,
+                                = help use `MyCall(Arg1Type, Arg2Type, .., #[reply] OncePortRef<ReplyType>)`
+                                = help use `MyCall { arg1: Arg1Type, arg2: Arg2Type, .., reply: #[reply] OncePortRef<ReplyType>}`
+                                = help use `MyCall(Arg1Type, Arg2Type, .., #[reply] OncePortHandle<ReplyType>)`
+                                = help use `MyCall { arg1: Arg1Type, arg2: Arg2Type, .., reply: #[reply] OncePortHandle<ReplyType>}`
+                              "#},
+                        ));
+                    }
+                };
+                let log_level = parse_log_level(attrs)?;
 
-                      = help use `MyCall(Arg1Type, Arg2Type, ..)`,
-                      = help use `MyCall { arg1: Arg1Type, arg2: Arg2Type, .. }`,
-                      = help use `MyCall(Arg1Type, Arg2Type, .., #[reply] OncePortRef<ReplyType>)`
-                      = help use `MyCall { arg1: Arg1Type, arg2: Arg2Type, .., reply: #[reply] OncePortRef<ReplyType>)`
-                      = help use `MyCall(Arg1Type, Arg2Type, .., #[reply] OncePortHandle<ReplyType>)`
-                      = help use `MyCall { arg1: Arg1Type, arg2: Arg2Type, .., reply: #[reply] OncePortHandle<ReplyType>)`
-                    "#},
-                ));
+                messages.push(Message::new(
+                    variant.fields.span(),
+                    message_variant,
+                    log_level,
+                )?);
             }
-        };
-        let log_level = parse_log_level(attrs)?;
 
-        messages.push(Message::new(
-            variant.fields.span(),
-            message_variant,
-            log_level,
-        )?);
+            Ok(messages)
+        }
+        Data::Struct(data_struct) => {
+            let struct_name = input.ident.clone();
+            let attrs = &input.attrs;
+
+            let message_variant = match &data_struct.fields {
+                syn::Fields::Unnamed(fields_) => Variant::Anon {
+                    enum_name: struct_name.clone(),
+                    name: struct_name,
+                    field_types: fields_
+                        .unnamed
+                        .iter()
+                        .map(|field| field.ty.clone())
+                        .collect(),
+                    field_flags: fields_.unnamed.iter().map(parse_field_flag).collect(),
+                    is_struct: true,
+                },
+                syn::Fields::Named(fields_) => Variant::Named {
+                    enum_name: struct_name.clone(),
+                    name: struct_name,
+                    field_names: fields_
+                        .named
+                        .iter()
+                        .map(|field| field.ident.clone().unwrap())
+                        .collect(),
+                    field_types: fields_.named.iter().map(|field| field.ty.clone()).collect(),
+                    field_flags: fields_.named.iter().map(parse_field_flag).collect(),
+                    is_struct: true,
+                },
+                syn::Fields::Unit => Variant::Anon {
+                    enum_name: struct_name.clone(),
+                    name: struct_name,
+                    field_types: Vec::new(),
+                    field_flags: Vec::new(),
+                    is_struct: true,
+                },
+            };
+
+            let log_level = parse_log_level(attrs)?;
+            let message = Message::new(data_struct.fields.span(), message_variant, log_level)?;
+
+            Ok(vec![message])
+        }
+        _ => Err(syn::Error::new_spanned(
+            input,
+            "handlers can only be derived for enums and structs",
+        )),
     }
-
-    Ok(messages)
 }
 
 /// Derive a custom handler trait for given an enum containing tuple
@@ -562,7 +620,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
     let name: Ident = input.ident.clone();
     let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
 
-    let messages = match parse_message_enum(input.clone()) {
+    let messages = match parse_messages(input.clone()) {
         Ok(messages) => messages,
         Err(err) => return TokenStream::from(err.to_compile_error()),
     };
@@ -779,7 +837,7 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident.clone();
 
-    let messages = match parse_message_enum(input.clone()) {
+    let messages = match parse_messages(input.clone()) {
         Ok(messages) => messages,
         Err(err) => return TokenStream::from(err.to_compile_error()),
     };
