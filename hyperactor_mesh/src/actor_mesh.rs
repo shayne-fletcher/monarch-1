@@ -1352,7 +1352,7 @@ mod tests {
 
             // Message sized to exactly max frame length.
             let payload = Payload {
-                part: Part::from(Bytes::from(vec![0u8; 764])),
+                part: Part::from(Bytes::from(vec![0u8; 763])),
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
@@ -1372,7 +1372,7 @@ mod tests {
 
             // Message sized to max frame length + 1.
             let payload = Payload {
-                part: Part::from(Bytes::from(vec![0u8; 765])),
+                part: Part::from(Bytes::from(vec![0u8; 764])),
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
