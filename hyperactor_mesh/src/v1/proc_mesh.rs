@@ -254,16 +254,6 @@ impl ProcMeshRef {
         })
     }
 
-    /// Maps over all of the ProcRefs in the mesh, returning a new
-    /// ValueMesh with the mapped values. This is infallible because
-    /// the mapping is 1:1 with the ranks.
-    fn mapped<F, R>(&self, f: F) -> ValueMesh<R>
-    where
-        F: Fn(&ProcRef) -> R,
-    {
-        ValueMesh::new_unchecked(self.region.clone(), self.ranks.iter().map(f).collect())
-    }
-
     /// The current statuses of procs in this mesh.
     #[allow(dead_code)]
     async fn status(&self, cx: &impl context::Actor) -> v1::Result<ValueMesh<bool>> {
