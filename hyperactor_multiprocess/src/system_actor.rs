@@ -722,14 +722,14 @@ pub struct ReportingRouter {
 }
 
 impl MailboxSender for ReportingRouter {
-    fn post(
+    fn post_unchecked(
         &self,
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) {
         let ReportingRouter { router, .. } = self;
         self.post_update_address(&envelope);
-        router.post(envelope, return_handle);
+        router.post_unchecked(envelope, return_handle);
     }
 }
 

@@ -380,6 +380,21 @@ impl MailboxSender for ReconfigurableMailboxSender {
             }
         }
     }
+
+    fn post_unchecked(
+        &self,
+        envelope: MessageEnvelope,
+        return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
+    ) {
+        match *self.state.read().unwrap() {
+            ReconfigurableMailboxSenderState::Queueing(ref queue) => {
+                queue.lock().unwrap().push((envelope, return_handle));
+            }
+            ReconfigurableMailboxSenderState::Configured(ref sender) => {
+                sender.post_unchecked(envelope, return_handle);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -416,7 +431,7 @@ mod tests {
     }
 
     impl MailboxSender for QueueingMailboxSender {
-        fn post(
+        fn post_unchecked(
             &self,
             envelope: MessageEnvelope,
             _return_handle: PortHandle<Undeliverable<MessageEnvelope>>,

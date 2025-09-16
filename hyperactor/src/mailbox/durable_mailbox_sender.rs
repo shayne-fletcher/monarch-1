@@ -70,7 +70,7 @@ impl DurableMailboxSender {
 
 #[async_trait]
 impl MailboxSender for DurableMailboxSender {
-    fn post(
+    fn post_unchecked(
         &self,
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,

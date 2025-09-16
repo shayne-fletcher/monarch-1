@@ -739,7 +739,7 @@ impl Proc {
 
 #[async_trait]
 impl MailboxSender for Proc {
-    fn post(
+    fn post_unchecked(
         &self,
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
@@ -767,7 +767,7 @@ impl WeakProc {
 
 #[async_trait]
 impl MailboxSender for WeakProc {
-    fn post(
+    fn post_unchecked(
         &self,
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,

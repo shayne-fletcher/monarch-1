@@ -197,15 +197,15 @@ struct ProcOrDial {
 }
 
 impl MailboxSender for ProcOrDial {
-    fn post(
+    fn post_unchecked(
         &self,
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) {
         if envelope.dest().actor_id().proc_id() == self.proc.proc_id() {
-            self.proc.post(envelope, return_handle);
+            self.proc.post_unchecked(envelope, return_handle);
         } else {
-            self.router.post(envelope, return_handle)
+            self.router.post_unchecked(envelope, return_handle)
         }
     }
 }
