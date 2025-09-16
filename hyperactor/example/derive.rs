@@ -7,6 +7,7 @@
  */
 
 use std::collections::HashSet;
+use std::fmt::Debug;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -21,6 +22,7 @@ use hyperactor::RefClient;
 use hyperactor::proc::Proc;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 #[derive(Handler, HandleClient, RefClient, Debug, Serialize, Deserialize, Named)]
 enum ShoppingList {
@@ -32,20 +34,20 @@ enum ShoppingList {
     // provided port, which must be in the last position.
     Exists(String, #[reply] OncePortRef<bool>),
 
-    List(#[reply] PortRef<Vec<String>>),
+    List(#[reply] OncePortRef<Vec<String>>),
 }
 
-// Struct message types. These generate a single method.
+// Example struct-based message types (demonstrating the new struct support)
 #[derive(Handler, HandleClient, RefClient, Debug, Serialize, Deserialize, Named)]
 struct ClearList {
     reason: String,
 }
 
 #[derive(Handler, HandleClient, RefClient, Debug, Serialize, Deserialize, Named)]
-struct GetItemCount {
+struct GetItemCount<C> {
     category_filter: String,
     #[reply]
-    reply: OncePortRef<usize>,
+    reply: OncePortRef<C>,
 }
 
 // Define an actor.
@@ -55,7 +57,7 @@ struct GetItemCount {
     handlers = [
         ShoppingList,
         ClearList,
-        GetItemCount,
+        GetItemCount<usize>,
     ],
 )]
 struct ShoppingListActor(HashSet<String>);
@@ -111,8 +113,8 @@ impl ClearListHandler for ShoppingListActor {
 }
 
 #[async_trait]
-#[hyperactor::forward(GetItemCount)]
-impl GetItemCountHandler for ShoppingListActor {
+#[hyperactor::forward(GetItemCount<usize>)]
+impl GetItemCountHandler<usize> for ShoppingListActor {
     async fn get_item_count(
         &mut self,
         _cx: &Context<Self>,

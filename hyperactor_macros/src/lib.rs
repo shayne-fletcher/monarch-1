@@ -75,6 +75,7 @@ enum Variant {
         field_types: Vec<Type>,
         field_flags: Vec<FieldFlag>,
         is_struct: bool,
+        generics: syn::Generics,
     },
     /// An anonymous variant (i.e., `MyVariant(..)`).
     Anon {
@@ -83,6 +84,7 @@ enum Variant {
         field_types: Vec<Type>,
         field_flags: Vec<FieldFlag>,
         is_struct: bool,
+        generics: syn::Generics,
     },
 }
 
@@ -113,6 +115,14 @@ impl Variant {
         match self {
             Variant::Named { name, .. } => name,
             Variant::Anon { name, .. } => name,
+        }
+    }
+
+    /// The generics of the variant itself.
+    fn generics(&self) -> &syn::Generics {
+        match self {
+            Variant::Named { generics, .. } => generics,
+            Variant::Anon { generics, .. } => generics,
         }
     }
 
@@ -403,6 +413,7 @@ fn parse_messages(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
                             .collect(),
                         field_flags: fields_.unnamed.iter().map(parse_field_flag).collect(),
                         is_struct: false,
+                        generics: input.generics.clone(),
                     },
                     syn::Fields::Named(fields_) => Variant::Named {
                         enum_name: input.ident.clone(),
@@ -415,6 +426,7 @@ fn parse_messages(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
                         field_types: fields_.named.iter().map(|field| field.ty.clone()).collect(),
                         field_flags: fields_.named.iter().map(parse_field_flag).collect(),
                         is_struct: false,
+                        generics: input.generics.clone(),
                     },
                     _ => {
                         return Err(syn::Error::new_spanned(
@@ -458,6 +470,7 @@ fn parse_messages(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
                         .collect(),
                     field_flags: fields_.unnamed.iter().map(parse_field_flag).collect(),
                     is_struct: true,
+                    generics: input.generics.clone(),
                 },
                 syn::Fields::Named(fields_) => Variant::Named {
                     enum_name: struct_name.clone(),
@@ -470,6 +483,7 @@ fn parse_messages(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
                     field_types: fields_.named.iter().map(|field| field.ty.clone()).collect(),
                     field_flags: fields_.named.iter().map(parse_field_flag).collect(),
                     is_struct: true,
+                    generics: input.generics.clone(),
                 },
                 syn::Fields::Unit => Variant::Anon {
                     enum_name: struct_name.clone(),
@@ -477,6 +491,7 @@ fn parse_messages(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
                     field_types: Vec::new(),
                     field_flags: Vec::new(),
                     is_struct: true,
+                    generics: input.generics.clone(),
                 },
             };
 
@@ -652,7 +667,7 @@ fn parse_messages(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
 pub fn derive_handler(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name: Ident = input.ident.clone();
-    let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
+    let (_, ty_generics, _) = input.generics.split_for_impl();
 
     let messages = match parse_messages(input.clone()) {
         Ok(messages) => messages,
@@ -670,13 +685,13 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
 
     let global_log_level = parse_log_level(&input.attrs).ok().unwrap_or(None);
 
-    for message in messages {
+    for message in &messages {
         match message {
             Message::Call {
-                ref variant,
-                ref reply_port,
-                ref return_type,
-                ref log_level,
+                variant,
+                reply_port,
+                return_type,
+                log_level,
             } => {
                 let (arg_names, arg_types): (Vec<_>, Vec<_>) = message.args().into_iter().unzip();
                 let variant_name_snake = variant.snake_name();
@@ -758,10 +773,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                     });
                 }
             }
-            Message::OneWay {
-                ref variant,
-                ref log_level,
-            } => {
+            Message::OneWay { variant, log_level } => {
                 let (arg_names, arg_types): (Vec<_>, Vec<_>) = message.args().into_iter().unzip();
                 let variant_name_snake = variant.snake_name();
                 let variant_name_snake_deprecated =
@@ -824,10 +836,27 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
     let handler_trait_name = format_ident!("{}Handler", name);
     let client_trait_name = format_ident!("{}Client", name);
 
+    // We impose additional constraints on the generics in the implementation;
+    // but the trait itself should not impose additional constraints:
+
+    let mut handler_generics = input.generics.clone();
+    for param in handler_generics.type_params_mut() {
+        param.bounds.push(syn::parse_quote!(serde::Serialize));
+        param
+            .bounds
+            .push(syn::parse_quote!(for<'de> serde::Deserialize<'de>));
+        param.bounds.push(syn::parse_quote!(Send));
+        param.bounds.push(syn::parse_quote!(Sync));
+        param.bounds.push(syn::parse_quote!(std::fmt::Debug));
+        param.bounds.push(syn::parse_quote!(hyperactor::Named));
+    }
+    let (handler_impl_generics, _, _) = handler_generics.split_for_impl();
+    let (client_impl_generics, _, _) = input.generics.split_for_impl();
+
     let expanded = quote! {
         #[doc = "The custom handler trait for this message type."]
         #[hyperactor::async_trait::async_trait]
-        pub trait #handler_trait_name #impl_generics: hyperactor::Actor + Send + Sync  {
+        pub trait #handler_trait_name #handler_impl_generics: hyperactor::Actor + Send + Sync  {
             #(#handler_trait_methods)*
 
             #[doc = "Handle the next message."]
@@ -845,7 +874,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
 
         #[doc = "The custom client trait for this message type."]
         #[hyperactor::async_trait::async_trait]
-        pub trait #client_trait_name #impl_generics: Send + Sync  {
+        pub trait #client_trait_name #client_impl_generics: Send + Sync  {
             #(#client_trait_methods)*
         }
     };
@@ -886,13 +915,13 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
     };
     let global_log_level = parse_log_level(&input.attrs).ok().unwrap_or(None);
 
-    for message in messages {
+    for message in &messages {
         match message {
             Message::Call {
-                ref variant,
-                ref reply_port,
-                ref return_type,
-                ref log_level,
+                variant,
+                reply_port,
+                return_type,
+                log_level,
             } => {
                 let (arg_names, arg_types): (Vec<_>, Vec<_>) = message.args().into_iter().unzip();
                 let variant_name_snake = variant.snake_name();
@@ -991,10 +1020,7 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
                     });
                 }
             }
-            Message::OneWay {
-                ref variant,
-                ref log_level,
-            } => {
+            Message::OneWay { variant, log_level } => {
                 let (arg_names, arg_types): (Vec<_>, Vec<_>) = message.args().into_iter().unzip();
                 let variant_name_snake = variant.snake_name();
                 let variant_name_snake_deprecated =
@@ -1055,12 +1081,12 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
     let (_, ty_generics, _) = input.generics.split_for_impl();
 
     // Add a new generic parameter 'A'
-    let a_ident = Ident::new("A", proc_macro2::Span::from(proc_macro::Span::def_site()));
+    let actor_ident = Ident::new("A", proc_macro2::Span::from(proc_macro::Span::def_site()));
     let mut trait_generics = input.generics.clone();
     trait_generics.params.insert(
         0,
         syn::GenericParam::Type(syn::TypeParam {
-            ident: a_ident.clone(),
+            ident: actor_ident.clone(),
             attrs: vec![],
             colon_token: None,
             bounds: Punctuated::new(),
@@ -1068,21 +1094,36 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
             default: None,
         }),
     );
+
+    for param in trait_generics.type_params_mut() {
+        if param.ident == actor_ident {
+            continue;
+        }
+        param.bounds.push(syn::parse_quote!(serde::Serialize));
+        param
+            .bounds
+            .push(syn::parse_quote!(for<'de> serde::Deserialize<'de>));
+        param.bounds.push(syn::parse_quote!(Send));
+        param.bounds.push(syn::parse_quote!(Sync));
+        param.bounds.push(syn::parse_quote!(std::fmt::Debug));
+        param.bounds.push(syn::parse_quote!(hyperactor::Named));
+    }
+
     let (impl_generics, _, _) = trait_generics.split_for_impl();
 
     let expanded = if is_handle {
         quote! {
             #[hyperactor::async_trait::async_trait]
-            impl #impl_generics #trait_name #ty_generics for hyperactor::ActorHandle<#a_ident>
-              where #a_ident: hyperactor::Handler<#name #ty_generics> {
+            impl #impl_generics #trait_name #ty_generics for hyperactor::ActorHandle<#actor_ident>
+              where #actor_ident: hyperactor::Handler<#name #ty_generics> {
                 #(#impl_methods)*
             }
         }
     } else {
         quote! {
             #[hyperactor::async_trait::async_trait]
-            impl #impl_generics #trait_name #ty_generics for hyperactor::ActorRef<#a_ident>
-              where #a_ident: hyperactor::actor::RemoteHandles<#name #ty_generics> {
+            impl #impl_generics #trait_name #ty_generics for hyperactor::ActorRef<#actor_ident>
+              where #actor_ident: hyperactor::actor::RemoteHandles<#name #ty_generics> {
                 #(#impl_methods)*
             }
         }

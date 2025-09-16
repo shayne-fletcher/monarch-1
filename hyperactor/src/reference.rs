@@ -869,7 +869,7 @@ impl fmt::Display for PortId {
 /// PortRefs will be serialized.
 #[derive(Debug, Serialize, Deserialize, Derivative, Named)]
 #[derivative(PartialEq, Eq, PartialOrd, Hash, Ord)]
-pub struct PortRef<M: RemoteMessage> {
+pub struct PortRef<M> {
     port_id: PortId,
     #[derivative(
         PartialEq = "ignore",
@@ -1021,7 +1021,7 @@ impl<M: RemoteMessage> Bind for PortRef<M> {
 /// and may be passed to remote actors, which can then use it to send
 /// a message to this port.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub struct OncePortRef<M: RemoteMessage> {
+pub struct OncePortRef<M> {
     port_id: PortId,
     phantom: PhantomData<M>,
 }
