@@ -47,7 +47,7 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 
 const REPLY_VARIANT_ERROR: &str = indoc! {r#"
-`call` message expects a typed `OncePortRef` or `OncePortHandle` argument in the last position
+`call` message expects a typed port ref (`OncePortRef` or `PortRef`) or handle (`OncePortHandle` or `PortHandle`) argument in the last position
 
 = help: use `MyCall(Arg1Type, Arg2Type, .., OncePortRef<ReplyType>)`
 = help: use `MyCall(Arg1Type, Arg2Type, .., OncePortHandle<ReplyType>)`
@@ -174,6 +174,36 @@ impl Variant {
     }
 }
 
+struct ReplyPort {
+    is_handle: bool,
+    is_once: bool,
+}
+
+impl ReplyPort {
+    fn from_last_segment(last_segment: &proc_macro2::Ident) -> ReplyPort {
+        ReplyPort {
+            is_handle: last_segment == "PortHandle" || last_segment == "OncePortHandle",
+            is_once: last_segment == "OncePortHandle" || last_segment == "OncePortRef",
+        }
+    }
+
+    fn open_op(&self) -> proc_macro2::TokenStream {
+        if self.is_once {
+            quote! { hyperactor::mailbox::open_once_port }
+        } else {
+            quote! { hyperactor::mailbox::open_port }
+        }
+    }
+
+    fn rx_modifier(&self) -> proc_macro2::TokenStream {
+        if self.is_once {
+            quote! {}
+        } else {
+            quote! { mut }
+        }
+    }
+}
+
 /// Represents a message that can be sent to a handler, each message is associated with
 /// a variant.
 #[allow(clippy::large_enum_variant)]
@@ -183,7 +213,7 @@ enum Message {
     Call {
         variant: Variant,
         /// Tells whether the reply argument is a handle.
-        reply_port_is_handle: bool,
+        reply_port: ReplyPort,
         /// The underlying return type (i.e., the type of the reply port).
         return_type: Type,
         /// the log level for generated instrumentation for handlers of this message.
@@ -216,7 +246,11 @@ impl Message {
                 let Some(last_segment) = type_path.path.segments.last() else {
                     return Err(syn::Error::new(span, REPLY_VARIANT_ERROR));
                 };
-                if last_segment.ident != "OncePortRef" && last_segment.ident != "OncePortHandle" {
+                if last_segment.ident != "OncePortRef"
+                    && last_segment.ident != "OncePortHandle"
+                    && last_segment.ident != "PortRef"
+                    && last_segment.ident != "PortHandle"
+                {
                     return Err(syn::Error::new_spanned(last_segment, REPLY_VARIANT_ERROR));
                 }
                 let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments else {
@@ -225,11 +259,11 @@ impl Message {
                 let Some(syn::GenericArgument::Type(return_ty)) = args.args.first() else {
                     return Err(syn::Error::new_spanned(&args.args, REPLY_VARIANT_ERROR));
                 };
-                let reply_port_is_handle = last_segment.ident == "OncePortHandle";
+                let reply_port = ReplyPort::from_last_segment(&last_segment.ident);
                 let return_type = return_ty.clone();
                 Ok(Self::Call {
                     variant,
-                    reply_port_is_handle,
+                    reply_port,
                     return_type,
                     log_level,
                 })
@@ -640,7 +674,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
         match message {
             Message::Call {
                 ref variant,
-                ref reply_port_is_handle,
+                ref reply_port,
                 ref return_type,
                 ref log_level,
             } => {
@@ -655,7 +689,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                     (Some(global), None) => global.clone(),
                     _ => Ident::new("DEBUG", Span::call_site()),
                 };
-                let _log_level = if *reply_port_is_handle {
+                let _log_level = if reply_port.is_handle {
                     quote! {
                         tracing::Level::#log_level
                     }
@@ -702,7 +736,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                 let constructor = variant.constructor();
                 let result_ident = Ident::new("result", Span::mixed_site());
                 let construct_result_future = quote! { use hyperactor::Message; let #result_ident = self.#variant_name_snake(cx, #(#arg_names),*).await?; };
-                if *reply_port_is_handle {
+                if reply_port.is_handle {
                     match_arms.push(quote! {
                         #constructor => {
                             #log_message
@@ -856,7 +890,7 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
         match message {
             Message::Call {
                 ref variant,
-                ref reply_port_is_handle,
+                ref reply_port,
                 ref return_type,
                 ref log_level,
             } => {
@@ -891,7 +925,9 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
                         ));
 
                 };
-                if *reply_port_is_handle {
+                let open_port = reply_port.open_op();
+                let rx_mod = reply_port.rx_modifier();
+                if reply_port.is_handle {
                     impl_methods.push(quote! {
                         #[hyperactor::instrument(level=#log_level, rpc = "call", message_type=#name)]
                         async fn #variant_name_snake(
@@ -899,8 +935,8 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
                             cx: &impl hyperactor::context::Actor,
                             #(#arg_names: #arg_types),*)
                             -> Result<#return_type, hyperactor::anyhow::Error> {
-                            let (#reply_port_arg, reply_receiver) =
-                                hyperactor::mailbox::open_once_port::<#return_type>(cx);
+                            let (#reply_port_arg, #rx_mod reply_receiver) =
+                                #open_port::<#return_type>(cx);
                             let message = #constructor;
                             #log_message;
                             #send_message;
@@ -913,8 +949,8 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
                             cx: &(impl hyperactor::cap::CanSend + hyperactor::cap::CanOpenPort),
                             #(#arg_names: #arg_types),*)
                             -> Result<#return_type, hyperactor::anyhow::Error> {
-                            let (#reply_port_arg, reply_receiver) =
-                                hyperactor::mailbox::open_once_port::<#return_type>(cx);
+                            let (#reply_port_arg, #rx_mod reply_receiver) =
+                                #open_port::<#return_type>(cx);
                             let message = #constructor;
                             #log_message;
                             #send_message;
@@ -929,8 +965,8 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
                             cx: &impl hyperactor::context::Actor,
                             #(#arg_names: #arg_types),*)
                             -> Result<#return_type, hyperactor::anyhow::Error> {
-                            let (#reply_port_arg, reply_receiver) =
-                                hyperactor::mailbox::open_once_port::<#return_type>(cx);
+                            let (#reply_port_arg, #rx_mod reply_receiver) =
+                                #open_port::<#return_type>(cx);
                             let #reply_port_arg = #reply_port_arg.bind();
                             let message = #constructor;
                             #log_message;
@@ -944,8 +980,8 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
                             cx: &(impl hyperactor::cap::CanSend + hyperactor::cap::CanOpenPort),
                             #(#arg_names: #arg_types),*)
                             -> Result<#return_type, hyperactor::anyhow::Error> {
-                            let (#reply_port_arg, reply_receiver) =
-                                hyperactor::mailbox::open_once_port::<#return_type>(cx);
+                            let (#reply_port_arg, #rx_mod reply_receiver) =
+                                #open_port::<#return_type>(cx);
                             let #reply_port_arg = #reply_port_arg.bind();
                             let message = #constructor;
                             #log_message;

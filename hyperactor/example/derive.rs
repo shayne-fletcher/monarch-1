@@ -16,6 +16,7 @@ use hyperactor::HandleClient;
 use hyperactor::Handler;
 use hyperactor::Named;
 use hyperactor::OncePortRef;
+use hyperactor::PortRef;
 use hyperactor::RefClient;
 use hyperactor::proc::Proc;
 use serde::Deserialize;
@@ -31,7 +32,7 @@ enum ShoppingList {
     // provided port, which must be in the last position.
     Exists(String, #[reply] OncePortRef<bool>),
 
-    List(#[reply] OncePortRef<Vec<String>>),
+    List(#[reply] PortRef<Vec<String>>),
 }
 
 // Struct message types. These generate a single method.
