@@ -1393,11 +1393,10 @@ pub trait Ranked: Sized {
     /// Return the item at `rank`
     fn get(&self, rank: usize) -> Option<Self::Item>;
 
-    /// Construct a new Ranked containing the ranks in this view that are
-    /// part of region. The caller guarantees that
-    /// `ranks.len() == region.num_ranks()` and that
+    /// Construct a new Ranked containing the ranks in this view that
+    /// are part of region. The caller guarantees that
     /// `region.is_subset(self.region())`.
-    fn sliced(&self, region: Region, ranks: impl Iterator<Item = Self::Item>) -> Self;
+    fn sliced(&self, region: Region) -> Self;
 }
 
 /// Borrowed (by-reference) access to items in a ranked view.
@@ -1435,19 +1434,14 @@ impl<T: Ranked> View for T {
     }
 
     fn subset(&self, region: Region) -> Result<Self, ViewError> {
-        // Compact the ranks, remapping them into the new region.
-        // `remap` returns None if the target region is not a subset
-        // of the source region.
-        let ranks = self
-            .region()
-            .remap(&region)
-            .ok_or_else(|| ViewError::InvalidRange {
+        if !region.is_subset(self.region()) {
+            return Err(ViewError::InvalidRange {
                 base: Box::new(self.region().clone()),
                 selected: Box::new(region.clone()),
-            })?
-            .map(|index| self.get(index).unwrap());
+            });
+        }
 
-        Ok(self.sliced(region, ranks))
+        Ok(self.sliced(region))
     }
 }
 

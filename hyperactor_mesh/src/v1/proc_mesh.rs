@@ -341,8 +341,13 @@ impl view::Ranked for ProcMeshRef {
         self.ranks.get(rank).cloned()
     }
 
-    fn sliced(&self, region: Region, nodes: impl Iterator<Item = ProcRef>) -> Self {
-        Self::new(self.name.clone(), region, Arc::new(nodes.collect())).unwrap()
+    fn sliced(&self, region: Region) -> Self {
+        let ranks = self
+            .region()
+            .remap(&region)
+            .unwrap()
+            .map(|index| self.get(index).unwrap());
+        Self::new(self.name.clone(), region, Arc::new(ranks.collect())).unwrap()
     }
 }
 

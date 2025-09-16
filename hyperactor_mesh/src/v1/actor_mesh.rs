@@ -92,10 +92,7 @@ impl<A: RemoteActor> view::Ranked for ActorMeshRef<A> {
         Some(proc_ref.attest(&self.name.clone()))
     }
 
-    // TODO: adjust this to include a compaction hint, rather than the nodes themselves,
-    // as the current interface forces refs like ActorRef, which does not materialize its
-    // ranks, to needlessly materialize.
-    fn sliced(&self, region: Region, _nodes: impl Iterator<Item = ActorRef<A>>) -> Self {
+    fn sliced(&self, region: Region) -> Self {
         Self {
             // This is safe because by the time `sliced` has been called, the subsetting
             // has been validated.

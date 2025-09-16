@@ -88,9 +88,14 @@ impl<T: Clone + 'static> view::Ranked for ValueMesh<T> {
         self.ranks.get(rank).cloned()
     }
 
-    fn sliced(&self, region: Region, nodes: impl Iterator<Item = T>) -> Self {
+    fn sliced(&self, region: Region) -> Self {
         debug_assert!(region.is_subset(self.region()), "sliced: not a subset");
-        let ranks: Vec<T> = nodes.collect();
+        let ranks: Vec<T> = self
+            .region()
+            .remap(&region)
+            .unwrap()
+            .map(|index| self.get(index).unwrap())
+            .collect();
         debug_assert_eq!(
             region.num_ranks(),
             ranks.len(),
