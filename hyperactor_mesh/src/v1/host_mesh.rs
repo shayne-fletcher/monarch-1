@@ -78,8 +78,13 @@ impl view::Ranked for HostMeshRef {
         self.ranks.get(rank).cloned()
     }
 
-    fn sliced(&self, region: Region, nodes: impl Iterator<Item = HostRef>) -> Self {
-        Self::new(region, nodes.collect()).unwrap()
+    fn sliced(&self, region: Region) -> Self {
+        let ranks = self
+            .region()
+            .remap(&region)
+            .unwrap()
+            .map(|index| self.get(index).unwrap());
+        Self::new(region, ranks.collect()).unwrap()
     }
 }
 
