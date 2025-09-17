@@ -37,9 +37,13 @@ use crate::alloc::Alloc;
 use crate::alloc::AllocExt;
 use crate::alloc::AllocatedProc;
 use crate::assign::Ranks;
+use crate::proc_mesh;
+use crate::proc_mesh::mesh_agent;
 use crate::proc_mesh::mesh_agent::GspawnResult;
 use crate::proc_mesh::mesh_agent::MeshAgentMessageClient;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
+use crate::resource;
+use crate::resource::CreateOrUpdateClient;
 use crate::v1;
 use crate::v1::ActorMesh;
 use crate::v1::Error;
@@ -343,45 +347,58 @@ impl ProcMeshRef {
         let serialized_params = bincode::serialize(params)?;
 
         let (completed_handle, mut completed_receiver) = cx.mailbox().open_port();
-        for proc_ref in self.ranks.iter() {
+        for (rank, proc_ref) in self.ranks.iter().enumerate() {
             proc_ref
                 .agent
-                .gspawn(
+                .send(
                     cx,
-                    actor_type.clone(),
-                    name.to_string(),
-                    serialized_params.clone(),
-                    completed_handle.bind(),
+                    resource::CreateOrUpdate::<mesh_agent::ActorSpec> {
+                        name: name.clone(),
+                        spec: mesh_agent::ActorSpec {
+                            actor_type: actor_type.clone(),
+                            params_data: serialized_params.clone(),
+                        },
+                        reply: completed_handle.contramap(move |ok| (rank, ok)).bind(),
+                    },
                 )
-                .await
-                .map_err(|e| Error::CallError(proc_ref.agent.actor_id().clone(), e))?;
+                .map_err(|e| Error::SendingError(proc_ref.agent.actor_id().clone(), Box::new(e)))?;
         }
 
         let mut completed = Ranks::new(self.ranks.len());
         while !completed.is_full() {
-            let result = completed_receiver.recv().await?;
-            match result {
-                GspawnResult::Success { rank, .. } if rank >= self.ranks.len() => {
-                    tracing::error!("ignoring invalid rank {}", rank);
-                }
-                GspawnResult::Success { rank, actor_id } => {
-                    if completed.insert(rank, actor_id.clone()).is_some() {
-                        tracing::error!("multiple completions received for rank {}", rank);
-                    }
-
-                    let expected_actor_id = self.ranks.get(rank).unwrap().actor_id(&name);
-                    if actor_id != expected_actor_id {
-                        return Err(Error::GspawnError(
-                            name,
-                            format!(
-                                "expected actor id {} for rank {}; got {}",
-                                expected_actor_id, rank, actor_id
-                            ),
-                        ));
-                    }
-                }
-                GspawnResult::Error(error_msg) => return Err(Error::GspawnError(name, error_msg)),
+            let (rank, ok) = completed_receiver.recv().await?;
+            if rank >= self.ranks.len() {
+                tracing::error!("ignoring invalid rank {}", rank);
+                continue;
             }
+
+            if completed.insert(rank, (rank, ok)).is_some() {
+                tracing::error!("multiple completions received for rank {}", rank);
+            }
+        }
+
+        // TODO: at this point, we know that non-failed ranks have been created.
+        // This is good enough for mailbox setup: the actors are now routable.
+        //
+        // However, we should retrieve detailed failure information from failed spawns.
+
+        let failed: Vec<_> = completed
+            .into_iter()
+            .filter_map(|rank| {
+                if let Some((rank, ok)) = rank
+                    && !ok
+                {
+                    Some(rank)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !failed.is_empty() {
+            return Err(Error::GspawnError(
+                name,
+                format!("failed ranks: {:?}", failed),
+            ));
         }
 
         Ok(ActorMesh::new(self.clone(), name))

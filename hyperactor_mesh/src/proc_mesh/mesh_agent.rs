@@ -50,6 +50,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::proc_mesh::SupervisionEventState;
+use crate::resource;
+use crate::v1::Name;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Named)]
 pub enum GspawnResult {
@@ -159,11 +161,19 @@ impl State {
 
 /// A mesh agent is responsible for managing procs in a [`ProcMesh`].
 #[derive(Debug)]
-#[hyperactor::export(handlers=[MeshAgentMessage])]
+#[hyperactor::export(
+    handlers=[
+        MeshAgentMessage,
+        resource::CreateOrUpdate<ActorSpec>,
+        resource::GetState<ActorState>
+    ]
+)]
 pub struct ProcMeshAgent {
     proc: Proc,
     remote: Remote,
     state: State,
+    /// Actors created and tracked through the resource behavior.
+    created: HashMap<Name, Result<ActorId, anyhow::Error>>,
 }
 
 impl ProcMeshAgent {
@@ -182,6 +192,7 @@ impl ProcMeshAgent {
             proc: proc.clone(),
             remote: Remote::collect(),
             state: State::UnconfiguredV0 { sender },
+            created: HashMap::new(),
         };
         let handle = proc.spawn::<Self>("mesh", agent).await?;
         Ok((proc, handle))
@@ -192,6 +203,7 @@ impl ProcMeshAgent {
             proc: proc.clone(),
             remote: Remote::collect(),
             state: State::V1,
+            created: HashMap::new(),
         };
         proc.spawn::<Self>("agent", agent).await
     }
@@ -358,6 +370,90 @@ impl Handler<ActorSupervisionEvent> for ProcMeshAgent {
             // in testing of the LocalAllocator, etc.
             std::process::exit(1);
         }
+        Ok(())
+    }
+}
+
+// Implement the resource behavior for managing actors:
+
+/// Actor spec.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+pub struct ActorSpec {
+    /// registered actor type
+    pub actor_type: String,
+    /// serialized parameters
+    pub params_data: Data,
+}
+
+/// Actor state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+pub struct ActorState {
+    /// The actor's ID.
+    pub actor_id: ActorId,
+    // TODO status: ActorStatus,
+}
+
+#[async_trait]
+impl Handler<resource::CreateOrUpdate<ActorSpec>> for ProcMeshAgent {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        create_or_update: resource::CreateOrUpdate<ActorSpec>,
+    ) -> anyhow::Result<()> {
+        if self.created.contains_key(&create_or_update.name) {
+            // There is no update.
+            return Ok(());
+        }
+
+        let ActorSpec {
+            actor_type,
+            params_data,
+        } = create_or_update.spec;
+        self.created.insert(
+            create_or_update.name.clone(),
+            self.remote
+                .gspawn(
+                    &self.proc,
+                    &actor_type,
+                    &create_or_update.name.to_string(),
+                    params_data,
+                )
+                .await,
+        );
+
+        create_or_update.reply.send(cx, true)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<resource::GetState<ActorState>> for ProcMeshAgent {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        get_state: resource::GetState<ActorState>,
+    ) -> anyhow::Result<()> {
+        let state = match self.created.get(&get_state.name) {
+            Some(Ok(actor_id)) => resource::State {
+                name: get_state.name.clone(),
+                status: resource::Status::Running,
+                state: Some(ActorState {
+                    actor_id: actor_id.clone(),
+                }),
+            },
+            Some(Err(e)) => resource::State {
+                name: get_state.name.clone(),
+                status: resource::Status::Failed(e.to_string()),
+                state: None,
+            },
+            None => resource::State {
+                name: get_state.name.clone(),
+                status: resource::Status::NotExist,
+                state: None,
+            },
+        };
+
+        get_state.reply.send(cx, state)?;
         Ok(())
     }
 }
