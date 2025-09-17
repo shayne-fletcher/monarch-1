@@ -70,7 +70,7 @@ impl PyValueMesh {
         // ValueMesh<T: Clone>: get() returns owned T; we clone the
         // Py<PyAny>. `unwrap` is safe because the bounds have been
         // checked.
-        let v: Py<PyAny> = self.inner.get(rank).unwrap();
+        let v: Py<PyAny> = self.inner.get(rank).unwrap().clone();
         Ok(v.into())
     }
 

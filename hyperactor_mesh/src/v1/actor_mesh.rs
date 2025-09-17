@@ -43,24 +43,39 @@ impl<A> ActorMesh<A> {
             _phantom: PhantomData,
         }
     }
+}
 
+impl<A: RemoteActor> ActorMesh<A> {
     /// Freeze this actor mesh in its current state, returning a stable
     /// reference that may be serialized.
     pub fn freeze(&self) -> ActorMeshRef<A> {
-        ActorMeshRef {
-            proc_mesh: self.proc_mesh.clone(),
-            name: self.name.clone(),
-            _phantom: PhantomData,
-        }
+        let actor_refs = self
+            .proc_mesh
+            .values()
+            .map(|p| p.attest(&self.name))
+            .collect();
+        ActorMeshRef::new(self.name.clone(), self.proc_mesh.clone(), actor_refs)
     }
 }
 
 /// A reference to a stable snapshot of an [`ActorMesh`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ActorMeshRef<A> {
+pub struct ActorMeshRef<A: RemoteActor> {
     proc_mesh: ProcMeshRef,
     name: Name,
+    actor_refs: Vec<ActorRef<A>>, // Ranked::get() -> &ActorRef<A>
     _phantom: PhantomData<A>,
+}
+
+impl<A: RemoteActor> ActorMeshRef<A> {
+    pub(crate) fn new(name: Name, proc_mesh: ProcMeshRef, actor_refs: Vec<ActorRef<A>>) -> Self {
+        Self {
+            proc_mesh,
+            name,
+            actor_refs,
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<A: Actor + RemoteActor> ActorMeshRef<A> {
@@ -87,18 +102,21 @@ impl<A: RemoteActor> view::Ranked for ActorMeshRef<A> {
         view::Ranked::region(&self.proc_mesh)
     }
 
-    fn get(&self, rank: usize) -> Option<ActorRef<A>> {
-        let proc_ref = view::Ranked::get(&self.proc_mesh, rank)?;
-        Some(proc_ref.attest(&self.name.clone()))
+    fn get(&self, rank: usize) -> Option<&Self::Item> {
+        self.actor_refs.get(rank)
     }
+}
 
+impl<A: RemoteActor> view::RankedSliceable for ActorMeshRef<A> {
     fn sliced(&self, region: Region) -> Self {
-        Self {
-            // This is safe because by the time `sliced` has been called, the subsetting
-            // has been validated.
-            proc_mesh: self.proc_mesh.subset(region).unwrap(),
-            name: self.name.clone(),
-            _phantom: PhantomData,
-        }
+        debug_assert!(region.is_subset(view::Ranked::region(self)));
+        let proc_mesh = self.proc_mesh.subset(region.clone()).unwrap();
+        let actor_refs = self
+            .region()
+            .remap(&region)
+            .unwrap()
+            .map(|index| self.actor_refs[index].clone())
+            .collect();
+        ActorMeshRef::new(self.name.clone(), proc_mesh, actor_refs)
     }
 }

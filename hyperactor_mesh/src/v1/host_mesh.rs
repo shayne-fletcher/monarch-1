@@ -13,6 +13,7 @@ use hyperactor::Named;
 use hyperactor::channel::ChannelAddr;
 use ndslice::Region;
 use ndslice::view;
+use ndslice::view::Ranked;
 use ndslice::view::RegionParseError;
 use serde::Deserialize;
 use serde::Serialize;
@@ -74,16 +75,18 @@ impl view::Ranked for HostMeshRef {
         &self.region
     }
 
-    fn get(&self, rank: usize) -> Option<HostRef> {
-        self.ranks.get(rank).cloned()
+    fn get(&self, rank: usize) -> Option<&Self::Item> {
+        self.ranks.get(rank)
     }
+}
 
+impl view::RankedSliceable for HostMeshRef {
     fn sliced(&self, region: Region) -> Self {
         let ranks = self
             .region()
             .remap(&region)
             .unwrap()
-            .map(|index| self.get(index).unwrap());
+            .map(|index| self.get(index).unwrap().clone());
         Self::new(region, ranks.collect()).unwrap()
     }
 }

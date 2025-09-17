@@ -1236,9 +1236,9 @@ where
     }
 }
 
-/// Map-by-value into any mesh `M`.
+/// Map into any mesh `M`.
 pub trait MapIntoExt: Ranked {
-    fn map_into<M, U>(&self, f: impl Fn(Self::Item) -> U) -> M
+    fn map_into<M, U>(&self, f: impl Fn(&Self::Item) -> U) -> M
     where
         Self: Sized,
         M: BuildFromRegion<U>,
@@ -1249,7 +1249,7 @@ pub trait MapIntoExt: Ranked {
         M::build_dense_unchecked(region, values)
     }
 
-    fn try_map_into<M, U, E>(self, f: impl Fn(Self::Item) -> Result<U, E>) -> Result<M, E>
+    fn try_map_into<M, U, E>(self, f: impl Fn(&Self::Item) -> Result<U, E>) -> Result<M, E>
     where
         Self: Sized,
         M: BuildFromRegion<U>,
@@ -1267,39 +1267,6 @@ pub trait MapIntoExt: Ranked {
 /// Blanket impl: enables `.map_into(...)` and `.try_map_into`` on any
 /// `Ranked`.
 impl<T: Ranked> MapIntoExt for T {}
-
-/// Map-by-reference into any mesh `M` (no clone required).
-pub trait MapIntoRefExt: RankedRef {
-    fn map_into_ref<M, U>(&self, f: impl Fn(&<Self as RankedRef>::Item) -> U) -> M
-    where
-        M: BuildFromRegion<U>,
-    {
-        let region = self.region().clone();
-        let n = region.num_ranks();
-        let values: Vec<U> = (0..n).map(|i| f(self.get_ref(i).unwrap())).collect();
-        M::build_dense_unchecked(region, values)
-    }
-
-    fn try_map_into_ref<M, U, E>(
-        &self,
-        f: impl Fn(&<Self as RankedRef>::Item) -> Result<U, E>,
-    ) -> Result<M, E>
-    where
-        M: BuildFromRegion<U>,
-    {
-        let region = self.region().clone();
-        let n = region.num_ranks();
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            out.push(f(self.get_ref(i).unwrap())?);
-        }
-        Ok(M::build_dense_unchecked(region, out))
-    }
-}
-
-/// Blanket impl: enables `.map_into_ref(...)` and
-/// `.try_map_into_ref(...)` on any `RankedRef`.
-impl<T: RankedRef> MapIntoRefExt for T {}
 
 /// A View is a collection of items in a space indexed by a [`Region`].
 pub trait View: Sized {
@@ -1385,52 +1352,42 @@ impl View for Extent {
 /// of items.
 pub trait Ranked: Sized {
     /// The type of item in this view.
-    type Item: Clone + 'static;
+    type Item: 'static;
 
     /// The ranks contained in this view.
     fn region(&self) -> &Region;
 
     /// Return the item at `rank`
-    fn get(&self, rank: usize) -> Option<Self::Item>;
+    fn get(&self, rank: usize) -> Option<&Self::Item>;
+}
 
+/// Extension of [`Ranked`] for types that can materialize a new owned
+/// view.
+///
+/// `sliced` constructs a new instance containing only the items in
+/// the given `region`. Unlike [`Ranked::get`], which only provides
+/// borrowed access, `sliced` requires that the implementor can
+/// produce owned values for the specified sub-region.
+pub trait RankedSliceable: Ranked {
     /// Construct a new Ranked containing the ranks in this view that
     /// are part of region. The caller guarantees that
     /// `region.is_subset(self.region())`.
     fn sliced(&self, region: Region) -> Self;
 }
 
-/// Borrowed (by-reference) access to items in a ranked view.
-///
-/// This trait is the counterpart to [`Ranked`], which provides owned
-/// access (`get` ->`Self::Item`). `RankedRef` instead allows
-/// implementors that can expose their internal storage to let callers
-/// borrow items directly without requiring `Clone` on the element
-/// type.
-///
-/// A type may implement `RankedRef` even if it cannot implement
-/// [`Ranked`], for example when its items are not `Clone`. This
-/// enables APIs like [`MapIntoRefExt`] that can transform meshes by
-/// reference only.
-pub trait RankedRef {
-    type Item;
-
-    /// The ranks contained in this view.
-    fn region(&self) -> &Region;
-
-    /// Return the item at `rank`
-    fn get_ref(&self, rank: usize) -> Option<&Self::Item>;
-}
-
-impl<T: Ranked> View for T {
+impl<T: RankedSliceable> View for T
+where
+    T::Item: Clone + 'static,
+{
     type Item = T::Item;
     type View = Self;
 
     fn region(&self) -> Region {
-        self.region().clone()
+        <Self as Ranked>::region(self).clone()
     }
 
     fn get(&self, rank: usize) -> Option<Self::Item> {
-        self.get(rank)
+        <Self as Ranked>::get(self, rank).cloned()
     }
 
     fn subset(&self, region: Region) -> Result<Self, ViewError> {

@@ -13,6 +13,7 @@ use std::ptr::NonNull;
 
 use futures::Future;
 use ndslice::view;
+use ndslice::view::Ranked;
 use ndslice::view::Region;
 
 /// A mesh of values, where each value is associated with a rank.
@@ -77,24 +78,26 @@ impl<T, E> ValueMesh<Result<T, E>> {
     }
 }
 
-impl<T: Clone + 'static> view::Ranked for ValueMesh<T> {
+impl<T: 'static> view::Ranked for ValueMesh<T> {
     type Item = T;
 
     fn region(&self) -> &Region {
         &self.region
     }
 
-    fn get(&self, rank: usize) -> Option<T> {
-        self.ranks.get(rank).cloned()
+    fn get(&self, rank: usize) -> Option<&Self::Item> {
+        self.ranks.get(rank)
     }
+}
 
+impl<T: Clone + 'static> view::RankedSliceable for ValueMesh<T> {
     fn sliced(&self, region: Region) -> Self {
         debug_assert!(region.is_subset(self.region()), "sliced: not a subset");
         let ranks: Vec<T> = self
             .region()
             .remap(&region)
             .unwrap()
-            .map(|index| self.get(index).unwrap())
+            .map(|index| self.get(index).unwrap().clone())
             .collect();
         debug_assert_eq!(
             region.num_ranks(),
@@ -355,18 +358,6 @@ impl<T> view::BuildFromRegionIndexed<T> for ValueMesh<T> {
     }
 }
 
-impl<T> view::RankedRef for ValueMesh<T> {
-    type Item = T;
-
-    fn region(&self) -> &Region {
-        &self.region
-    }
-
-    fn get_ref(&self, rank: usize) -> Option<&Self::Item> {
-        self.ranks.get(rank)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
@@ -386,7 +377,6 @@ mod tests {
     use ndslice::view::CollectIndexedMeshExt;
     use ndslice::view::CollectMeshExt;
     use ndslice::view::MapIntoExt;
-    use ndslice::view::MapIntoRefExt;
     use ndslice::view::Ranked;
     use ndslice::view::ViewExt;
     use proptest::prelude::*;
@@ -839,7 +829,7 @@ mod tests {
             vec!["a".to_string(), "b".into(), "c".into(), "d".into()],
         );
 
-        let lens: ValueMesh<_> = vm.map_into_ref(|s| s.len());
+        let lens: ValueMesh<_> = vm.map_into(|s| s.len());
         assert_eq!(lens.region, region);
         assert_eq!(lens.ranks, vec![1, 1, 1, 1]);
     }
@@ -850,7 +840,7 @@ mod tests {
         let vm = ValueMesh::new_unchecked(region, vec![1, 2, 3, 4]);
 
         let res: Result<ValueMesh<i32>, &'static str> =
-            vm.try_map_into(|x| if x == 3 { Err("boom") } else { Ok(x + 10) });
+            vm.try_map_into(|x| if x == &3 { Err("boom") } else { Ok(x + 10) });
 
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), "boom");
@@ -862,7 +852,7 @@ mod tests {
         let vm = ValueMesh::new_unchecked(region, vec![1, 2, 3, 4]);
 
         let res: Result<ValueMesh<i32>, &'static str> =
-            vm.try_map_into_ref(|x| if x == &3 { Err("boom") } else { Ok(x + 10) });
+            vm.try_map_into(|x| if x == &3 { Err("boom") } else { Ok(x + 10) });
 
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), "boom");
@@ -934,14 +924,8 @@ mod tests {
         let values = vec![(10, NotClone(1)), (20, NotClone(2)), (30, NotClone(3))];
         let mesh: ValueMesh<(i32, NotClone)> =
             values.into_iter().collect_mesh(region.clone()).unwrap();
-        // Compiles: mesh is `RankedRef`
-        let _: &dyn ndslice::view::RankedRef<Item = (i32, NotClone)> = &mesh;
-        // Would fail if uncommented (mesh is not `Ranked` since `T: !Clone`):
-        // let _: &dyn ndslice::view::Ranked<Item = (i32, NotClone)> = &mesh;
 
-        // It does implement `RankedRef` though so we can
-        // `.map_into_ref()`. Project out the first field.
-        let projected: ValueMesh<i32> = mesh.map_into_ref(|t| t.0);
+        let projected: ValueMesh<i32> = mesh.map_into(|t| t.0);
         assert_eq!(projected.values().collect::<Vec<_>>(), vec![10, 20, 30]);
         assert_eq!(projected.region(), &region);
     }
