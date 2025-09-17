@@ -89,6 +89,10 @@ pub enum HostError {
     #[error("proc '{0}' failed to spawn process: {1}")]
     ProcessSpawnFailure(ProcId, #[source] std::io::Error),
 
+    /// Failures occuring while configuring a subprocess.
+    #[error("proc '{0}' failed to configure process: {1}")]
+    ProcessConfigurationFailure(ProcId, #[source] anyhow::Error),
+
     /// Failures occuring while spawning a management actor in a proc.
     #[error("failed to spawn agent on proc '{0}': {1}")]
     AgentSpawnFailure(ProcId, #[source] anyhow::Error),
@@ -305,22 +309,25 @@ where
 /// The function [`boot_proc`] provides a convenient implementation of the
 /// protocol.
 pub struct ProcessProcManager<A> {
-    cmd: Arc<Mutex<Command>>,
+    program: std::path::PathBuf,
     _phantom: PhantomData<A>,
 }
 
 impl<A> ProcessProcManager<A> {
     /// Create a new ProcessProcManager that runs the provided command.
-    pub fn new(cmd: Command) -> Self {
+    pub fn new(program: std::path::PathBuf) -> Self {
         Self {
-            cmd: Arc::new(Mutex::new(cmd)),
+            program,
             _phantom: PhantomData,
         }
     }
 }
 
 #[async_trait]
-impl<A: Actor + RemoteActor> ProcManager for ProcessProcManager<A> {
+impl<A> ProcManager for ProcessProcManager<A>
+where
+    A: Actor + RemoteActor,
+{
     type Agent = A;
 
     fn transport(&self) -> ChannelTransport {
@@ -332,13 +339,12 @@ impl<A: Actor + RemoteActor> ProcManager for ProcessProcManager<A> {
         proc_id: ProcId,
         forwarder_addr: ChannelAddr,
     ) -> Result<(ChannelAddr, ActorRef<A>), HostError> {
-        let mut cmd = self.cmd.lock().await;
-
         let (callback_addr, mut callback_rx) =
             channel::serve(ChannelAddr::any(ChannelTransport::Unix)).await?;
 
-        cmd.env("HYPERACTOR_HOST_BACKEND_ADDR", forwarder_addr.to_string());
+        let mut cmd = Command::new(&self.program);
         cmd.env("HYPERACTOR_HOST_PROC_ID", proc_id.to_string());
+        cmd.env("HYPERACTOR_HOST_BACKEND_ADDR", forwarder_addr.to_string());
         cmd.env("HYPERACTOR_HOST_CALLBACK_ADDR", callback_addr.to_string());
 
         // TODO: retain, manage lifecycle
@@ -351,19 +357,52 @@ impl<A: Actor + RemoteActor> ProcManager for ProcessProcManager<A> {
     }
 }
 
-/// Boot a process in a ProcessProcManager<A>. Should be called from processes spawned
-/// by the process manager. `boot_proc` will spawn the provided actor type (with parameters)
-/// onto the newly created Proc, and bind its handler. This allows the user to install an agent to
-/// manage the proc itself.
-pub async fn boot_proc<A, S, F>(spawn: S) -> Result<Proc, HostError>
+impl<A> ProcessProcManager<A>
+where
+    A: Actor + RemoteActor + Binds<A>,
+{
+    /// Boot a process in a ProcessProcManager<A>. Should be called from processes spawned
+    /// by the process manager. `boot_proc` will spawn the provided actor type (with parameters)
+    /// onto the newly created Proc, and bind its handler. This allows the user to install an agent to
+    /// manage the proc itself.
+    pub async fn boot_proc<S, F>(spawn: S) -> Result<Proc, HostError>
+    where
+        S: FnOnce(Proc) -> F,
+        F: Future<Output = Result<ActorHandle<A>, anyhow::Error>>,
+    {
+        let proc_id: ProcId = Self::parse_env("HYPERACTOR_HOST_PROC_ID")?;
+        let backend_addr: ChannelAddr = Self::parse_env("HYPERACTOR_HOST_BACKEND_ADDR")?;
+        let callback_addr: ChannelAddr = Self::parse_env("HYPERACTOR_HOST_CALLBACK_ADDR")?;
+        spawn_proc(proc_id, backend_addr, callback_addr, spawn).await
+    }
+
+    fn parse_env<T, E>(key: &str) -> Result<T, HostError>
+    where
+        T: FromStr<Err = E>,
+        E: Into<anyhow::Error>,
+    {
+        std::env::var(key)
+            .map_err(|e| HostError::MissingParameter(key.to_string(), e))?
+            .parse()
+            .map_err(|e: E| HostError::InvalidParameter(key.to_string(), e.into()))
+    }
+}
+
+/// Spawn a proc at `proc_id` with an `A`-typed agent actor,
+/// forwarding messages to the provided `backend_addr`,
+/// and returning the proc's address and agent actor on
+/// the provided `callback_addr`.
+pub async fn spawn_proc<A, S, F>(
+    proc_id: ProcId,
+    backend_addr: ChannelAddr,
+    callback_addr: ChannelAddr,
+    spawn: S,
+) -> Result<Proc, HostError>
 where
     A: Actor + RemoteActor + Binds<A>,
     S: FnOnce(Proc) -> F,
     F: Future<Output = Result<ActorHandle<A>, anyhow::Error>>,
 {
-    let backend_addr: ChannelAddr = parse_env("HYPERACTOR_HOST_BACKEND_ADDR")?;
-    let proc_id: ProcId = parse_env("HYPERACTOR_HOST_PROC_ID")?;
-    let callback_addr: ChannelAddr = parse_env("HYPERACTOR_HOST_CALLBACK_ADDR")?;
     let backend_transport = backend_addr.transport();
     let proc = Proc::new(
         proc_id.clone(),
@@ -384,17 +423,6 @@ where
         .map_err(ChannelError::from)?;
 
     Ok(proc)
-}
-
-fn parse_env<T, E>(key: &str) -> Result<T, HostError>
-where
-    T: FromStr<Err = E>,
-    E: Into<anyhow::Error>,
-{
-    std::env::var(key)
-        .map_err(|e| HostError::MissingParameter(key.to_string(), e))?
-        .parse()
-        .map_err(|e: E| HostError::InvalidParameter(key.to_string(), e.into()))
 }
 
 /// Testing support for hosts. This is linked outside of cfg(test)
@@ -505,9 +533,9 @@ mod tests {
         hyperactor_telemetry::initialize_logging(crate::clock::ClockKind::default());
 
         // EchoActor is "agent", just for testing connectivity.
-        let process_manager = ProcessProcManager::<EchoActor>::new(Command::new(
+        let process_manager = ProcessProcManager::<EchoActor>::new(
             buck_resources::get("monarch/hyperactor/bootstrap").unwrap(),
-        ));
+        );
         let (mut host, _handle) =
             Host::serve(process_manager, ChannelAddr::any(ChannelTransport::Unix))
                 .await

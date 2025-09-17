@@ -8,17 +8,20 @@
 
 use std::future;
 
-/// This is an "empty shell" bootstrap process,
-/// simply invoking [`hyperactor_mesh::bootstrap_or_die`].
+use hyperactor::host::ProcessProcManager;
+
+/// This is a bootstrap process to test `hyperactor::host::ProcessProcManager`.
+/// It just boots a proc with `hyperactor::host::testing::EchoActor`.
 #[tokio::main]
 async fn main() {
     hyperactor_telemetry::initialize_logging(hyperactor::clock::ClockKind::default());
 
-    let proc = hyperactor::host::boot_proc::<hyperactor::host::testing::EchoActor, _, _>(
-        |proc| async move { proc.spawn("echo", ()).await },
-    )
-    .await
-    .unwrap();
+    let proc =
+        ProcessProcManager::<hyperactor::host::testing::EchoActor>::boot_proc(|proc| async move {
+            proc.spawn("echo", ()).await
+        })
+        .await
+        .unwrap();
 
     tracing::info!("booted proc {}", proc.proc_id());
 
