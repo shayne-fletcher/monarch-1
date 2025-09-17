@@ -41,12 +41,13 @@
 //! ```
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::marker::PhantomData;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::Future;
+use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -244,14 +245,17 @@ pub trait ProcManager {
     // TODO: full lifecycle management; perhaps mimick the Command API.
 }
 
-/// A ProcManager that spawns into local (in-process) procs. Used for testing.
+/// A ProcManager that spawns into local (in-process) procs. Used for
+/// testing.
 pub struct LocalProcManager<A: Actor> {
     procs: Arc<Mutex<HashMap<ProcId, Proc>>>,
     params: A::Params,
 }
 
 impl<A: Actor> LocalProcManager<A> {
-    fn new(params: A::Params) -> Self {
+    /// Create a new in-process proc manager with the given agent
+    /// params.
+    pub fn new(params: A::Params) -> Self {
         Self {
             procs: Arc::new(Mutex::new(HashMap::new())),
             params,
@@ -299,9 +303,9 @@ where
 /// It follows a simple protocol:
 ///
 /// Each process is launched with the following environment variables:
-/// - HYPERACTOR_HOST_BACKEND_ADDR: the backend address to which all messages are forwarded,
-/// - HYPERACTOR_HOST_PROC_ID: the proc id to assign the launched proc, and
-/// - HYPERACTOR_HOST_CALLBACK_ADDR: the channel address with which to return the proc's address
+/// - `HYPERACTOR_HOST_BACKEND_ADDR`: the backend address to which all messages are forwarded,
+/// - `HYPERACTOR_HOST_PROC_ID`: the proc id to assign the launched proc, and
+/// - `HYPERACTOR_HOST_CALLBACK_ADDR`: the channel address with which to return the proc's address
 ///
 /// The launched proc should also spawn an actor to manage it - the details of this are
 /// implementation dependent, and outside the scope of the process manager.
@@ -310,16 +314,27 @@ where
 /// protocol.
 pub struct ProcessProcManager<A> {
     program: std::path::PathBuf,
+    children: Arc<Mutex<HashMap<ProcId, Child>>>,
     _phantom: PhantomData<A>,
 }
 
 impl<A> ProcessProcManager<A> {
-    /// Create a new ProcessProcManager that runs the provided command.
+    /// Create a new ProcessProcManager that runs the provided
+    /// command.
     pub fn new(program: std::path::PathBuf) -> Self {
         Self {
             program,
+            children: Arc::new(Mutex::new(HashMap::new())),
             _phantom: PhantomData,
         }
+    }
+}
+
+impl<A> Drop for ProcessProcManager<A> {
+    fn drop(&mut self) {
+        // When the manager is dropped, `children` is dropped, which
+        // drops each `Child` handle. With `kill_on_drop(true)`, the OS
+        // will SIGKILL the processes. Nothing else to do here.
     }
 }
 
@@ -347,12 +362,30 @@ where
         cmd.env("HYPERACTOR_HOST_BACKEND_ADDR", forwarder_addr.to_string());
         cmd.env("HYPERACTOR_HOST_CALLBACK_ADDR", callback_addr.to_string());
 
-        // TODO: retain, manage lifecycle
-        let _process = cmd
-            .spawn()
-            .map_err(|e| HostError::ProcessSpawnFailure(proc_id, e))?;
+        // Lifetime strategy: mark the child with
+        // `kill_on_drop(true)` so the OS will send SIGKILL if the
+        // handle is dropped and retain the `Child` in
+        // `self.children`, tying its lifetime to the manager/host.
+        //
+        // This is the simplest viable policy to avoid orphaned
+        // subprocesses in CI; more sophisticated lifecycle control
+        // (graceful shutdown, restart) will be layered on later.
 
-        // Now wait for the callback, providing the address:
+        // Kill the child when its handle is dropped.
+        cmd.kill_on_drop(true);
+
+        let child = cmd
+            .spawn()
+            .map_err(|e| HostError::ProcessSpawnFailure(proc_id.clone(), e))?;
+
+        // Retain the handle so it lives for the life of the
+        // manager/host.
+        {
+            let mut children = self.children.lock().await;
+            children.insert(proc_id.clone(), child);
+        }
+
+        // Now wait for the callback, providing the address.
         Ok(callback_rx.recv().await?)
     }
 }
@@ -532,7 +565,7 @@ mod tests {
     async fn test_process_proc_manager() {
         hyperactor_telemetry::initialize_logging(crate::clock::ClockKind::default());
 
-        // EchoActor is "agent", just for testing connectivity.
+        // EchoActor is "agent" used to test connectivity.
         let process_manager = ProcessProcManager::<EchoActor>::new(
             buck_resources::get("monarch/hyperactor/bootstrap").unwrap(),
         );
@@ -541,20 +574,73 @@ mod tests {
                 .await
                 .unwrap();
 
-        let (proc1, echo_actor_1) = host.spawn("proc1".to_string()).await.unwrap();
-        let (proc2, echo_actor_2) = host.spawn("proc2".to_string()).await.unwrap();
+        // (1) Spawn and check invariants.
+        assert!(matches!(host.addr().transport(), ChannelTransport::Unix));
+        let (proc1, echo1) = host.spawn("proc1".to_string()).await.unwrap();
+        let (proc2, echo2) = host.spawn("proc2".to_string()).await.unwrap();
+        assert_eq!(echo1.actor_id().proc_id(), &proc1);
+        assert_eq!(echo2.actor_id().proc_id(), &proc2);
 
-        // These are always direct addressed, so we can reach them with our own proc.
-        let test_proc = Proc::direct(
+        // (2) Duplicate name rejection.
+        let dup = host.spawn("proc1".to_string()).await;
+        assert!(matches!(dup, Err(HostError::ProcExists(_))));
+
+        // (3) Create a standalone client proc and verify echo1 agent responds.
+        // Request: client proc -> host frontend/router -> echo1 (proc1).
+        // Reply:   echo1 (proc1) -> host backend -> host router -> client port.
+        // This confirms that an external proc (created via
+        // `Proc::direct`) can address a child proc through the host,
+        // and receive a correct reply.
+        let client = Proc::direct(
             ChannelAddr::any(host.addr().transport()),
             "test".to_string(),
         )
         .await
         .unwrap();
-        let (test_instance, _handle) = test_proc.instance("test").unwrap();
+        let (client_inst, _h) = client.instance("test").unwrap();
+        let (port, rx) = client_inst.mailbox().open_once_port();
+        echo1.send(&client_inst, port.bind()).unwrap();
+        #[allow(clippy::disallowed_methods)]
+        let id = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(id, *echo1.actor_id());
 
-        let (port, rx) = test_instance.mailbox().open_once_port();
-        echo_actor_1.send(&test_instance, port.bind()).unwrap();
-        assert_eq!(rx.recv().await.unwrap(), *echo_actor_1.actor_id());
+        // (4) Child <-> external client request -> reply:
+        // Request: client proc (standalone via `Proc::direct`) ->
+        //          host frontend/router -> echo2 (proc2).
+        // Reply:   echo2 (proc2) -> host backend -> host router ->
+        //          client port (standalone proc).
+        // This exercises cross-proc routing between a child and an
+        // external client under the same host.
+        let (port2, rx2) = client_inst.mailbox().open_once_port();
+        echo2.send(&client_inst, port2.bind()).unwrap();
+        #[allow(clippy::disallowed_methods)]
+        let id2 = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx2.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(id2, *echo2.actor_id());
+
+        // (5) System -> child request -> cross-proc reply:
+        // Request: system proc -> host router (frontend) -> echo1
+        //          (proc1, child).
+        // Reply: echo1 (proc1) -> proc1 forwarder -> host backend ->
+        //        host router -> client proc direct addr (Proc::direct) ->
+        //        client port.
+        // Because `client_inst` runs in its own proc, the reply
+        // traverses the host (not local delivery within proc1).
+        let (sys_inst, _h) = host.system_proc().instance("sys-client").unwrap();
+        let (port3, rx3) = client_inst.mailbox().open_once_port();
+        // Send from system -> child via a message that ultimately
+        // replies to client's port
+        echo1.send(&sys_inst, port3.bind()).unwrap();
+        #[allow(clippy::disallowed_methods)]
+        let id3 = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx3.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(id3, *echo1.actor_id());
     }
 }
