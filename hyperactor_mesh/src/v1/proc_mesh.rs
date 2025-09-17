@@ -26,7 +26,8 @@ use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxServer;
 use ndslice::Extent;
 use ndslice::view;
-use ndslice::view::MapIntoRefExt;
+use ndslice::view::MapIntoExt;
+use ndslice::view::Ranked;
 use ndslice::view::Region;
 use serde::Deserialize;
 use serde::Serialize;
@@ -257,7 +258,7 @@ impl ProcMeshRef {
     /// The current statuses of procs in this mesh.
     #[allow(dead_code)]
     async fn status(&self, cx: &impl context::Actor) -> v1::Result<ValueMesh<bool>> {
-        let vm: ValueMesh<_> = self.map_into_ref(|proc_ref| {
+        let vm: ValueMesh<_> = self.map_into(|proc_ref| {
             let proc_ref = proc_ref.clone();
             async move { proc_ref.status(cx).await }
         });
@@ -337,29 +338,21 @@ impl view::Ranked for ProcMeshRef {
         &self.region
     }
 
-    fn get(&self, rank: usize) -> Option<ProcRef> {
-        self.ranks.get(rank).cloned()
+    fn get(&self, rank: usize) -> Option<&Self::Item> {
+        self.ranks.get(rank)
     }
+}
 
+impl view::RankedSliceable for ProcMeshRef {
     fn sliced(&self, region: Region) -> Self {
+        debug_assert!(region.is_subset(view::Ranked::region(self)));
         let ranks = self
             .region()
             .remap(&region)
             .unwrap()
-            .map(|index| self.get(index).unwrap());
-        Self::new(self.name.clone(), region, Arc::new(ranks.collect())).unwrap()
-    }
-}
-
-impl view::RankedRef for ProcMeshRef {
-    type Item = ProcRef;
-
-    fn region(&self) -> &Region {
-        &self.region
-    }
-
-    fn get_ref(&self, rank: usize) -> Option<&Self::Item> {
-        self.ranks.get(rank)
+            .map(|index| self.get(index).unwrap().clone())
+            .collect();
+        Self::new(self.name.clone(), region, Arc::new(ranks)).unwrap()
     }
 }
 
