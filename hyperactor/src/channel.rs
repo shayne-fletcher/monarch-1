@@ -327,6 +327,11 @@ impl ChannelTransport {
             // TODO ChannelTransport::Sim(Box::new(ChannelTransport::Local)),
         ]
     }
+
+    /// Return an "any" address for this transport.
+    pub fn any(&self) -> ChannelAddr {
+        ChannelAddr::any(self.clone())
+    }
 }
 
 /// The type of (TCP) hostnames.

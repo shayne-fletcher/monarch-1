@@ -6,9 +6,13 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::env::VarError;
+use std::future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use base64::prelude::*;
 use hyperactor::ActorRef;
 use hyperactor::Named;
 use hyperactor::ProcId;
@@ -19,14 +23,19 @@ use hyperactor::channel::Rx;
 use hyperactor::channel::Tx;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
+use hyperactor::host;
+use hyperactor::host::HostError;
+use hyperactor::host::ProcManager;
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::proc::Proc;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
+use crate::v1;
 
 pub const BOOTSTRAP_ADDR_ENV: &str = "HYPERACTOR_MESH_BOOTSTRAP_ADDR";
 pub const BOOTSTRAP_INDEX_ENV: &str = "HYPERACTOR_MESH_INDEX";
@@ -112,9 +121,96 @@ async fn exit_if_missed_heartbeat(bootstrap_index: usize, bootstrap_addr: Channe
     }
 }
 
-/// Entry point to processes managed by hyperactor_mesh. This advertises the process
-/// to a bootstrap server, and receives instructions to manage the lifecycle(s) of
-/// procs within this process.
+/// The bootstrap mode configures the behavior of the bootstrap process.
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BootstrapMode {
+    // "v1" proc bootstrap
+    Proc {
+        /// The ProcId of the proc to be bootstrapped.
+        proc_id: ProcId,
+        /// The backend address to which messages are forwarded.
+        /// See [`hyperactor::host`] for channel topology details.
+        backend_addr: ChannelAddr,
+        /// The callback address used to indicate successful spawning.
+        callback_addr: ChannelAddr,
+    },
+
+    #[default]
+    V0ProcMesh, // pass through to the v0 allocator
+}
+
+impl BootstrapMode {
+    /// Serialize the mode into a environment-variable-safe string by
+    /// base64-encoding its JSON representation.
+    fn to_env_safe_string(&self) -> v1::Result<String> {
+        Ok(BASE64_STANDARD.encode(serde_json::to_string(&self)?))
+    }
+
+    /// Deserialize the mode from the representation returned by [`to_env_safe_string`].
+    fn from_env_safe_string(str: &str) -> v1::Result<Self> {
+        let data = BASE64_STANDARD.decode(str)?;
+        let data = std::str::from_utf8(&data)?;
+        Ok(serde_json::from_str(data)?)
+    }
+}
+
+/// A proc manager that launches procs using the [`bootstrap`] function as an entry point.
+pub struct BootstrapProcManager {
+    program: std::path::PathBuf,
+}
+
+impl BootstrapProcManager {
+    #[allow(dead_code)]
+    pub(crate) fn new(program: std::path::PathBuf) -> Self {
+        Self { program }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Self {
+        Self::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap())
+    }
+}
+
+#[async_trait]
+impl ProcManager for BootstrapProcManager {
+    type Agent = ProcMeshAgent;
+
+    fn transport(&self) -> ChannelTransport {
+        ChannelTransport::Unix
+    }
+    async fn spawn(
+        &self,
+        proc_id: ProcId,
+        backend_addr: ChannelAddr,
+    ) -> Result<(ChannelAddr, ActorRef<Self::Agent>), HostError> {
+        let (callback_addr, mut callback_rx) =
+            channel::serve(ChannelAddr::any(ChannelTransport::Unix)).await?;
+
+        let mode = BootstrapMode::Proc {
+            proc_id: proc_id.clone(),
+            backend_addr,
+            callback_addr,
+        };
+        let mut cmd = Command::new(&self.program);
+        cmd.env(
+            "HYPERACTOR_MESH_BOOTSTRAP_MODE",
+            mode.to_env_safe_string()
+                .map_err(|e| HostError::ProcessConfigurationFailure(proc_id.clone(), e.into()))?,
+        );
+
+        // TODO: retain, manage lifecycle
+        let _process = cmd
+            .spawn()
+            .map_err(|e| HostError::ProcessSpawnFailure(proc_id, e))?;
+
+        // Now wait for the callback, providing the address:
+        Ok(callback_rx.recv().await?)
+    }
+}
+
+/// Entry point to processes managed by hyperactor_mesh. Any process that is part
+/// of a hyperactor_mesh program should call [`bootstrap`], which then configures
+/// the process according to how it is invoked.
 ///
 /// If bootstrap returns any error, it is defunct from the point of view of hyperactor_mesh,
 /// and the process should likely exit:
@@ -127,6 +223,50 @@ async fn exit_if_missed_heartbeat(bootstrap_index: usize, bootstrap_addr: Channe
 ///
 /// Use [`bootstrap_or_die`] to implement this behavior directly.
 pub async fn bootstrap() -> anyhow::Error {
+    let mode = match std::env::var("HYPERACTOR_MESH_BOOTSTRAP_MODE") {
+        Ok(mode) => match BootstrapMode::from_env_safe_string(&mode) {
+            Ok(mode) => mode,
+            Err(e) => {
+                return anyhow::Error::from(e).context("parsing HYPERACTOR_MESH_BOOTSTRAP_MODE");
+            }
+        },
+        Err(VarError::NotPresent) => BootstrapMode::default(),
+        Err(e) => return anyhow::Error::from(e).context("reading HYPERACTOR_MESH_BOOTSTRAP_MODE"),
+    };
+
+    match mode {
+        BootstrapMode::Proc {
+            proc_id,
+            backend_addr,
+            callback_addr,
+        } => {
+            let result =
+                host::spawn_proc(proc_id, backend_addr, callback_addr, |proc| async move {
+                    ProcMeshAgent::boot_v1(proc).await
+                })
+                .await;
+            match result {
+                Ok(_proc) => {
+                    future::pending::<()>().await;
+                    unreachable!()
+                }
+                Err(e) => e.into(),
+            }
+        }
+        BootstrapMode::V0ProcMesh => bootstrap_v0_proc_mesh().await,
+    }
+}
+
+/// Bootstrap a v0 proc mesh. This launches a control process that responds to
+/// Allocator2Process messages, conveying its own state in Process2Allocator messages.
+///
+/// The bootstrapping process is controlled by the
+/// following environment variables:
+///
+/// - `HYPERACTOR_MESH_BOOTSTRAP_ADDR`: the channel address to which Process2Allocator messages
+///   should be sent.
+/// - `HYPERACTOR_MESH_INDEX`: an index used to identify this process to the allocator.
+async fn bootstrap_v0_proc_mesh() -> anyhow::Error {
     pub async fn go() -> Result<(), anyhow::Error> {
         let procs = Arc::new(Mutex::new(Vec::<Proc>::new()));
         let procs_for_cleanup = procs.clone();
@@ -236,4 +376,28 @@ pub async fn bootstrap_or_die() -> ! {
     let err = bootstrap().await;
     tracing::error!("failed to bootstrap mesh process: {}", err);
     std::process::exit(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use hyperactor::id;
+
+    use super::*;
+
+    #[test]
+    fn test_bootstrap_mode_env_string() {
+        let values = [
+            BootstrapMode::default(),
+            BootstrapMode::Proc {
+                proc_id: id!(foo[0]),
+                backend_addr: ChannelAddr::any(ChannelTransport::Tcp),
+                callback_addr: ChannelAddr::any(ChannelTransport::Unix),
+            },
+        ];
+
+        for value in values {
+            let safe = value.to_env_safe_string().unwrap();
+            assert_eq!(value, BootstrapMode::from_env_safe_string(&safe).unwrap());
+        }
+    }
 }

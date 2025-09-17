@@ -6,6 +6,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+pub mod mesh_agent;
+
 use std::str::FromStr;
 use std::sync::Arc;
 

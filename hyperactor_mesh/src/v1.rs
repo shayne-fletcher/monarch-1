@@ -56,7 +56,7 @@ pub enum Error {
     MailboxError(#[from] Box<hyperactor::mailbox::MailboxError>),
 
     #[error(transparent)]
-    BincodeError(#[from] Box<bincode::Error>),
+    CodecError(#[from] CodecError),
 
     #[error("error during mesh configuration: {0}")]
     ConfigurationError(anyhow::Error),
@@ -82,6 +82,43 @@ pub enum Error {
     CastingError(Name, anyhow::Error),
 }
 
+/// Errors that occur during serialization and deserialization.
+#[derive(Debug, thiserror::Error)]
+pub enum CodecError {
+    #[error(transparent)]
+    BincodeError(#[from] Box<bincode::Error>),
+    #[error(transparent)]
+    JsonError(#[from] Box<serde_json::Error>),
+    #[error(transparent)]
+    Base64Error(#[from] Box<base64::DecodeError>),
+    #[error(transparent)]
+    Utf8Error(#[from] Box<std::str::Utf8Error>),
+}
+
+impl From<bincode::Error> for Error {
+    fn from(e: bincode::Error) -> Self {
+        Error::CodecError(Box::new(e).into())
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Error::CodecError(Box::new(e).into())
+    }
+}
+
+impl From<base64::DecodeError> for Error {
+    fn from(e: base64::DecodeError) -> Self {
+        Error::CodecError(Box::new(e).into())
+    }
+}
+
+impl From<std::str::Utf8Error> for Error {
+    fn from(e: std::str::Utf8Error) -> Self {
+        Error::CodecError(Box::new(e).into())
+    }
+}
+
 impl From<crate::alloc::AllocatorError> for Error {
     fn from(e: crate::alloc::AllocatorError) -> Self {
         Error::AllocatorError(Box::new(e))
@@ -97,12 +134,6 @@ impl From<hyperactor::channel::ChannelError> for Error {
 impl From<hyperactor::mailbox::MailboxError> for Error {
     fn from(e: hyperactor::mailbox::MailboxError) -> Self {
         Error::MailboxError(Box::new(e))
-    }
-}
-
-impl From<bincode::Error> for Error {
-    fn from(e: bincode::Error) -> Self {
-        Error::BincodeError(Box::new(e))
     }
 }
 
