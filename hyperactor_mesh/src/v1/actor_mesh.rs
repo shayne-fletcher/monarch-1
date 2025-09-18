@@ -6,7 +6,11 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fmt;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::marker::PhantomData;
+use std::sync::OnceLock as OnceCell;
 
 use hyperactor::Actor;
 use hyperactor::ActorRef;
@@ -20,7 +24,6 @@ use hyperactor::supervision::ActorSupervisionEvent;
 use hyperactor_mesh_macros::sel;
 use ndslice::Selection;
 use ndslice::Shape;
-use ndslice::ViewExt;
 use ndslice::view;
 use ndslice::view::Region;
 use ndslice::view::View;
@@ -55,36 +58,62 @@ impl<A> ActorMesh<A> {
 }
 
 impl<A: RemoteActor> ActorMesh<A> {
-    /// Freeze this actor mesh in its current state, returning a stable
-    /// reference that may be serialized.
+    /// Freeze this actor mesh in its current state, returning a
+    /// stable reference that may be serialized.
     pub fn freeze(&self) -> ActorMeshRef<A> {
-        let actor_refs = self
-            .proc_mesh
-            .values()
-            .map(|p| p.attest(&self.name))
-            .collect();
-        ActorMeshRef::new(self.name.clone(), self.proc_mesh.clone(), actor_refs)
+        ActorMeshRef::new(self.name.clone(), self.proc_mesh.clone())
+    }
+
+    /// Freeze with a specific page size for the lazy cache.
+    pub fn freeze_with_page_size(&self, page_size: usize) -> ActorMeshRef<A> {
+        ActorMeshRef::with_page_size(self.name.clone(), self.proc_mesh.clone(), page_size)
+    }
+}
+
+/// Influences paging behavior for the lazy cache. Smaller pages
+/// reduce over-allocation for sparse access; larger pages reduce the
+/// number of heap allocations for contiguous scans.
+const DEFAULT_PAGE: usize = 1024;
+
+/// A lazily materialized page of ActorRefs.
+struct Page<A: RemoteActor> {
+    slots: Box<[OnceCell<ActorRef<A>>]>,
+}
+
+impl<A: RemoteActor> Page<A> {
+    fn new(len: usize) -> Self {
+        let mut v = Vec::with_capacity(len);
+        for _ in 0..len {
+            v.push(OnceCell::new());
+        }
+        Self {
+            slots: v.into_boxed_slice(),
+        }
     }
 }
 
 /// A reference to a stable snapshot of an [`ActorMesh`].
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ActorMeshRef<A: RemoteActor> {
     proc_mesh: ProcMeshRef,
     name: Name,
-    actor_refs: Vec<ActorRef<A>>, // Ranked::get() -> &ActorRef<A>
-    _phantom: PhantomData<A>,
-}
 
-impl<A: RemoteActor> ActorMeshRef<A> {
-    pub(crate) fn new(name: Name, proc_mesh: ProcMeshRef, actor_refs: Vec<ActorRef<A>>) -> Self {
-        Self {
-            proc_mesh,
-            name,
-            actor_refs,
-            _phantom: PhantomData,
-        }
-    }
+    /// Lazily allocated collection of pages:
+    /// - The outer `OnceCell` defers creating the vector until first
+    ///   use.
+    /// - The `Vec` holds slots for multiple pages.
+    /// - Each slot is itself a `OnceCell<Box<Page<A>>>`, so that each
+    ///   page can be initialized on demand.
+    /// - A `Page<A>` is a boxed slice of `OnceCell<ActorRef<A>>`,
+    ///   i.e. the actual storage for actor references within that
+    ///   page.
+    #[serde(skip, default)]
+    pages: OnceCell<Vec<OnceCell<Box<Page<A>>>>>,
+    // Page size knob (not serialize; defaults after deserialize).
+    #[serde(skip, default)]
+    page_size: usize,
+
+    _phantom: PhantomData<A>,
 }
 
 impl<A: Actor + RemoteActor> ActorMeshRef<A> {
@@ -136,29 +165,124 @@ impl<A: Actor + RemoteActor> ActorMeshRef<A> {
     }
 }
 
+impl<A: RemoteActor> ActorMeshRef<A> {
+    pub(crate) fn new(name: Name, proc_mesh: ProcMeshRef) -> Self {
+        Self::with_page_size(name, proc_mesh, DEFAULT_PAGE)
+    }
+
+    pub(crate) fn with_page_size(name: Name, proc_mesh: ProcMeshRef, page_size: usize) -> Self {
+        Self {
+            proc_mesh,
+            name,
+            pages: OnceCell::new(),
+            page_size: page_size.max(1),
+            _phantom: PhantomData,
+        }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        view::Ranked::region(&self.proc_mesh).num_ranks()
+    }
+
+    fn ensure_pages(&self) -> &Vec<OnceCell<Box<Page<A>>>> {
+        let n = self.len().div_ceil(self.page_size); // ⌈len / page_size⌉
+        self.pages
+            .get_or_init(|| (0..n).map(|_| OnceCell::new()).collect())
+    }
+
+    fn materialize(&self, rank: usize) -> Option<&ActorRef<A>> {
+        let len = self.len();
+        if rank >= len {
+            return None;
+        }
+        let p = self.page_size;
+        let page_ix = rank / p;
+        let local_ix = rank % p;
+
+        let pages = self.ensure_pages();
+        let page = pages[page_ix].get_or_init(|| {
+            // Last page may be partial.
+            let base = page_ix * p;
+            let remaining = len - base;
+            let page_len = remaining.min(p);
+            Box::new(Page::<A>::new(page_len))
+        });
+
+        Some(page.slots[local_ix].get_or_init(|| {
+            // Invariant: `proc_mesh` and this view share the same
+            // dense rank space:
+            //   - ranks are contiguous [0, self.len()) with no gaps
+            //     or reordering
+            //   - for every rank r, `proc_mesh.get(r)` is Some(..)
+            // Therefore we can index `proc_mesh` with `rank`
+            // directly.
+            debug_assert!(rank < self.len(), "rank must be within [0, len)");
+            debug_assert!(
+                self.proc_mesh.get(rank).is_some(),
+                "proc_mesh must be dense/aligned with this view"
+            );
+            let proc_ref = self.proc_mesh.get(rank).expect("rank in-bounds");
+            proc_ref.attest(&self.name)
+        }))
+    }
+}
+
+impl<A: RemoteActor> Clone for ActorMeshRef<A> {
+    fn clone(&self) -> Self {
+        Self {
+            proc_mesh: self.proc_mesh.clone(),
+            name: self.name.clone(),
+            pages: OnceCell::new(), // No clone cache.
+            page_size: self.page_size,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<A: RemoteActor> PartialEq for ActorMeshRef<A> {
+    fn eq(&self, other: &Self) -> bool {
+        self.proc_mesh == other.proc_mesh && self.name == other.name
+    }
+}
+impl<A: RemoteActor> Eq for ActorMeshRef<A> {}
+
+impl<A: RemoteActor> Hash for ActorMeshRef<A> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.proc_mesh.hash(state);
+        self.name.hash(state);
+    }
+}
+
+impl<A: RemoteActor> fmt::Debug for ActorMeshRef<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ActorMeshRef")
+            .field("proc_mesh", &self.proc_mesh)
+            .field("name", &self.name)
+            .field("page_size", &self.page_size)
+            .finish_non_exhaustive() // No print cache.
+    }
+}
+
 impl<A: RemoteActor> view::Ranked for ActorMeshRef<A> {
     type Item = ActorRef<A>;
 
+    #[inline]
     fn region(&self) -> &Region {
         view::Ranked::region(&self.proc_mesh)
     }
 
+    #[inline]
     fn get(&self, rank: usize) -> Option<&Self::Item> {
-        self.actor_refs.get(rank)
+        self.materialize(rank)
     }
 }
 
 impl<A: RemoteActor> view::RankedSliceable for ActorMeshRef<A> {
     fn sliced(&self, region: Region) -> Self {
         debug_assert!(region.is_subset(view::Ranked::region(self)));
-        let proc_mesh = self.proc_mesh.subset(region.clone()).unwrap();
-        let actor_refs = self
-            .region()
-            .remap(&region)
-            .unwrap()
-            .map(|index| self.actor_refs[index].clone())
-            .collect();
-        ActorMeshRef::new(self.name.clone(), proc_mesh, actor_refs)
+        let proc_mesh = self.proc_mesh.subset(region).unwrap();
+        Self::with_page_size(self.name.clone(), proc_mesh, self.page_size)
     }
 }
 
@@ -169,18 +293,126 @@ fn to_shape(region: &Region) -> Shape {
 
 #[cfg(test)]
 mod tests {
-
     use std::assert_matches::assert_matches;
+    use std::collections::HashSet;
 
     use hyperactor::actor::ActorStatus;
+    use hyperactor::clock::Clock;
+    use hyperactor::clock::RealClock;
+    use hyperactor::mailbox;
     use hyperactor::supervision::ActorSupervisionEvent;
     use ndslice::ViewExt;
     use ndslice::extent;
+    use ndslice::view::Ranked;
     use timed_test::async_timed_test;
+    use tokio::time::Duration;
 
+    use super::ActorMesh;
+    use crate::v1::ActorMeshRef;
     use crate::v1::Name;
+    use crate::v1::ProcMesh;
+    use crate::v1::ProcMeshRef;
     use crate::v1::testactor;
     use crate::v1::testing;
+
+    #[tokio::test]
+    async fn test_actor_mesh_ref_lazy_materialization() {
+        // 1) Bring up procs and spawn actors.
+        let instance = testing::instance();
+        // Small mesh so the test runs fast, but > page_size so we
+        // cross a boundary
+        let extent = extent!(replicas = 3, hosts = 2); // 6 ranks
+        let pm: ProcMesh = testing::proc_meshes(&instance, extent.clone())
+            .await
+            .into_iter()
+            .next()
+            .expect("at least one proc mesh");
+        let pmr: ProcMeshRef = pm.freeze();
+        let am: ActorMesh<testactor::TestActor> = pmr.spawn(&instance, "test", &()).await.unwrap();
+
+        // 2) Build our ActorMeshRef with a tiny page size (2) to
+        // force multiple pages:
+        // page 0: ranks [0,1], page 1: [2,3], page 2: [4,5]
+        let page_size = 2;
+        let amr: ActorMeshRef<testactor::TestActor> = am.freeze_with_page_size(page_size);
+        assert_eq!(amr.extent(), extent);
+        assert_eq!(amr.region().num_ranks(), 6);
+
+        // 3) Within-rank pointer stability (OnceLock caches &ActorRef)
+        let p0_a = amr.get(0).expect("rank 0 exists") as *const _;
+        let p0_b = amr.get(0).expect("rank 0 exists") as *const _;
+        assert_eq!(p0_a, p0_b, "same rank should return same cached pointer");
+
+        // 4) Same page, different rank (both materialize fine)
+        let p1_a = amr.get(1).expect("rank 1 exists") as *const _;
+        let p1_b = amr.get(1).expect("rank 1 exists") as *const _;
+        assert_eq!(p1_a, p1_b, "same rank should return same cached pointer");
+        // They're different ranks, so the pointers are different
+        // (distinct OnceLocks in the page)
+        assert_ne!(p0_a, p1_a, "different ranks have different cache slots");
+
+        // 5) Cross a page boundary (rank 2 is in a different page than rank 0/1)
+        let p2_a = amr.get(2).expect("rank 2 exists") as *const _;
+        let p2_b = amr.get(2).expect("rank 2 exists") as *const _;
+        assert_eq!(p2_a, p2_b, "same rank should return same cached pointer");
+        assert_ne!(p0_a, p2_a, "different pages have different cache slots");
+
+        // 6) Clone should drop the cache but keep identity (actor_id)
+        let amr_clone = amr.clone();
+        let orig_id_0 = amr.get(0).unwrap().actor_id().clone();
+        let clone_id_0 = amr_clone.get(0).unwrap().actor_id().clone();
+        assert_eq!(orig_id_0, clone_id_0, "clone preserves identity");
+        let p0_clone = amr_clone.get(0).unwrap() as *const _;
+        assert_ne!(
+            p0_a, p0_clone,
+            "cloned ActorMeshRef has a fresh cache (different pointer)"
+        );
+
+        // 7) Slicing preserves page_size and clears cache
+        // (RankedSliceable::sliced)
+        let sliced = amr.range("replicas", 1..).expect("slice should be valid"); // leaves 4 ranks
+        assert_eq!(sliced.region().num_ranks(), 4);
+        // First access materializes a new cache for the sliced view.
+        let sp0_a = sliced.get(0).unwrap() as *const _;
+        let sp0_b = sliced.get(0).unwrap() as *const _;
+        assert_eq!(sp0_a, sp0_b, "sliced view has its own cache slot per rank");
+        // Cross-page inside the slice too (page_size = 2 => pages are
+        // [0..2), [2..4)).
+        let sp2 = sliced.get(2).unwrap() as *const _;
+        assert_ne!(sp0_a, sp2, "sliced view crosses its own page boundary");
+
+        // 8) Hash/Eq ignore cache state; identical identity collapses
+        // to one set entry.
+        let mut set = HashSet::new();
+        set.insert(amr.clone());
+        set.insert(amr.clone());
+        assert_eq!(set.len(), 1, "cache state must not affect Hash/Eq");
+
+        // 9) As a sanity check, cast to ensure the refs are indeed
+        // usable/live.
+        let (port, mut rx) = mailbox::open_port(&instance);
+        // Send to rank 0 and rank 3 (extent 3x2 => at least 4 ranks
+        // exist).
+        amr.get(0)
+            .expect("rank 0 exists")
+            .send(&instance, testactor::GetActorId(port.bind()))
+            .expect("send to rank 0 should succeed");
+        amr.get(3)
+            .expect("rank 3 exists")
+            .send(&instance, testactor::GetActorId(port.bind()))
+            .expect("send to rank 3 should succeed");
+        let id_a = RealClock
+            .timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timed out waiting for first reply")
+            .expect("channel closed before first reply");
+        let id_b = RealClock
+            .timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timed out waiting for second reply")
+            .expect("channel closed before second reply");
+        assert_ne!(id_a, id_b, "two different ranks responded");
+    }
 
     #[async_timed_test(timeout_secs = 30)]
     async fn test_status() {

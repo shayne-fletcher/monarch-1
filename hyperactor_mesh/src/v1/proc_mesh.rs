@@ -26,9 +26,7 @@ use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::supervision::ActorSupervisionEvent;
 use ndslice::Extent;
-use ndslice::ViewExt;
 use ndslice::view;
-use ndslice::view::CollectMeshExt;
 use ndslice::view::MapIntoExt;
 use ndslice::view::Ranked;
 use ndslice::view::Region;
@@ -47,7 +45,6 @@ use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
 use crate::v1;
 use crate::v1::ActorMesh;
-use crate::v1::ActorMeshRef;
 use crate::v1::Error;
 use crate::v1::Name;
 use crate::v1::ValueMesh;
@@ -375,7 +372,8 @@ impl ProcMeshRef {
     }
 
     /// Spawn an actor on all of the procs in this mesh, returning a new ActorMesh.
-    pub async fn spawn<A: Actor + RemoteActor>(
+    #[allow(dead_code)]
+    pub(crate) async fn spawn<A: Actor + RemoteActor>(
         &self,
         cx: &impl context::Actor,
         name: &str,
@@ -508,7 +506,6 @@ mod tests {
     use timed_test::async_timed_test;
 
     use crate::v1::ActorMeshRef;
-    use crate::v1::Name;
     use crate::v1::testactor;
     use crate::v1::testing;
 
