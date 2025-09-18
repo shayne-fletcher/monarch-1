@@ -8,15 +8,21 @@
 
 import io
 import pickle
+import sys
 from contextlib import contextmanager, ExitStack
 from typing import Any, Callable, Iterable, List, Tuple
 
 import cloudpickle
 
-try:
-    import torch  # @manual
-except ImportError:
-    torch = None
+
+def maybe_torch():
+    """
+    XXX: there is a minor bug if we are sending a gpu tensor to a host that hasn't loaded
+    torch yet: the patch to load the tensor on the cpu will not have been applied and it
+    will end up on the gpu. The right fix is to switch cpu loading to the save side,
+    or to delete the custom behavior entirely.
+    """
+    return sys.modules.get("torch")
 
 
 _orig_function_getstate = cloudpickle.cloudpickle._function_getstate
@@ -76,6 +82,7 @@ def flatten(obj: Any, filter: Callable[[Any], bool]) -> Tuple[List[Any], bytes]:
 
 def unflatten(data: bytes, values: Iterable[Any]) -> Any:
     with ExitStack() as stack:
+        torch = maybe_torch()
         if torch is not None:
             stack.enter_context(load_tensors_on_cpu())
             stack.enter_context(torch.utils._python_dispatch._disable_current_modes())
@@ -87,6 +94,8 @@ def unflatten(data: bytes, values: Iterable[Any]) -> Any:
 def load_tensors_on_cpu():
     # Ensure that any tensors load from CPU via monkeypatching how Storages are
     # loaded.
+    import torch
+
     old = torch.storage._load_from_bytes
     try:
         torch.storage._load_from_bytes = lambda b: torch.load(
