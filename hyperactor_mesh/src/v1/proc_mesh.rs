@@ -9,6 +9,7 @@
 use std::any::type_name;
 use std::collections::HashMap;
 use std::fmt;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use hyperactor::Actor;
@@ -149,6 +150,7 @@ pub struct ProcMesh {
     name: Name,
     allocation: ProcMeshAllocation,
     comm_actor_name: Option<Name>,
+    current_ref: ProcMeshRef,
 }
 
 impl ProcMesh {
@@ -163,14 +165,35 @@ impl ProcMesh {
         } else {
             None
         };
+
+        let region = allocation.extent().clone().into();
+        let ranks = allocation.ranks();
+        let root_comm_actor = comm_actor_name.as_ref().map(|name| {
+            ActorRef::attest(
+                ranks
+                    .first()
+                    .expect("root mesh cannot be empty")
+                    .actor_id(name),
+            )
+        });
+        let current_ref = ProcMeshRef::new(
+            name.clone(),
+            region,
+            ranks,
+            None, // this is the root mesh
+            root_comm_actor,
+        )
+        .unwrap();
+
         let proc_mesh = Self {
             name,
             allocation,
             comm_actor_name: comm_actor_name.clone(),
+            current_ref,
         };
+
         if let Some(comm_actor_name) = comm_actor_name {
             proc_mesh
-                .freeze()
                 .spawn_with_name::<CommActor>(cx, comm_actor_name, &Default::default())
                 .await?;
         }
@@ -195,29 +218,6 @@ impl ProcMesh {
             false, // comm actors not yet supported for owned meshes
         )
         .await
-    }
-
-    /// Freeze this proc mesh in its current state, returning a stable
-    /// reference that may be serialized.
-    pub fn freeze(&self) -> ProcMeshRef {
-        let region = self.allocation.extent().clone().into();
-        let ranks = self.allocation.ranks();
-        let root_comm_actor = self.comm_actor_name.as_ref().map(|name| {
-            ActorRef::attest(
-                ranks
-                    .first()
-                    .expect("root mesh cannot be empty")
-                    .actor_id(name),
-            )
-        });
-        ProcMeshRef::new(
-            self.name.clone(),
-            region,
-            ranks,
-            None, // this is the root mesh
-            root_comm_actor,
-        )
-        .unwrap()
     }
 
     /// Allocate a new ProcMesh from the provided alloc.
@@ -310,6 +310,14 @@ impl ProcMesh {
             true, // alloc-based meshes support comm actors
         )
         .await
+    }
+}
+
+impl Deref for ProcMesh {
+    type Target = ProcMeshRef;
+
+    fn deref(&self) -> &Self::Target {
+        &self.current_ref
     }
 }
 
@@ -580,6 +588,7 @@ mod tests {
     use ndslice::extent;
     use timed_test::async_timed_test;
 
+    use crate::v1::ActorMesh;
     use crate::v1::ActorMeshRef;
     use crate::v1::testactor;
     use crate::v1::testing;
@@ -587,20 +596,18 @@ mod tests {
     #[tokio::test]
     async fn test_proc_mesh_allocate() {
         let (mesh, actor, router) = testing::local_proc_mesh(extent!(replica = 4)).await;
-        let mesh_ref = mesh.freeze();
-        assert_eq!(mesh_ref.extent(), extent!(replica = 4));
-        assert_eq!(mesh_ref.ranks.len(), 4);
+        assert_eq!(mesh.extent(), extent!(replica = 4));
+        assert_eq!(mesh.ranks.len(), 4);
         assert!(!router.prefixes().is_empty());
 
         // All of the agents are alive, and reachable (both ways).
-        for proc_ref in mesh_ref.values() {
+        for proc_ref in mesh.values() {
             assert!(proc_ref.status(&actor).await.unwrap());
         }
 
         // Same on the proc mesh:
         assert!(
-            mesh_ref
-                .status(&actor)
+            mesh.status(&actor)
                 .await
                 .unwrap()
                 .values()
@@ -615,12 +622,8 @@ mod tests {
         let instance = testing::instance().await;
 
         for proc_mesh in testing::proc_meshes(&instance, extent!(replicas = 4, hosts = 2)).await {
-            let actor_mesh: ActorMeshRef<testactor::TestActor> = proc_mesh
-                .freeze()
-                .spawn(instance, "test", &())
-                .await
-                .unwrap()
-                .freeze();
+            let actor_mesh: ActorMesh<testactor::TestActor> =
+                proc_mesh.spawn(instance, "test", &()).await.unwrap();
 
             // Verify casting to the root actor mesh
             {

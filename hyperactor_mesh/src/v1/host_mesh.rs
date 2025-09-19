@@ -8,6 +8,7 @@
 
 pub mod mesh_agent;
 
+use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -74,6 +75,7 @@ pub struct HostMesh {
     name: Name,
     extent: Extent,
     allocation: HostMeshAllocation,
+    current_ref: HostMeshRef,
 }
 
 enum HostMeshAllocation {
@@ -131,7 +133,6 @@ impl HostMesh {
         let transport = alloc.transport();
         let extent = alloc.extent().clone();
         let proc_mesh = ProcMesh::allocate(cx, alloc, name).await?;
-        let proc_mesh_ref = proc_mesh.freeze();
         let name = Name::new(name);
 
         // TODO: figure out how to deal with MAST allocs. It requires an extra dimension,
@@ -139,7 +140,7 @@ impl HostMesh {
         // sub-host dimension of size 1.
 
         let (mesh_agents, mut mesh_agents_rx) = cx.mailbox().open_port();
-        let _trampoline_actor_mesh = proc_mesh_ref
+        let _trampoline_actor_mesh = proc_mesh
             .spawn::<HostMeshAgentProcMeshTrampoline>(
                 cx,
                 "host_mesh_trampoline",
@@ -172,23 +173,25 @@ impl HostMesh {
             hosts.push(host_ref);
         }
 
+        let proc_mesh_ref = proc_mesh.clone();
         Ok(Self {
             name,
-            extent,
+            extent: extent.clone(),
             allocation: HostMeshAllocation::ProcMesh {
                 proc_mesh,
                 proc_mesh_ref,
-                hosts,
+                hosts: hosts.clone(),
             },
+            current_ref: HostMeshRef::new(extent.into(), hosts).unwrap(),
         })
     }
+}
 
-    pub fn freeze(&self) -> HostMeshRef {
-        match &self.allocation {
-            HostMeshAllocation::ProcMesh { hosts, .. } => {
-                HostMeshRef::new(self.extent.clone().into(), hosts.clone()).unwrap()
-            }
-        }
+impl Deref for HostMesh {
+    type Target = HostMeshRef;
+
+    fn deref(&self) -> &Self::Target {
+        &self.current_ref
     }
 }
 
@@ -339,6 +342,7 @@ mod tests {
     use crate::alloc::AllocSpec;
     use crate::alloc::Allocator;
     use crate::alloc::ProcessAllocator;
+    use crate::v1::ActorMesh;
     use crate::v1::ActorMeshRef;
     use crate::v1::testactor;
     use crate::v1::testing;
@@ -395,20 +399,20 @@ mod tests {
             .unwrap();
 
         let host_mesh = HostMesh::allocate(instance, alloc, "test").await.unwrap();
-        let proc_mesh1 = host_mesh.freeze().spawn(instance, "test_1").await.unwrap();
-        let actor_mesh1: ActorMeshRef<testactor::TestActor> = proc_mesh1
-            .freeze()
-            .spawn(instance, "test", &())
-            .await
-            .unwrap()
-            .freeze();
-        let proc_mesh2 = host_mesh.freeze().spawn(instance, "test_2").await.unwrap();
-        let actor_mesh2: ActorMeshRef<testactor::TestActor> = proc_mesh2
-            .freeze()
-            .spawn(instance, "test", &())
-            .await
-            .unwrap()
-            .freeze();
+        let proc_mesh1 = host_mesh.spawn(instance, "test_1").await.unwrap();
+        let actor_mesh1: ActorMesh<testactor::TestActor> =
+            proc_mesh1.spawn(instance, "test", &()).await.unwrap();
+        let proc_mesh2 = host_mesh.spawn(instance, "test_2").await.unwrap();
+        let actor_mesh2: ActorMesh<testactor::TestActor> =
+            proc_mesh2.spawn(instance, "test", &()).await.unwrap();
+
+        // Host meshes can be dereferenced to produce a concrete ref.
+        let host_mesh_ref: HostMeshRef = host_mesh.clone();
+        // Here, the underlying host mesh does not change:
+        assert_eq!(
+            host_mesh_ref.iter().collect::<Vec<_>>(),
+            host_mesh.iter().collect::<Vec<_>>(),
+        );
 
         // Validate we can cast:
 

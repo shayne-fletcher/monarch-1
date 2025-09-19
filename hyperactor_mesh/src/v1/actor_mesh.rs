@@ -10,6 +10,7 @@ use std::fmt;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::sync::OnceLock as OnceCell;
 
 use hyperactor::Actor;
@@ -32,10 +33,8 @@ use ndslice::view::View;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::CommActor;
 use crate::actor_mesh as v0_actor_mesh;
 use crate::comm::multicast;
-use crate::comm::multicast::CAST_ORIGINATING_SENDER;
 use crate::reference::ActorMeshId;
 use crate::v1;
 use crate::v1::Error;
@@ -45,32 +44,30 @@ use crate::v1::ValueMesh;
 
 /// An ActorMesh is a collection of ranked A-typed actors.
 #[derive(Debug)]
-pub struct ActorMesh<A> {
+pub struct ActorMesh<A: RemoteActor> {
     proc_mesh: ProcMeshRef,
     name: Name,
-    _phantom: PhantomData<A>,
+    current_ref: ActorMeshRef<A>,
 }
 
-impl<A> ActorMesh<A> {
+impl<A: RemoteActor> ActorMesh<A> {
     pub(crate) fn new(proc_mesh: ProcMeshRef, name: Name) -> Self {
+        let current_ref =
+            ActorMeshRef::with_page_size(name.clone(), proc_mesh.clone(), DEFAULT_PAGE);
+
         Self {
             proc_mesh,
             name,
-            _phantom: PhantomData,
+            current_ref,
         }
     }
 }
 
-impl<A: RemoteActor> ActorMesh<A> {
-    /// Freeze this actor mesh in its current state, returning a
-    /// stable reference that may be serialized.
-    pub fn freeze(&self) -> ActorMeshRef<A> {
-        ActorMeshRef::new(self.name.clone(), self.proc_mesh.clone())
-    }
+impl<A: RemoteActor> Deref for ActorMesh<A> {
+    type Target = ActorMeshRef<A>;
 
-    /// Freeze with a specific page size for the lazy cache.
-    pub fn freeze_with_page_size(&self, page_size: usize) -> ActorMeshRef<A> {
-        ActorMeshRef::with_page_size(self.name.clone(), self.proc_mesh.clone(), page_size)
+    fn deref(&self) -> &Self::Target {
+        &self.current_ref
     }
 }
 
@@ -328,7 +325,6 @@ mod tests {
     use crate::v1::ActorMeshRef;
     use crate::v1::Name;
     use crate::v1::ProcMesh;
-    use crate::v1::ProcMeshRef;
     use crate::v1::testactor;
     use crate::v1::testing;
 
@@ -339,19 +335,19 @@ mod tests {
         // Small mesh so the test runs fast, but > page_size so we
         // cross a boundary
         let extent = extent!(replicas = 3, hosts = 2); // 6 ranks
-        let pm: ProcMesh = testing::proc_meshes(&instance, extent.clone())
+        let pm: ProcMesh = testing::proc_meshes(instance, extent.clone())
             .await
             .into_iter()
             .next()
             .expect("at least one proc mesh");
-        let pmr: ProcMeshRef = pm.freeze();
-        let am: ActorMesh<testactor::TestActor> = pmr.spawn(&instance, "test", &()).await.unwrap();
+        let am: ActorMesh<testactor::TestActor> = pm.spawn(instance, "test", &()).await.unwrap();
 
         // 2) Build our ActorMeshRef with a tiny page size (2) to
         // force multiple pages:
         // page 0: ranks [0,1], page 1: [2,3], page 2: [4,5]
         let page_size = 2;
-        let amr: ActorMeshRef<testactor::TestActor> = am.freeze_with_page_size(page_size);
+        let amr: ActorMeshRef<testactor::TestActor> =
+            ActorMeshRef::with_page_size(am.name.clone(), pm.clone(), page_size);
         assert_eq!(amr.extent(), extent);
         assert_eq!(amr.region().num_ranks(), 6);
 
@@ -407,16 +403,16 @@ mod tests {
 
         // 9) As a sanity check, cast to ensure the refs are indeed
         // usable/live.
-        let (port, mut rx) = mailbox::open_port(&instance);
+        let (port, mut rx) = mailbox::open_port(instance);
         // Send to rank 0 and rank 3 (extent 3x2 => at least 4 ranks
         // exist).
         amr.get(0)
             .expect("rank 0 exists")
-            .send(&instance, testactor::GetActorId(port.bind()))
+            .send(instance, testactor::GetActorId(port.bind()))
             .expect("send to rank 0 should succeed");
         amr.get(3)
             .expect("rank 3 exists")
-            .send(&instance, testactor::GetActorId(port.bind()))
+            .send(instance, testactor::GetActorId(port.bind()))
             .expect("send to rank 3 should succeed");
         let id_a = RealClock
             .timeout(Duration::from_secs(3), rx.recv())
@@ -446,13 +442,11 @@ mod tests {
         let child_name = Name::new("child");
 
         let actor_mesh = proc_mesh
-            .freeze()
             .spawn_with_name::<testactor::TestActor>(instance, child_name.clone(), &())
             .await
             .unwrap();
 
         actor_mesh
-            .freeze()
             .cast(
                 instance,
                 testactor::CauseSupervisionEvent(testactor::SupervisionEventType::Panic),
@@ -468,10 +462,9 @@ mod tests {
         // Now that all ranks have completed, set up a continuous poll of the
         // status such that when a process switches to unhealthy it sets a
         // supervision event.
-        let actor_mesh_ref = actor_mesh.freeze();
         let child_name_clone = child_name.clone();
         let supervision_task = tokio::spawn(async move {
-            match actor_mesh_ref
+            match actor_mesh
                 .supervision_events(instance, child_name_clone)
                 .await
             {
@@ -509,16 +502,14 @@ mod tests {
     async fn test_cast() {
         let instance = testing::instance().await;
         let host_mesh = testing::host_mesh(extent!(host = 4)).await;
-        let proc_mesh = host_mesh.freeze().spawn(instance, "test").await.unwrap();
+        let proc_mesh = host_mesh.spawn(instance, "test").await.unwrap();
         let actor_mesh = proc_mesh
-            .freeze()
             .spawn::<testactor::TestActor>(instance, "test", &())
             .await
             .unwrap();
 
         let (cast_info, mut cast_info_rx) = instance.mailbox().open_port();
         actor_mesh
-            .freeze()
             .cast(
                 instance,
                 testactor::GetCastInfo {
@@ -527,7 +518,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut point_to_actor: HashSet<_> = actor_mesh.freeze().iter().collect();
+        let mut point_to_actor: HashSet<_> = actor_mesh.iter().collect();
         while !point_to_actor.is_empty() {
             let (point, origin_actor_ref, sender_actor_id) = cast_info_rx.recv().await.unwrap();
             let key = (point, origin_actor_ref);
