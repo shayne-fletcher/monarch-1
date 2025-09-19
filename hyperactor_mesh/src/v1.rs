@@ -80,6 +80,9 @@ pub enum Error {
 
     #[error("error while casting message to {0}: {1}")]
     CastingError(Name, anyhow::Error),
+
+    #[error("error configuring host mesh agent {0}: {1}")]
+    HostMeshAgentConfigurationError(ActorId, String),
 }
 
 /// Errors that occur during serialization and deserialization.

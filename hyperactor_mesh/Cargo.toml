@@ -83,6 +83,7 @@ tracing-subscriber = { version = "0.3.20", features = ["chrono", "env-filter", "
 
 [dev-dependencies]
 bytes = { version = "1.10", features = ["serde"] }
+itertools = "0.14.0"
 maplit = "1.0"
 proptest = "1.5"
 timed_test = { version = "0.0.0", path = "../timed_test" }

@@ -12,6 +12,7 @@
 
 use hyperactor::Instance;
 use hyperactor::Proc;
+use hyperactor::channel::ChannelTransport;
 use hyperactor::context;
 use hyperactor::id;
 use hyperactor::mailbox::BoxableMailboxSender;
@@ -25,8 +26,10 @@ use crate::alloc::LocalAllocator;
 use crate::alloc::ProcessAllocator;
 use crate::v1::ProcMesh;
 
-pub fn instance() -> Instance<()> {
-    let proc = Proc::new(id!(test[0]), DialMailboxRouter::new().boxed());
+pub async fn instance() -> Instance<()> {
+    let proc = Proc::direct(ChannelTransport::Unix.any(), "testproc".to_string())
+        .await
+        .unwrap();
     let (actor, _handle) = proc.instance("testclient").unwrap();
     actor
 }

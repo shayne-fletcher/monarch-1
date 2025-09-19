@@ -24,6 +24,7 @@ use hyperactor::supervision::ActorSupervisionEvent;
 use hyperactor_mesh_macros::sel;
 use ndslice::Selection;
 use ndslice::Shape;
+use ndslice::ViewExt as _;
 use ndslice::view;
 use ndslice::view::Region;
 use ndslice::view::View;
@@ -32,6 +33,7 @@ use serde::Serialize;
 
 use crate::CommActor;
 use crate::actor_mesh as v0_actor_mesh;
+use crate::comm::multicast::CAST_ORIGINATING_SENDER;
 use crate::reference::ActorMeshId;
 use crate::v1;
 use crate::v1::Error;
@@ -121,38 +123,43 @@ impl<A: Actor + RemoteActor> ActorMeshRef<A> {
     pub fn cast<M>(&self, cx: &impl context::Actor, message: M) -> v1::Result<()>
     where
         A: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
-        M: Castable + RemoteMessage,
+        M: Castable + RemoteMessage + Clone, // Clone is required until we are fully onto comm actor
     {
-        let cast_mesh_shape = to_shape(view::Ranked::region(self));
-        let comm_actor_ref = self
-            .proc_mesh
-            .root_mesh_rank_0
-            .attest::<CommActor>(self.proc_mesh.comm_actor_name());
-        let actor_mesh_id = ActorMeshId::V1(self.name.clone());
-        match &self.proc_mesh.root_region {
-            Some(root_region) => {
-                let root_mesh_shape = to_shape(root_region);
-                v0_actor_mesh::cast_to_sliced_mesh::<A, M>(
+        if let Some(root_comm_actor) = self.proc_mesh.root_comm_actor() {
+            let cast_mesh_shape = to_shape(view::Ranked::region(self));
+            let actor_mesh_id = ActorMeshId::V1(self.name.clone());
+            match &self.proc_mesh.root_region {
+                Some(root_region) => {
+                    let root_mesh_shape = to_shape(root_region);
+                    v0_actor_mesh::cast_to_sliced_mesh::<A, M>(
+                        cx,
+                        actor_mesh_id,
+                        root_comm_actor,
+                        &sel!(*),
+                        message,
+                        &cast_mesh_shape,
+                        &root_mesh_shape,
+                    )
+                    .map_err(|e| Error::CastingError(self.name.clone(), e.into()))
+                }
+                None => v0_actor_mesh::actor_mesh_cast::<A, M>(
                     cx,
                     actor_mesh_id,
-                    &comm_actor_ref,
-                    &sel!(*),
-                    message,
+                    root_comm_actor,
+                    sel!(*),
                     &cast_mesh_shape,
-                    &root_mesh_shape,
+                    &cast_mesh_shape,
+                    message,
                 )
-                .map_err(|e| Error::CastingError(self.name.clone(), e.into()))
+                .map_err(|e| Error::CastingError(self.name.clone(), e.into())),
             }
-            None => v0_actor_mesh::actor_mesh_cast::<A, M>(
-                cx,
-                actor_mesh_id,
-                &comm_actor_ref,
-                sel!(*),
-                &cast_mesh_shape,
-                &cast_mesh_shape,
-                message,
-            )
-            .map_err(|e| Error::CastingError(self.name.clone(), e.into())),
+        } else {
+            for (_point, actor) in self.iter() {
+                actor
+                    .send(cx, message.clone())
+                    .map_err(|e| Error::SendingError(actor.actor_id().clone(), Box::new(e)))?;
+            }
+            Ok(())
         }
     }
 
@@ -318,7 +325,7 @@ mod tests {
     #[tokio::test]
     async fn test_actor_mesh_ref_lazy_materialization() {
         // 1) Bring up procs and spawn actors.
-        let instance = testing::instance();
+        let instance = testing::instance().await;
         // Small mesh so the test runs fast, but > page_size so we
         // cross a boundary
         let extent = extent!(replicas = 3, hosts = 2); // 6 ranks
@@ -418,7 +425,7 @@ mod tests {
     async fn test_status() {
         hyperactor_telemetry::initialize_logging_for_test();
 
-        let instance = testing::instance();
+        let instance = testing::instance().await;
         // Listen for supervision events sent to the parent instance.
         let (supervision_port, mut supervision_receiver) =
             instance.open_port::<ActorSupervisionEvent>();

@@ -13,11 +13,16 @@ use std::fmt;
 
 use async_trait::async_trait;
 use hyperactor::Actor;
+use hyperactor::ActorHandle;
 use hyperactor::ActorRef;
 use hyperactor::Context;
 use hyperactor::Handler;
+use hyperactor::Instance;
 use hyperactor::Named;
+use hyperactor::PortRef;
 use hyperactor::ProcId;
+use hyperactor::RefClient;
+use hyperactor::channel::ChannelTransport;
 use hyperactor::host::Host;
 use hyperactor::host::HostError;
 use serde::Deserialize;
@@ -49,9 +54,9 @@ impl fmt::Debug for HostMeshAgent {
 impl Actor for HostMeshAgent {
     type Params = Host<BootstrapProcManager>;
 
-    async fn new(params: Self::Params) -> anyhow::Result<Self> {
+    async fn new(host: Host<BootstrapProcManager>) -> anyhow::Result<Self> {
         Ok(Self {
-            host: params,
+            host,
             created: HashMap::new(),
         })
     }
@@ -119,6 +124,63 @@ impl Handler<resource::GetState<ProcState>> for HostMeshAgent {
         };
 
         get_state.reply.send(cx, state)?;
+        Ok(())
+    }
+}
+
+/// A trampoline actor that spawns a [`Host`], and sends a reference to the
+/// corresponding [`HostMeshAgent`] to the provided reply port.
+///
+/// This is used to bootstrap host meshes from proc meshes.
+#[derive(Debug)]
+#[hyperactor::export(
+    spawn = true,
+    handlers=[GetHostMeshAgent]
+)]
+pub(crate) struct HostMeshAgentProcMeshTrampoline {
+    host_mesh_agent: ActorHandle<HostMeshAgent>,
+    reply_port: PortRef<ActorRef<HostMeshAgent>>,
+}
+
+#[async_trait]
+impl Actor for HostMeshAgentProcMeshTrampoline {
+    type Params = (ChannelTransport, PortRef<ActorRef<HostMeshAgent>>);
+
+    async fn new((transport, reply_port): Self::Params) -> anyhow::Result<Self> {
+        let manager = BootstrapProcManager::new_current_exe()?;
+        let (host, _handle) = Host::serve(manager, transport.any()).await?;
+
+        let system_proc = host.system_proc().clone();
+        let host_mesh_agent = system_proc.spawn::<HostMeshAgent>("agent", host).await?;
+
+        Ok(Self {
+            host_mesh_agent,
+            reply_port,
+        })
+    }
+
+    async fn init(&mut self, this: &Instance<Self>) -> anyhow::Result<()> {
+        self.reply_port.send(this, self.host_mesh_agent.bind())?;
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Named, Handler, RefClient)]
+pub struct GetHostMeshAgent {
+    #[reply]
+    pub host_mesh_agent: PortRef<ActorRef<HostMeshAgent>>,
+}
+
+#[async_trait]
+impl Handler<GetHostMeshAgent> for HostMeshAgentProcMeshTrampoline {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        get_host_mesh_agent: GetHostMeshAgent,
+    ) -> anyhow::Result<()> {
+        get_host_mesh_agent
+            .host_mesh_agent
+            .send(cx, self.host_mesh_agent.bind())?;
         Ok(())
     }
 }

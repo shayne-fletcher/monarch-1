@@ -8,6 +8,7 @@
 
 use std::env::VarError;
 use std::future;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -155,6 +156,7 @@ impl BootstrapMode {
 }
 
 /// A proc manager that launches procs using the [`bootstrap`] function as an entry point.
+#[derive(Debug)]
 pub struct BootstrapProcManager {
     program: std::path::PathBuf,
 }
@@ -163,6 +165,10 @@ impl BootstrapProcManager {
     #[allow(dead_code)]
     pub(crate) fn new(program: std::path::PathBuf) -> Self {
         Self { program }
+    }
+
+    pub(crate) fn new_current_exe() -> io::Result<Self> {
+        Ok(Self::new(std::env::current_exe()?))
     }
 
     #[cfg(test)]
@@ -178,6 +184,7 @@ impl ProcManager for BootstrapProcManager {
     fn transport(&self) -> ChannelTransport {
         ChannelTransport::Unix
     }
+
     async fn spawn(
         &self,
         proc_id: ProcId,
