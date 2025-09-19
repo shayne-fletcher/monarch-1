@@ -256,7 +256,7 @@ pub enum TlsMode {
 }
 
 /// Types of channel transports.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Named)]
 pub enum ChannelTransport {
     /// Transport over a TCP connection.
     Tcp,

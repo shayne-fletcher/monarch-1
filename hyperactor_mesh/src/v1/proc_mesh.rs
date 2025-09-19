@@ -26,6 +26,7 @@ use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::supervision::ActorSupervisionEvent;
 use ndslice::Extent;
+use ndslice::ViewExt as _;
 use ndslice::view;
 use ndslice::view::MapIntoExt;
 use ndslice::view::Ranked;
@@ -46,6 +47,7 @@ use crate::resource;
 use crate::v1;
 use crate::v1::ActorMesh;
 use crate::v1::Error;
+use crate::v1::HostMeshRef;
 use crate::v1::Name;
 use crate::v1::ValueMesh;
 
@@ -60,6 +62,14 @@ pub struct ProcRef {
 }
 
 impl ProcRef {
+    pub(crate) fn new(proc_id: ProcId, create_rank: usize, agent: ActorRef<ProcMeshAgent>) -> Self {
+        Self {
+            proc_id,
+            create_rank,
+            agent,
+        }
+    }
+
     /// Pings the proc, returning whether it is alive. This will be replaced by a
     /// finer-grained lifecycle status in the near future.
     #[allow(dead_code)]
@@ -138,28 +148,76 @@ impl ProcRef {
 pub struct ProcMesh {
     name: Name,
     allocation: ProcMeshAllocation,
-    comm_actor_name: Name,
+    comm_actor_name: Option<Name>,
 }
 
 impl ProcMesh {
+    async fn create(
+        cx: &impl context::Actor,
+        name: Name,
+        allocation: ProcMeshAllocation,
+        spawn_comm_actor: bool,
+    ) -> v1::Result<Self> {
+        let comm_actor_name = if spawn_comm_actor {
+            Some(Name::new("comm"))
+        } else {
+            None
+        };
+        let proc_mesh = Self {
+            name,
+            allocation,
+            comm_actor_name: comm_actor_name.clone(),
+        };
+        if let Some(comm_actor_name) = comm_actor_name {
+            proc_mesh
+                .freeze()
+                .spawn_with_name::<CommActor>(cx, comm_actor_name, &Default::default())
+                .await?;
+        }
+        Ok(proc_mesh)
+    }
+
+    pub(crate) async fn create_owned_unchecked(
+        cx: &impl context::Actor,
+        name: Name,
+        hosts: HostMeshRef,
+        ranks: Vec<ProcRef>,
+    ) -> v1::Result<Self> {
+        let extent = hosts.extent();
+        Self::create(
+            cx,
+            name,
+            ProcMeshAllocation::Owned {
+                hosts,
+                extent,
+                ranks: Arc::new(ranks),
+            },
+            false, // comm actors not yet supported for owned meshes
+        )
+        .await
+    }
+
     /// Freeze this proc mesh in its current state, returning a stable
     /// reference that may be serialized.
     pub fn freeze(&self) -> ProcMeshRef {
         let region = self.allocation.extent().clone().into();
-        match &self.allocation {
-            ProcMeshAllocation::Allocated { ranks, .. } => {
-                let root_mesh_rank_0 = ranks.first().expect("root mesh cannot be empty").clone();
-                ProcMeshRef::new(
-                    self.name.clone(),
-                    region,
-                    Arc::clone(ranks),
-                    self.comm_actor_name.clone(),
-                    None, // this is the root mesh
-                    root_mesh_rank_0,
-                )
-                .unwrap()
-            }
-        }
+        let ranks = self.allocation.ranks();
+        let root_comm_actor = self.comm_actor_name.as_ref().map(|name| {
+            ActorRef::attest(
+                ranks
+                    .first()
+                    .expect("root mesh cannot be empty")
+                    .actor_id(name),
+            )
+        });
+        ProcMeshRef::new(
+            self.name.clone(),
+            region,
+            ranks,
+            None, // this is the root mesh
+            root_comm_actor,
+        )
+        .unwrap()
     }
 
     /// Allocate a new ProcMesh from the provided alloc.
@@ -242,23 +300,16 @@ impl ProcMesh {
             })
             .collect();
 
-        let proc_mesh = Self {
-            name: Name::new(name),
-            allocation: ProcMeshAllocation::Allocated {
+        Self::create(
+            cx,
+            Name::new(name),
+            ProcMeshAllocation::Allocated {
                 alloc: Box::new(alloc),
                 ranks: Arc::new(ranks),
             },
-            comm_actor_name: Name::new("comm"),
-        };
-        // Spawn a comm actor on each proc, so that they can be used to perform
-        // tree distribution and accumulation.
-        let comm_actor_name = proc_mesh.comm_actor_name.clone();
-        proc_mesh
-            .freeze()
-            .spawn_with_name::<CommActor>(cx, comm_actor_name, &Default::default())
-            .await?;
-
-        Ok(proc_mesh)
+            true, // alloc-based meshes support comm actors
+        )
+        .await
     }
 }
 
@@ -273,13 +324,32 @@ enum ProcMeshAllocation {
         // The allocated ranks.
         ranks: Arc<Vec<ProcRef>>,
     },
+
+    /// An owned allocation: this ProcMesh fully owns the set of ranks.
+    Owned {
+        /// The host mesh from which the proc mesh was spawned.
+        hosts: HostMeshRef,
+        // This is purely for storage: `hosts.extent()` returns a computed (by value)
+        // extent.
+        extent: Extent,
+        /// A proc reference for each rank in the mesh.
+        ranks: Arc<Vec<ProcRef>>,
+    },
 }
 
 impl ProcMeshAllocation {
     fn extent(&self) -> &Extent {
         match self {
             ProcMeshAllocation::Allocated { alloc, .. } => alloc.extent(),
+            ProcMeshAllocation::Owned { extent, .. } => extent,
         }
+    }
+
+    fn ranks(&self) -> Arc<Vec<ProcRef>> {
+        Arc::clone(match self {
+            ProcMeshAllocation::Allocated { ranks, .. } => ranks,
+            ProcMeshAllocation::Owned { ranks, .. } => ranks,
+        })
     }
 }
 
@@ -287,8 +357,17 @@ impl fmt::Debug for ProcMeshAllocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProcMeshAllocation::Allocated { ranks, .. } => f
-                .debug_struct("ProcMeshAllocation")
+                .debug_struct("ProcMeshAllocation::Allocated")
                 .field("alloc", &"<dyn Alloc>")
+                .field("ranks", ranks)
+                .finish(),
+            ProcMeshAllocation::Owned {
+                hosts,
+                ranks,
+                extent: _,
+            } => f
+                .debug_struct("ProcMeshAllocation::Owned")
+                .field("hosts", hosts)
                 .field("ranks", ranks)
                 .finish(),
         }
@@ -306,7 +385,6 @@ pub struct ProcMeshRef {
     name: Name,
     region: Region,
     ranks: Arc<Vec<ProcRef>>,
-    comm_actor_name: Name,
     // Temporary: used to fit v1 ActorMesh with v0's casting implementation. This
     // should be removed after we remove the v0 code.
     // The root region of this mesh. None means this mesh itself is the root.
@@ -315,7 +393,7 @@ pub struct ProcMeshRef {
     // should be removed after we remove the v0 code.
     // v0 casting requires root mesh rank 0 as the 1st hop, so we need to provide
     // it here. For v1, this can be removed since v1 can use any rank.
-    pub(crate) root_mesh_rank_0: ProcRef,
+    pub(crate) root_comm_actor: Option<ActorRef<CommActor>>,
 }
 
 impl ProcMeshRef {
@@ -324,9 +402,8 @@ impl ProcMeshRef {
         name: Name,
         region: Region,
         ranks: Arc<Vec<ProcRef>>,
-        comm_actor_name: Name,
         root_region: Option<Region>,
-        root_mesh_rank_0: ProcRef,
+        root_comm_actor: Option<ActorRef<CommActor>>,
     ) -> v1::Result<Self> {
         if region.num_ranks() != ranks.len() {
             return Err(v1::Error::InvalidRankCardinality {
@@ -338,14 +415,13 @@ impl ProcMeshRef {
             name,
             region,
             ranks,
-            comm_actor_name,
             root_region,
-            root_mesh_rank_0,
+            root_comm_actor,
         })
     }
 
-    pub(crate) fn comm_actor_name(&self) -> &Name {
-        &self.comm_actor_name
+    pub(crate) fn root_comm_actor(&self) -> Option<&ActorRef<CommActor>> {
+        self.root_comm_actor.as_ref()
     }
 
     /// The current statuses of procs in this mesh.
@@ -486,9 +562,8 @@ impl view::RankedSliceable for ProcMeshRef {
             self.name.clone(),
             region,
             Arc::new(ranks),
-            self.comm_actor_name.clone(),
             Some(self.root_region.as_ref().unwrap_or(&self.region).clone()),
-            self.root_mesh_rank_0.clone(),
+            self.root_comm_actor.clone(),
         )
         .unwrap()
     }
@@ -537,7 +612,7 @@ mod tests {
     async fn test_spawn_actor() {
         hyperactor_telemetry::initialize_logging(hyperactor::clock::ClockKind::default());
 
-        let instance = testing::instance();
+        let instance = testing::instance().await;
 
         for proc_mesh in testing::proc_meshes(&instance, extent!(replicas = 4, hosts = 2)).await {
             let actor_mesh: ActorMeshRef<testactor::TestActor> = proc_mesh
