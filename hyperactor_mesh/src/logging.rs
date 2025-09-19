@@ -56,7 +56,7 @@ use crate::bootstrap::BOOTSTRAP_LOG_CHANNEL;
 mod line_prefixing_writer;
 use line_prefixing_writer::LinePrefixingWriter;
 
-const DEFAULT_AGGREGATE_WINDOW_SEC: u64 = 5;
+pub(crate) const DEFAULT_AGGREGATE_WINDOW_SEC: u64 = 5;
 
 /// Calculate the Levenshtein distance between two strings
 fn levenshtein_distance(left: &str, right: &str) -> usize {
@@ -807,6 +807,10 @@ impl LogClientActor {
 
     fn print_log_line(hostname: &str, pid: u32, output_target: OutputTarget, line: String) {
         let message = format!("[{} {}] {}", hostname, pid, line);
+
+        #[cfg(test)]
+        crate::logging::test_tap::push(&message);
+
         match output_target {
             OutputTarget::Stdout => println!("{}", message),
             OutputTarget::Stderr => eprintln!("{}", message),
@@ -1006,6 +1010,47 @@ impl LogClientMessageHandler for LogClientActor {
             .send(cx, self.current_flush_version)
             .map_err(anyhow::Error::from)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+pub mod test_tap {
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+
+    use tokio::sync::mpsc::UnboundedReceiver;
+    use tokio::sync::mpsc::UnboundedSender;
+
+    static TAP: OnceLock<UnboundedSender<String>> = OnceLock::new();
+    static RX: OnceLock<Mutex<UnboundedReceiver<String>>> = OnceLock::new();
+
+    // Called by tests to install the sender.
+    pub fn install(tx: UnboundedSender<String>) {
+        let _ = TAP.set(tx);
+    }
+
+    // Called by tests to register the receiver so we can drain later.
+    pub fn set_receiver(rx: UnboundedReceiver<String>) {
+        let _ = RX.set(Mutex::new(rx));
+    }
+
+    // Used by LogClientActor (under #[cfg(test)]) to push a line.
+    pub fn push(s: &str) {
+        if let Some(tx) = TAP.get() {
+            let _ = tx.send(s.to_string());
+        }
+    }
+
+    // Tests call this to collect everything observed so far.
+    pub fn drain() -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(rx) = RX.get() {
+            let mut rx = rx.lock().unwrap();
+            while let Ok(line) = rx.try_recv() {
+                out.push(line);
+            }
+        }
+        out
     }
 }
 
