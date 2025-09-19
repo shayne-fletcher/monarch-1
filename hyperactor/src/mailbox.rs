@@ -3139,7 +3139,7 @@ mod tests {
                 quux[0].foo[0] to corge[0].bar[0][9999] was undeliverable and returned"
         ));
 
-        proc.destroy_and_wait(tokio::time::Duration::from_secs(1), None)
+        proc.destroy_and_wait::<()>(tokio::time::Duration::from_secs(1), None)
             .await
             .unwrap();
     }

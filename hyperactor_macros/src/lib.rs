@@ -659,7 +659,9 @@ fn parse_messages(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
 ///         shopping_list_actor.list(&client).await?
 ///     );
 ///
-///     let _ = proc.destroy_and_wait(Duration::from_secs(1), None).await?;
+///     let _ = proc
+///         .destroy_and_wait::<()>(Duration::from_secs(1), None)
+///         .await?;
 ///     Ok(())
 /// }
 /// ```

@@ -758,7 +758,7 @@ impl ProcMessageHandler for ProcActor {
         tracing::info!("stopping proc {}", self.params.proc.proc_id());
         self.params
             .proc
-            .destroy_and_wait(timeout, Some(cx.self_id()))
+            .destroy_and_wait(timeout, Some(cx))
             .await
             .map(|(stopped, aborted)| {
                 tracing::info!("stopped proc {}", self.params.proc.proc_id());

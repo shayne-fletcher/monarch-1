@@ -280,7 +280,7 @@ async fn bootstrap_v0_proc_mesh() -> anyhow::Error {
         let _cleanup_guard = hyperactor::register_signal_cleanup_scoped(Box::pin(async move {
             for proc_to_stop in procs_for_cleanup.lock().await.iter_mut() {
                 if let Err(err) = proc_to_stop
-                    .destroy_and_wait(Duration::from_millis(10), None)
+                    .destroy_and_wait::<()>(Duration::from_millis(10), None)
                     .await
                 {
                     tracing::error!(
@@ -351,7 +351,7 @@ async fn bootstrap_v0_proc_mesh() -> anyhow::Error {
                     {
                         for proc_to_stop in procs.lock().await.iter_mut() {
                             if let Err(err) = proc_to_stop
-                                .destroy_and_wait(Duration::from_millis(10), None)
+                                .destroy_and_wait::<()>(Duration::from_millis(10), None)
                                 .await
                             {
                                 tracing::error!(

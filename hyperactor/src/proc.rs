@@ -552,7 +552,11 @@ impl Proc {
     /// Call `abort` on the `JoinHandle` associated with the given
     /// root actor. If successful return `Some(root.clone())` else
     /// `None`.
-    pub fn abort_root_actor(&self, root: &ActorId) -> Option<impl Future<Output = ActorId>> {
+    pub fn abort_root_actor(
+        &self,
+        root: &ActorId,
+        this_handle: Option<&JoinHandle<()>>,
+    ) -> Option<impl Future<Output = ActorId>> {
         self.state()
             .ledger
             .roots
@@ -562,6 +566,13 @@ impl Proc {
             .map(|cell| {
                 let r1 = root.clone();
                 let r2 = root.clone();
+                // If abort_root_actor was called from inside an actor task, we don't want to abort that actor's task yet.
+                let skip_abort = this_handle.is_some_and(|this_h| {
+                    cell.inner
+                        .actor_task_handle
+                        .get()
+                        .is_some_and(|other_h| std::ptr::eq(this_h, other_h))
+                });
                 // `start` was called on the actor's instance
                 // immediately following `root`'s insertion into the
                 // ledger. `Instance::start()` is infallible and should
@@ -569,9 +580,11 @@ impl Proc {
                 // should be safe (i.e., not hang forever).
                 async move {
                     tokio::task::spawn_blocking(move || {
-                        let h = cell.inner.actor_task_handle.wait();
-                        tracing::debug!("{}: aborting {:?}", r1, h);
-                        h.abort()
+                        if !skip_abort {
+                            let h = cell.inner.actor_task_handle.wait();
+                            tracing::debug!("{}: aborting {:?}", r1, h);
+                            h.abort();
+                        }
                     })
                     .await
                     .unwrap();
@@ -612,14 +625,23 @@ impl Proc {
     /// - the actors observed to stop;
     /// - the actors not observed to stop when timeout.
     ///
-    /// The "skip_waiting" actor, if it is Some, is always not observed to stop.
+    /// If `cx` is specified, it means this method was called from inside an actor
+    /// in which case we shouldn't wait for it to stop and need to delay aborting
+    /// its task.
     #[hyperactor::instrument]
-    pub async fn destroy_and_wait(
+    pub async fn destroy_and_wait<A: Actor>(
         &mut self,
         timeout: Duration,
-        skip_waiting: Option<&ActorId>,
+        cx: Option<&Context<'_, A>>,
     ) -> Result<(Vec<ActorId>, Vec<ActorId>), anyhow::Error> {
         tracing::debug!("{}: proc stopping", self.proc_id());
+
+        let (this_handle, this_actor_id) = cx.map_or((None, None), |cx| {
+            (
+                Some(cx.actor_task_handle().expect("cannot call destroy_and_wait from inside an actor unless actor has finished starting")),
+                Some(cx.self_id())
+            )
+        });
 
         let mut statuses = HashMap::new();
         for actor_id in self
@@ -638,7 +660,7 @@ impl Proc {
 
         let waits: Vec<_> = statuses
             .iter_mut()
-            .filter(|(actor_id, _)| Some(*actor_id) != skip_waiting)
+            .filter(|(actor_id, _)| Some(*actor_id) != this_actor_id)
             .map(|(actor_id, root)| {
                 let actor_id = actor_id.clone();
                 async move {
@@ -666,7 +688,7 @@ impl Proc {
             .iter()
             .filter(|(actor_id, _)| !stopped_actors.contains(actor_id))
             .map(|(actor_id, _)| {
-                let f = self.abort_root_actor(actor_id);
+                let f = self.abort_root_actor(actor_id, this_handle.clone());
                 async move {
                     let _ = if let Some(f) = f { Some(f.await) } else { None };
                     // If `is_none(&_)` then the proc's `ledger.roots`
@@ -680,6 +702,13 @@ impl Proc {
             })
             .collect();
         let aborted_actors = futures::future::join_all(aborted_actors).await;
+
+        if let Some(this_handle) = this_handle
+            && let Some(this_actor_id) = this_actor_id
+        {
+            tracing::debug!("{}: aborting (delayed) {:?}", this_actor_id, this_handle);
+            this_handle.abort()
+        };
 
         tracing::info!(
             "destroy_and_wait: {} actors stopped, {} actors aborted",
@@ -1362,6 +1391,11 @@ impl<A: Actor> Instance<A> {
             ports: self.ports.clone(),
             status_tx: self.status_tx.clone(),
         }
+    }
+
+    /// Get the join handle associated with this actor.
+    fn actor_task_handle(&self) -> Option<&JoinHandle<()>> {
+        self.cell.inner.actor_task_handle.get()
     }
 }
 
