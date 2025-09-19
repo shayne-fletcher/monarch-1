@@ -17,6 +17,7 @@ use hyperactor::ActorRef;
 use hyperactor::RemoteHandles;
 use hyperactor::RemoteMessage;
 use hyperactor::actor::RemoteActor;
+use hyperactor::attrs::Attrs;
 use hyperactor::context;
 use hyperactor::message::Castable;
 use hyperactor::message::IndexedErasedUnbound;
@@ -33,6 +34,7 @@ use serde::Serialize;
 
 use crate::CommActor;
 use crate::actor_mesh as v0_actor_mesh;
+use crate::comm::multicast;
 use crate::comm::multicast::CAST_ORIGINATING_SENDER;
 use crate::reference::ActorMeshId;
 use crate::v1;
@@ -154,9 +156,16 @@ impl<A: Actor + RemoteActor> ActorMeshRef<A> {
                 .map_err(|e| Error::CastingError(self.name.clone(), e.into())),
             }
         } else {
-            for (_point, actor) in self.iter() {
+            for (point, actor) in self.iter() {
+                let mut headers = Attrs::new();
+                headers.set(
+                    multicast::CAST_ORIGINATING_SENDER,
+                    cx.instance().self_id().clone(),
+                );
+                headers.set(multicast::CAST_POINT, point);
+
                 actor
-                    .send(cx, message.clone())
+                    .send_with_headers(cx, headers, message.clone())
                     .map_err(|e| Error::SendingError(actor.actor_id().clone(), Box::new(e)))?;
             }
             Ok(())
@@ -306,6 +315,7 @@ mod tests {
     use hyperactor::actor::ActorStatus;
     use hyperactor::clock::Clock;
     use hyperactor::clock::RealClock;
+    use hyperactor::context::Mailbox as _;
     use hyperactor::mailbox;
     use hyperactor::supervision::ActorSupervisionEvent;
     use ndslice::ViewExt;
@@ -431,20 +441,20 @@ mod tests {
             instance.open_port::<ActorSupervisionEvent>();
         let supervisor = supervision_port.bind();
         let num_replicas = 4;
-        let meshes = testing::proc_meshes(&instance, extent!(replicas = num_replicas)).await;
+        let meshes = testing::proc_meshes(instance, extent!(replicas = num_replicas)).await;
         let proc_mesh = &meshes[1];
         let child_name = Name::new("child");
 
         let actor_mesh = proc_mesh
             .freeze()
-            .spawn_with_name::<testactor::TestActor>(&instance, child_name.clone(), &())
+            .spawn_with_name::<testactor::TestActor>(instance, child_name.clone(), &())
             .await
             .unwrap();
 
         actor_mesh
             .freeze()
             .cast(
-                &instance,
+                instance,
                 testactor::CauseSupervisionEvent(testactor::SupervisionEventType::Panic),
             )
             .unwrap();
@@ -462,14 +472,14 @@ mod tests {
         let child_name_clone = child_name.clone();
         let supervision_task = tokio::spawn(async move {
             match actor_mesh_ref
-                .supervision_events(&instance, child_name_clone)
+                .supervision_events(instance, child_name_clone)
                 .await
             {
                 Ok(events) => {
                     for event_list in events.values() {
                         assert!(!event_list.is_empty());
                         for event in event_list {
-                            supervisor.send(&instance, event).unwrap();
+                            supervisor.send(instance, event).unwrap();
                         }
                     }
                 }
@@ -492,6 +502,41 @@ mod tests {
                     panic!("error: {:?}", e);
                 }
             }
+        }
+    }
+
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_cast() {
+        let instance = testing::instance().await;
+        let host_mesh = testing::host_mesh(extent!(host = 4)).await;
+        let proc_mesh = host_mesh.freeze().spawn(instance, "test").await.unwrap();
+        let actor_mesh = proc_mesh
+            .freeze()
+            .spawn::<testactor::TestActor>(instance, "test", &())
+            .await
+            .unwrap();
+
+        let (cast_info, mut cast_info_rx) = instance.mailbox().open_port();
+        actor_mesh
+            .freeze()
+            .cast(
+                instance,
+                testactor::GetCastInfo {
+                    cast_info: cast_info.bind(),
+                },
+            )
+            .unwrap();
+
+        let mut point_to_actor: HashSet<_> = actor_mesh.freeze().iter().collect();
+        while !point_to_actor.is_empty() {
+            let (point, origin_actor_ref, sender_actor_id) = cast_info_rx.recv().await.unwrap();
+            let key = (point, origin_actor_ref);
+            assert!(
+                point_to_actor.remove(&key),
+                "key {:?} not present or removed twice",
+                key
+            );
+            assert_eq!(&sender_actor_id, instance.self_id());
         }
     }
 }

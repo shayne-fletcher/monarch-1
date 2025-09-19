@@ -617,7 +617,7 @@ mod tests {
         for proc_mesh in testing::proc_meshes(&instance, extent!(replicas = 4, hosts = 2)).await {
             let actor_mesh: ActorMeshRef<testactor::TestActor> = proc_mesh
                 .freeze()
-                .spawn(&instance, "test", &())
+                .spawn(instance, "test", &())
                 .await
                 .unwrap()
                 .freeze();
@@ -626,7 +626,7 @@ mod tests {
             {
                 let (port, mut rx) = mailbox::open_port(&instance);
                 actor_mesh
-                    .cast(&instance, testactor::GetActorId(port.bind()))
+                    .cast(instance, testactor::GetActorId(port.bind()))
                     .unwrap();
 
                 let mut expected_actor_ids: HashSet<_> = actor_mesh
@@ -651,9 +651,9 @@ mod tests {
             // Verify casting to the sliced actor mesh
             let sliced_actor_mesh = actor_mesh.range("replicas", 1..3).unwrap();
             {
-                let (port, mut rx) = mailbox::open_port(&instance);
+                let (port, mut rx) = mailbox::open_port(instance);
                 sliced_actor_mesh
-                    .cast(&instance, testactor::GetActorId(port.bind()))
+                    .cast(instance, testactor::GetActorId(port.bind()))
                     .unwrap();
 
                 let mut expected_actor_ids: HashSet<_> = sliced_actor_mesh

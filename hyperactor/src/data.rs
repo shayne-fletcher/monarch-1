@@ -132,6 +132,15 @@ impl Named for bytes::Bytes {
     }
 }
 
+// This is somewhat unfortunate. We should separate this module out into
+// its own crate, and just derive(Named) in `ndslice`. As it is, this would
+// create a circular (and heavy!) dependency for `ndslice`.
+impl Named for ndslice::Point {
+    fn typename() -> &'static str {
+        "ndslice::Point"
+    }
+}
+
 // A macro that implements type-keyed interning of typenames. This is useful
 // for implementing [`Named`] for generic types.
 #[doc(hidden)] // not part of the public API

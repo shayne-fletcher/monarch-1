@@ -52,7 +52,9 @@ pub fn log_message_latency_if_sampling(headers: &Attrs, actor_id: String) {
     let metric_pairs = hyperactor_telemetry::kv_pairs!(
         "actor_id" => actor_id
     );
-    let send_timestamp = headers.get(SEND_TIMESTAMP).unwrap();
+    let Some(send_timestamp) = headers.get(SEND_TIMESTAMP) else {
+        return;
+    };
     let now = RealClock.system_time_now();
     let latency = now.duration_since(*send_timestamp).unwrap();
     MESSAGE_LATENCY_MICROS.record(latency.as_micros() as f64, metric_pairs);

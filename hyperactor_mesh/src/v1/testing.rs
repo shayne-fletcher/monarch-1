@@ -19,19 +19,28 @@ use hyperactor::mailbox::BoxableMailboxSender;
 use hyperactor::mailbox::DialMailboxRouter;
 use ndslice::Extent;
 use tokio::process::Command;
+use tokio::sync::OnceCell;
 
 use crate::alloc::AllocSpec;
 use crate::alloc::Allocator;
 use crate::alloc::LocalAllocator;
 use crate::alloc::ProcessAllocator;
 use crate::v1::ProcMesh;
+use crate::v1::host_mesh::HostMesh;
 
-pub async fn instance() -> Instance<()> {
+/// Returns a new test instance; it is initialized lazily.
+pub async fn fresh_instance() -> Instance<()> {
     let proc = Proc::direct(ChannelTransport::Unix.any(), "testproc".to_string())
         .await
         .unwrap();
     let (actor, _handle) = proc.instance("testclient").unwrap();
     actor
+}
+
+/// Returns the singleton test instance; it is initialized lazily.
+pub async fn instance() -> &'static Instance<()> {
+    static INSTANCE: OnceCell<Instance<()>> = OnceCell::const_new();
+    INSTANCE.get_or_init(fresh_instance).await
 }
 
 pub async fn proc_meshes(cx: &impl context::Actor, extent: Extent) -> Vec<ProcMesh> {
@@ -89,4 +98,23 @@ pub async fn local_proc_mesh(extent: Extent) -> (ProcMesh, Instance<()>, DialMai
         actor,
         router,
     )
+}
+
+/// Create a host mesh using multiple processes running on the test machine.
+pub async fn host_mesh(extent: Extent) -> HostMesh {
+    let mut allocator = ProcessAllocator::new(Command::new(
+        buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
+    ));
+    let alloc = allocator
+        .allocate(AllocSpec {
+            extent,
+            constraints: Default::default(),
+            proc_name: None,
+        })
+        .await
+        .unwrap();
+
+    HostMesh::allocate(instance().await, alloc, "test")
+        .await
+        .unwrap()
 }

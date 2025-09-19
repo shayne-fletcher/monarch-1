@@ -394,18 +394,18 @@ mod tests {
             .await
             .unwrap();
 
-        let host_mesh = HostMesh::allocate(&instance, alloc, "test").await.unwrap();
-        let proc_mesh1 = host_mesh.freeze().spawn(&instance, "test_1").await.unwrap();
+        let host_mesh = HostMesh::allocate(instance, alloc, "test").await.unwrap();
+        let proc_mesh1 = host_mesh.freeze().spawn(instance, "test_1").await.unwrap();
         let actor_mesh1: ActorMeshRef<testactor::TestActor> = proc_mesh1
             .freeze()
-            .spawn(&instance, "test", &())
+            .spawn(instance, "test", &())
             .await
             .unwrap()
             .freeze();
-        let proc_mesh2 = host_mesh.freeze().spawn(&instance, "test_2").await.unwrap();
+        let proc_mesh2 = host_mesh.freeze().spawn(instance, "test_2").await.unwrap();
         let actor_mesh2: ActorMeshRef<testactor::TestActor> = proc_mesh2
             .freeze()
-            .spawn(&instance, "test", &())
+            .spawn(instance, "test", &())
             .await
             .unwrap()
             .freeze();
@@ -414,7 +414,7 @@ mod tests {
 
         let (port, mut rx) = instance.mailbox().open_port();
         actor_mesh1
-            .cast(&instance, testactor::GetActorId(port.bind()))
+            .cast(instance, testactor::GetActorId(port.bind()))
             .unwrap();
 
         let mut expected_actor_ids: HashSet<_> = actor_mesh1
@@ -454,7 +454,7 @@ mod tests {
             visited: Vec::new(),
         };
         let first = forward.to_visit.front().unwrap().clone();
-        first.send(&instance, forward).unwrap();
+        first.send(instance, forward).unwrap();
 
         let forward = last_rx.recv().await.unwrap();
         assert_eq!(forward.visited, expect_visited);

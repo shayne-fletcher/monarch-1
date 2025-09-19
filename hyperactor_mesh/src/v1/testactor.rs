@@ -16,16 +16,21 @@ use std::collections::VecDeque;
 use async_trait::async_trait;
 use hyperactor::Actor;
 use hyperactor::ActorId;
+use hyperactor::ActorRef;
 use hyperactor::Bind;
 use hyperactor::Context;
 use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::PortRef;
+use hyperactor::RefClient;
 use hyperactor::Unbind;
 use hyperactor::supervision::ActorSupervisionEvent;
+use ndslice::Point;
 use serde::Deserialize;
 use serde::Serialize;
+
+use crate::comm::multicast::CastInfo;
 
 /// A simple test actor used by various unit tests.
 #[derive(Actor, Default, Debug)]
@@ -33,6 +38,7 @@ use serde::Serialize;
     spawn = true,
     handlers = [
         GetActorId { cast = true },
+        GetCastInfo { cast = true },
         CauseSupervisionEvent { cast = true },
         Forward,
     ]
@@ -155,6 +161,36 @@ impl Handler<Forward> for TestActor {
         let next = to_visit.front().cloned();
         anyhow::ensure!(next.is_some(), "unexpected forward chain termination");
         next.unwrap().send(cx, Forward { to_visit, visited })?;
+        Ok(())
+    }
+}
+
+/// Just return the cast info of the sender.
+#[derive(
+    Debug,
+    Clone,
+    Named,
+    Bind,
+    Unbind,
+    Serialize,
+    Deserialize,
+    Handler,
+    RefClient
+)]
+pub struct GetCastInfo {
+    /// Originating actor, point, sender.
+    #[reply]
+    pub cast_info: PortRef<(Point, ActorRef<TestActor>, ActorId)>,
+}
+
+#[async_trait]
+impl Handler<GetCastInfo> for TestActor {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        GetCastInfo { cast_info }: GetCastInfo,
+    ) -> Result<(), anyhow::Error> {
+        cast_info.send(cx, (cx.cast_info(), cx.bind(), cx.sender().clone()))?;
         Ok(())
     }
 }
