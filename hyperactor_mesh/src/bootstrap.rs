@@ -13,6 +13,7 @@ use std::io;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use base64::prelude::*;
@@ -33,8 +34,8 @@ use hyperactor::mailbox::MailboxServer;
 use hyperactor::proc::Proc;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::process::Child;
 use tokio::process::Command;
-use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
 use crate::logging::create_log_writers;
@@ -158,15 +159,263 @@ impl BootstrapMode {
     }
 }
 
+/// Represents the lifecycle state of a **proc as hosted in an OS
+/// process** managed by `BootstrapProcManager`.
+///
+/// Note: This type is deliberately distinct from [`ProcState`] and
+/// [`ProcStopReason`] (see `alloc.rs`). Those types model allocator
+/// *events* - e.g. "a proc was Created/Running/Stopped" - and are
+/// consumed from an event stream during allocation. By contrast,
+/// [`ProcStatus`] is a **live, queryable view**: it reflects the
+/// current observed status of a running proc, as seen through a
+/// [`ProcHandle`] API (stop, kill, status).
+///
+/// In short:
+/// - `ProcState`/`ProcStopReason`: historical / event-driven model
+/// - `ProcStatus`: immediate status surface for lifecycle control
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcStatus {
+    /// The OS process has been spawned but is not yet fully running.
+    /// (Process-level: child handle exists, no confirmation yet.)
+    Starting,
+    /// The OS process is alive and the proc is considered running.
+    /// (Process-level: `pid` is known; Proc-level: bootstrap
+    /// completed.)
+    Running { pid: u32, started_at: SystemTime },
+    /// A stop has been requested (SIGTERM, graceful shutdown, etc.),
+    /// but the OS process has not yet fully exited. (Proc-level:
+    /// shutdown in progress; Process-level: still running.)
+    Stopping,
+    /// The process exited with a normal exit code. (Process-level:
+    /// exit observed.)
+    Stopped { exit_code: i32 },
+    /// The process was killed by a signal (e.g. SIGKILL).
+    /// (Process-level: abnormal termination.)
+    Killed { signal: i32, core_dumped: bool },
+    /// The proc or its process failed for some other reason
+    /// (bootstrap error, unexpected condition, etc.). (Both levels:
+    /// catch-all failure.)
+    Failed { reason: String },
+}
+
+/// A handle to a proc launched by [`BootstrapProcManager`].
+///
+/// `ProcHandle` is the owner-facing API for controlling and observing
+/// the lifecycle of a proc. It pairs the **logical proc identity**
+/// (`ProcId`) with the underlying **OS process handle**
+/// (`tokio::process::Child`) and a shared, queryable [`ProcStatus`].
+///
+/// Responsibilities:
+/// - Retains the child process handle so the OS process can be
+///   terminated, waited on, or killed when the handle is dropped.
+/// - Tracks the current [`ProcStatus`] in an `Arc<Mutex<...>>`,
+///   allowing concurrent observation and mutation from lifecycle
+///   control paths.
+/// - Provides the foundation for higher-level APIs such as
+///   `terminate()`, `kill()`, `wait()`, and `status()`.
+///
+/// Relationship to types:
+/// - [`ProcStatus`]: live status surface, updated by this handle.
+/// - [`ProcState`]/[`ProcStopReason`] (in `alloc.rs`): event-driven
+///   allocator view; not directly updated by this type.
+#[derive(Clone)]
+pub struct ProcHandle {
+    /// Logical identity of the proc in the mesh.
+    proc_id: ProcId,
+    /// Current lifecycle status of the proc (see [`ProcStatus`]).
+    /// Shared/mutable so observers and controllers can read/update.
+    status: Arc<std::sync::Mutex<ProcStatus>>,
+    /// Underlying OS process handle. Retained so the proc can be
+    /// signaled (SIGTERM/SIGKILL) or awaited for exit. Wrapped in
+    /// `Option` because ownership is consumed on wait.
+    child: Arc<std::sync::Mutex<Option<Child>>>,
+}
+
+impl ProcHandle {
+    /// Construct a new [`ProcHandle`] for a freshly spawned OS
+    /// process hosting a proc.
+    ///
+    /// - Initializes the status to [`ProcStatus::Starting`] since the
+    ///   child process has been created but not yet confirmed running.
+    /// - Wraps the provided [`Child`] handle in an
+    ///   `Arc<Mutex<Option<Child>>>` so lifecycle methods (`wait`,
+    ///   `terminate`, etc.) can consume it later.
+    ///
+    /// This is the canonical entry point used by
+    /// `BootstrapProcManager` when it launches a proc into a new
+    /// process.
+    pub fn new(proc_id: ProcId, child: Child) -> Self {
+        Self {
+            proc_id,
+            status: Arc::new(std::sync::Mutex::new(ProcStatus::Starting)),
+            child: Arc::new(std::sync::Mutex::new(Some(child))),
+        }
+    }
+
+    /// Return the logical proc identity in the mesh.
+    #[inline]
+    pub fn proc_id(&self) -> &ProcId {
+        &self.proc_id
+    }
+
+    /// Return the OS process ID (`pid`) of the underlying child
+    /// process, if it is still alive.
+    ///
+    /// This is a *process-level* identifier (from
+    /// [`tokio::process::Child::id`]), not a logical [`ProcId`]. It
+    /// may return `None` if the child handle has already been
+    /// consumed (e.g. via `wait()`) or the process has exited.
+    #[inline]
+    pub fn pid(&self) -> Option<u32> {
+        self.child
+            .lock()
+            .expect("child mutex poisoned")
+            .as_ref()
+            .and_then(|c| c.id())
+    }
+
+    /// TODO: status is currently backed by `Arc<Mutex<ProcStatus>>`
+    /// with mark_* mutators. This is intentionally simple for now. In
+    /// future, consider replacing with `tokio::sync::watch` so
+    /// callers can both poll (`status()`) and subscribe to changes
+    /// (`watch`). That would provide async lifecycle observation
+    /// without changing the external API.
+    /// Return a snapshot of the current [`ProcStatus`] for this proc.
+    ///
+    /// This is a *live view* of the lifecycle state as tracked by
+    /// [`BootstrapProcManager`]. It reflects what is currently known
+    /// about the underlying OS process (e.g., `Starting`, `Running`,
+    /// `Stopping`, etc.).
+    ///
+    /// Note: this is a synchronous snapshot. Future improvements may
+    /// allow async subscriptions (e.g. via `tokio::sync::watch`) to
+    /// observe status transitions as they happen.
+    #[must_use]
+    pub fn status(&self) -> ProcStatus {
+        self.status.lock().expect("status mutex poisoned").clone()
+    }
+
+    /// Transition this proc into the [`ProcStatus::Running`] state.
+    ///
+    /// Called internally once the child OS process has successfully
+    /// started and the proc is considered live. Records the `pid` and
+    /// the `started_at` timestamp so that callers can query them
+    /// later via [`ProcHandle::status`] or [`ProcHandle::pid`].
+    pub(crate) fn mark_running(&self, pid: u32, started_at: SystemTime) -> bool {
+        let mut status = self.status.lock().unwrap();
+        match *status {
+            ProcStatus::Starting => {
+                *status = ProcStatus::Running { pid, started_at };
+                true
+            }
+            _ => {
+                tracing::warn!(
+                    "illegal transition: {:?} -> Running; leaving status unchanged",
+                    *status
+                );
+                false
+            }
+        }
+    }
+
+    /// Record that a stop has been requested for the proc (e.g. a
+    /// graceful shutdown via SIGTERM), but the underlying process has
+    /// not yet fully exited.
+    pub(crate) fn mark_stopping(&self) -> bool {
+        let mut status = self.status.lock().expect("status mutex poisoned");
+        match *status {
+            ProcStatus::Running { .. } | ProcStatus::Starting => {
+                *status = ProcStatus::Stopping;
+                true
+            }
+            _ => {
+                tracing::debug!(
+                    "illegal transition: {:?} -> Stopping; leaving status unchanged",
+                    *status
+                );
+                false
+            }
+        }
+    }
+
+    /// Record that the process has exited normally with the given
+    /// exit code.
+    pub(crate) fn mark_stopped(&self, exit_code: i32) -> bool {
+        let mut status = self.status.lock().expect("status mutex poisoned");
+        match *status {
+            ProcStatus::Stopping | ProcStatus::Running { .. } | ProcStatus::Starting => {
+                *status = ProcStatus::Stopped { exit_code };
+                true
+            }
+            _ => {
+                tracing::warn!(
+                    "illegal transition: {:?} -> Stopped; leaving status unchanged",
+                    *status
+                );
+                false
+            }
+        }
+    }
+
+    /// Record that the process was killed by the given signal (e.g.
+    /// SIGKILL, SIGTERM).
+    pub(crate) fn mark_killed(&self, signal: i32, core_dumped: bool) -> bool {
+        let mut status = self.status.lock().expect("status mutex poisoned");
+        match *status {
+            ProcStatus::Running { .. } | ProcStatus::Stopping | ProcStatus::Starting => {
+                *status = ProcStatus::Killed {
+                    signal,
+                    core_dumped,
+                };
+                true
+            }
+            _ => {
+                tracing::warn!(
+                    "illegal transition: {:?} -> Killed; leaving status unchanged",
+                    *status
+                );
+                false
+            }
+        }
+    }
+
+    /// Record that the proc or its process failed for an unexpected
+    /// reason (bootstrap error, spawn failure, etc.).
+    pub(crate) fn mark_failed<S: Into<String>>(&self, reason: S) -> bool {
+        let mut status = self.status.lock().expect("status mutex poisoned");
+        match *status {
+            ProcStatus::Starting | ProcStatus::Running { .. } | ProcStatus::Stopping => {
+                *status = ProcStatus::Failed {
+                    reason: reason.into(),
+                };
+                true
+            }
+            _ => {
+                tracing::warn!(
+                    "illegal transition: {:?} -> Failed; leaving status unchanged",
+                    *status
+                );
+                false
+            }
+        }
+    }
+}
+
 /// A proc manager that launches procs using the [`bootstrap`]
 /// function as an entry point.
 #[derive(Debug)]
 pub struct BootstrapProcManager {
     program: std::path::PathBuf,
-    children: Arc<tokio::sync::Mutex<HashMap<ProcId, tokio::process::Child>>>,
+    children: Arc<tokio::sync::Mutex<HashMap<ProcId, Child>>>,
 }
 
 impl BootstrapProcManager {
+    /// Construct a new [`BootstrapProcManager`] that will launch
+    /// procs using the given program binary.
+    ///
+    /// This is the general entry point when you want to manage procs
+    /// backed by a specific binary path (e.g. a bootstrap
+    /// trampoline).
     #[allow(dead_code)]
     pub(crate) fn new(program: std::path::PathBuf) -> Self {
         Self {
@@ -175,10 +424,23 @@ impl BootstrapProcManager {
         }
     }
 
+    /// Convenience constructor that resolves the current executable
+    /// (`std::env::current_exe`) and uses that as the bootstrap
+    /// binary.
+    ///
+    /// Useful when the proc manager should re-exec itself as the
+    /// child program. Returns an `io::Result` since querying the
+    /// current executable path can fail.
     pub(crate) fn new_current_exe() -> io::Result<Self> {
         Ok(Self::new(std::env::current_exe()?))
     }
 
+    /// Test-only constructor that uses the Buck-built
+    /// `monarch/hyperactor_mesh/bootstrap` binary.
+    ///
+    /// Intended for integration tests where we need to spawn real
+    /// bootstrap processes under proc manager control. Not available
+    /// outside of test builds.
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
         Self::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap())
@@ -215,7 +477,7 @@ impl ProcManager for BootstrapProcManager {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-        // TODO: add graceful shutdown (SIGTERM → wait → SIGKILL) via
+        // TODO: add graceful shutdown (SIGTERM -> wait -> SIGKILL) via
         // terminate_all().
 
         let log_channel = ChannelAddr::any(ChannelTransport::Unix);
@@ -314,7 +576,7 @@ pub async fn bootstrap() -> anyhow::Error {
 /// - `HYPERACTOR_MESH_INDEX`: an index used to identify this process to the allocator.
 async fn bootstrap_v0_proc_mesh() -> anyhow::Error {
     pub async fn go() -> Result<(), anyhow::Error> {
-        let procs = Arc::new(Mutex::new(Vec::<Proc>::new()));
+        let procs = Arc::new(tokio::sync::Mutex::new(Vec::<Proc>::new()));
         let procs_for_cleanup = procs.clone();
         let _cleanup_guard = hyperactor::register_signal_cleanup_scoped(Box::pin(async move {
             for proc_to_stop in procs_for_cleanup.lock().await.iter_mut() {
@@ -492,7 +754,7 @@ mod tests {
             );
         }
 
-        // Drop the manager — this drops the Child handles; with
+        // Drop the manager - this drops the Child handles; with
         // kill_on_drop(true) the OS should send SIGKILL to the child
         // process.
         drop(manager);
@@ -591,5 +853,111 @@ mod tests {
             line.contains("hello from child"),
             "log line did not appear via LogClientActor; got: {line}"
         );
+    }
+
+    mod proc_handle {
+
+        use tokio::process::Command;
+
+        use super::super::*;
+
+        // Helper: build a ProcHandle with a short-lived child
+        // process. We don't rely on the actual process; we only
+        // exercise the status transitions.
+        fn handle_for_test() -> ProcHandle {
+            // Spawn a trivial child that exits immediately.
+            let child = Command::new("sh")
+                .arg("-c")
+                .arg("exit 0")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("failed to spawn test child process");
+
+            let proc_id = hyperactor::ProcId::Ranked(hyperactor::WorldId("test".into()), 0);
+            ProcHandle::new(proc_id, child)
+        }
+
+        #[tokio::test]
+        async fn starting_to_running_ok() {
+            let h = handle_for_test();
+            assert_eq!(h.status(), ProcStatus::Starting);
+            let child_pid = h.pid().expect("child should have a pid");
+            let child_started_at = RealClock.system_time_now();
+            assert!(h.mark_running(child_pid, child_started_at));
+            match h.status() {
+                ProcStatus::Running { pid, started_at } => {
+                    assert_eq!(pid, child_pid);
+                    assert_eq!(started_at, child_started_at);
+                }
+                other => panic!("expected Running, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn running_to_stopping_to_stopped_ok() {
+            let h = handle_for_test();
+            let child_pid = h.pid().expect("child should have a pid");
+            let child_started_at = RealClock.system_time_now();
+            assert!(h.mark_running(child_pid, child_started_at));
+            assert!(h.mark_stopping());
+            assert_eq!(h.status(), ProcStatus::Stopping);
+            assert!(h.mark_stopped(0));
+            assert_eq!(h.status(), ProcStatus::Stopped { exit_code: 0 });
+        }
+
+        #[tokio::test]
+        async fn running_to_killed_ok() {
+            let h = handle_for_test();
+            let child_pid = h.pid().expect("child should have a pid");
+            let child_started_at = RealClock.system_time_now();
+            assert!(h.mark_running(child_pid, child_started_at));
+            assert!(h.mark_killed(9, true));
+            assert_eq!(
+                h.status(),
+                ProcStatus::Killed {
+                    signal: 9,
+                    core_dumped: true
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn running_to_failed_ok() {
+            let h = handle_for_test();
+            let child_pid = h.pid().expect("child should have a pid");
+            let child_started_at = RealClock.system_time_now();
+            assert!(h.mark_running(child_pid, child_started_at));
+            assert!(h.mark_failed("bootstrap error"));
+            assert_eq!(
+                h.status(),
+                ProcStatus::Failed {
+                    reason: "bootstrap error".into()
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn illegal_transitions_are_rejected() {
+            let h = handle_for_test();
+            let child_pid = h.pid().expect("child should have a pid");
+            let child_started_at = RealClock.system_time_now();
+            // Starting -> Running is fine; second Running should be rejected.
+            assert!(h.mark_running(child_pid, child_started_at));
+            assert!(!h.mark_running(child_pid, RealClock.system_time_now()));
+            match h.status() {
+                ProcStatus::Running { pid, .. } => assert_eq!(pid, child_pid),
+                other => panic!("expected Running, got {other:?}"),
+            }
+            // Once Stopped, we can't go to Running/Killed/Failed/etc.
+            assert!(h.mark_stopping());
+            assert!(h.mark_stopped(0));
+            assert!(!h.mark_running(child_pid, child_started_at));
+            assert!(!h.mark_killed(9, false));
+            assert!(!h.mark_failed("nope"));
+
+            assert_eq!(h.status(), ProcStatus::Stopped { exit_code: 0 });
+        }
     }
 }
