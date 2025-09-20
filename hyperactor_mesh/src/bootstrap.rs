@@ -6,9 +6,11 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::collections::HashMap;
 use std::env::VarError;
 use std::future;
 use std::io;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -155,16 +157,21 @@ impl BootstrapMode {
     }
 }
 
-/// A proc manager that launches procs using the [`bootstrap`] function as an entry point.
+/// A proc manager that launches procs using the [`bootstrap`]
+/// function as an entry point.
 #[derive(Debug)]
 pub struct BootstrapProcManager {
     program: std::path::PathBuf,
+    children: Arc<tokio::sync::Mutex<HashMap<ProcId, tokio::process::Child>>>,
 }
 
 impl BootstrapProcManager {
     #[allow(dead_code)]
     pub(crate) fn new(program: std::path::PathBuf) -> Self {
-        Self { program }
+        Self {
+            program,
+            children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
     }
 
     pub(crate) fn new_current_exe() -> io::Result<Self> {
@@ -203,14 +210,54 @@ impl ProcManager for BootstrapProcManager {
             "HYPERACTOR_MESH_BOOTSTRAP_MODE",
             mode.to_env_safe_string()
                 .map_err(|e| HostError::ProcessConfigurationFailure(proc_id.clone(), e.into()))?,
-        );
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+        // TODO: add graceful shutdown (SIGTERM → wait → SIGKILL) via
+        // terminate_all().
 
-        // TODO: retain, manage lifecycle
-        let _process = cmd
+        let mut child = cmd
             .spawn()
-            .map_err(|e| HostError::ProcessSpawnFailure(proc_id, e))?;
+            .map_err(|e| HostError::ProcessSpawnFailure(proc_id.clone(), e))?;
+        // Drain stdout/stderr so child processes don't block on full
+        // pipe buffers. Temporary: will be replaced with proper log
+        // forwarding in a later diff.
+        // TODO: replace with structured log forwarding (tee + tail)
+        // like v0.
+        let pid = child.id().unwrap_or_default();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let proc_tag_out = proc_id.to_string();
+        let proc_tag_err = proc_id.to_string();
+        if let Some(out) = stdout {
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                use tokio::io::BufReader;
+                let mut r = BufReader::new(out).lines();
+                while let Ok(Some(line)) = r.next_line().await {
+                    tracing::info!(target = "process.stdout", %pid, proc=%proc_tag_out, "{}", line);
+                }
+            });
+        }
+        if let Some(err) = stderr {
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                use tokio::io::BufReader;
+                let mut r = BufReader::new(err).lines();
+                while let Ok(Some(line)) = r.next_line().await {
+                    tracing::warn!(target = "process.stderr", %pid, proc=%proc_tag_err, "{}", line);
+                }
+            });
+        }
+        // Retain handle for lifecycle mgt.
+        {
+            let mut children = self.children.lock().await;
+            children.insert(proc_id.clone(), child);
+        }
 
-        // Now wait for the callback, providing the address:
+        // Now wait for the callback, providing the address (proc
+        // listen addr + agent).
         Ok(callback_rx.recv().await?)
     }
 }
@@ -387,6 +434,10 @@ pub async fn bootstrap_or_die() -> ! {
 
 #[cfg(test)]
 mod tests {
+    use hyperactor::ProcId;
+    use hyperactor::channel::ChannelAddr;
+    use hyperactor::channel::ChannelTransport;
+    use hyperactor::clock::RealClock;
     use hyperactor::id;
 
     use super::*;
@@ -406,5 +457,69 @@ mod tests {
             let safe = value.to_env_safe_string().unwrap();
             assert_eq!(value, BootstrapMode::from_env_safe_string(&safe).unwrap());
         }
+    }
+
+    #[tokio::test]
+    async fn test_children_killed_on_manager_drop() {
+        use std::path::PathBuf;
+        use std::process::Stdio;
+
+        use tokio::process::Command;
+        use tokio::time::Duration;
+
+        // Manager; program path is irrelevant for this test.
+        let manager = BootstrapProcManager::new(PathBuf::from("/bin/true"));
+
+        // Spawn a long-running child process (sleep 30) with
+        // kill_on_drop(true).
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("sleep 30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+
+        let child = cmd.spawn().expect("spawn sleep");
+        let pid = child.id().expect("pid");
+
+        // Insert into the manager's children map (simulates a spawned
+        // proc).
+        let proc_id = ProcId::Direct(ChannelAddr::any(ChannelTransport::Unix), "test".to_string());
+        {
+            let mut children = manager.children.lock().await;
+            children.insert(proc_id, child);
+        }
+
+        // (Linux-only) Verify the process exists before drop.
+        #[cfg(target_os = "linux")]
+        {
+            let path = format!("/proc/{}", pid);
+            assert!(
+                std::fs::metadata(&path).is_ok(),
+                "expected /proc/{pid} to exist before drop"
+            );
+        }
+
+        // Drop the manager — this drops the Child handles; with
+        // kill_on_drop(true) the OS should send SIGKILL to the child
+        // process.
+        drop(manager);
+
+        // Allow a moment for the signal to be delivered and the
+        // process to exit.
+        RealClock.sleep(Duration::from_millis(400)).await;
+
+        // (Linux-only) Assert the process is gone.
+        #[cfg(target_os = "linux")]
+        {
+            let path = format!("/proc/{}", pid);
+            assert!(
+                std::fs::metadata(&path).is_err(),
+                "expected /proc/{pid} to be gone after drop"
+            );
+        }
+
+        // On non-Linux, absence of panics/hangs is the signal; PID
+        // probing is platform-specific.
     }
 }
