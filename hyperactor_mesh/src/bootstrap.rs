@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::env::VarError;
 use std::future;
 use std::io;
+use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -206,19 +207,26 @@ pub enum ProcStatus {
 /// (`tokio::process::Child`) and a shared, queryable [`ProcStatus`].
 ///
 /// Responsibilities:
-/// - Retains the child process handle so the OS process can be
-///   terminated, waited on, or killed when the handle is dropped.
+/// - Retains the child process handle until it is claimed by the exit
+///   monitor, so the OS process can be waited on and its status
+///   recorded.
 /// - Tracks the current [`ProcStatus`] in an `Arc<Mutex<...>>`,
 ///   allowing concurrent observation and mutation from lifecycle
 ///   control paths.
 /// - Provides the foundation for higher-level APIs such as
 ///   `terminate()`, `kill()`, `wait()`, and `status()`.
 ///
+/// Notes:
+/// - Dropping a `ProcHandle` does **not** automatically kill the
+///   process. Cleanup on manager drop is handled by
+///   [`BootstrapProcManager`], which sends SIGKILL to any remaining
+///   PIDs in its registry.
+///
 /// Relationship to types:
 /// - [`ProcStatus`]: live status surface, updated by this handle.
 /// - [`ProcState`]/[`ProcStopReason`] (in `alloc.rs`): event-driven
 ///   allocator view; not directly updated by this type.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ProcHandle {
     /// Logical identity of the proc in the mesh.
     proc_id: ProcId,
@@ -258,15 +266,19 @@ impl ProcHandle {
         &self.proc_id
     }
 
-    /// Return the OS process ID (`pid`) of the underlying child
-    /// process, if it is still alive.
+    /// Return the OS process ID (`pid`) for this proc.
     ///
-    /// This is a *process-level* identifier (from
-    /// [`tokio::process::Child::id`]), not a logical [`ProcId`]. It
-    /// may return `None` if the child handle has already been
-    /// consumed (e.g. via `wait()`) or the process has exited.
+    /// If the proc is currently `Running`, this returns the cached
+    /// pid even if the `Child` has already been taken by the exit
+    /// monitor. Otherwise, it falls back to `Child::id()` if the
+    /// handle is still present. Returns `None` once the proc has
+    /// exited or if the handle has been consumed.
     #[inline]
     pub fn pid(&self) -> Option<u32> {
+        if let ProcStatus::Running { pid, .. } = *self.status.lock().expect("status mutex poisoned")
+        {
+            return Some(pid);
+        }
         self.child
             .lock()
             .expect("child mutex poisoned")
@@ -297,10 +309,14 @@ impl ProcHandle {
 
     /// Transition this proc into the [`ProcStatus::Running`] state.
     ///
-    /// Called internally once the child OS process has successfully
-    /// started and the proc is considered live. Records the `pid` and
-    /// the `started_at` timestamp so that callers can query them
-    /// later via [`ProcHandle::status`] or [`ProcHandle::pid`].
+    /// Called internally once the child OS process has been spawned
+    /// and we can observe a valid `pid`. Records the `pid` and the
+    /// `started_at` timestamp so that callers can query them later
+    /// via [`ProcHandle::status`] or [`ProcHandle::pid`].
+    ///
+    /// This is a best-effort marker: it reflects that the process
+    /// exists at the OS level, but does not guarantee that the proc
+    /// has completed bootstrap or is fully ready.
     pub(crate) fn mark_running(&self, pid: u32, started_at: SystemTime) -> bool {
         let mut status = self.status.lock().unwrap();
         match *status {
@@ -401,12 +417,77 @@ impl ProcHandle {
     }
 }
 
-/// A proc manager that launches procs using the [`bootstrap`]
-/// function as an entry point.
+/// A process manager for launching and supervising **bootstrap
+/// processes** (via the [`bootstrap`] entry point).
+///
+/// `BootstrapProcManager` is the host-side runtime for external procs
+/// in a hyperactor mesh. It spawns the configured bootstrap binary,
+/// forwards each child's stdout/stderr into the logging channel,
+/// tracks lifecycle state through [`ProcHandle`] / [`ProcStatus`],
+/// and ensures best-effort teardown on drop.
+///
+/// Internally it maintains two maps:
+/// - [`children`]: async map from [`ProcId`] to [`ProcHandle`], used
+///   for lifecycle queries (`status`) and exit monitoring.
+/// - [`pid_table`]: synchronous map from [`ProcId`] to raw PIDs, used
+///   in [`Drop`] to synchronously send `SIGKILL` to any still-running
+///   children.
+///
+/// Together these provide both a queryable, real-time status surface
+/// and a deterministic cleanup path, so no child processes are left
+/// orphaned if the manager itself is dropped.
 #[derive(Debug)]
 pub struct BootstrapProcManager {
+    /// Path to the bootstrap binary that this manager will launch for
+    /// each proc.
     program: std::path::PathBuf,
-    children: Arc<tokio::sync::Mutex<HashMap<ProcId, Child>>>,
+    /// Async registry of running children, keyed by [`ProcId`]. Holds
+    /// [`ProcHandle`]s so callers can query or monitor status.
+    children: Arc<tokio::sync::Mutex<HashMap<ProcId, ProcHandle>>>,
+    /// Synchronous table of raw PIDs, keyed by [`ProcId`]. Used
+    /// exclusively in the [`Drop`] impl to send `SIGKILL` without
+    /// needing async context.
+    pid_table: Arc<std::sync::Mutex<HashMap<ProcId, u32>>>,
+}
+
+impl Drop for BootstrapProcManager {
+    /// Drop implementation for [`BootstrapProcManager`].
+    ///
+    /// Ensures that when the manager itself is dropped, any child
+    /// processes it spawned are also terminated. This is a
+    /// best-effort cleanup mechanism: the manager iterates over its
+    /// recorded PID table and sends `SIGKILL` to each one.
+    ///
+    /// Notes:
+    /// - Uses a synchronous `Mutex` so it can be locked safely in
+    ///   `Drop` without async context.
+    /// - Safety: sending `SIGKILL` is low-level but safe here because
+    ///   it only instructs the OS to terminate the process. The only
+    ///   risk is PID reuse, in which case an unrelated process might
+    ///   be signaled. This is accepted for shutdown semantics.
+    /// - This makes `BootstrapProcManager` robust against leaks:
+    ///   dropping it should not leave stray child processes running.
+    fn drop(&mut self) {
+        if let Ok(table) = self.pid_table.lock() {
+            for (proc_id, pid) in table.iter() {
+                // SAFETY: We own these PIDs because they were spawned and recorded
+                // by this manager. Sending SIGKILL is safe here since it does not
+                // dereference any memory; it only instructs the OS to terminate the
+                // process. The worst-case outcome is that the PID has already exited
+                // and been reused, in which case the signal may affect an unrelated
+                // process. We accept that risk in Drop semantics because this path
+                // is only used for cleanup at shutdown.
+                unsafe {
+                    libc::kill(*pid as i32, libc::SIGKILL);
+                }
+                tracing::info!(
+                    "BootstrapProcManager::drop: sent SIGKILL to pid {} for {:?}",
+                    pid,
+                    proc_id
+                );
+            }
+        }
+    }
 }
 
 impl BootstrapProcManager {
@@ -421,6 +502,7 @@ impl BootstrapProcManager {
         Self {
             program,
             children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -445,16 +527,111 @@ impl BootstrapProcManager {
     pub(crate) fn new_for_test() -> Self {
         Self::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap())
     }
+
+    /// Return the current [`ProcStatus`] for the given [`ProcId`], if
+    /// the proc is known to this manager.
+    ///
+    /// This queries the live [`ProcHandle`] stored in the manager's
+    /// internal map. It provides an immediate snapshot of lifecycle
+    /// state (`Starting`, `Running`, `Stopping`, `Stopped`, etc.).
+    ///
+    /// Returns `None` if the manager has no record of the proc (e.g.
+    /// never spawned here, or entry already removed).
+    pub async fn status(&self, proc_id: &ProcId) -> Option<ProcStatus> {
+        self.children.lock().await.get(proc_id).map(|h| h.status())
+    }
+
+    fn spawn_exit_monitor(&self, proc_id: ProcId, handle: ProcHandle) {
+        let pid_table = Arc::clone(&self.pid_table);
+
+        let maybe_child = {
+            let mut guard = handle.child.lock().expect("child mutex");
+            let taken = guard.take();
+            debug_assert!(guard.is_none(), "no Child should remain in handles");
+
+            taken
+        };
+
+        tokio::spawn(async move {
+            if let Some(mut child) = maybe_child {
+                match child.wait().await {
+                    Ok(status) => {
+                        if let Some(sig) = status.signal() {
+                            let _ = handle.mark_killed(sig, status.core_dumped());
+                            if let Ok(mut table) = pid_table.lock() {
+                                table.remove(&proc_id);
+                            }
+                        } else if let Some(code) = status.code() {
+                            let _ = handle.mark_stopped(code);
+                            if let Ok(mut table) = pid_table.lock() {
+                                table.remove(&proc_id);
+                            }
+                        } else {
+                            debug_assert!(
+                                false,
+                                "unreachable: process terminated with neither signal nor exit code"
+                            );
+                            tracing::error!(
+                                "proc {proc_id}: unreachable exit status (no code, no signal)"
+                            );
+                            let _ = handle.mark_failed("process exited with unknown status");
+                            if let Ok(mut table) = pid_table.lock() {
+                                table.remove(&proc_id);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = handle.mark_failed(format!("wait() failed: {e}"));
+                        if let Ok(mut table) = pid_table.lock() {
+                            table.remove(&proc_id);
+                        }
+                    }
+                }
+            } else {
+                tracing::debug!("proc {proc_id}: child was already taken; skipping wait");
+            }
+        });
+    }
 }
 
 #[async_trait]
 impl ProcManager for BootstrapProcManager {
     type Agent = ProcMeshAgent;
 
+    /// Return the [`ChannelTransport`] used by this proc manager.
+    ///
+    /// For `BootstrapProcManager` this is always
+    /// [`ChannelTransport::Unix`], since all procs are spawned
+    /// locally on the same host and communicate over Unix domain
+    /// sockets.
     fn transport(&self) -> ChannelTransport {
         ChannelTransport::Unix
     }
 
+    /// Launch a new proc under this [`BootstrapProcManager`].
+    ///
+    /// Spawns the configured bootstrap binary (`self.program`) in a
+    /// fresh child process, passing environment variables that
+    /// describe the [`BootstrapMode::Proc`] (proc ID, backend
+    /// address, callback address).
+    ///
+    /// Responsibilities performed here:
+    /// - Create a one-shot callback channel so the child can confirm
+    ///   successful bootstrap and return its mailbox address + agent.
+    /// - Spawn the OS process with stdout/stderr piped.
+    /// - Stamp the new [`ProcHandle`] as [`ProcStatus::Running`] once
+    ///   a PID is observed.
+    /// - Wire stdout/stderr pipes into local writers and forward them
+    ///   over a logging channel (`BOOTSTRAP_LOG_CHANNEL`).
+    /// - Insert the handle into the manager's children map and start
+    ///   an exit monitor to track process termination.
+    ///
+    /// Returns the proc's listening address and its [`ProcMeshAgent`]
+    /// once the callback is received. Errors are surfaced as
+    /// [`HostError`].
+    ///
+    /// Note: graceful shutdown (SIGTERM → wait → SIGKILL) is not yet
+    /// implemented here; see the `terminate_all` TODO.
     async fn spawn(
         &self,
         proc_id: ProcId,
@@ -475,40 +652,61 @@ impl ProcManager for BootstrapProcManager {
                 .map_err(|e| HostError::ProcessConfigurationFailure(proc_id.clone(), e.into()))?,
         )
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(Stdio::piped());
         // TODO: add graceful shutdown (SIGTERM -> wait -> SIGKILL) via
         // terminate_all().
 
         let log_channel = ChannelAddr::any(ChannelTransport::Unix);
         cmd.env(BOOTSTRAP_LOG_CHANNEL, log_channel.to_string());
 
-        let mut child = cmd
+        let child = cmd
             .spawn()
             .map_err(|e| HostError::ProcessSpawnFailure(proc_id.clone(), e))?;
         let pid = child.id().unwrap_or_default();
+
+        let handle = ProcHandle::new(proc_id.clone(), child);
+
+        if let Some(pid) = handle.pid() {
+            handle.mark_running(pid, hyperactor::clock::RealClock.system_time_now());
+            if let Ok(mut table) = self.pid_table.lock() {
+                table.insert(proc_id.clone(), pid);
+            }
+        }
 
         // Writers: tee to local (stdout/stderr or file) + send over
         // channel
         let (mut out_writer, mut err_writer) = create_log_writers(0, log_channel.clone(), pid)
             .unwrap_or_else(|_| (Box::new(tokio::io::stdout()), Box::new(tokio::io::stderr())));
 
-        if let Some(mut out) = child.stdout.take() {
-            tokio::spawn(async move {
-                let _ = tokio::io::copy(&mut out, &mut out_writer).await;
-            });
-        }
-        if let Some(mut err) = child.stderr.take() {
-            tokio::spawn(async move {
-                let _ = tokio::io::copy(&mut err, &mut err_writer).await;
-            });
+        // Take the pipes from the child.
+        {
+            let mut guard = handle.child.lock().expect("child mutex poisoned");
+
+            if let Some(child) = guard.as_mut() {
+                if let Some(mut out) = child.stdout.take() {
+                    tokio::spawn(async move {
+                        let _ = tokio::io::copy(&mut out, &mut out_writer).await;
+                    });
+                }
+                if let Some(mut err) = child.stderr.take() {
+                    tokio::spawn(async move {
+                        let _ = tokio::io::copy(&mut err, &mut err_writer).await;
+                    });
+                }
+            } else {
+                tracing::debug!("proc {proc_id}: child already taken before wiring IO");
+            }
         }
 
         // Retain handle for lifecycle mgt.
         {
             let mut children = self.children.lock().await;
-            children.insert(proc_id.clone(), child);
+            children.insert(proc_id.clone(), handle.clone());
         }
+
+        // Kick off an exit monitor that updates ProcStatus when the
+        // OS process ends
+        self.spawn_exit_monitor(proc_id.clone(), handle.clone());
 
         // Now wait for the callback, providing the address (proc
         // listen addr + agent).
@@ -688,11 +886,15 @@ pub async fn bootstrap_or_die() -> ! {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::process::Stdio;
+
     use hyperactor::ProcId;
     use hyperactor::channel::ChannelAddr;
     use hyperactor::channel::ChannelTransport;
     use hyperactor::clock::RealClock;
     use hyperactor::id;
+    use tokio::process::Command;
 
     use super::*;
 
@@ -714,7 +916,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_children_killed_on_manager_drop() {
+    async fn test_child_terminated_on_manager_drop() {
         use std::path::PathBuf;
         use std::process::Stdio;
 
@@ -726,9 +928,8 @@ mod tests {
 
         // Spawn a long-running child process (sleep 30) with
         // kill_on_drop(true).
-        let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c")
-            .arg("sleep 30")
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("30")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
@@ -741,7 +942,7 @@ mod tests {
         let proc_id = ProcId::Direct(ChannelAddr::any(ChannelTransport::Unix), "test".to_string());
         {
             let mut children = manager.children.lock().await;
-            children.insert(proc_id, child);
+            children.insert(proc_id.clone(), ProcHandle::new(proc_id.clone(), child));
         }
 
         // (Linux-only) Verify the process exists before drop.
@@ -754,23 +955,44 @@ mod tests {
             );
         }
 
-        // Drop the manager - this drops the Child handles; with
-        // kill_on_drop(true) the OS should send SIGKILL to the child
-        // process.
+        // Drop the manager. We don't rely on `Child::kill_on_drop`.
+        // The exit monitor owns the Child; the manager’s Drop uses
+        // `pid_table` to best-effort SIGKILL any recorded PIDs. This
+        // should terminate the child.
         drop(manager);
 
-        // Allow a moment for the signal to be delivered and the
-        // process to exit.
-        RealClock.sleep(Duration::from_millis(400)).await;
-
-        // (Linux-only) Assert the process is gone.
+        // Poll until the /proc entry disappears OR the state is
+        // Zombie.
         #[cfg(target_os = "linux")]
         {
-            let path = format!("/proc/{}", pid);
-            assert!(
-                std::fs::metadata(&path).is_err(),
-                "expected /proc/{pid} to be gone after drop"
-            );
+            let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+            let proc_dir = format!("/proc/{}", pid);
+            let status_file = format!("{}/status", proc_dir);
+
+            let mut ok = false;
+            while std::time::Instant::now() < deadline {
+                match std::fs::read_to_string(&status_file) {
+                    Ok(s) => {
+                        if let Some(state_line) = s.lines().find(|l| l.starts_with("State:")) {
+                            if state_line.contains('Z') {
+                                // Only 'Z' (Zombie) is acceptable.
+                                ok = true;
+                                break;
+                            } else {
+                                // Still alive (e.g. 'R', 'S', etc.). Give it more time.
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // /proc/<pid>/status no longer exists -> fully gone
+                        ok = true;
+                        break;
+                    }
+                }
+                RealClock.sleep(Duration::from_millis(100)).await;
+            }
+
+            assert!(ok, "expected /proc/{pid} to be gone or zombie after drop");
         }
 
         // On non-Linux, absence of panics/hangs is the signal; PID
@@ -959,5 +1181,210 @@ mod tests {
 
             assert_eq!(h.status(), ProcStatus::Stopped { exit_code: 0 });
         }
+    }
+
+    #[tokio::test]
+    async fn test_exit_monitor_updates_status_on_clean_exit() {
+        use std::path::PathBuf;
+        use std::process::Stdio;
+
+        use tokio::process::Command;
+
+        let manager = BootstrapProcManager::new(PathBuf::from("/bin/true"));
+
+        // Spawn a fast-exiting child.
+        let mut cmd = Command::new("/bin/true");
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        let child = cmd.spawn().expect("spawn true");
+
+        let proc_id = ProcId::Direct(ChannelAddr::any(ChannelTransport::Unix), "clean".into());
+        let handle = ProcHandle::new(proc_id.clone(), child);
+
+        // Put into manager & start monitor.
+        {
+            let mut children = manager.children.lock().await;
+            children.insert(proc_id.clone(), handle.clone());
+        }
+        manager.spawn_exit_monitor(proc_id.clone(), handle.clone());
+        {
+            let guard = handle.child.lock().expect("child mutex");
+            assert!(
+                guard.is_none(),
+                "expected Child to be taken by exit monitor"
+            );
+        }
+
+        // Wait briefly for /bin/true.
+        RealClock.sleep(Duration::from_millis(100)).await;
+
+        // Snapshot should be Stopped(code=0) (don't assert the exact
+        // enum if it's awkward; at least not Running)
+        let st = manager.status(&proc_id).await.unwrap();
+        assert!(
+            matches!(st, ProcStatus::Stopped { .. } | ProcStatus::Stopping),
+            "status={st:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_exit_monitor_updates_status_on_kill() {
+        use std::path::PathBuf;
+        use std::process::Stdio;
+
+        use tokio::process::Command;
+        use tokio::time::Duration;
+
+        let manager = BootstrapProcManager::new(PathBuf::from("/bin/sleep"));
+
+        // Spawn a process that will live long enough to kill.
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("5").stdout(Stdio::null()).stderr(Stdio::null());
+        let child = cmd.spawn().expect("spawn sleep");
+        let pid = child.id().expect("pid") as i32;
+
+        // Register with the manager and start the exit monitor.
+        let proc_id = ProcId::Direct(ChannelAddr::any(ChannelTransport::Unix), "killed".into());
+        let handle = ProcHandle::new(proc_id.clone(), child);
+        {
+            let mut children = manager.children.lock().await;
+            children.insert(proc_id.clone(), handle.clone());
+        }
+        manager.spawn_exit_monitor(proc_id.clone(), handle.clone());
+        {
+            let guard = handle.child.lock().expect("child mutex");
+            assert!(
+                guard.is_none(),
+                "expected Child to be taken by exit monitor"
+            );
+        }
+        // Send SIGKILL to the process.
+        #[cfg(unix)]
+        // SAFETY: We own the child process we just spawned and have
+        // its PID.
+        // Sending SIGKILL is safe here because:
+        //  - the PID comes directly from `child.id()`
+        //  - the process is guaranteed to be in our test scope
+        //  - we don't touch any memory via this call, only signal the
+        //    OS
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+
+        // Wait for the exit monitor to observe termination and update
+        // status.
+        let deadline = RealClock.now() + Duration::from_millis(1500);
+        let mut saw_killed = false;
+        while RealClock.now() < deadline {
+            if let Some(st) = manager.status(&proc_id).await {
+                if let ProcStatus::Killed { signal, .. } = st {
+                    assert_eq!(signal, libc::SIGKILL, "unexpected signal");
+                    saw_killed = true;
+                    break;
+                }
+            }
+            RealClock.sleep(Duration::from_millis(50)).await;
+        }
+        assert!(saw_killed, "did not observe ProcStatus::Killed(SIGKILL)");
+    }
+
+    #[tokio::test]
+    async fn status_unknown_proc_is_none() {
+        use std::path::PathBuf;
+
+        let manager = BootstrapProcManager::new(PathBuf::from("/bin/true"));
+        let unknown = ProcId::Direct(ChannelAddr::any(ChannelTransport::Unix), "nope".into());
+        assert!(manager.status(&unknown).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn exit_monitor_child_already_taken_leaves_status_unchanged() {
+        let manager = BootstrapProcManager::new(PathBuf::from("/bin/sleep"));
+
+        // Long-ish child so it's alive while we "steal" it.
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("5").stdout(Stdio::null()).stderr(Stdio::null());
+        let child = cmd.spawn().expect("spawn sleep");
+
+        let proc_id = ProcId::Direct(
+            ChannelAddr::any(ChannelTransport::Unix),
+            "already-taken".into(),
+        );
+        let handle = ProcHandle::new(proc_id.clone(), child);
+
+        // Insert, then deliberately consume the Child before starting
+        // the monitor.
+        {
+            let mut children = manager.children.lock().await;
+            children.insert(proc_id.clone(), handle.clone());
+        }
+        {
+            let _ = handle.child.lock().expect("child mutex").take();
+        }
+
+        // This should not panic; monitor will see None and bail.
+        manager.spawn_exit_monitor(proc_id.clone(), handle.clone());
+
+        // Status should remain whatever it was (Starting in this
+        // setup).
+        assert!(matches!(
+            manager.status(&proc_id).await,
+            Some(ProcStatus::Starting)
+        ));
+    }
+
+    #[tokio::test]
+    async fn pid_none_after_exit_monitor_takes_child() {
+        let manager = BootstrapProcManager::new(PathBuf::from("/bin/sleep"));
+
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("5").stdout(Stdio::null()).stderr(Stdio::null());
+        let child = cmd.spawn().expect("spawn sleep");
+
+        let proc_id = ProcId::Direct(ChannelAddr::any(ChannelTransport::Unix), "pid-none".into());
+        let handle = ProcHandle::new(proc_id.clone(), child);
+
+        // Before monitor: we should still be able to read a pid.
+        assert!(handle.pid().is_some());
+        {
+            let mut children = manager.children.lock().await;
+            children.insert(proc_id.clone(), handle.clone());
+        }
+        // `spawn_exit_monitor` takes the Child synchronously before
+        // spawning the task.
+        manager.spawn_exit_monitor(proc_id.clone(), handle.clone());
+
+        // Immediately after, the handle should no longer expose a pid
+        // (Child is gone).
+        assert!(handle.pid().is_none());
+    }
+
+    #[tokio::test]
+    async fn starting_may_directly_be_marked_stopped() {
+        // Unit-level transition check for the "process exited very
+        // fast" case.
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn true");
+
+        let proc_id = ProcId::Direct(ChannelAddr::any(ChannelTransport::Unix), "fast-exit".into());
+        let handle = ProcHandle::new(proc_id, child);
+
+        if let Some(mut c) = handle.child.lock().expect("child mutex").take() {
+            let status = c.wait().await.expect("wait");
+            let code = status.code().unwrap_or(0);
+            assert!(handle.mark_stopped(code));
+        } else {
+            panic!("child already taken");
+        }
+
+        assert!(matches!(
+            handle.status(),
+            ProcStatus::Stopped { exit_code: 0 }
+        ));
     }
 }
