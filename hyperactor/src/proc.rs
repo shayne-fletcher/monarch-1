@@ -333,6 +333,22 @@ impl Proc {
         Ok(proc)
     }
 
+    /// Create a new direct-addressed proc with a default sender for the forwarder.
+    pub async fn direct_with_default(
+        addr: ChannelAddr,
+        name: String,
+        default: BoxedMailboxSender,
+    ) -> Result<Self, ChannelError> {
+        let (addr, rx) = channel::serve(addr).await?;
+        let proc_id = ProcId::Direct(addr, name);
+        let proc = Self::new(
+            proc_id,
+            DialMailboxRouter::new_with_default(default).into_boxed(),
+        );
+        proc.clone().serve(rx);
+        Ok(proc)
+    }
+
     /// Create a new proc with the given proc id, forwarder and clock kind.
     pub fn new_with_clock(
         proc_id: ProcId,

@@ -132,7 +132,7 @@ impl HostMesh {
     ) -> v1::Result<Self> {
         let transport = alloc.transport();
         let extent = alloc.extent().clone();
-        let proc_mesh = ProcMesh::allocate(cx, alloc, name).await?;
+        let proc_mesh = ProcMesh::allocate(cx, Box::new(alloc), name).await?;
         let name = Name::new(name);
 
         // TODO: figure out how to deal with MAST allocs. It requires an extra dimension,

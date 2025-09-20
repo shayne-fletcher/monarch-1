@@ -195,6 +195,15 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "monarch_hyperactor.proc_mesh",
     )?)?;
 
+    monarch_hyperactor::v1::actor_mesh::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_hyperactor.v1.actor_mesh",
+    )?)?;
+    monarch_hyperactor::v1::proc_mesh::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_hyperactor.v1.proc_mesh",
+    )?)?;
+
     monarch_hyperactor::runtime::register_python_bindings(&get_or_add_new_module(
         module,
         "monarch_hyperactor.runtime",

@@ -203,6 +203,11 @@ impl Shape {
     pub fn extent(&self) -> Extent {
         Extent::new(self.labels.clone(), self.slice.sizes().to_vec()).unwrap()
     }
+
+    /// The region corresponding to this shape.
+    pub fn region(&self) -> Region {
+        self.into()
+    }
 }
 
 impl From<&Region> for Shape {

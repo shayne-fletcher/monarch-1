@@ -14,8 +14,7 @@ import inspect
 import itertools
 import logging
 import random
-import traceback
-from abc import abstractmethod, abstractproperty
+from abc import abstractproperty
 
 from dataclasses import dataclass
 from pprint import pformat
@@ -53,6 +52,7 @@ from monarch._rust_bindings.monarch_hyperactor.actor_mesh import (
     PythonActorMesh,
     PythonActorMeshImpl,
 )
+from monarch._rust_bindings.monarch_hyperactor.context import Instance as HyInstance
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
     OncePortReceiver as HyOncePortReceiver,  # noqa: F401
@@ -63,8 +63,14 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
 )
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
-from monarch._rust_bindings.monarch_hyperactor.selection import Selection as HySelection
-from monarch._rust_bindings.monarch_hyperactor.shape import Point as HyPoint, Shape
+from monarch._rust_bindings.monarch_hyperactor.selection import (
+    Selection as HySelection,  # noqa: F401
+)
+from monarch._rust_bindings.monarch_hyperactor.shape import (
+    Point as HyPoint,
+    Region,
+    Shape,
+)
 from monarch._rust_bindings.monarch_hyperactor.supervision import SupervisionError
 
 from monarch._rust_bindings.monarch_hyperactor.value_mesh import (
@@ -169,6 +175,13 @@ class Instance(abc.ABC):
         else:
             self._children.append(child)
 
+    def _as_rust(self) -> HyInstance:
+        return cast(HyInstance, self)
+
+    @staticmethod
+    def _as_py(ins: HyInstance) -> "Instance":
+        return cast(Instance, ins)
+
 
 @rust_struct("monarch_hyperactor::context::Context")
 class Context:
@@ -244,22 +257,22 @@ _load_balancing_seed = random.Random(4)
 
 
 class _SingletonActorAdapator:
-    def __init__(self, inner: ActorId, shape: Optional[Shape] = None) -> None:
+    def __init__(self, inner: ActorId, region: Optional[Region] = None) -> None:
         self._inner: ActorId = inner
-        if shape is None:
-            shape = singleton_shape
-        self._shape = shape
+        if region is None:
+            region = singleton_shape.region
+        self._region = region
 
     def cast(
         self,
         message: PythonMessage,
         selection: str,
-        mailbox: Mailbox,
+        instance: HyInstance,
     ) -> None:
-        mailbox.post(self._inner, message)
+        Instance._as_py(instance)._mailbox.post(self._inner, message)
 
-    def new_with_shape(self, shape: Shape) -> "ActorMeshProtocol":
-        return _SingletonActorAdapator(self._inner, self._shape)
+    def new_with_region(self, region: Region) -> "ActorMeshProtocol":
+        return _SingletonActorAdapator(self._inner, self._region)
 
     def supervision_event(self) -> "Optional[Shared[Exception]]":
         return None
@@ -341,7 +354,7 @@ class _ActorMeshRefImpl:
         self,
         message: PythonMessage,
         selection: str,
-        mailbox: Mailbox,
+        instance: HyInstance,
     ) -> None:
         self._check_state()
 
@@ -399,9 +412,13 @@ class _ActorMeshRefImpl:
     def proc_mesh(self) -> Optional["ProcMesh"]:
         return self._proc_mesh
 
-    def new_with_shape(self, shape: Shape) -> "_ActorMeshRefImpl":
+    def new_with_region(self, region: Region) -> "_ActorMeshRefImpl":
         return _ActorMeshRefImpl(
-            self._mailbox, None, None, shape, self._please_replace_me_actor_ids
+            self._mailbox,
+            None,
+            None,
+            region.as_shape(),
+            self._please_replace_me_actor_ids,
         )
 
     def supervision_event(self) -> "Optional[Shared[Exception]]":
@@ -431,7 +448,6 @@ class ActorEndpoint(Endpoint[P, R]):
         proc_mesh: "Optional[ProcMesh]",
         name: MethodSpecifier,
         impl: Callable[Concatenate[Any, P], Awaitable[R]],
-        mailbox: Mailbox,
         propagator: Propagator,
         explicit_response_port: bool,
     ) -> None:
@@ -441,7 +457,6 @@ class ActorEndpoint(Endpoint[P, R]):
         self._shape = shape
         self._proc_mesh = proc_mesh
         self._signature: inspect.Signature = inspect.signature(impl)
-        self._mailbox = mailbox
         self._explicit_response_port = explicit_response_port
 
     def _call_name(self) -> Any:
@@ -474,7 +489,9 @@ class ActorEndpoint(Endpoint[P, R]):
                 ),
                 bytes,
             )
-            self._actor_mesh.cast(message, selection, self._mailbox)
+            self._actor_mesh.cast(
+                message, selection, context().actor_instance._as_rust()
+            )
         else:
             actor_send(self, bytes, objects, port, selection)
         shape = self._shape
@@ -997,8 +1014,9 @@ class _Actor:
                 self._maybe_exit_debugger(do_continue=False)
 
     def _handle_undeliverable_message(
-        self, message: UndeliverableMessageEnvelope
+        self, cx: Context, message: UndeliverableMessageEnvelope
     ) -> bool:
+        _context.set(cx)
         handle_undeliverable = getattr(
             self.instance, "_handle_undeliverable_message", None
         )
@@ -1076,14 +1094,12 @@ class ActorMesh(MeshTrait, Generic[T], DeprecatedNotAFuture):
         self,
         Class: Type[T],
         inner: "ActorMeshProtocol",
-        mailbox: Mailbox,
         shape: Shape,
         proc_mesh: "Optional[ProcMesh]",
     ) -> None:
         self.__name__: str = Class.__name__
         self._class: Type[T] = Class
         self._inner: "ActorMeshProtocol" = inner
-        self._mailbox: Mailbox = mailbox
         self._shape = shape
         self._proc_mesh = proc_mesh
         for attr_name in dir(self._class):
@@ -1124,7 +1140,6 @@ class ActorMesh(MeshTrait, Generic[T], DeprecatedNotAFuture):
             self._proc_mesh,
             name,
             impl,
-            self._mailbox,
             propagator,
             explicit_response_port,
         )
@@ -1148,7 +1163,7 @@ class ActorMesh(MeshTrait, Generic[T], DeprecatedNotAFuture):
                 mailbox, shape, actor_mesh, proc_mesh
             )
 
-        mesh = cls(Class, actor_mesh, mailbox, shape, proc_mesh)
+        mesh = cls(Class, actor_mesh, shape, proc_mesh)
 
         async def null_func(*_args: Iterable[Any], **_kwargs: Dict[str, Any]) -> None:
             return None
@@ -1170,14 +1185,11 @@ class ActorMesh(MeshTrait, Generic[T], DeprecatedNotAFuture):
         cls,
         Class: Type[T],
         actor_id: ActorId,
-        mailbox: Mailbox,
     ) -> "ActorMesh[T]":
-        return cls(
-            Class, _SingletonActorAdapator(actor_id), mailbox, singleton_shape, None
-        )
+        return cls(Class, _SingletonActorAdapator(actor_id), singleton_shape, None)
 
     def __reduce_ex__(self, protocol: ...) -> "Tuple[Type[ActorMesh], Tuple[Any, ...]]":
-        return ActorMesh, (self._class, self._inner, self._mailbox, self._shape, None)
+        return ActorMesh, (self._class, self._inner, self._shape, None)
 
     @property
     def _ndslice(self) -> NDSlice:
@@ -1188,8 +1200,8 @@ class ActorMesh(MeshTrait, Generic[T], DeprecatedNotAFuture):
         return self._shape.labels
 
     def _new_with_shape(self, shape: Shape) -> "ActorMesh[T]":
-        sliced = self._inner.new_with_shape(shape)
-        return ActorMesh(self._class, sliced, self._mailbox, shape, self._proc_mesh)
+        sliced = self._inner.new_with_region(shape.region)
+        return ActorMesh(self._class, sliced, shape, self._proc_mesh)
 
     def __repr__(self) -> str:
         return f"ActorMesh(class={self._class}, shape={self._shape}), inner={type(self._inner)})"

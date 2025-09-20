@@ -931,7 +931,7 @@ async def test_flush_logs_ipython() -> None:
                     lambda: mock_ipython,
                 ), unittest.mock.patch("monarch._src.actor.logging.IN_IPYTHON", True):
                     # Make sure we can register and unregister callbacks
-                    for i in range(3):
+                    for _ in range(3):
                         pm1 = await this_host().spawn_procs(per_host={"gpus": 2})
                         pm2 = await this_host().spawn_procs(per_host={"gpus": 2})
                         am1 = await pm1.spawn("printer", Printer)
@@ -1426,9 +1426,11 @@ class UndeliverableMessageSenderWithOverride(UndeliverableMessageSender):
     def _handle_undeliverable_message(
         self, message: UndeliverableMessageEnvelope
     ) -> bool:
-        self._receiver.receive_undeliverable.call_one(
-            message.sender(), message.dest(), message.error_msg()
-        ).get()
+        PythonTask.spawn_blocking(
+            self._receiver.receive_undeliverable.call_one(
+                message.sender(), message.dest(), message.error_msg()
+            ).get
+        )
         return True
 
 

@@ -40,15 +40,17 @@ use tokio::sync::mpsc;
 
 type OnStopCallback = Box<dyn FnOnce() -> Box<dyn std::future::Future<Output = ()> + Send> + Send>;
 
+use crate::actor_mesh::ActorMeshProtocol;
 use crate::actor_mesh::PythonActorMesh;
 use crate::actor_mesh::PythonActorMeshImpl;
 use crate::alloc::PyAlloc;
+use crate::context::PyInstance;
 use crate::mailbox::PyMailbox;
 use crate::pytokio::PyPythonTask;
 use crate::pytokio::PyShared;
 use crate::pytokio::PythonTask;
 use crate::runtime::get_tokio_runtime;
-use crate::shape::PyShape;
+use crate::shape::PyRegion;
 use crate::supervision::SupervisionError;
 use crate::supervision::Unhealthy;
 
@@ -328,7 +330,7 @@ impl PyProcMesh {
                 keepalive,
                 actor_events,
             );
-            Ok(PythonActorMesh::from_impl(im))
+            Ok(PythonActorMesh::from_impl(Box::new(im)))
         };
         PyPythonTask::new(meshimpl)
     }
@@ -357,14 +359,14 @@ impl PyProcMesh {
             let instance = proc_mesh.client();
             let actor_mesh = proc_mesh.spawn(&name, &pickled_type).await?;
             let actor_events = actor_mesh.with_mut(|a| a.events()).await.unwrap().unwrap();
-            Ok(PythonActorMeshImpl::new(
+            Ok::<_, PyErr>(Box::new(PythonActorMeshImpl::new(
                 actor_mesh,
                 PyMailbox {
                     inner: instance.mailbox().clone(),
                 },
                 keepalive,
                 actor_events,
-            ))
+            )))
         };
         if emulated {
             // we give up on doing mesh spawn async for the emulated old version
@@ -372,10 +374,14 @@ impl PyProcMesh {
             let r = get_tokio_runtime().block_on(meshimpl)?;
             Python::with_gil(|py| r.into_py_any(py))
         } else {
-            let r = PythonActorMesh::new(meshimpl);
+            let r = PythonActorMesh::new(async move {
+                let meshimpl: Box<dyn ActorMeshProtocol> = meshimpl.await?;
+                Ok(meshimpl)
+            });
             Python::with_gil(|py| r.into_py_any(py))
         }
     }
+
     // User can call this to monitor the proc mesh events. This will override
     // the default monitor that exits the client on process crash, so user can
     // handle the process crash in their own way.
@@ -398,10 +404,8 @@ impl PyProcMesh {
     }
 
     #[getter]
-    fn client(&self) -> PyResult<PyMailbox> {
-        Ok(PyMailbox {
-            inner: self.try_inner()?.client().mailbox().clone(),
-        })
+    fn client(&self) -> PyResult<PyInstance> {
+        Ok(self.try_inner()?.client().into())
     }
 
     fn __repr__(&self) -> PyResult<String> {
@@ -409,8 +413,10 @@ impl PyProcMesh {
     }
 
     #[getter]
-    fn shape(&self) -> PyResult<PyShape> {
-        Ok(self.try_inner()?.shape().clone().into())
+    fn region(&self) -> PyResult<PyRegion> {
+        Ok(PyRegion {
+            inner: self.try_inner()?.shape().into(),
+        })
     }
 
     fn stop_nonblocking(&self) -> PyResult<PyPythonTask> {

@@ -37,7 +37,9 @@ use derivative::Derivative;
 use enum_as_inner::EnumAsInner;
 use rand::Rng;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
+use serde::Serializer;
 
 use crate as hyperactor;
 use crate::Actor;
@@ -373,6 +375,12 @@ impl FromStr for Reference {
                     Token::Elem(proc_name) Token::Comma Token::Elem(actor_name)
                         Token::LeftBracket Token::Uint(rank) Token::RightBracket =>
                         Self::Actor(ActorId(ProcId::Direct(channel_addr, proc_name.to_string()), actor_name.to_string(), rank)),
+
+                    // channeladdr,proc_name,actor_name[rank][port]
+                    Token::Elem(proc_name) Token::Comma Token::Elem(actor_name)
+                        Token::LeftBracket Token::Uint(rank) Token::RightBracket
+                        Token::LeftBracket Token::Uint(index) Token::RightBracket  =>
+                        Self::Port(PortId(ActorId(ProcId::Direct(channel_addr, proc_name.to_string()), actor_name.to_string(), rank), index as u64)),
                 }?)
             }
 
@@ -638,7 +646,10 @@ impl ActorId {
 impl fmt::Display for ActorId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ActorId(proc_id, name, pid) = self;
-        write!(f, "{}.{}[{}]", proc_id, name, pid)
+        match proc_id {
+            ProcId::Ranked(..) => write!(f, "{}.{}[{}]", proc_id, name, pid),
+            ProcId::Direct(..) => write!(f, "{},{}[{}]", proc_id, name, pid),
+        }
     }
 }
 impl<A: RemoteActor> From<ActorRef<A>> for ActorId {
@@ -665,7 +676,7 @@ impl FromStr for ActorId {
 }
 
 /// ActorRefs are typed references to actors.
-#[derive(Debug, Serialize, Deserialize, Named)]
+#[derive(Debug, Named)]
 pub struct ActorRef<A: RemoteActor> {
     pub(crate) actor_id: ActorId,
     phantom: PhantomData<A>,
@@ -737,6 +748,31 @@ impl<A: RemoteActor> ActorRef<A> {
         A: Actor,
     {
         cap.resolve_actor_ref(self)
+    }
+}
+
+// Implement Serialize manually, without requiring A: Serialize
+impl<A: RemoteActor> Serialize for ActorRef<A> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize only the fields that don't depend on A
+        self.actor_id().serialize(serializer)
+    }
+}
+
+// Implement Deserialize manually, without requiring A: Deserialize
+impl<'de, A: RemoteActor> Deserialize<'de> for ActorRef<A> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let actor_id = <ActorId>::deserialize(deserializer)?;
+        Ok(ActorRef {
+            actor_id,
+            phantom: PhantomData,
+        })
     }
 }
 

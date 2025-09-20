@@ -138,13 +138,21 @@ pub(crate) fn get_global_supervision_sink() -> Option<PortHandle<ActorSupervisio
 /// Context use by root client to send messages.
 /// This mailbox allows us to open ports before we know which proc the
 /// messages will be sent to.
-pub fn global_root_client() -> &'static Instance<()> {
-    static GLOBAL_INSTANCE: OnceLock<(Instance<()>, ActorHandle<()>)> = OnceLock::new();
-    let (instance, _) = GLOBAL_INSTANCE.get_or_init(|| {
-        let world_id = WorldId(ShortUuid::generate().to_string());
-        let client_proc_id = ProcId::Ranked(world_id.clone(), 0);
-        let client_proc = Proc::new(client_proc_id.clone(), router::global().boxed());
-        router::global().bind(world_id.clone().into(), client_proc.clone());
+pub async fn global_root_client() -> &'static Instance<()> {
+    static GLOBAL_INSTANCE: tokio::sync::OnceCell<(Instance<()>, ActorHandle<()>)> =
+        tokio::sync::OnceCell::const_new();
+    &GLOBAL_INSTANCE.get_or_init(async || {
+        let client_proc = Proc::direct_with_default(
+            ChannelAddr::any(channel::ChannelTransport::Unix),
+            "mesh_root_client_proc".into(),
+            router::global().clone().boxed(),
+        )
+        .await
+        .unwrap();
+
+        // Make this proc reachable through the global router, so that we can use the
+        // same client in both direct-addressed and ranked-addressed modes.
+        router::global().bind(client_proc.proc_id().clone().into(), client_proc.clone());
 
         let (client, handle) = client_proc
             .instance("client")
@@ -180,8 +188,7 @@ pub fn global_root_client() -> &'static Instance<()> {
         );
 
         (client, handle)
-    });
-    instance
+    }).await.0
 }
 
 type ActorEventRouter = Arc<DashMap<ActorMeshName, mpsc::UnboundedSender<ActorSupervisionEvent>>>;

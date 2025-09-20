@@ -7,7 +7,7 @@
 # pyre-unsafe
 
 import pickle
-from typing import Any, Callable, cast, Coroutine, Iterable, List, TYPE_CHECKING
+from typing import Any, Callable, cast, Coroutine, Iterable, List, TYPE_CHECKING, Union
 
 import monarch
 import pytest
@@ -28,10 +28,13 @@ from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monar
 if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
 
-from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox, PortReceiver
+from monarch._rust_bindings.monarch_hyperactor.mailbox import PortReceiver
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
-from monarch._src.actor.actor_mesh import Context
+from monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh import (
+    ProcMesh as ProcMeshV1,
+)
+from monarch._src.actor.actor_mesh import Context, context, Instance
 
 
 def run_on_tokio(
@@ -49,6 +52,16 @@ async def allocate() -> ProcMesh:
     allocator = monarch.LocalAllocator()
     alloc = await allocator.allocate_nonblocking(spec)
     proc_mesh = await ProcMesh.allocate_nonblocking(alloc)
+    return proc_mesh
+
+
+async def allocate_v1() -> ProcMeshV1:
+    spec = AllocSpec(AllocConstraints(), replicas=3, hosts=8, gpus=8)
+    allocator = monarch.LocalAllocator()
+    alloc = await allocator.allocate_nonblocking(spec)
+    proc_mesh = await ProcMeshV1.allocate_nonblocking(
+        context().actor_instance._as_rust(), alloc, "proc_mesh"
+    )
     return proc_mesh
 
 
@@ -88,35 +101,51 @@ class MyActor:
 # TODO - re-enable after resolving T232206970
 @pytest.mark.oss_skip
 @pytest.mark.timeout(30)
-async def test_bind_and_pickling() -> None:
+@pytest.mark.parametrize("use_v1", [True, False])
+async def test_bind_and_pickling(use_v1: bool) -> None:
     @run_on_tokio
     async def run() -> None:
-        proc_mesh = await allocate()
-        actor_mesh = await proc_mesh.spawn_nonblocking("test", MyActor)
+        if not use_v1:
+            proc_mesh = await allocate()
+            actor_mesh = await proc_mesh.spawn_nonblocking("test", MyActor)
+        else:
+            proc_mesh = await allocate_v1()
+            actor_mesh = await proc_mesh.spawn_nonblocking(
+                context().actor_instance._as_rust(), "test", MyActor
+            )
         pickle.dumps(actor_mesh)
 
-        actor_mesh_ref = actor_mesh.new_with_shape(proc_mesh.shape)
+        actor_mesh_ref = actor_mesh.new_with_region(proc_mesh.region)
         obj = pickle.dumps(actor_mesh_ref)
-        unpickled = pickle.loads(obj)
-        await proc_mesh.stop_nonblocking()
+        pickle.loads(obj)
+        if not use_v1:
+            # TODO: proc mesh stop not yet supported for v1
+            await proc_mesh.stop_nonblocking()
 
     run()
 
 
-async def spawn_actor_mesh(proc_mesh: ProcMesh) -> PythonActorMesh:
-    actor_mesh = await proc_mesh.spawn_nonblocking("test", MyActor)
+async def spawn_actor_mesh(proc_mesh: Union[ProcMesh, ProcMeshV1]) -> PythonActorMesh:
+    if isinstance(proc_mesh, ProcMeshV1):
+        actor_mesh = await proc_mesh.spawn_nonblocking(
+            context().actor_instance._as_rust(), "test", MyActor
+        )
+    else:
+        actor_mesh = await proc_mesh.spawn_nonblocking("test", MyActor)
     # init actors to record their root ranks
     receiver: PortReceiver
-    handle, receiver = proc_mesh.client.open_port()
+    instance = context().actor_instance
+    client = instance._mailbox
+    handle, receiver = client.open_port()
     port_ref = handle.bind()
 
     message = PythonMessage(
         PythonMessageKind.CallMethod(MethodSpecifier.Init(), port_ref),
         pickle.dumps(None),
     )
-    actor_mesh.cast(message, "all", proc_mesh.client)
+    actor_mesh.cast(message, "all", instance._as_rust())
     # wait for init to complete
-    for _ in range(len(proc_mesh.shape.ndslice)):
+    for _ in range(len(proc_mesh.region.as_shape().ndslice)):
         await receiver.recv_task()
 
     return actor_mesh
@@ -124,19 +153,19 @@ async def spawn_actor_mesh(proc_mesh: ProcMesh) -> PythonActorMesh:
 
 async def cast_to_call(
     actor_mesh: PythonActorMesh,
-    mailbox: Mailbox,
+    instance: Instance,
     message: PythonMessage,
 ) -> None:
-    actor_mesh.cast(message, "all", mailbox)
+    actor_mesh.cast(message, "all", instance._as_rust())
 
 
 async def verify_cast_to_call(
     actor_mesh: PythonActorMesh,
-    mailbox: Mailbox,
+    instance: Instance,
     root_ranks: List[int],
 ) -> None:
     receiver: PortReceiver
-    handle, receiver = mailbox.open_port()
+    handle, receiver = instance._mailbox.open_port()
     port_ref = handle.bind()
 
     # Now send the real message
@@ -144,7 +173,7 @@ async def verify_cast_to_call(
         PythonMessageKind.CallMethod(MethodSpecifier.ReturnsResponse("echo"), port_ref),
         pickle.dumps("ping"),
     )
-    await cast_to_call(actor_mesh, mailbox, message)
+    await cast_to_call(actor_mesh, instance, message)
 
     rcv_ranks = []
     for _ in range(len(root_ranks)):
@@ -171,14 +200,21 @@ async def verify_cast_to_call(
 # TODO - re-enable after resolving T232206970
 @pytest.mark.oss_skip
 @pytest.mark.timeout(30)
-async def test_cast_handle() -> None:
+@pytest.mark.parametrize("use_v1", [True, False])
+async def test_cast_handle(use_v1: bool) -> None:
     @run_on_tokio
     async def run() -> None:
-        proc_mesh = await allocate()
+        if use_v1:
+            proc_mesh = await allocate_v1()
+        else:
+            proc_mesh = await allocate()
         actor_mesh = await spawn_actor_mesh(proc_mesh)
-        await verify_cast_to_call(actor_mesh, proc_mesh.client, list(range(3 * 8 * 8)))
+        await verify_cast_to_call(
+            actor_mesh, context().actor_instance, list(range(3 * 8 * 8))
+        )
 
-        await proc_mesh.stop_nonblocking()
+        if not use_v1:
+            await proc_mesh.stop_nonblocking()
 
     run()
 
@@ -186,16 +222,20 @@ async def test_cast_handle() -> None:
 # TODO - re-enable after resolving T232206970
 @pytest.mark.oss_skip
 @pytest.mark.timeout(30)
-async def test_cast_ref() -> None:
+@pytest.mark.parametrize("use_v1", [True, False])
+async def test_cast_ref(use_v1: bool) -> None:
     @run_on_tokio
     async def run() -> None:
-        proc_mesh = await allocate()
+        if use_v1:
+            proc_mesh = await allocate_v1()
+        else:
+            proc_mesh = await allocate()
         actor_mesh = await spawn_actor_mesh(proc_mesh)
-        actor_mesh_ref = actor_mesh.new_with_shape(proc_mesh.shape)
+        actor_mesh_ref = actor_mesh.new_with_region(proc_mesh.region)
         await verify_cast_to_call(
-            actor_mesh_ref, proc_mesh.client, list(range(3 * 8 * 8))
+            actor_mesh_ref, context().actor_instance, list(range(3 * 8 * 8))
         )
-
-        await proc_mesh.stop_nonblocking()
+        if not use_v1:
+            await proc_mesh.stop_nonblocking()
 
     run()

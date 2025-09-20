@@ -30,7 +30,9 @@ use ndslice::view;
 use ndslice::view::Region;
 use ndslice::view::View;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
+use serde::Serializer;
 
 use crate::actor_mesh as v0_actor_mesh;
 use crate::comm::multicast;
@@ -70,6 +72,18 @@ impl<A: RemoteActor> Deref for ActorMesh<A> {
     }
 }
 
+/// Manual implementation of Clone because `A` doesn't need to implement Clone
+/// but we still want to be able to clone the ActorMesh.
+impl<A: RemoteActor> Clone for ActorMesh<A> {
+    fn clone(&self) -> Self {
+        Self {
+            proc_mesh: self.proc_mesh.clone(),
+            name: self.name.clone(),
+            current_ref: self.current_ref.clone(),
+        }
+    }
+}
+
 /// Influences paging behavior for the lazy cache. Smaller pages
 /// reduce over-allocation for sparse access; larger pages reduce the
 /// number of heap allocations for contiguous scans.
@@ -93,7 +107,6 @@ impl<A: RemoteActor> Page<A> {
 }
 
 /// A reference to a stable snapshot of an [`ActorMesh`].
-#[derive(Serialize, Deserialize)]
 pub struct ActorMeshRef<A: RemoteActor> {
     proc_mesh: ProcMeshRef,
     name: Name,
@@ -107,10 +120,8 @@ pub struct ActorMeshRef<A: RemoteActor> {
     /// - A `Page<A>` is a boxed slice of `OnceCell<ActorRef<A>>`,
     ///   i.e. the actual storage for actor references within that
     ///   page.
-    #[serde(skip, default)]
     pages: OnceCell<Vec<OnceCell<Box<Page<A>>>>>,
     // Page size knob (not serialize; defaults after deserialize).
-    #[serde(skip, default)]
     page_size: usize,
 
     _phantom: PhantomData<A>,
@@ -273,6 +284,28 @@ impl<A: RemoteActor> fmt::Debug for ActorMeshRef<A> {
             .field("name", &self.name)
             .field("page_size", &self.page_size)
             .finish_non_exhaustive() // No print cache.
+    }
+}
+
+// Implement Serialize manually, without requiring A: Serialize
+impl<A: RemoteActor> Serialize for ActorMeshRef<A> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize only the fields that don't depend on A
+        (&self.proc_mesh, &self.name).serialize(serializer)
+    }
+}
+
+// Implement Deserialize manually, without requiring A: Deserialize
+impl<'de, A: RemoteActor> Deserialize<'de> for ActorMeshRef<A> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let (proc_mesh, name) = <(ProcMeshRef, Name)>::deserialize(deserializer)?;
+        Ok(ActorMeshRef::with_page_size(name, proc_mesh, DEFAULT_PAGE))
     }
 }
 

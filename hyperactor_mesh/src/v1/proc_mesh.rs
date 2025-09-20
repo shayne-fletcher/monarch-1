@@ -145,7 +145,7 @@ impl ProcRef {
 }
 
 /// A mesh of processes.
-#[derive(Named)]
+#[derive(Debug, Named)]
 pub struct ProcMesh {
     name: Name,
     allocation: ProcMeshAllocation,
@@ -225,7 +225,7 @@ impl ProcMesh {
     /// Allocate a new ProcMesh from the provided alloc.
     pub async fn allocate(
         cx: &impl context::Actor,
-        mut alloc: impl Alloc + Send + Sync + 'static,
+        mut alloc: Box<dyn Alloc + Send + Sync + 'static>,
         name: &str,
     ) -> v1::Result<Self> {
         let running = alloc.initialize().await?;
@@ -304,7 +304,7 @@ impl ProcMesh {
             cx,
             Name::new(name),
             ProcMeshAllocation::Allocated {
-                alloc: Box::new(alloc),
+                alloc,
                 ranks: Arc::new(ranks),
             },
             true, // alloc-based meshes support comm actors
@@ -456,8 +456,7 @@ impl ProcMeshRef {
     }
 
     /// Spawn an actor on all of the procs in this mesh, returning a new ActorMesh.
-    #[allow(dead_code)]
-    pub(crate) async fn spawn<A: Actor + RemoteActor>(
+    pub async fn spawn<A: Actor + RemoteActor>(
         &self,
         cx: &impl context::Actor,
         name: &str,

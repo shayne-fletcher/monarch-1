@@ -943,6 +943,21 @@ impl From<Extent> for Region {
     }
 }
 
+impl From<&Shape> for Region {
+    fn from(s: &Shape) -> Self {
+        Region {
+            labels: s.labels().to_vec(),
+            slice: s.slice().clone(),
+        }
+    }
+}
+
+impl From<Shape> for Region {
+    fn from(s: Shape) -> Self {
+        Region::from(&s)
+    }
+}
+
 /// Formats a `Region` in a compact rectangular syntax:
 /// ```text
 /// [offset+]label=size/stride[,label=size/stride,...]

@@ -6,18 +6,13 @@
 
 # pyre-strict
 
-from typing import AsyncIterator, final, NoReturn, Optional, Protocol
+from typing import final, Optional, Protocol
 
 from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
-from monarch._rust_bindings.monarch_hyperactor.mailbox import (
-    Mailbox,
-    OncePortReceiver,
-    PortReceiver,
-)
+from monarch._rust_bindings.monarch_hyperactor.context import Instance
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
-from monarch._rust_bindings.monarch_hyperactor.selection import Selection
-from monarch._rust_bindings.monarch_hyperactor.shape import Shape
+from monarch._rust_bindings.monarch_hyperactor.shape import Region
 from typing_extensions import Self
 
 class ActorMeshProtocol(Protocol):
@@ -29,9 +24,9 @@ class ActorMeshProtocol(Protocol):
         self,
         message: PythonMessage,
         selection: str,
-        mailbox: Mailbox,
+        instance: Instance,
     ) -> None: ...
-    def new_with_shape(self, shape: Shape) -> Self: ...
+    def new_with_region(self, region: Region) -> Self: ...
     def supervision_event(self) -> "Optional[Shared[Exception]]": ...
     def stop(self) -> PythonTask[None]: ...
     def initialized(self) -> PythonTask[None]: ...
