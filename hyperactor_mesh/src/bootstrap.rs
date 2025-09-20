@@ -37,6 +37,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
+use crate::logging::create_log_writers;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::v1;
 
@@ -217,39 +218,30 @@ impl ProcManager for BootstrapProcManager {
         // TODO: add graceful shutdown (SIGTERM → wait → SIGKILL) via
         // terminate_all().
 
+        let log_channel = ChannelAddr::any(ChannelTransport::Unix);
+        cmd.env(BOOTSTRAP_LOG_CHANNEL, log_channel.to_string());
+
         let mut child = cmd
             .spawn()
             .map_err(|e| HostError::ProcessSpawnFailure(proc_id.clone(), e))?;
-        // Drain stdout/stderr so child processes don't block on full
-        // pipe buffers. Temporary: will be replaced with proper log
-        // forwarding in a later diff.
-        // TODO: replace with structured log forwarding (tee + tail)
-        // like v0.
         let pid = child.id().unwrap_or_default();
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let proc_tag_out = proc_id.to_string();
-        let proc_tag_err = proc_id.to_string();
-        if let Some(out) = stdout {
+
+        // Writers: tee to local (stdout/stderr or file) + send over
+        // channel
+        let (mut out_writer, mut err_writer) = create_log_writers(0, log_channel.clone(), pid)
+            .unwrap_or_else(|_| (Box::new(tokio::io::stdout()), Box::new(tokio::io::stderr())));
+
+        if let Some(mut out) = child.stdout.take() {
             tokio::spawn(async move {
-                use tokio::io::AsyncBufReadExt;
-                use tokio::io::BufReader;
-                let mut r = BufReader::new(out).lines();
-                while let Ok(Some(line)) = r.next_line().await {
-                    tracing::info!(target = "process.stdout", %pid, proc=%proc_tag_out, "{}", line);
-                }
+                let _ = tokio::io::copy(&mut out, &mut out_writer).await;
             });
         }
-        if let Some(err) = stderr {
+        if let Some(mut err) = child.stderr.take() {
             tokio::spawn(async move {
-                use tokio::io::AsyncBufReadExt;
-                use tokio::io::BufReader;
-                let mut r = BufReader::new(err).lines();
-                while let Ok(Some(line)) = r.next_line().await {
-                    tracing::warn!(target = "process.stderr", %pid, proc=%proc_tag_err, "{}", line);
-                }
+                let _ = tokio::io::copy(&mut err, &mut err_writer).await;
             });
         }
+
         // Retain handle for lifecycle mgt.
         {
             let mut children = self.children.lock().await;
@@ -521,5 +513,83 @@ mod tests {
 
         // On non-Linux, absence of panics/hangs is the signal; PID
         // probing is platform-specific.
+    }
+
+    #[tokio::test]
+    async fn test_v1_child_logging() {
+        use std::time::Duration;
+
+        use hyperactor::ActorRef;
+        use hyperactor::channel::ChannelAddr;
+        use hyperactor::channel::ChannelTransport;
+        use hyperactor::channel::{self};
+        use hyperactor::data::Serialized;
+        use hyperactor::id;
+        use hyperactor::mailbox::BoxedMailboxSender;
+        use hyperactor::mailbox::DialMailboxRouter;
+        use hyperactor::mailbox::MailboxServer;
+        use hyperactor::proc::Proc;
+        use tokio::time::timeout;
+
+        use crate::bootstrap::BOOTSTRAP_LOG_CHANNEL;
+        use crate::logging::LogClientActor;
+        use crate::logging::LogClientMessageClient;
+        use crate::logging::LogForwardActor;
+        use crate::logging::LogMessage;
+        use crate::logging::OutputTarget;
+        use crate::logging::test_tap;
+
+        let router = DialMailboxRouter::new();
+        let (proc_addr, proc_rx) = channel::serve(ChannelAddr::any(ChannelTransport::Unix))
+            .await
+            .unwrap();
+        let proc = Proc::new(id!(client[0]), BoxedMailboxSender::new(router.clone()));
+        proc.clone().serve(proc_rx);
+        router.bind(id!(client[0]).into(), proc_addr.clone());
+        let (client, _handle) = proc.instance("client").unwrap();
+
+        let (tap_tx, mut tap_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        test_tap::install(tap_tx);
+
+        let log_channel = ChannelAddr::any(ChannelTransport::Unix);
+        // SAFETY: unit-test scoped env var
+        unsafe {
+            std::env::set_var(BOOTSTRAP_LOG_CHANNEL, log_channel.to_string());
+        }
+
+        // Spawn the log client and disable aggregation (immediate
+        // print + tap push).
+        let log_client: ActorRef<LogClientActor> =
+            proc.spawn("log_client", ()).await.unwrap().bind();
+        log_client.set_aggregate(&client, None).await.unwrap();
+
+        // Spawn the forwarder in this proc (it will serve BOOTSTRAP_LOG_CHANNEL).
+        let _log_forwarder: ActorRef<LogForwardActor> = proc
+            .spawn("log_forwarder", log_client.clone())
+            .await
+            .unwrap()
+            .bind();
+
+        // Send a fake log message as if it came from the proc
+        // manager's writer.
+        let tx = channel::dial::<LogMessage>(log_channel.clone()).unwrap();
+        tx.post(LogMessage::Log {
+            hostname: "testhost".into(),
+            pid: 12345,
+            output_target: OutputTarget::Stdout,
+            payload: Serialized::serialize(&"hello from child".to_string()).unwrap(),
+        });
+
+        // Assert we see it via the tap.
+        // Give it up to 2 seconds to travel through forwarder ->
+        // client -> print_log_line -> tap.
+        let line = timeout(Duration::from_secs(2), tap_rx.recv())
+            .await
+            .expect("timed out waiting for log line")
+            .expect("tap channel closed unexpectedly");
+        assert!(
+            line.contains("hello from child"),
+            "log line did not appear via LogClientActor; got: {line}"
+        );
     }
 }
