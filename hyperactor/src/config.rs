@@ -21,6 +21,8 @@ use std::sync::LazyLock;
 use std::sync::RwLock;
 use std::time::Duration;
 
+use shell_quote::QuoteRefExt;
+
 use crate::attrs::AttrKeyInfo;
 use crate::attrs::Attrs;
 use crate::attrs::SerializableValue;
@@ -90,40 +92,52 @@ declare_attrs! {
 /// Load configuration from environment variables
 pub fn from_env() -> Attrs {
     let mut config = Attrs::new();
+    let mut output = String::new();
+
+    fn export(env_var: &str, value: Option<&dyn SerializableValue>) -> String {
+        let env_var: String = env_var.quoted(shell_quote::Bash);
+        let value: String = value
+            .map_or("".to_string(), SerializableValue::display)
+            .quoted(shell_quote::Bash);
+        format!("export {}={}\n", env_var, value)
+    }
 
     for key in inventory::iter::<AttrKeyInfo>() {
         let Some(env_var) = key.meta.get(CONFIG_ENV_VAR) else {
             continue;
         };
         let Ok(val) = env::var(env_var) else {
-            tracing::info!(
-                "config {}={}",
-                key.name,
-                key.default
-                    .map_or("<undefined>".to_string(), SerializableValue::display)
-            );
-            // Just use the default
+            // Default value
+            output.push_str("# ");
+            output.push_str(&export(env_var, key.default));
             continue;
         };
 
         match (key.parse)(&val) {
             Err(e) => {
                 tracing::error!(
-                    "config {}={} (failed to override from value \"{}\" in ${}: {})",
+                    "failed to override config key {} from value \"{}\" in ${}: {})",
                     key.name,
-                    key.default
-                        .map_or("<undefined>".to_string(), SerializableValue::display),
                     val,
                     env_var,
                     e
                 );
+                output.push_str("# ");
+                output.push_str(&export(env_var, key.default));
             }
             Ok(parsed) => {
-                tracing::info!("config {}={} (overridden)", key.name, parsed.display(),);
+                output.push_str("# ");
+                output.push_str(&export(env_var, key.default));
+                output.push_str(&export(env_var, Some(parsed.as_ref())));
                 config.insert_value_by_name_unchecked(key.name, parsed);
             }
         }
     }
+
+    tracing::info!(
+        "loaded configuration from environment:\n{}",
+        output.trim_end()
+    );
 
     config
 }
@@ -280,6 +294,10 @@ pub mod global {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use indoc::indoc;
+
     use super::*;
 
     const CODEC_MAX_FRAME_LENGTH_DEFAULT: usize = 10 * 1024 * 1024 * 1024;
@@ -322,25 +340,42 @@ mod tests {
             Duration::from_millis(500)
         ); // Default value
 
-        let lines = vec![
-            "config hyperactor::config::message_latency_sampling_rate=0.01",
-            "config hyperactor::config::channel_net_rx_buffer_full_check_interval=5s",
-            "config hyperactor::config::channel_multipart=true",
-            "config hyperactor::config::default_encoding=serde_multipart",
-            "config hyperactor::config::remote_allocator_heartbeat_interval=5s",
-            "config hyperactor::config::stop_actor_timeout=1s",
-            "config hyperactor::config::split_max_buffer_size=5",
-            "config hyperactor::config::message_ttl_default=64",
-            "config hyperactor::config::message_ack_every_n_messages=1000",
-            "config hyperactor::config::message_ack_time_interval=500ms",
-            "config hyperactor::config::process_exit_timeout=10s",
-            "config hyperactor::config::message_delivery_timeout=1m (overridden)",
-            "config hyperactor::config::codec_max_frame_length=1024 (overridden)",
-        ];
+        let expected_lines: HashSet<&str> = indoc! {"
+            # export HYPERACTOR_MESSAGE_LATENCY_SAMPLING_RATE=0.01
+            # export HYPERACTOR_CHANNEL_NET_RX_BUFFER_FULL_CHECK_INTERVAL=5s
+            # export HYPERACTOR_CHANNEL_MULTIPART=true
+            # export HYPERACTOR_DEFAULT_ENCODING=serde_multipart
+            # export HYPERACTOR_REMOTE_ALLOCATOR_HEARTBEAT_INTERVAL=5s
+            # export HYPERACTOR_STOP_ACTOR_TIMEOUT=1s
+            # export HYPERACTOR_SPLIT_MAX_BUFFER_SIZE=5
+            # export HYPERACTOR_MESSAGE_TTL_DEFAULT=64
+            # export HYPERACTOR_MESSAGE_ACK_EVERY_N_MESSAGES=1000
+            # export HYPERACTOR_MESSAGE_ACK_TIME_INTERVAL=500ms
+            # export HYPERACTOR_PROCESS_EXIT_TIMEOUT=10s
+            # export HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT=30s
+            export HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT=1m
+            # export HYPERACTOR_CODEC_MAX_FRAME_LENGTH=10737418240
+            export HYPERACTOR_CODEC_MAX_FRAME_LENGTH=1024
+        "}
+        .trim_end()
+        .lines()
+        .collect();
 
-        for line in lines {
-            assert!(logs_contain(line));
-        }
+        // For some reason, logs_contaqin fails to find these lines individually
+        // (possibly to do with the fact that we have newlines in our log entries);
+        // instead, we test it manually.
+        logs_assert(|logged_lines: &[&str]| {
+            let mut expected_lines = expected_lines.clone(); // this is an `Fn` closure
+            for logged in logged_lines {
+                expected_lines.remove(logged);
+            }
+
+            if expected_lines.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("missing log lines: {:?}", expected_lines))
+            }
+        });
 
         // Clean up
         // SAFETY: TODO: Audit that the environment access only happens in single-threaded code.
