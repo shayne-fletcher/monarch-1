@@ -21,50 +21,68 @@ use std::sync::LazyLock;
 use std::sync::RwLock;
 use std::time::Duration;
 
+use crate::attrs::AttrKeyInfo;
 use crate::attrs::Attrs;
 use crate::attrs::declare_attrs;
 use crate::data::Encoding;
 
 // Declare configuration keys using the new attrs system with defaults
 declare_attrs! {
+    /// This is a meta-attribute specifying the environment variable used by the configuration
+    /// key.
+    pub attr CONFIG_ENV_VAR: String;
+
     /// Maximum frame length for codec
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_CODEC_MAX_FRAME_LENGTH".to_string())
     pub attr CODEC_MAX_FRAME_LENGTH: usize = 10 * 1024 * 1024 * 1024; // 10 GiB
 
     /// Message delivery timeout
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT".to_string())
     pub attr MESSAGE_DELIVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
     /// Timeout used by allocator for stopping a proc.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_PROCESS_EXIT_TIMEOUT".to_string())
     pub attr PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
     /// Message acknowledgment interval
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESSAGE_ACK_TIME_INTERVAL".to_string())
     pub attr MESSAGE_ACK_TIME_INTERVAL: Duration = Duration::from_millis(500);
 
     /// Number of messages after which to send an acknowledgment
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESSAGE_ACK_EVERY_N_MESSAGES".to_string())
     pub attr MESSAGE_ACK_EVERY_N_MESSAGES: u64 = 1000;
 
     /// Default hop Time-To-Live for message envelopes.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESSAGE_TTL_DEFAULT".to_string())
     pub attr MESSAGE_TTL_DEFAULT : u8 = 64;
 
     /// Maximum buffer size for split port messages
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_SPLIT_MAX_BUFFER_SIZE".to_string())
     pub attr SPLIT_MAX_BUFFER_SIZE: usize = 5;
 
     /// Timeout used by proc mesh for stopping an actor.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_STOP_ACTOR_TIMEOUT".to_string())
     pub attr STOP_ACTOR_TIMEOUT: Duration = Duration::from_secs(1);
 
     /// Heartbeat interval for remote allocator
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_REMOTE_ALLOCATOR_HEARTBEAT_INTERVAL".to_string())
     pub attr REMOTE_ALLOCATOR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
     /// The default encoding to be used.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_DEFAULT_ENCODING".to_string())
     pub attr DEFAULT_ENCODING: Encoding = Encoding::Multipart;
 
     /// Whether to use multipart encoding for network channel communications.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_CHANNEL_MULTIPART".to_string())
     pub attr CHANNEL_MULTIPART: bool = true;
 
     /// How often to check for full MSPC channel on NetRx.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_CHANNEL_NET_RX_BUFFER_FULL_CHECK_INTERVAL".to_string())
     pub attr CHANNEL_NET_RX_BUFFER_FULL_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
     /// Sampling rate for logging message latency
     /// Set to 0.01 for 1% sampling, 0.1 for 10% sampling, 0.90 for 90% sampling, etc.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESSAGE_LATENCY_SAMPLING_RATE".to_string())
     pub attr MESSAGE_LATENCY_SAMPLING_RATE: f32 = 0.01;
 }
 
@@ -72,78 +90,29 @@ declare_attrs! {
 pub fn from_env() -> Attrs {
     let mut config = Attrs::new();
 
-    // Load codec max frame length
-    if let Ok(val) = env::var("HYPERACTOR_CODEC_MAX_FRAME_LENGTH") {
-        if let Ok(parsed) = val.parse::<usize>() {
-            tracing::info!("overriding CODEC_MAX_FRAME_LENGTH to {}", parsed);
-            config[CODEC_MAX_FRAME_LENGTH] = parsed;
-        }
-    }
+    for key in inventory::iter::<AttrKeyInfo>() {
+        let Some(env_var) = key.meta.get(CONFIG_ENV_VAR) else {
+            continue;
+        };
+        let Ok(val) = env::var(env_var) else {
+            // Just use the default
+            continue;
+        };
 
-    // Load message delivery timeout
-    if let Ok(val) = env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT_SECS") {
-        if let Ok(parsed) = val.parse::<u64>() {
-            tracing::info!("overriding MESSAGE_DELIVERY_TIMEOUT to {}", parsed);
-            config[MESSAGE_DELIVERY_TIMEOUT] = Duration::from_secs(parsed);
-        }
-    }
-
-    // Load message ack time interval
-    if let Ok(val) = env::var("HYPERACTOR_MESSAGE_ACK_TIME_INTERVAL_MS") {
-        if let Ok(parsed) = val.parse::<u64>() {
-            tracing::info!("overriding MESSAGE_ACK_TIME_INTERVAL to {}", parsed);
-            config[MESSAGE_ACK_TIME_INTERVAL] = Duration::from_millis(parsed);
-        }
-    }
-
-    // Load message ttl default
-    if let Ok(val) = env::var("HYPERACTOR_MESSAGE_TTL_DEFAULT") {
-        if let Ok(parsed) = val.parse::<u8>() {
-            tracing::info!("overriding MESSAGE_TTL_DEFAULT to {}", parsed);
-            config[MESSAGE_TTL_DEFAULT] = parsed;
-        }
-    }
-
-    // Load message ack every n messages
-    if let Ok(val) = env::var("HYPERACTOR_MESSAGE_ACK_EVERY_N_MESSAGES") {
-        if let Ok(parsed) = val.parse::<u64>() {
-            tracing::info!("overriding MESSAGE_ACK_EVERY_N_MESSAGES to {}", parsed);
-            config[MESSAGE_ACK_EVERY_N_MESSAGES] = parsed;
-        }
-    }
-
-    // Load split max buffer size
-    if let Ok(val) = env::var("HYPERACTOR_SPLIT_MAX_BUFFER_SIZE") {
-        if let Ok(parsed) = val.parse::<usize>() {
-            tracing::info!("overriding SPLIT_MAX_BUFFER_SIZE to {}", parsed);
-            config[SPLIT_MAX_BUFFER_SIZE] = parsed;
-        }
-    }
-
-    // Load remote allocator heartbeat interval
-    if let Ok(val) = env::var("HYPERACTOR_REMOTE_ALLOCATOR_HEARTBEAT_INTERVAL_SECS") {
-        if let Ok(parsed) = val.parse::<u64>() {
-            tracing::info!(
-                "overriding REMOTE_ALLOCATOR_HEARTBEAT_INTERVAL to {}",
-                parsed
-            );
-            config[REMOTE_ALLOCATOR_HEARTBEAT_INTERVAL] = Duration::from_secs(parsed);
-        }
-    }
-
-    // Load default encoding
-    if let Ok(val) = env::var("HYPERACTOR_DEFAULT_ENCODING") {
-        if let Ok(parsed) = val.parse::<Encoding>() {
-            tracing::info!("overriding DEFAULT_ENCODING to {}", parsed);
-            config[DEFAULT_ENCODING] = parsed;
-        }
-    }
-
-    // Load channel multipart.
-    if let Ok(val) = env::var("HYPERACTOR_CHANNEL_MULTIPART") {
-        if let Ok(parsed) = val.parse::<bool>() {
-            tracing::info!("overriding CHANNEL_MULTIPART to {}", parsed);
-            config[CHANNEL_MULTIPART] = parsed;
+        match (key.parse)(&val) {
+            Err(e) => {
+                tracing::error!(
+                    "configuration key {}: could not parse value \"{}\" from ${}: {}",
+                    key.name,
+                    val,
+                    env_var,
+                    e
+                );
+            }
+            Ok(parsed) => {
+                tracing::info!("configuration key {}={}", key.name, parsed.display());
+                config.insert_value_by_name_unchecked(key.name, parsed);
+            }
         }
     }
 
@@ -163,37 +132,6 @@ pub fn to_yaml<P: AsRef<Path>>(attrs: &Attrs, path: P) -> Result<(), anyhow::Err
     let yaml = serde_yaml::to_string(attrs)?;
     std::fs::write(path, yaml)?;
     Ok(())
-}
-
-/// Merge with another configuration, with the other taking precedence
-pub fn merge(config: &mut Attrs, other: &Attrs) {
-    if other.contains_key(CODEC_MAX_FRAME_LENGTH) {
-        config[CODEC_MAX_FRAME_LENGTH] = other[CODEC_MAX_FRAME_LENGTH];
-    }
-    if other.contains_key(MESSAGE_DELIVERY_TIMEOUT) {
-        config[MESSAGE_DELIVERY_TIMEOUT] = other[MESSAGE_DELIVERY_TIMEOUT];
-    }
-    if other.contains_key(MESSAGE_ACK_TIME_INTERVAL) {
-        config[MESSAGE_ACK_TIME_INTERVAL] = other[MESSAGE_ACK_TIME_INTERVAL];
-    }
-    if other.contains_key(MESSAGE_ACK_EVERY_N_MESSAGES) {
-        config[MESSAGE_ACK_EVERY_N_MESSAGES] = other[MESSAGE_ACK_EVERY_N_MESSAGES];
-    }
-    if other.contains_key(MESSAGE_TTL_DEFAULT) {
-        config[MESSAGE_TTL_DEFAULT] = other[MESSAGE_TTL_DEFAULT];
-    }
-    if other.contains_key(SPLIT_MAX_BUFFER_SIZE) {
-        config[SPLIT_MAX_BUFFER_SIZE] = other[SPLIT_MAX_BUFFER_SIZE];
-    }
-    if other.contains_key(REMOTE_ALLOCATOR_HEARTBEAT_INTERVAL) {
-        config[REMOTE_ALLOCATOR_HEARTBEAT_INTERVAL] = other[REMOTE_ALLOCATOR_HEARTBEAT_INTERVAL];
-    }
-    if other.contains_key(DEFAULT_ENCODING) {
-        config[DEFAULT_ENCODING] = other[DEFAULT_ENCODING];
-    }
-    if other.contains_key(CHANNEL_MULTIPART) {
-        config[CHANNEL_MULTIPART] = other[CHANNEL_MULTIPART];
-    }
 }
 
 /// Global configuration functions
@@ -298,7 +236,7 @@ pub mod global {
         ) -> ConfigValueGuard<'a, T> {
             let orig = {
                 let mut config = CONFIG.write().unwrap();
-                let orig = config.take_value(key);
+                let orig = config.remove_value(key);
                 config.set(key, value);
                 orig
             };
@@ -323,7 +261,7 @@ pub mod global {
         fn drop(&mut self) {
             let mut config = CONFIG.write().unwrap();
             if let Some(orig) = self.orig.take() {
-                config.restore_value(self.key, orig);
+                config.insert_value(self.key, orig);
             } else {
                 config.remove_value(self.key);
             }
@@ -363,7 +301,7 @@ mod tests {
         // SAFETY: TODO: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::set_var("HYPERACTOR_CODEC_MAX_FRAME_LENGTH", "1024") };
         // SAFETY: TODO: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT_SECS", "60") };
+        unsafe { std::env::set_var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT", "60s") };
 
         let config = from_env();
 
@@ -379,19 +317,6 @@ mod tests {
         unsafe { std::env::remove_var("HYPERACTOR_CODEC_MAX_FRAME_LENGTH") };
         // SAFETY: TODO: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT_SECS") };
-    }
-
-    #[test]
-    fn test_merge() {
-        let mut config1 = Attrs::new();
-        let mut config2 = Attrs::new();
-        config2[CODEC_MAX_FRAME_LENGTH] = 1024;
-        config2[MESSAGE_DELIVERY_TIMEOUT] = Duration::from_secs(60);
-
-        merge(&mut config1, &config2);
-
-        assert_eq!(config1[CODEC_MAX_FRAME_LENGTH], 1024);
-        assert_eq!(config1[MESSAGE_DELIVERY_TIMEOUT], Duration::from_secs(60));
     }
 
     #[test]

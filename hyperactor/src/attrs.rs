@@ -326,6 +326,8 @@ pub trait SerializableValue: Send + Sync {
     fn as_erased_serialize(&self) -> &dyn ErasedSerialize;
     /// Clone the underlying value, retaining dyn compatibility.
     fn cloned(&self) -> Box<dyn SerializableValue>;
+    /// Display the value
+    fn display(&self) -> String;
 }
 
 impl<T: AttrValue> SerializableValue for T {
@@ -343,6 +345,10 @@ impl<T: AttrValue> SerializableValue for T {
 
     fn cloned(&self) -> Box<dyn SerializableValue> {
         Box::new(self.clone())
+    }
+
+    fn display(&self) -> String {
+        self.display()
     }
 }
 
@@ -434,7 +440,7 @@ impl Attrs {
 
     // Internal methods for config guard support
     /// Take a value by key name, returning the boxed value if present
-    pub(crate) fn take_value<T: 'static>(
+    pub(crate) fn remove_value<T: 'static>(
         &mut self,
         key: Key<T>,
     ) -> Option<Box<dyn SerializableValue>> {
@@ -442,7 +448,7 @@ impl Attrs {
     }
 
     /// Restore a value by key name
-    pub(crate) fn restore_value<T: 'static>(
+    pub(crate) fn insert_value<T: 'static>(
         &mut self,
         key: Key<T>,
         value: Box<dyn SerializableValue>,
@@ -450,9 +456,13 @@ impl Attrs {
         self.values.insert(key.name, value);
     }
 
-    /// Remove a value by key name
-    pub(crate) fn remove_value<T: 'static>(&mut self, key: Key<T>) -> bool {
-        self.values.remove(key.name).is_some()
+    /// Restore a value by key name
+    pub(crate) fn insert_value_by_name_unchecked(
+        &mut self,
+        name: &'static str,
+        value: Box<dyn SerializableValue>,
+    ) {
+        self.values.insert(name, value);
     }
 }
 
