@@ -65,12 +65,40 @@
 //!
 //! assert_eq!(deserialized.get(TIMEOUT), Some(&Duration::from_secs(30)));
 //! ```
+//!
+//! ## Meta attributes
+//!
+//! An attribute can be assigned a set of attribute values,
+//! associated with the attribute key. These are specified by
+//! @-annotations in the `declare_attrs!` macro:
+//!
+//! ```
+//! use std::time::Duration;
+//!
+//! use hyperactor::attrs::Attrs;
+//! use hyperactor::attrs::declare_attrs;
+//!
+//! declare_attrs! {
+//!   /// Is experimental?
+//!   pub attr EXPERIMENTAL: bool;
+//!
+//!   /// Request timeout
+//!   @meta(EXPERIMENTAL = true)
+//!   pub attr TIMEOUT: Duration;
+//! }
+//!
+//! assert!(TIMEOUT.attrs().get(EXPERIMENTAL).unwrap());
+//! ```
+//!
+//! Meta attributes can be used to provide more generic functionality
+//! on top of the basic attributes. For example, a library can use
+//! meta-attributes to specify the behavior of an attribute.
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::ops::Index;
 use std::ops::IndexMut;
+use std::sync::LazyLock;
 
 use erased_serde::Deserializer as ErasedDeserializer;
 use erased_serde::Serialize as ErasedSerialize;
@@ -97,6 +125,8 @@ pub struct AttrKeyInfo {
     /// Deserializer function that deserializes directly from any deserializer
     pub deserialize_erased:
         fn(&mut dyn ErasedDeserializer) -> Result<Box<dyn SerializableValue>, erased_serde::Error>,
+    // Meta-attributes.
+    pub meta: &'static LazyLock<Attrs>,
 }
 
 inventory::collect!(AttrKeyInfo);
@@ -109,25 +139,20 @@ inventory::collect!(AttrKeyInfo);
 pub struct Key<T: 'static> {
     name: &'static str,
     default_value: Option<&'static T>,
-    _phantom: PhantomData<T>,
+    attrs: &'static LazyLock<Attrs>,
 }
 
 impl<T: Named + 'static> Key<T> {
     /// Creates a new key with the given name.
-    pub const fn new(name: &'static str) -> Self {
+    pub const fn new(
+        name: &'static str,
+        default_value: Option<&'static T>,
+        attrs: &'static LazyLock<Attrs>,
+    ) -> Self {
         Self {
             name,
-            default_value: None,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Creates a new key with the given name and default value reference.
-    pub const fn with_default(name: &'static str, default_value: &'static T) -> Self {
-        Self {
-            name,
-            default_value: Some(default_value),
-            _phantom: PhantomData,
+            default_value,
+            attrs,
         }
     }
 
@@ -149,6 +174,11 @@ impl<T: Named + 'static> Key<T> {
     /// Returns the type hash of the associated value type.
     pub fn typehash(&self) -> u64 {
         T::typehash()
+    }
+
+    /// The attributes associated with this key.
+    pub fn attrs(&self) -> &'static LazyLock<Attrs> {
+        self.attrs
     }
 }
 
@@ -547,21 +577,36 @@ macro_rules! const_ascii_lowercase {
 /// ```
 #[macro_export]
 macro_rules! declare_attrs {
-    // Handle multiple attribute keys with optional default values
+    // Handle multiple attribute keys with optional default values and optional meta attributes
     ($(
         $(#[$attr:meta])*
+        $(@meta($($meta_key:ident = $meta_value:expr),* $(,)?))*
         $vis:vis attr $name:ident: $type:ty $(= $default:expr)?;
     )*) => {
         $(
-            $crate::declare_attrs! { @single $(#[$attr])* ; $vis attr $name: $type $(= $default)?; }
+            $crate::declare_attrs! {
+                @single
+                $(@meta($($meta_key = $meta_value),*))*
+                $(#[$attr])* ;
+                $vis attr $name: $type $(= $default)?;
+            }
         )*
     };
 
-    // Handle single attribute key with default value
-    (@single $(#[$attr:meta])* ; $vis:vis attr $name:ident: $type:ty = $default:expr;) => {
+    // Handle single attribute key with default value and meta attributes
+    (@single $(@meta($($meta_key:ident = $meta_value:expr),* $(,)?))* $(#[$attr:meta])* ; $vis:vis attr $name:ident: $type:ty = $default:expr;) => {
         // Create a static default value
         $crate::paste! {
             static [<$name _DEFAULT>]: $type = $default;
+            static [<$name _META_ATTRS>]: std::sync::LazyLock<$crate::attrs::Attrs> =
+                std::sync::LazyLock::new(|| {
+                    #[allow(unused_mut)]
+                    let mut attrs = $crate::attrs::Attrs::new();
+                    $($(
+                        attrs.set($meta_key, $meta_value);
+                    )*)*
+                    attrs
+                });
         }
 
         $(#[$attr])*
@@ -569,9 +614,10 @@ macro_rules! declare_attrs {
             const FULL_NAME: &str = concat!(std::module_path!(), "::", stringify!($name));
             const LOWER_NAME: &str = $crate::const_ascii_lowercase!(FULL_NAME);
             $crate::paste! {
-                $crate::attrs::Key::with_default(
+                $crate::attrs::Key::new(
                     LOWER_NAME,
-                    &[<$name _DEFAULT>]
+                    Some(&[<$name _DEFAULT>]),
+                    $crate::paste! { &[<$name _META_ATTRS>] },
                 )
             }
         };
@@ -588,18 +634,34 @@ macro_rules! declare_attrs {
                     let value: $type = erased_serde::deserialize(deserializer)?;
                     Ok(Box::new(value) as Box<dyn $crate::attrs::SerializableValue>)
                 },
+                meta: $crate::paste! { &[<$name _META_ATTRS>] },
             }
         }
     };
 
-    // Handle single attribute key without default value
-    (@single $(#[$attr:meta])* ; $vis:vis attr $name:ident: $type:ty;) => {
+    // Handle single attribute key without default value but with meta attributes
+    (@single $(@meta($($meta_key:ident = $meta_value:expr),* $(,)?))* $(#[$attr:meta])* ; $vis:vis attr $name:ident: $type:ty;) => {
+        $crate::paste! {
+            static [<$name _META_ATTRS>]: std::sync::LazyLock<$crate::attrs::Attrs> =
+            std::sync::LazyLock::new(|| {
+                #[allow(unused_mut)]
+                let mut attrs = $crate::attrs::Attrs::new();
+                $($(
+                    // Note: This assumes meta keys are already declared somewhere
+                    // The user needs to ensure the meta keys exist and are in scope
+                    attrs.set($meta_key, $meta_value);
+                )*)*
+                attrs
+            });
+        }
+
         $(#[$attr])*
         $vis static $name: $crate::attrs::Key<$type> = {
             const FULL_NAME: &str = concat!(std::module_path!(), "::", stringify!($name));
             const LOWER_NAME: &str = $crate::const_ascii_lowercase!(FULL_NAME);
-            $crate::attrs::Key::new(LOWER_NAME)
+            $crate::attrs::Key::new(LOWER_NAME, None, $crate::paste! { &[<$name _META_ATTRS>] })
         };
+
 
         // Register the key for serialization
         $crate::submit! {
@@ -613,6 +675,7 @@ macro_rules! declare_attrs {
                     let value: $type = erased_serde::deserialize(deserializer)?;
                     Ok(Box::new(value) as Box<dyn $crate::attrs::SerializableValue>)
                 },
+                meta: $crate::paste! { &[<$name _META_ATTRS>] },
             }
         }
     };
@@ -629,6 +692,7 @@ mod tests {
     declare_attrs! {
         attr TEST_TIMEOUT: Duration;
         attr TEST_COUNT: u32;
+        @meta(TEST_COUNT = 42)
         attr TEST_NAME: String;
     }
 
@@ -653,6 +717,9 @@ mod tests {
         // Test len
         assert_eq!(attrs.len(), 3);
         assert!(!attrs.is_empty());
+
+        // Meta attribute:
+        assert_eq!(TEST_NAME.attrs().get(TEST_COUNT).unwrap(), &42u32);
     }
 
     #[test]
