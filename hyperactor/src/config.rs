@@ -217,6 +217,7 @@ pub mod global {
     use std::marker::PhantomData;
 
     use super::*;
+    use crate::attrs::AttrValue;
     use crate::attrs::Key;
 
     /// Global configuration instance, initialized from environment variables.
@@ -259,17 +260,7 @@ pub mod global {
 
     /// Get a key from the global configuration. Currently only available for Copy types.
     /// `get` assumes that the key has a default value.
-    pub fn get<
-        T: Send
-            + Sync
-            + Copy
-            + serde::Serialize
-            + serde::de::DeserializeOwned
-            + crate::data::Named
-            + 'static,
-    >(
-        key: Key<T>,
-    ) -> T {
+    pub fn get<T: AttrValue + Copy>(key: Key<T>) -> T {
         *CONFIG.read().unwrap().get(key).unwrap()
     }
 
@@ -300,16 +291,7 @@ pub mod global {
         /// Create a configuration override that will be restored when the guard is dropped.
         ///
         /// The returned guard must not outlive this ConfigLock.
-        pub fn override_key<
-            'a,
-            T: Send
-                + Sync
-                + serde::Serialize
-                + serde::de::DeserializeOwned
-                + crate::data::Named
-                + Clone
-                + 'static,
-        >(
+        pub fn override_key<'a, T: AttrValue>(
             &'a self,
             key: crate::attrs::Key<T>,
             value: T,

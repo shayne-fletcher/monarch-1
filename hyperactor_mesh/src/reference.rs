@@ -8,10 +8,13 @@
 
 use std::cmp::Ord;
 use std::cmp::PartialOrd;
+use std::fmt;
 use std::hash::Hash;
 use std::marker::PhantomData;
+use std::str::FromStr;
 
 use hyperactor::ActorRef;
+use hyperactor::AttrValue;
 use hyperactor::Named;
 use hyperactor::RemoteHandles;
 use hyperactor::RemoteMessage;
@@ -71,13 +74,46 @@ pub struct ProcMeshId(pub String);
     PartialOrd,
     Hash,
     Ord,
-    Named
+    Named,
+    AttrValue
 )]
 pub enum ActorMeshId {
     /// V0: Tuple of the ProcMesh ID and actor name.
     V0(ProcMeshId, String),
     /// V1: Name-based actor mesh ID.
     V1(Name),
+}
+
+impl fmt::Display for ActorMeshId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ActorMeshId::V0(proc_mesh_id, actor_name) => {
+                write!(f, "v0:{},{}", proc_mesh_id.0, actor_name)
+            }
+            ActorMeshId::V1(name) => write!(f, "{}", name),
+        }
+    }
+}
+
+impl FromStr for ActorMeshId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.starts_with("v0:") {
+            let parts: Vec<_> = s[3..].split(',').collect();
+            if parts.len() != 2 {
+                return Err(anyhow::anyhow!("invalid v0 actor mesh id: {}", s));
+            }
+            let proc_mesh_id = parts[0];
+            let actor_name = parts[1];
+            Ok(ActorMeshId::V0(
+                ProcMeshId(proc_mesh_id.to_string()),
+                actor_name.to_string(),
+            ))
+        } else {
+            Ok(ActorMeshId::V1(Name::from_str(s)?))
+        }
+    }
 }
 
 /// Types references to Actor Meshes.
@@ -342,5 +378,23 @@ mod tests {
             .unwrap();
 
         assert!(done_rx.recv().await.unwrap());
+    }
+
+    #[test]
+    fn test_actor_mesh_id_roundtrip() {
+        let mesh_ids = &[
+            ActorMeshId::V0(
+                ProcMeshId("proc_mesh".to_string()),
+                "actor_mesh".to_string(),
+            ),
+            ActorMeshId::V1(Name::new("testing")),
+        ];
+
+        for mesh_id in mesh_ids {
+            assert_eq!(
+                mesh_id,
+                &mesh_id.to_string().parse::<ActorMeshId>().unwrap()
+            );
+        }
     }
 }
