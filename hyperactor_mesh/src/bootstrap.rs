@@ -552,43 +552,44 @@ impl BootstrapProcManager {
             taken
         };
 
+        let Some(mut child) = maybe_child else {
+            tracing::debug!("proc {proc_id}: child was already taken; skipping wait");
+            return;
+        };
+
         tokio::spawn(async move {
-            if let Some(mut child) = maybe_child {
-                match child.wait().await {
-                    Ok(status) => {
-                        if let Some(sig) = status.signal() {
-                            let _ = handle.mark_killed(sig, status.core_dumped());
-                            if let Ok(mut table) = pid_table.lock() {
-                                table.remove(&proc_id);
-                            }
-                        } else if let Some(code) = status.code() {
-                            let _ = handle.mark_stopped(code);
-                            if let Ok(mut table) = pid_table.lock() {
-                                table.remove(&proc_id);
-                            }
-                        } else {
-                            debug_assert!(
-                                false,
-                                "unreachable: process terminated with neither signal nor exit code"
-                            );
-                            tracing::error!(
-                                "proc {proc_id}: unreachable exit status (no code, no signal)"
-                            );
-                            let _ = handle.mark_failed("process exited with unknown status");
-                            if let Ok(mut table) = pid_table.lock() {
-                                table.remove(&proc_id);
-                            }
+            match child.wait().await {
+                Ok(status) => {
+                    if let Some(sig) = status.signal() {
+                        let _ = handle.mark_killed(sig, status.core_dumped());
+                        if let Ok(mut table) = pid_table.lock() {
+                            table.remove(&proc_id);
                         }
-                    }
-                    Err(e) => {
-                        let _ = handle.mark_failed(format!("wait() failed: {e}"));
+                    } else if let Some(code) = status.code() {
+                        let _ = handle.mark_stopped(code);
+                        if let Ok(mut table) = pid_table.lock() {
+                            table.remove(&proc_id);
+                        }
+                    } else {
+                        debug_assert!(
+                            false,
+                            "unreachable: process terminated with neither signal nor exit code"
+                        );
+                        tracing::error!(
+                            "proc {proc_id}: unreachable exit status (no code, no signal)"
+                        );
+                        let _ = handle.mark_failed("process exited with unknown status");
                         if let Ok(mut table) = pid_table.lock() {
                             table.remove(&proc_id);
                         }
                     }
                 }
-            } else {
-                tracing::debug!("proc {proc_id}: child was already taken; skipping wait");
+                Err(e) => {
+                    let _ = handle.mark_failed(format!("wait() failed: {e}"));
+                    if let Ok(mut table) = pid_table.lock() {
+                        table.remove(&proc_id);
+                    }
+                }
             }
         });
     }
