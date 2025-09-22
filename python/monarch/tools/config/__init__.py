@@ -7,9 +7,9 @@
 # pyre-strict
 import warnings
 from dataclasses import dataclass, field
-from typing import Any
 
 from monarch.tools.config.workspace import Workspace
+from torchx.specs import CfgVal
 
 # Gracefully handle cases where torchx might not be installed
 # NOTE: this can be removed once torchx.specs moves to monarch.session
@@ -29,10 +29,23 @@ def _empty_appdef() -> "specs.AppDef":
 class Config:
     """
     All configs needed to schedule a mesh of allocators.
+
+    Args:
+        scheduler: the name of the scheduler to use, must be one of the registered schedulers in
+          `monarch.tools.config.defaults.scheduler_factories`.
+        scheduler_args: additional arguments to pass to the scheduler. Scheduler args are different
+           for each scheduler. You can run `torchx runopts {scheduler}` from the commandline to get
+           a help string. For additional details refer to the scheduler documentation
+           in https://docs.pytorch.org/torchx/latest/schedulers.
+        workspace: the local workspace to package and mirror on the remote side.
+        dryrun: useful for debugging job specs, if `True`, will return the actual scheduler request that
+          would've been used to submit the job.
+        appdef: the job spec to submit to the scheduler.
+
     """
 
     scheduler: str = NOT_SET
-    scheduler_args: dict[str, Any] = field(default_factory=dict)
+    scheduler_args: dict[str, CfgVal] = field(default_factory=dict)
     workspace: Workspace = field(default_factory=Workspace.null)
     dryrun: bool = False
     appdef: "specs.AppDef" = field(default_factory=_empty_appdef)
