@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use crate::attrs::AttrKeyInfo;
 use crate::attrs::Attrs;
+use crate::attrs::SerializableValue;
 use crate::attrs::declare_attrs;
 use crate::data::Encoding;
 
@@ -95,6 +96,12 @@ pub fn from_env() -> Attrs {
             continue;
         };
         let Ok(val) = env::var(env_var) else {
+            tracing::info!(
+                "config {}={}",
+                key.name,
+                key.default
+                    .map_or("<undefined>".to_string(), SerializableValue::display)
+            );
             // Just use the default
             continue;
         };
@@ -102,15 +109,17 @@ pub fn from_env() -> Attrs {
         match (key.parse)(&val) {
             Err(e) => {
                 tracing::error!(
-                    "configuration key {}: could not parse value \"{}\" from ${}: {}",
+                    "config {}={} (failed to override from value \"{}\" in ${}: {})",
                     key.name,
+                    key.default
+                        .map_or("<undefined>".to_string(), SerializableValue::display),
                     val,
                     env_var,
                     e
                 );
             }
             Ok(parsed) => {
-                tracing::info!("configuration key {}={}", key.name, parsed.display());
+                tracing::info!("config {}={} (overridden)", key.name, parsed.display(),);
                 config.insert_value_by_name_unchecked(key.name, parsed);
             }
         }
@@ -295,6 +304,7 @@ mod tests {
         );
     }
 
+    #[tracing_test::traced_test]
     #[test]
     fn test_from_env() {
         // Set environment variables
@@ -311,6 +321,26 @@ mod tests {
             config[MESSAGE_ACK_TIME_INTERVAL],
             Duration::from_millis(500)
         ); // Default value
+
+        let lines = vec![
+            "config hyperactor::config::message_latency_sampling_rate=0.01",
+            "config hyperactor::config::channel_net_rx_buffer_full_check_interval=5s",
+            "config hyperactor::config::channel_multipart=true",
+            "config hyperactor::config::default_encoding=serde_multipart",
+            "config hyperactor::config::remote_allocator_heartbeat_interval=5s",
+            "config hyperactor::config::stop_actor_timeout=1s",
+            "config hyperactor::config::split_max_buffer_size=5",
+            "config hyperactor::config::message_ttl_default=64",
+            "config hyperactor::config::message_ack_every_n_messages=1000",
+            "config hyperactor::config::message_ack_time_interval=500ms",
+            "config hyperactor::config::process_exit_timeout=10s",
+            "config hyperactor::config::message_delivery_timeout=1m (overridden)",
+            "config hyperactor::config::codec_max_frame_length=1024 (overridden)",
+        ];
+
+        for line in lines {
+            assert!(logs_contain(line));
+        }
 
         // Clean up
         // SAFETY: TODO: Audit that the environment access only happens in single-threaded code.

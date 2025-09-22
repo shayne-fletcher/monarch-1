@@ -133,6 +133,8 @@ pub struct AttrKeyInfo {
     pub display: fn(&dyn SerializableValue) -> String,
     /// Parse an attribute value using AttrValue::parse.
     pub parse: fn(&str) -> Result<Box<dyn SerializableValue>, anyhow::Error>,
+    /// Default value for the attribute, if any.
+    pub default: Option<&'static dyn SerializableValue>,
 }
 
 inventory::collect!(AttrKeyInfo);
@@ -754,6 +756,7 @@ macro_rules! declare_attrs {
                     let value: $type = $crate::attrs::AttrValue::parse(value)?;
                     Ok(Box::new(value) as Box<dyn $crate::attrs::SerializableValue>)
                 },
+                default: Some($crate::paste! { &[<$name _DEFAULT>] }),
             }
         }
     };
@@ -805,6 +808,7 @@ macro_rules! declare_attrs {
                     let value: $type = $crate::attrs::AttrValue::parse(value)?;
                     Ok(Box::new(value) as Box<dyn $crate::attrs::SerializableValue>)
                 },
+                default: None,
             }
         }
     };
