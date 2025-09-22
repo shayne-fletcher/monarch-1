@@ -1080,7 +1080,7 @@ mod tests {
 
         assert!(tracing_test::internal::logs_with_scope_contain(
             "hyperactor::proc",
-            "world[0].proc[0]: aborting JoinHandle"
+            "world[0].proc[0]: aborting (delayed) JoinHandle"
         ));
         for i in 1..3 {
             assert!(tracing_test::internal::logs_with_scope_contain(
@@ -1091,7 +1091,10 @@ mod tests {
         logs_assert(|logs| {
             let count = logs
                 .iter()
-                .filter(|log| log.contains("aborting JoinHandle"))
+                .filter(|log| {
+                    log.contains("aborting JoinHandle")
+                        || log.contains("aborting (delayed) JoinHandle")
+                })
                 .count();
             if count == actors_aborted {
                 Ok(())
