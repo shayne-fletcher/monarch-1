@@ -38,6 +38,7 @@ use serde::Serialize;
 use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 use crate::logging::create_log_writers;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
@@ -199,6 +200,18 @@ pub enum ProcStatus {
     Failed { reason: String },
 }
 
+impl ProcStatus {
+    /// Returns `true` if the proc is in a terminal (exited) state:
+    /// `Stopped`, `Killed`, or `Failed`.
+    #[inline]
+    pub fn is_exit(&self) -> bool {
+        matches!(
+            self,
+            ProcStatus::Stopped { .. } | ProcStatus::Killed { .. } | ProcStatus::Failed { .. }
+        )
+    }
+}
+
 /// A handle to a proc launched by [`BootstrapProcManager`].
 ///
 /// `ProcHandle` is the owner-facing API for controlling and observing
@@ -213,6 +226,8 @@ pub enum ProcStatus {
 /// - Tracks the current [`ProcStatus`] in an `Arc<Mutex<...>>`,
 ///   allowing concurrent observation and mutation from lifecycle
 ///   control paths.
+/// - Broadcasts status changes over a `tokio::sync::watch` channel,
+///   so tasks can `await` lifecycle transitions asynchronously.
 /// - Provides the foundation for higher-level APIs such as
 ///   `terminate()`, `kill()`, `wait()`, and `status()`.
 ///
@@ -237,6 +252,15 @@ pub struct ProcHandle {
     /// signaled (SIGTERM/SIGKILL) or awaited for exit. Wrapped in
     /// `Option` because ownership is consumed on wait.
     child: Arc<std::sync::Mutex<Option<Child>>>,
+    /// Broadcast channel used to notify subscribers whenever
+    /// [`ProcStatus`] changes. All mutations call
+    /// `tx.send(new_status)`.
+    tx: tokio::sync::watch::Sender<ProcStatus>,
+    /// Subscription endpoint for watching [`ProcStatus`] changes.
+    /// Each clone of this receiver can be awaited independently
+    /// (e.g., via `rx.changed().await`) to observe lifecycle
+    /// transitions as they occur.
+    rx: tokio::sync::watch::Receiver<ProcStatus>,
 }
 
 impl ProcHandle {
@@ -253,10 +277,13 @@ impl ProcHandle {
     /// `BootstrapProcManager` when it launches a proc into a new
     /// process.
     pub fn new(proc_id: ProcId, child: Child) -> Self {
+        let (tx, rx) = watch::channel(ProcStatus::Starting);
         Self {
             proc_id,
             status: Arc::new(std::sync::Mutex::new(ProcStatus::Starting)),
             child: Arc::new(std::sync::Mutex::new(Some(child))),
+            tx,
+            rx,
         }
     }
 
@@ -264,6 +291,43 @@ impl ProcHandle {
     #[inline]
     pub fn proc_id(&self) -> &ProcId {
         &self.proc_id
+    }
+
+    /// Create a new subscription to this proc's status stream.
+    ///
+    /// Each call returns a fresh [`watch::Receiver`] tied to this
+    /// handle's internal [`ProcStatus`] channel. The receiver can be
+    /// awaited on (`rx.changed().await`) to observe lifecycle
+    /// transitions as they occur.
+    ///
+    /// Notes:
+    /// - Multiple subscribers can exist simultaneously; each sees
+    ///   every status update in order.
+    /// - Use [`ProcHandle::status`] for a one-off snapshot; use
+    ///   `watch()` when you need to await changes over time.
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<ProcStatus> {
+        self.rx.clone()
+    }
+
+    /// Wait until this proc's status changes.
+    ///
+    /// This is a convenience wrapper around
+    /// [`watch::Receiver::changed`]: it subscribes internally via
+    /// [`ProcHandle::watch`] and awaits the next transition. If no
+    /// subscribers exist or the channel is closed, this returns
+    /// without error.
+    ///
+    /// Typical usage:
+    /// ```ignore
+    /// handle.changed().await;
+    /// match handle.status() {
+    ///     ProcStatus::Running { .. } => { /* now running */ }
+    ///     ProcStatus::Stopped { .. } => { /* exited */ }
+    ///     _ => {}
+    /// }
+    /// ```
+    pub async fn changed(&self) {
+        let _ = self.watch().changed().await;
     }
 
     /// Return the OS process ID (`pid`) for this proc.
@@ -307,6 +371,27 @@ impl ProcHandle {
         self.status.lock().expect("status mutex poisoned").clone()
     }
 
+    /// Atomically apply a state transition while holding the status
+    /// lock, and send the updated value on the watch channel before
+    /// releasing the lock. This ensures the mutex state and the
+    /// broadcast value are always in sync and avoids races between
+    /// concurrent transitions.
+    fn transition<F>(&self, f: F) -> bool
+    where
+        F: FnOnce(&mut ProcStatus),
+    {
+        let mut guard = self.status.lock().expect("status mutex poisoned");
+        let before = guard.clone();
+        f(&mut guard);
+        if *guard != before {
+            // Publish while still holding the lock to preserve order.
+            let _ = self.tx.send(guard.clone());
+            true
+        } else {
+            false
+        }
+    }
+
     /// Transition this proc into the [`ProcStatus::Running`] state.
     ///
     /// Called internally once the child OS process has been spawned
@@ -318,102 +403,87 @@ impl ProcHandle {
     /// exists at the OS level, but does not guarantee that the proc
     /// has completed bootstrap or is fully ready.
     pub(crate) fn mark_running(&self, pid: u32, started_at: SystemTime) -> bool {
-        let mut status = self.status.lock().unwrap();
-        match *status {
+        self.transition(|st| match *st {
             ProcStatus::Starting => {
-                *status = ProcStatus::Running { pid, started_at };
-                true
+                *st = ProcStatus::Running { pid, started_at };
             }
             _ => {
                 tracing::warn!(
                     "illegal transition: {:?} -> Running; leaving status unchanged",
-                    *status
+                    *st
                 );
-                false
             }
-        }
+        })
     }
 
     /// Record that a stop has been requested for the proc (e.g. a
     /// graceful shutdown via SIGTERM), but the underlying process has
     /// not yet fully exited.
     pub(crate) fn mark_stopping(&self) -> bool {
-        let mut status = self.status.lock().expect("status mutex poisoned");
-        match *status {
+        self.transition(|st| match *st {
             ProcStatus::Running { .. } | ProcStatus::Starting => {
-                *status = ProcStatus::Stopping;
-                true
+                *st = ProcStatus::Stopping;
             }
             _ => {
                 tracing::debug!(
                     "illegal transition: {:?} -> Stopping; leaving status unchanged",
-                    *status
+                    *st
                 );
-                false
             }
-        }
+        })
     }
 
     /// Record that the process has exited normally with the given
     /// exit code.
     pub(crate) fn mark_stopped(&self, exit_code: i32) -> bool {
-        let mut status = self.status.lock().expect("status mutex poisoned");
-        match *status {
+        self.transition(|st| match *st {
             ProcStatus::Stopping | ProcStatus::Running { .. } | ProcStatus::Starting => {
-                *status = ProcStatus::Stopped { exit_code };
-                true
+                *st = ProcStatus::Stopped { exit_code };
             }
             _ => {
                 tracing::warn!(
                     "illegal transition: {:?} -> Stopped; leaving status unchanged",
-                    *status
+                    *st
                 );
-                false
             }
-        }
+        })
     }
 
     /// Record that the process was killed by the given signal (e.g.
     /// SIGKILL, SIGTERM).
     pub(crate) fn mark_killed(&self, signal: i32, core_dumped: bool) -> bool {
-        let mut status = self.status.lock().expect("status mutex poisoned");
-        match *status {
+        self.transition(|st| match *st {
             ProcStatus::Running { .. } | ProcStatus::Stopping | ProcStatus::Starting => {
-                *status = ProcStatus::Killed {
+                *st = ProcStatus::Killed {
                     signal,
                     core_dumped,
                 };
-                true
             }
             _ => {
                 tracing::warn!(
                     "illegal transition: {:?} -> Killed; leaving status unchanged",
-                    *status
+                    *st
                 );
-                false
             }
-        }
+        })
     }
 
     /// Record that the proc or its process failed for an unexpected
     /// reason (bootstrap error, spawn failure, etc.).
     pub(crate) fn mark_failed<S: Into<String>>(&self, reason: S) -> bool {
-        let mut status = self.status.lock().expect("status mutex poisoned");
-        match *status {
+        self.transition(|st| match *st {
             ProcStatus::Starting | ProcStatus::Running { .. } | ProcStatus::Stopping => {
-                *status = ProcStatus::Failed {
+                *st = ProcStatus::Failed {
                     reason: reason.into(),
                 };
-                true
             }
             _ => {
                 tracing::warn!(
                     "illegal transition: {:?} -> Failed; leaving status unchanged",
-                    *status
+                    *st
                 );
-                false
             }
-        }
+        })
     }
 }
 
@@ -957,7 +1027,7 @@ mod tests {
         }
 
         // Drop the manager. We don't rely on `Child::kill_on_drop`.
-        // The exit monitor owns the Child; the manager’s Drop uses
+        // The exit monitor owns the Child; the manager's Drop uses
         // `pid_table` to best-effort SIGKILL any recorded PIDs. This
         // should terminate the child.
         drop(manager);
@@ -1014,7 +1084,6 @@ mod tests {
         use hyperactor::mailbox::DialMailboxRouter;
         use hyperactor::mailbox::MailboxServer;
         use hyperactor::proc::Proc;
-        use tokio::time::timeout;
 
         use crate::bootstrap::BOOTSTRAP_LOG_CHANNEL;
         use crate::logging::LogClientActor;
@@ -1068,7 +1137,8 @@ mod tests {
         // Assert we see it via the tap.
         // Give it up to 2 seconds to travel through forwarder ->
         // client -> print_log_line -> tap.
-        let line = timeout(Duration::from_secs(2), tap_rx.recv())
+        let line = RealClock
+            .timeout(Duration::from_secs(2), tap_rx.recv())
             .await
             .expect("timed out waiting for log line")
             .expect("tap channel closed unexpectedly");
@@ -1184,6 +1254,20 @@ mod tests {
         }
     }
 
+    // Helper. Await until the proc has exited. Loops on the watch
+    // channel until the status transitions into a terminal state
+    // (Stopped, Killed, or Failed), then returns that final status.
+    async fn wait_for_exit(h: &ProcHandle) -> ProcStatus {
+        let mut rx = h.watch();
+        loop {
+            let st = rx.borrow().clone();
+            if st.is_exit() {
+                return st;
+            }
+            rx.changed().await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn test_exit_monitor_updates_status_on_clean_exit() {
         use std::path::PathBuf;
@@ -1215,12 +1299,7 @@ mod tests {
             );
         }
 
-        // Wait briefly for /bin/true.
-        RealClock.sleep(Duration::from_millis(100)).await;
-
-        // Snapshot should be Stopped(code=0) (don't assert the exact
-        // enum if it's awkward; at least not Running)
-        let st = manager.status(&proc_id).await.unwrap();
+        let st = wait_for_exit(&handle).await;
         assert!(
             matches!(st, ProcStatus::Stopped { .. } | ProcStatus::Stopping),
             "status={st:?}"
@@ -1233,7 +1312,6 @@ mod tests {
         use std::process::Stdio;
 
         use tokio::process::Command;
-        use tokio::time::Duration;
 
         let manager = BootstrapProcManager::new(PathBuf::from("/bin/sleep"));
 
@@ -1271,21 +1349,48 @@ mod tests {
             libc::kill(pid, libc::SIGKILL);
         }
 
-        // Wait for the exit monitor to observe termination and update
-        // status.
-        let deadline = RealClock.now() + Duration::from_millis(1500);
-        let mut saw_killed = false;
-        while RealClock.now() < deadline {
-            if let Some(st) = manager.status(&proc_id).await {
-                if let ProcStatus::Killed { signal, .. } = st {
-                    assert_eq!(signal, libc::SIGKILL, "unexpected signal");
-                    saw_killed = true;
-                    break;
-                }
-            }
-            RealClock.sleep(Duration::from_millis(50)).await;
+        let st = wait_for_exit(&handle).await;
+        match st {
+            ProcStatus::Killed { signal, .. } => assert_eq!(signal, libc::SIGKILL),
+            other => panic!("expected Killed(SIGKILL), got {other:?}"),
         }
-        assert!(saw_killed, "did not observe ProcStatus::Killed(SIGKILL)");
+    }
+
+    #[tokio::test]
+    async fn watch_notifies_on_status_changes() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 0.1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn");
+
+        let proc_id = hyperactor::ProcId::Ranked(hyperactor::WorldId("test".into()), 1);
+        let handle = ProcHandle::new(proc_id, child);
+        let mut rx = handle.watch();
+
+        // Starting -> Running
+        let pid = handle.pid().unwrap_or(0);
+        let now = RealClock.system_time_now();
+        assert!(handle.mark_running(pid, now));
+        rx.changed().await.ok(); // Observe the transition.
+        match &*rx.borrow() {
+            ProcStatus::Running { pid: p, started_at } => {
+                assert_eq!(*p, pid);
+                assert_eq!(*started_at, now);
+            }
+            s => panic!("expected Running, got {s:?}"),
+        }
+
+        // Running -> Stopped
+        assert!(handle.mark_stopped(0));
+        rx.changed().await.ok(); // Observe the transition.
+        assert!(matches!(
+            &*rx.borrow(),
+            ProcStatus::Stopped { exit_code: 0 }
+        ));
     }
 
     #[tokio::test]
@@ -1375,13 +1480,16 @@ mod tests {
         let proc_id = ProcId::Direct(ChannelAddr::any(ChannelTransport::Unix), "fast-exit".into());
         let handle = ProcHandle::new(proc_id, child);
 
-        if let Some(mut c) = handle.child.lock().expect("child mutex").take() {
-            let status = c.wait().await.expect("wait");
-            let code = status.code().unwrap_or(0);
-            assert!(handle.mark_stopped(code));
-        } else {
-            panic!("child already taken");
+        // Take the child (don't hold the mutex across an await).
+        let mut c = {
+            let mut guard = handle.child.lock().expect("child mutex");
+            guard.take()
         }
+        .expect("child already taken");
+
+        let status = c.wait().await.expect("wait");
+        let code = status.code().unwrap_or(0);
+        assert!(handle.mark_stopped(code));
 
         assert!(matches!(
             handle.status(),
