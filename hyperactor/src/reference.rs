@@ -61,7 +61,8 @@ use crate::message::Bind;
 use crate::message::Bindings;
 use crate::message::Unbind;
 
-mod lex;
+pub mod lex;
+pub mod name;
 mod parse;
 
 use parse::Lexer;
