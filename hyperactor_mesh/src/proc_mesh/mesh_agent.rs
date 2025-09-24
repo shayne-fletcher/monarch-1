@@ -282,9 +282,9 @@ impl MeshAgentMessageHandler for ProcMeshAgent {
         // supervision codepaths.
         let router = if std::env::var("HYPERACTOR_MESH_ROUTER_NO_GLOBAL_FALLBACK").is_err() {
             let default = super::router::global().fallback(client.into_boxed());
-            DialMailboxRouter::new_with_default(default.into_boxed())
+            DialMailboxRouter::new_with_default_direct_addressed_remote_only(default.into_boxed())
         } else {
-            DialMailboxRouter::new_with_default(client.into_boxed())
+            DialMailboxRouter::new_with_default_direct_addressed_remote_only(client.into_boxed())
         };
 
         for (proc_id, addr) in address_book {

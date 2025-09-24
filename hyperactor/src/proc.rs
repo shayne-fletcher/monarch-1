@@ -341,7 +341,7 @@ impl Proc {
     }
 
     /// Create a new direct-addressed proc with a default sender for the forwarder.
-    pub async fn direct_with_default(
+    pub fn direct_with_default(
         addr: ChannelAddr,
         name: String,
         default: BoxedMailboxSender,

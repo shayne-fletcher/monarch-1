@@ -15,7 +15,7 @@ use pyo3::prelude::*;
 use crate::actor::PythonActor;
 use crate::mailbox::PyMailbox;
 use crate::proc::PyActorId;
-use crate::runtime::signal_safe_block_on;
+use crate::runtime;
 use crate::shape::PyPoint;
 
 pub(crate) enum ContextInstance {
@@ -155,8 +155,8 @@ impl PyContext {
 
     #[staticmethod]
     fn _root_client_context(py: Python<'_>) -> PyResult<PyContext> {
-        let instance: PyInstance =
-            signal_safe_block_on(py, async { global_root_client().await.into() })?;
+        let _guard = runtime::get_tokio_runtime().enter();
+        let instance: PyInstance = global_root_client().into();
         Ok(PyContext {
             instance: instance.into_pyobject(py)?.into(),
             rank: Extent::unity().point_of_rank(0).unwrap(),

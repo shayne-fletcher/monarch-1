@@ -27,6 +27,7 @@ use crate::attrs::AttrKeyInfo;
 use crate::attrs::Attrs;
 use crate::attrs::SerializableValue;
 use crate::attrs::declare_attrs;
+use crate::channel::ChannelTransport;
 use crate::data::Encoding;
 
 // Declare configuration keys using the new attrs system with defaults
@@ -226,6 +227,11 @@ pub mod global {
     /// `get` assumes that the key has a default value.
     pub fn get<T: AttrValue + Copy>(key: Key<T>) -> T {
         *CONFIG.read().unwrap().get(key).unwrap()
+    }
+
+    /// Get a key from the global configuration by cloning the value.
+    pub fn get_cloned<T: AttrValue>(key: Key<T>) -> T {
+        CONFIG.read().unwrap().get(key).unwrap().clone()
     }
 
     /// Get the global attrs

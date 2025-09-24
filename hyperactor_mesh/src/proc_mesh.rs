@@ -30,9 +30,11 @@ use hyperactor::actor::RemoteActor;
 use hyperactor::actor::remote::Remote;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
-use hyperactor::clock::Clock;
-use hyperactor::clock::RealClock;
+use hyperactor::channel::ChannelTransport;
+use hyperactor::config;
+use hyperactor::config::CONFIG_ENV_VAR;
 use hyperactor::context;
+use hyperactor::declare_attrs;
 use hyperactor::mailbox;
 use hyperactor::mailbox::BoxableMailboxSender;
 use hyperactor::mailbox::BoxedMailboxSender;
@@ -80,6 +82,12 @@ pub mod mesh_agent;
 
 use std::sync::OnceLock;
 use std::sync::RwLock;
+
+declare_attrs! {
+    /// Transport type to use for the root client.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_ROOT_CLIENT_TRANSPORT".to_string())
+    attr ROOT_CLIENT_TRANSPORT: ChannelTransport = ChannelTransport::Unix;
+}
 
 /// Single, process-wide supervision sink storage.
 ///
@@ -140,16 +148,14 @@ pub(crate) fn get_global_supervision_sink() -> Option<PortHandle<ActorSupervisio
 /// Context use by root client to send messages.
 /// This mailbox allows us to open ports before we know which proc the
 /// messages will be sent to.
-pub async fn global_root_client() -> &'static Instance<()> {
-    static GLOBAL_INSTANCE: tokio::sync::OnceCell<(Instance<()>, ActorHandle<()>)> =
-        tokio::sync::OnceCell::const_new();
-    &GLOBAL_INSTANCE.get_or_init(async || {
+pub fn global_root_client() -> &'static Instance<()> {
+    static GLOBAL_INSTANCE: OnceLock<(Instance<()>, ActorHandle<()>)> = OnceLock::new();
+    &GLOBAL_INSTANCE.get_or_init(|| {
         let client_proc = Proc::direct_with_default(
-            ChannelAddr::any(channel::ChannelTransport::Unix),
+            ChannelAddr::any(config::global::get_cloned(ROOT_CLIENT_TRANSPORT)),
             "mesh_root_client_proc".into(),
             router::global().clone().boxed(),
         )
-        .await
         .unwrap();
 
         // Make this proc reachable through the global router, so that we can use the
@@ -190,7 +196,7 @@ pub async fn global_root_client() -> &'static Instance<()> {
         );
 
         (client, handle)
-    }).await.0
+    }).0
 }
 
 type ActorEventRouter = Arc<DashMap<ActorMeshName, mpsc::UnboundedSender<ActorSupervisionEvent>>>;
