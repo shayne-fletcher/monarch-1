@@ -321,7 +321,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             actor = proc_mesh.spawn("test_actor", TestActor)
 
             values = await actor.compute_world_size.call(
-                master_addr="0.0.0.0",
+                master_addr="localhost",
                 master_port=get_free_port(),
             )
 
@@ -547,10 +547,10 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             actor_b = proc_mesh_b.spawn("actor_b", TestActor)
 
             results_a = await actor_a.compute_world_size.call(
-                master_addr="0.0.0.0", master_port=get_free_port()
+                master_addr="localhost", master_port=get_free_port()
             )
             results_b = await actor_b.compute_world_size.call(
-                master_addr="0.0.0.0", master_port=get_free_port()
+                master_addr="localhost", master_port=get_free_port()
             )
 
             self.assert_computed_world_size(results_a, 2)  # a is a 1x2 mesh
@@ -604,12 +604,12 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                     name="x",
                     num_hosts=1,
                     transport="tcp",
-                    hostnames=["0.0.0.0"],
+                    hostnames=["localhost"],
                 )
             ],
         )
         port = get_free_port()
-        with remote_process_allocator(addr=f"tcp!{get_sockaddr('0.0.0.0', port)}"):
+        with remote_process_allocator(addr=f"tcp!{get_sockaddr('localhost', port)}"):
             with mock.patch(SERVER_READY, return_value=server):
                 initializer = TorchXRemoteAllocInitializer("local:///test", port=port)
                 allocator = RemoteAllocator(
@@ -620,7 +620,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 proc_mesh = ProcMesh.from_alloc(alloc)
                 actor = proc_mesh.spawn("test_actor", TestActor)
                 results = await actor.compute_world_size.call(
-                    master_addr="0.0.0.0", master_port=get_free_port()
+                    master_addr="localhost", master_port=get_free_port()
                 )
                 self.assert_computed_world_size(results, 4)  # 1x4 mesh
 
@@ -634,12 +634,12 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                     name="x",
                     num_hosts=1,
                     transport="tcp",
-                    hostnames=["0.0.0.0"],
+                    hostnames=["localhost"],
                 )
             ],
         )
         port = get_free_port()
-        with remote_process_allocator(addr=f"tcp!{get_sockaddr('0.0.0.0', port)}"):
+        with remote_process_allocator(addr=f"tcp!{get_sockaddr('localhost', port)}"):
             with mock.patch(SERVER_READY, return_value=server):
                 initializer = TorchXRemoteAllocInitializer("local:///test", port=port)
                 allocator = RemoteAllocator(
@@ -658,7 +658,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 proc_mesh = ProcMesh.from_alloc(alloc)
                 actor = proc_mesh.spawn("test_actor", TestActor)
                 results = await actor.compute_world_size.call(
-                    master_addr="0.0.0.0", master_port=get_free_port()
+                    master_addr="localhost", master_port=get_free_port()
                 )
                 self.assert_computed_world_size(results, 3)  # 1x3 mesh
 
