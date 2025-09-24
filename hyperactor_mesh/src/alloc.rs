@@ -618,16 +618,14 @@ pub(crate) mod testing {
     async fn spawn_proc(
         transport: ChannelTransport,
     ) -> (DialMailboxRouter, Instance<()>, Proc, ChannelAddr) {
-        let (router_channel_addr, router_rx) = channel::serve(ChannelAddr::any(transport.clone()))
-            .await
-            .unwrap();
+        let (router_channel_addr, router_rx) =
+            channel::serve(ChannelAddr::any(transport.clone())).unwrap();
         let router =
             DialMailboxRouter::new_with_default((UndeliverableMailboxSender {}).into_boxed());
         router.clone().serve(router_rx);
 
         let client_proc_id = ProcId::Ranked(WorldId("test_stuck".to_string()), 0);
-        let (client_proc_addr, client_rx) =
-            channel::serve(ChannelAddr::any(transport)).await.unwrap();
+        let (client_proc_addr, client_rx) = channel::serve(ChannelAddr::any(transport)).unwrap();
         let client_proc = Proc::new(
             client_proc_id.clone(),
             BoxedMailboxSender::new(router.clone()),

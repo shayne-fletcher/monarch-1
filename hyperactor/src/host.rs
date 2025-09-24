@@ -127,7 +127,7 @@ impl<M: ProcManager> Host<M> {
         manager: M,
         addr: ChannelAddr,
     ) -> Result<(Self, MailboxServerHandle), HostError> {
-        let (frontend_addr, frontend_rx) = channel::serve(addr).await?;
+        let (frontend_addr, frontend_rx) = channel::serve(addr)?;
 
         // We set up a cascade of routers: first, the outer router supports
         // sending to the the system proc, while the dial router manages dialed
@@ -136,8 +136,7 @@ impl<M: ProcManager> Host<M> {
 
         // Establish a backend channel on the preferred transport. We currently simply
         // serve the same router on both.
-        let (backend_addr, backend_rx) =
-            channel::serve(ChannelAddr::any(manager.transport())).await?;
+        let (backend_addr, backend_rx) = channel::serve(ChannelAddr::any(manager.transport()))?;
 
         // Set up a system proc. This is often used to manage the host itself.
         let service_proc_id = ProcId::Direct(frontend_addr.clone(), "service".to_string());
@@ -286,7 +285,7 @@ where
             proc_id.clone(),
             MailboxClient::dial(forwarder_addr)?.into_boxed(),
         );
-        let (proc_addr, rx) = channel::serve(ChannelAddr::any(transport)).await?;
+        let (proc_addr, rx) = channel::serve(ChannelAddr::any(transport))?;
         self.procs
             .lock()
             .await
@@ -356,7 +355,7 @@ where
         forwarder_addr: ChannelAddr,
     ) -> Result<(ChannelAddr, ActorRef<A>), HostError> {
         let (callback_addr, mut callback_rx) =
-            channel::serve(ChannelAddr::any(ChannelTransport::Unix)).await?;
+            channel::serve(ChannelAddr::any(ChannelTransport::Unix))?;
 
         let mut cmd = Command::new(&self.program);
         cmd.env("HYPERACTOR_HOST_PROC_ID", proc_id.to_string());
@@ -449,7 +448,7 @@ where
 
     // Finally serve the proc on the same transport as the backend address,
     // and call back.
-    let (proc_addr, proc_rx) = channel::serve(ChannelAddr::any(backend_transport)).await?;
+    let (proc_addr, proc_rx) = channel::serve(ChannelAddr::any(backend_transport))?;
     proc.clone().serve(proc_rx);
     channel::dial(callback_addr)?
         .send((proc_addr, agent_handle.bind::<A>()))

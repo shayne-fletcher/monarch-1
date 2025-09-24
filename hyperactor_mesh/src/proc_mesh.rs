@@ -280,7 +280,6 @@ impl ProcMesh {
         let client_proc_id =
             ProcId::Ranked(WorldId(format!("{}_client", alloc.world_id().name())), 0);
         let (client_proc_addr, client_rx) = channel::serve(ChannelAddr::any(alloc.transport()))
-            .await
             .map_err(|err| AllocatorError::Other(err.into()))?;
         tracing::info!(
             name = "ProcMesh::Allocate::ChannelServe",
@@ -346,7 +345,6 @@ impl ProcMesh {
 
         // Ensure that the router is served so that agents may reach us.
         let (router_channel_addr, router_rx) = channel::serve(ChannelAddr::any(alloc.transport()))
-            .await
             .map_err(|err| AllocatorError::Other(err.into()))?;
         router.serve(router_rx);
         tracing::info!("router channel started listening on addr: {router_channel_addr}");

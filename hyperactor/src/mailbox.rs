@@ -2877,9 +2877,7 @@ mod tests {
             .unwrap(),
         );
 
-        let (_, rx) = serve::<MessageEnvelope>(ChannelAddr::Sim(dst_addr.clone()))
-            .await
-            .unwrap();
+        let (_, rx) = serve::<MessageEnvelope>(ChannelAddr::Sim(dst_addr.clone())).unwrap();
         let tx = dial::<MessageEnvelope>(src_to_dst).unwrap();
         let mbox = Mailbox::new_detached(id!(test[0].actor0));
         let serve_handle = mbox.clone().serve(rx);
@@ -3008,9 +3006,7 @@ mod tests {
 
         let mut handles = Vec::new(); // hold on to handles, or channels get closed
         for mbox in mailboxes.iter() {
-            let (addr, rx) = channel::serve(ChannelAddr::any(ChannelTransport::Local))
-                .await
-                .unwrap();
+            let (addr, rx) = channel::serve(ChannelAddr::any(ChannelTransport::Local)).unwrap();
             let handle = (*mbox).clone().serve(rx);
             handles.push(handle);
 

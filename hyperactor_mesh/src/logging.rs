@@ -626,7 +626,7 @@ impl Actor for LogForwardActor {
             log_channel
         );
 
-        let rx = match channel::serve(log_channel.clone()).await {
+        let rx = match channel::serve(log_channel.clone()) {
             Ok((_, rx)) => rx,
             Err(err) => {
                 // This can happen if we are not spanwed on a separate process like local.
@@ -636,9 +636,7 @@ impl Actor for LogForwardActor {
                     log_channel,
                     err
                 );
-                channel::serve(ChannelAddr::any(ChannelTransport::Unix))
-                    .await?
-                    .1
+                channel::serve(ChannelAddr::any(ChannelTransport::Unix))?.1
             }
         };
 
@@ -1077,9 +1075,8 @@ mod tests {
     async fn test_forwarding_log_to_client() {
         // Setup the basics
         let router = DialMailboxRouter::new();
-        let (proc_addr, client_rx) = channel::serve(ChannelAddr::any(ChannelTransport::Unix))
-            .await
-            .unwrap();
+        let (proc_addr, client_rx) =
+            channel::serve(ChannelAddr::any(ChannelTransport::Unix)).unwrap();
         let proc = Proc::new(id!(client[0]), BoxedMailboxSender::new(router.clone()));
         proc.clone().serve(client_rx);
         router.bind(id!(client[0]).into(), proc_addr.clone());
