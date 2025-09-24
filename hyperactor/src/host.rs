@@ -50,6 +50,7 @@ use futures::Future;
 use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use tokio::time::Duration;
 
 use crate::Actor;
 use crate::ActorHandle;
@@ -65,6 +66,8 @@ use crate::channel::ChannelError;
 use crate::channel::ChannelTransport;
 use crate::channel::Rx;
 use crate::channel::Tx;
+use crate::clock::Clock;
+use crate::clock::RealClock;
 use crate::mailbox::BoxableMailboxSender;
 use crate::mailbox::DialMailboxRouter;
 use crate::mailbox::IntoBoxedMailboxSender as _;
@@ -117,6 +120,42 @@ pub struct Host<M> {
     router: DialMailboxRouter,
     manager: M,
     service_proc: Proc,
+}
+
+/// Await until a [`ProcHandle`] reports both its `addr()` and
+/// `agent_ref()`, or fail if the timeout expires.
+///
+/// This is a **temporary shim** to bridge the gap until readiness is
+/// part of the `ProcHandle` trait itself. Right now, external proc
+/// managers like `BootstrapProcManager` may return a handle
+/// immediately after spawning the OS process, before the proc has
+/// finished bootstrapping and published its address/agent. This
+/// helper spins in a short sleep loop, checking for those fields to
+/// become `Some(_)`.
+///
+/// Callers (e.g. `Host::spawn`) use this to enforce that the returned
+/// `(ProcId, ActorRef)` pair is only visible once the proc is
+/// actually usable. In the long term, this will be replaced by an
+/// explicit `handle.ready().await` API so no polling is required
+/// here.
+async fn await_ready_with_timeout<H: ProcHandle>(
+    handle: &H,
+    proc_id: &ProcId,
+    timeout: Duration,
+) -> Result<(ChannelAddr, ActorRef<H::Agent>), HostError> {
+    let deadline = RealClock.now() + timeout;
+    loop {
+        if let (Some(addr), Some(agent)) = (handle.addr(), handle.agent_ref()) {
+            return Ok((addr, agent));
+        }
+        if RealClock.now() >= deadline {
+            return Err(HostError::ProcessConfigurationFailure(
+                proc_id.clone(),
+                anyhow::anyhow!("timeout waiting for proc to become Ready"),
+            ));
+        }
+        RealClock.sleep(Duration::from_millis(5)).await;
+    }
 }
 
 impl<M: ProcManager> Host<M> {
@@ -183,13 +222,16 @@ impl<M: ProcManager> Host<M> {
         }
 
         let proc_id = ProcId::Direct(self.frontend_addr.clone(), name.clone());
-        let (addr, agent_ref) = self
+        let handle = self
             .manager
             .spawn(proc_id.clone(), self.backend_addr.clone())
             .await?;
 
+        let (addr, agent_ref) =
+            await_ready_with_timeout(&handle, &proc_id, Duration::from_secs(10)).await?;
         self.router.bind(proc_id.clone().into(), addr.clone());
         self.procs.insert(name, addr);
+
         Ok((proc_id, agent_ref))
     }
 }
@@ -216,6 +258,25 @@ impl MailboxSender for ProcOrDial {
     }
 }
 
+/// Minimal uniform surface for a spawned-proc handle returned by a
+/// ProcManager. Each manager can return its own concrete handle, as
+/// long as it exposes these.
+pub trait ProcHandle: Clone + Send + Sync + 'static {
+    /// The type of the agent actor installed in ths proc by the
+    /// manager.
+    type Agent: Actor + RemoteActor;
+
+    /// The proc's logical identity on this host.
+    fn proc_id(&self) -> &ProcId;
+
+    /// The proc's address (the one callers bind into the host
+    /// router).
+    fn addr(&self) -> Option<ChannelAddr>;
+
+    /// The agent actor reference hosted in the proc.
+    fn agent_ref(&self) -> Option<ActorRef<Self::Agent>>;
+}
+
 /// A trait describing a manager of procs, responsible for bootstrapping
 /// procs on a host, and managing their lifetimes. The manager spawns an
 /// `Agent`-typed actor on each proc, responsible for managing the proc.
@@ -223,6 +284,9 @@ impl MailboxSender for ProcOrDial {
 pub trait ProcManager {
     /// The type of agent actor launched on the proc.
     type Agent: Actor + RemoteActor;
+
+    /// Concrete handle type this manager returns.
+    type Handle: ProcHandle<Agent = Self::Agent>;
 
     /// The preferred transport for this ProcManager.
     /// In practice this will be [`ChannelTransport::Local`]
@@ -241,9 +305,7 @@ pub trait ProcManager {
         &self,
         proc_id: ProcId,
         forwarder_addr: ChannelAddr,
-    ) -> Result<(ChannelAddr, ActorRef<Self::Agent>), HostError>;
-
-    // TODO: full lifecycle management; perhaps mimick the Command API.
+    ) -> Result<Self::Handle, HostError>;
 }
 
 /// A ProcManager that spawns into local (in-process) procs. Used for
@@ -264,6 +326,52 @@ impl<A: Actor> LocalProcManager<A> {
     }
 }
 
+/// A lightweight implementation of [`ProcHandle`] for procs
+/// managed in-process via [`LocalProcManager`].
+///
+/// This handle wraps the minimal identifying state of a spawned proc:
+/// - its [`ProcId`] (logical identity on the host),
+/// - the proc's [`ChannelAddr`] (the address callers bind into the
+///   host router), and
+/// - the [`ActorRef`] to the agent actor hosted in the proc.
+///
+/// Unlike external process handles, `LocalHandle` does not track an
+/// OS child process or lifecycle events. It exists to provide a
+/// uniform surface (`proc_id()`, `addr()`, `agent_ref()`) so that
+/// host code can treat local and external procs through the same
+/// trait.
+#[derive(Debug)]
+pub struct LocalHandle<A: Actor + RemoteActor> {
+    proc_id: ProcId,
+    addr: ChannelAddr,
+    agent_ref: ActorRef<A>,
+}
+
+// Manual `Clone` to avoid requiring `A: Clone`.
+impl<A: Actor + RemoteActor> Clone for LocalHandle<A> {
+    fn clone(&self) -> Self {
+        Self {
+            proc_id: self.proc_id.clone(),
+            addr: self.addr.clone(),
+            agent_ref: self.agent_ref.clone(),
+        }
+    }
+}
+
+impl<A: Actor + RemoteActor> ProcHandle for LocalHandle<A> {
+    type Agent = A;
+
+    fn proc_id(&self) -> &ProcId {
+        &self.proc_id
+    }
+    fn addr(&self) -> Option<ChannelAddr> {
+        Some(self.addr.clone())
+    }
+    fn agent_ref(&self) -> Option<ActorRef<Self::Agent>> {
+        Some(self.agent_ref.clone())
+    }
+}
+
 #[async_trait]
 impl<A> ProcManager for LocalProcManager<A>
 where
@@ -271,6 +379,7 @@ where
     A::Params: Sync + Clone,
 {
     type Agent = A;
+    type Handle = LocalHandle<A>;
 
     fn transport(&self) -> ChannelTransport {
         ChannelTransport::Local
@@ -280,7 +389,7 @@ where
         &self,
         proc_id: ProcId,
         forwarder_addr: ChannelAddr,
-    ) -> Result<(ChannelAddr, ActorRef<A>), HostError> {
+    ) -> Result<Self::Handle, HostError> {
         let transport = forwarder_addr.transport();
         let proc = Proc::new(
             proc_id.clone(),
@@ -295,8 +404,13 @@ where
         let agent_handle = proc
             .spawn("agent", self.params.clone())
             .await
-            .map_err(|e| HostError::AgentSpawnFailure(proc_id, e))?;
-        Ok((proc_addr, agent_handle.bind()))
+            .map_err(|e| HostError::AgentSpawnFailure(proc_id.clone(), e))?;
+
+        Ok(LocalHandle {
+            proc_id,
+            addr: proc_addr,
+            agent_ref: agent_handle.bind(),
+        })
     }
 }
 
@@ -339,12 +453,61 @@ impl<A> Drop for ProcessProcManager<A> {
     }
 }
 
+/// A [`ProcHandle`] implementation for procs managed as separate
+/// OS processes via [`ProcessProcManager`].
+///
+/// This handle records the logical identity and connectivity of an
+/// external child process:
+/// - its [`ProcId`] (unique identity on the host),
+/// - the proc’s [`ChannelAddr`] (address registered in the host
+///   router),
+/// - and the [`ActorRef`] of the agent actor spawned inside the proc.
+///
+/// Unlike [`LocalHandle`], this corresponds to a real OS process
+/// whose lifecycle is supervised by the manager. The `ProcessHandle`
+/// itself does not own the `Child` or perform monitoring; it is a
+/// stable, clonable surface exposing the proc's identity, address,
+/// and agent reference so host code can interact uniformly with local
+/// and external procs.
+#[derive(Debug)]
+pub struct ProcessHandle<A: Actor + RemoteActor> {
+    proc_id: ProcId,
+    addr: ChannelAddr,
+    agent_ref: ActorRef<A>,
+}
+
+// Manual `Clone` to avoid requiring `A: Clone`.
+impl<A: Actor + RemoteActor> Clone for ProcessHandle<A> {
+    fn clone(&self) -> Self {
+        Self {
+            proc_id: self.proc_id.clone(),
+            addr: self.addr.clone(),
+            agent_ref: self.agent_ref.clone(),
+        }
+    }
+}
+
+impl<A: Actor + RemoteActor> ProcHandle for ProcessHandle<A> {
+    type Agent = A;
+
+    fn proc_id(&self) -> &ProcId {
+        &self.proc_id
+    }
+    fn addr(&self) -> Option<ChannelAddr> {
+        Some(self.addr.clone())
+    }
+    fn agent_ref(&self) -> Option<ActorRef<Self::Agent>> {
+        Some(self.agent_ref.clone())
+    }
+}
+
 #[async_trait]
 impl<A> ProcManager for ProcessProcManager<A>
 where
     A: Actor + RemoteActor,
 {
     type Agent = A;
+    type Handle = ProcessHandle<A>;
 
     fn transport(&self) -> ChannelTransport {
         ChannelTransport::Unix
@@ -354,7 +517,7 @@ where
         &self,
         proc_id: ProcId,
         forwarder_addr: ChannelAddr,
-    ) -> Result<(ChannelAddr, ActorRef<A>), HostError> {
+    ) -> Result<Self::Handle, HostError> {
         let (callback_addr, mut callback_rx) =
             channel::serve(ChannelAddr::any(ChannelTransport::Unix)).await?;
 
@@ -386,8 +549,14 @@ where
             children.insert(proc_id.clone(), child);
         }
 
-        // Now wait for the callback, providing the address.
-        Ok(callback_rx.recv().await?)
+        // Wait for the child's callback with (addr, agent_ref)
+        let (proc_addr, agent_ref) = callback_rx.recv().await?;
+
+        Ok(ProcessHandle {
+            proc_id,
+            addr: proc_addr,
+            agent_ref,
+        })
     }
 }
 
