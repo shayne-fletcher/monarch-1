@@ -53,6 +53,7 @@ use crate::attrs::Attrs;
 use crate::cap;
 use crate::channel::ChannelAddr;
 use crate::data::Serialized;
+use crate::data::TypeInfo;
 use crate::mailbox::MailboxSenderError;
 use crate::mailbox::MailboxSenderErrorKind;
 use crate::mailbox::PortSink;
@@ -381,6 +382,14 @@ impl FromStr for Reference {
                         Token::LeftBracket Token::Uint(rank) Token::RightBracket
                         Token::LeftBracket Token::Uint(index) Token::RightBracket  =>
                         Self::Port(PortId(ActorId(ProcId::Direct(channel_addr, proc_name.to_string()), actor_name.to_string(), rank), index as u64)),
+
+                    // channeladdr,proc_name,actor_name[rank][port<type>]
+                    Token::Elem(proc_name) Token::Comma Token::Elem(actor_name)
+                        Token::LeftBracket Token::Uint(rank) Token::RightBracket
+                        Token::LeftBracket Token::Uint(index)
+                            Token::LessThan Token::Elem(_type) Token::GreaterThan
+                        Token::RightBracket =>
+                        Self::Port(PortId(ActorId(ProcId::Direct(channel_addr, proc_name.to_string()), actor_name.to_string(), rank), index as u64)),
                 }?)
             }
 
@@ -412,6 +421,15 @@ impl FromStr for Reference {
                         Token::Dot Token::Elem(actor)
                         Token::LeftBracket Token::Uint(pid) Token::RightBracket
                         Token::LeftBracket Token::Uint(index) Token::RightBracket =>
+                        Self::Port(PortId(ActorId(ProcId::Ranked(WorldId(world.into()), rank), actor.into(), pid), index as u64)),
+
+                    // world[rank].actor[pid][port<type>]
+                    Token::Elem(world) Token::LeftBracket Token::Uint(rank) Token::RightBracket
+                        Token::Dot Token::Elem(actor)
+                        Token::LeftBracket Token::Uint(pid) Token::RightBracket
+                        Token::LeftBracket Token::Uint(index)
+                            Token::LessThan Token::Elem(_type) Token::GreaterThan
+                        Token::RightBracket =>
                         Self::Port(PortId(ActorId(ProcId::Ranked(WorldId(world.into()), rank), actor.into(), pid), index as u64)),
 
                     // world.actor
@@ -900,7 +918,13 @@ impl FromStr for PortId {
 impl fmt::Display for PortId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let PortId(actor_id, port) = self;
-        write!(f, "{}[{}]", actor_id, port)
+        if port & (1 << 63) != 0 {
+            let type_info = TypeInfo::get(*port).or_else(|| TypeInfo::get(*port & !(1 << 63)));
+            let typename = type_info.map_or("unknown", TypeInfo::typename);
+            write!(f, "{}[{}<{}>]", actor_id, port, typename)
+        } else {
+            write!(f, "{}[{}]", actor_id, port)
+        }
     }
 }
 
@@ -1348,11 +1372,23 @@ mod tests {
                 )
                 .into(),
             ),
+            (
+                // type annotations are ignored
+                "tcp:[::1]:1234,test,testactor[0][123<my::type>]",
+                PortId(
+                    ActorId(
+                        ProcId::Direct("tcp:[::1]:1234".parse().unwrap(), "test".to_string()),
+                        "testactor".to_string(),
+                        0,
+                    ),
+                    123,
+                )
+                .into(),
+            ),
         ];
 
         for (s, expected) in cases {
-            let got: Reference = s.parse().unwrap();
-            assert_eq!(got, expected);
+            assert_eq!(s.parse::<Reference>().unwrap(), expected, "for {}", s);
         }
     }
 
@@ -1419,5 +1455,23 @@ mod tests {
         sorted.sort();
 
         assert_eq!(sorted, expected);
+    }
+
+    #[test]
+    fn test_port_type_annotation() {
+        #[derive(Named, Serialize, Deserialize)]
+        struct MyType;
+        let port_id = PortId(
+            ActorId(
+                ProcId::Ranked(WorldId("test".into()), 234),
+                "testactor".into(),
+                1,
+            ),
+            MyType::port(),
+        );
+        assert_eq!(
+            port_id.to_string(),
+            "test[234].testactor[1][17867850292987402005<hyperactor::reference::tests::MyType>]"
+        );
     }
 }

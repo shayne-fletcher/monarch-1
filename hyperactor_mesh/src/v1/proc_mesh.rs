@@ -146,7 +146,7 @@ impl ProcRef {
 }
 
 /// A mesh of processes.
-#[derive(Debug, Named)]
+#[derive(Debug)]
 pub struct ProcMesh {
     name: Name,
     allocation: ProcMeshAllocation,

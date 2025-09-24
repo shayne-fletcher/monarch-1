@@ -478,6 +478,21 @@ impl Clone for Attrs {
     }
 }
 
+impl std::fmt::Display for Attrs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut first = true;
+        for (key, value) in &self.values {
+            if first {
+                first = false;
+            } else {
+                write!(f, ",")?;
+            }
+            write!(f, "{}={}", key, value.display())?
+        }
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for Attrs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Create a map of key names to their JSON representation for debugging

@@ -788,6 +788,8 @@ impl MailboxSender for UndeliverableMailboxSender {
             actor_name = sender_name,
             actor_id = envelope.sender.to_string(),
             dest = envelope.dest.to_string(),
+            headers = envelope.headers().to_string(), // todo: implement tracing::Value for Attrs
+            data = envelope.data().to_string(),
             "message not delivered, {}",
             error_str,
         );
