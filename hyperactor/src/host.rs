@@ -215,7 +215,10 @@ impl<M: ProcManager> Host<M> {
     /// Spawn a new process with the given `name`. On success, the proc has been
     /// spawned, and is reachable through the returned, direct-addressed ProcId,
     /// which will be `ProcId::Direct(self.addr(), name)`.
-    pub async fn spawn(&mut self, name: String) -> Result<(ProcId, ActorRef<M::Agent>), HostError> {
+    pub async fn spawn(
+        &mut self,
+        name: String,
+    ) -> Result<(ProcId, ActorRef<ManagerAgent<M>>), HostError> {
         if self.procs.contains_key(&name) {
             return Err(HostError::ProcExists(name));
         }
@@ -281,11 +284,8 @@ pub trait ProcHandle: Clone + Send + Sync + 'static {
 /// `Agent`-typed actor on each proc, responsible for managing the proc.
 #[async_trait]
 pub trait ProcManager {
-    /// The type of agent actor launched on the proc.
-    type Agent: Actor + RemoteActor;
-
     /// Concrete handle type this manager returns.
-    type Handle: ProcHandle<Agent = Self::Agent>;
+    type Handle: ProcHandle;
 
     /// The preferred transport for this ProcManager.
     /// In practice this will be [`ChannelTransport::Local`]
@@ -306,6 +306,20 @@ pub trait ProcManager {
         forwarder_addr: ChannelAddr,
     ) -> Result<Self::Handle, HostError>;
 }
+
+/// Type alias for the agent actor managed by a given [`ProcManager`].
+///
+/// This resolves to the `Agent` type exposed by the manager's
+/// associated `Handle` (via [`ProcHandle::Agent`]). It provides a
+/// convenient shorthand so call sites can refer to
+/// `ActorRef<ManagerAgent<M>>` instead of the more verbose
+/// `<M::Handle as ProcHandle>::Agent`.
+///
+/// # Example
+/// ```ignore
+/// fn takes_agent_ref<M: ProcManager>(r: ActorRef<ManagerAgent<M>>) { … }
+/// ```
+pub type ManagerAgent<M: ProcManager> = <M::Handle as ProcHandle>::Agent;
 
 /// A ProcManager that spawns into local (in-process) procs. Used for
 /// testing.
@@ -377,7 +391,6 @@ where
     A: Actor + RemoteActor + Binds<A>,
     A::Params: Sync + Clone,
 {
-    type Agent = A;
     type Handle = LocalHandle<A>;
 
     fn transport(&self) -> ChannelTransport {
@@ -505,7 +518,6 @@ impl<A> ProcManager for ProcessProcManager<A>
 where
     A: Actor + RemoteActor,
 {
-    type Agent = A;
     type Handle = ProcessHandle<A>;
 
     fn transport(&self) -> ChannelTransport {
