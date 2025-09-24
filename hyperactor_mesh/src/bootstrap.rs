@@ -169,7 +169,7 @@ impl BootstrapMode {
 /// *events* - e.g. "a proc was Created/Running/Stopped" - and are
 /// consumed from an event stream during allocation. By contrast,
 /// [`ProcStatus`] is a **live, queryable view**: it reflects the
-/// current observed status of a running proc, as seen through a
+/// current observed status of a running proc, as seen through the
 /// [`ProcHandle`] API (stop, kill, status).
 ///
 /// In short:
@@ -202,7 +202,8 @@ pub enum ProcStatus {
 
 impl ProcStatus {
     /// Returns `true` if the proc is in a terminal (exited) state:
-    /// `Stopped`, `Killed`, or `Failed`.
+    /// [`ProcStatus::Stopped`], [`ProcStatus::Killed`], or
+    /// [`ProcStatus::Failed`].
     #[inline]
     pub fn is_exit(&self) -> bool {
         matches!(
@@ -212,54 +213,82 @@ impl ProcStatus {
     }
 }
 
+/// Error returned by [`ProcHandle::ready`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadyError {
+    /// The proc reached a terminal state before `Running`.
+    Terminal(ProcStatus),
+    /// The internal watch channel closed unexpectedly.
+    ChannelClosed,
+}
+
+impl std::fmt::Display for ReadyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadyError::Terminal(st) => write!(f, "proc terminated before running: {st:?}"),
+            ReadyError::ChannelClosed => write!(f, "status channel closed"),
+        }
+    }
+}
+impl std::error::Error for ReadyError {}
+
 /// A handle to a proc launched by [`BootstrapProcManager`].
 ///
-/// `ProcHandle` is the owner-facing API for controlling and observing
-/// the lifecycle of a proc. It pairs the **logical proc identity**
-/// (`ProcId`) with the underlying **OS process handle**
-/// (`tokio::process::Child`) and a shared, queryable [`ProcStatus`].
+/// `ProcHandle` is a lightweight supervisor for an external process:
+/// it tracks and broadcasts lifecycle state, and exposes a small
+/// control/observation surface. While it may temporarily hold a
+/// `tokio::process::Child` (shared behind a mutex) so the exit
+/// monitor can `wait()` it, it is **not** the unique owner of the OS
+/// process, and dropping a `ProcHandle` does not by itself terminate
+/// the process.
+///
+/// What it pairs together:
+/// - the **logical proc identity** (`ProcId`)
+/// - the **live status surface** ([`ProcStatus`]), available both as
+///   a synchronous snapshot (`status()`) and as an async stream via a
+///   `tokio::sync::watch` channel (`watch()` / `changed()`)
 ///
 /// Responsibilities:
-/// - Retains the child process handle until it is claimed by the exit
-///   monitor, so the OS process can be waited on and its status
+/// - Retain the child handle only until the exit monitor claims it,
+///   so the OS process can be awaited and its terminal status
 ///   recorded.
-/// - Tracks the current [`ProcStatus`] in an `Arc<Mutex<...>>`,
-///   allowing concurrent observation and mutation from lifecycle
-///   control paths.
-/// - Broadcasts status changes over a `tokio::sync::watch` channel,
-///   so tasks can `await` lifecycle transitions asynchronously.
-/// - Provides the foundation for higher-level APIs such as
-///   `terminate()`, `kill()`, `wait()`, and `status()`.
+/// - Update status via the `mark_*` transitions and broadcast changes
+///   over the watch channel so tasks can `await` lifecycle
+///   transitions without polling.
+/// - Provide the foundation for higher-level APIs like `wait()`
+///   (await terminal) and, later, `terminate()` / `kill()`.
 ///
 /// Notes:
-/// - Dropping a `ProcHandle` does **not** automatically kill the
-///   process. Cleanup on manager drop is handled by
-///   [`BootstrapProcManager`], which sends SIGKILL to any remaining
-///   PIDs in its registry.
+/// - Manager-level cleanup happens in [`BootstrapProcManager::drop`]:
+///   it SIGKILLs any still-recorded PIDs; we do not rely on
+///   `Child::kill_on_drop`.
 ///
 /// Relationship to types:
 /// - [`ProcStatus`]: live status surface, updated by this handle.
-/// - [`ProcState`]/[`ProcStopReason`] (in `alloc.rs`): event-driven
-///   allocator view; not directly updated by this type.
+/// - [`ProcState`]/[`ProcStopReason`] (in `alloc.rs`):
+///   allocator-facing, historical event log; not directly updated by
+///   this type.
 #[derive(Clone, Debug)]
 pub struct ProcHandle {
     /// Logical identity of the proc in the mesh.
     proc_id: ProcId,
-    /// Current lifecycle status of the proc (see [`ProcStatus`]).
-    /// Shared/mutable so observers and controllers can read/update.
+    /// Live lifecycle snapshot (see [`ProcStatus`]). Kept in a mutex
+    /// so [`ProcHandle::status`] can return a synchronous copy. All
+    /// mutations now flow through [`ProcHandle::transition`], which
+    /// updates this field under the lock and then broadcasts on the
+    /// watch channel.
     status: Arc<std::sync::Mutex<ProcStatus>>,
-    /// Underlying OS process handle. Retained so the proc can be
-    /// signaled (SIGTERM/SIGKILL) or awaited for exit. Wrapped in
-    /// `Option` because ownership is consumed on wait.
+    /// Underlying OS child handle. Held only until the exit monitor
+    /// claims it (consumed by `wait()` there). Not relied on for
+    /// teardown; manager `Drop` handles best-effort SIGKILL.
     child: Arc<std::sync::Mutex<Option<Child>>>,
-    /// Broadcast channel used to notify subscribers whenever
-    /// [`ProcStatus`] changes. All mutations call
-    /// `tx.send(new_status)`.
+    /// Watch sender for status transitions. Every `mark_*` goes
+    /// through [`ProcHandle::transition`], which updates the snapshot
+    /// under the lock and then `send`s the new [`ProcStatus`].
     tx: tokio::sync::watch::Sender<ProcStatus>,
-    /// Subscription endpoint for watching [`ProcStatus`] changes.
-    /// Each clone of this receiver can be awaited independently
-    /// (e.g., via `rx.changed().await`) to observe lifecycle
-    /// transitions as they occur.
+    /// Watch receiver seed. `watch()` clones this so callers can
+    /// `borrow()` the current status and `changed().await` future
+    /// transitions independently.
     rx: tokio::sync::watch::Receiver<ProcStatus>,
 }
 
@@ -305,6 +334,7 @@ impl ProcHandle {
     ///   every status update in order.
     /// - Use [`ProcHandle::status`] for a one-off snapshot; use
     ///   `watch()` when you need to await changes over time.
+    #[inline]
     pub fn watch(&self) -> tokio::sync::watch::Receiver<ProcStatus> {
         self.rx.clone()
     }
@@ -326,6 +356,7 @@ impl ProcHandle {
     ///     _ => {}
     /// }
     /// ```
+    #[inline]
     pub async fn changed(&self) {
         let _ = self.watch().changed().await;
     }
@@ -350,12 +381,6 @@ impl ProcHandle {
             .and_then(|c| c.id())
     }
 
-    /// TODO: status is currently backed by `Arc<Mutex<ProcStatus>>`
-    /// with mark_* mutators. This is intentionally simple for now. In
-    /// future, consider replacing with `tokio::sync::watch` so
-    /// callers can both poll (`status()`) and subscribe to changes
-    /// (`watch`). That would provide async lifecycle observation
-    /// without changing the external API.
     /// Return a snapshot of the current [`ProcStatus`] for this proc.
     ///
     /// This is a *live view* of the lifecycle state as tracked by
@@ -363,18 +388,22 @@ impl ProcHandle {
     /// about the underlying OS process (e.g., `Starting`, `Running`,
     /// `Stopping`, etc.).
     ///
-    /// Note: this is a synchronous snapshot. Future improvements may
-    /// allow async subscriptions (e.g. via `tokio::sync::watch`) to
-    /// observe status transitions as they happen.
+    /// Internally this reads the mutex-guarded status. Use this when
+    /// you just need a synchronous snapshot; use
+    /// [`ProcHandle::watch`] or [`ProcHandle::changed`] if you want
+    /// to await transitions asynchronously.
     #[must_use]
     pub fn status(&self) -> ProcStatus {
+        // Source of truth for now is the mutex. We broadcast via
+        // `watch` in `transition`, but callers that want a
+        // synchronous snapshot should read the guarded value.
         self.status.lock().expect("status mutex poisoned").clone()
     }
 
     /// Atomically apply a state transition while holding the status
-    /// lock, and send the updated value on the watch channel before
-    /// releasing the lock. This ensures the mutex state and the
-    /// broadcast value are always in sync and avoids races between
+    /// lock, and send the updated value on the watch channel **while
+    /// still holding the lock**. This guarantees the mutex state and
+    /// the broadcast value stay in sync and avoids reordering between
     /// concurrent transitions.
     fn transition<F>(&self, f: F) -> bool
     where
@@ -484,6 +513,71 @@ impl ProcHandle {
                 );
             }
         })
+    }
+
+    /// Wait until the proc has reached a terminal state and return
+    /// it.
+    ///
+    /// Terminal means [`ProcStatus::Stopped`],
+    /// [`ProcStatus::Killed`], or [`ProcStatus::Failed`]. If the
+    /// current status is already terminal, returns immediately.
+    ///
+    /// Non-consuming: `ProcHandle` is a supervisor, not the owner of
+    /// the OS process, so you can call `wait()` from multiple tasks
+    /// concurrently.
+    ///
+    /// Implementation detail: listens on this handle's `watch`
+    /// channel. It snapshots the current status, and if not terminal
+    /// awaits the next change. If the channel closes unexpectedly,
+    /// returns the last observed status.
+    ///
+    /// Mirrors `tokio::process::Child::wait()`, but yields the
+    /// higher-level [`ProcStatus`] instead of an `ExitStatus`.
+    #[must_use]
+    pub async fn wait(&self) -> ProcStatus {
+        let mut rx = self.watch();
+        loop {
+            let st = rx.borrow().clone();
+            if st.is_exit() {
+                return st;
+            }
+            // If the channel closes, return the last observed value.
+            if rx.changed().await.is_err() {
+                return st;
+            }
+        }
+    }
+
+    /// Wait until the proc reaches the [`ProcStatus::Running`] state.
+    ///
+    /// If the proc hits a terminal state ([`ProcStatus::Stopped`],
+    /// [`ProcStatus::Killed`], or [`ProcStatus::Failed`]) before ever
+    /// running, this returns `Err(ReadyError::Terminal(status))`. If
+    /// the internal watch channel closes unexpectedly, this returns
+    /// `Err(ReadyError::ChannelClosed)`. Otherwise it returns
+    /// `Ok(())` when `Running` is first observed.
+    ///
+    /// Non-consuming: `ProcHandle` is a supervisor, not the owner;
+    /// multiple tasks may await `ready()` concurrently. `Stopping` is
+    /// not treated as terminal here; we continue waiting until
+    /// `Running` or a terminal state is seen.
+    ///
+    /// Companion to [`ProcHandle::wait`]: `wait()` resolves on exit;
+    /// `ready()` resolves on startup.
+    pub async fn ready(&self) -> Result<(), ReadyError> {
+        let mut rx = self.watch();
+        loop {
+            let st = rx.borrow().clone();
+            match &st {
+                ProcStatus::Running { .. } => return Ok(()),
+                s if s.is_exit() => return Err(ReadyError::Terminal(st)),
+                _non_terminal => {
+                    if rx.changed().await.is_err() {
+                        return Err(ReadyError::ChannelClosed);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1254,20 +1348,6 @@ mod tests {
         }
     }
 
-    // Helper. Await until the proc has exited. Loops on the watch
-    // channel until the status transitions into a terminal state
-    // (Stopped, Killed, or Failed), then returns that final status.
-    async fn wait_for_exit(h: &ProcHandle) -> ProcStatus {
-        let mut rx = h.watch();
-        loop {
-            let st = rx.borrow().clone();
-            if st.is_exit() {
-                return st;
-            }
-            rx.changed().await.unwrap();
-        }
-    }
-
     #[tokio::test]
     async fn test_exit_monitor_updates_status_on_clean_exit() {
         use std::path::PathBuf;
@@ -1299,11 +1379,8 @@ mod tests {
             );
         }
 
-        let st = wait_for_exit(&handle).await;
-        assert!(
-            matches!(st, ProcStatus::Stopped { .. } | ProcStatus::Stopping),
-            "status={st:?}"
-        );
+        let st = handle.wait().await;
+        assert!(matches!(st, ProcStatus::Stopped { .. }), "status={st:?}");
     }
 
     #[tokio::test]
@@ -1349,7 +1426,7 @@ mod tests {
             libc::kill(pid, libc::SIGKILL);
         }
 
-        let st = wait_for_exit(&handle).await;
+        let st = handle.wait().await;
         match st {
             ProcStatus::Killed { signal, .. } => assert_eq!(signal, libc::SIGKILL),
             other => panic!("expected Killed(SIGKILL), got {other:?}"),
@@ -1384,6 +1461,11 @@ mod tests {
             s => panic!("expected Running, got {s:?}"),
         }
 
+        handle
+            .ready()
+            .await
+            .expect("ready() should succeed once Running");
+
         // Running -> Stopped
         assert!(handle.mark_stopped(0));
         rx.changed().await.ok(); // Observe the transition.
@@ -1391,6 +1473,38 @@ mod tests {
             &*rx.borrow(),
             ProcStatus::Stopped { exit_code: 0 }
         ));
+    }
+
+    #[tokio::test]
+    async fn ready_errs_if_process_exits_before_running() {
+        // Child exits immediately.
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 7")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn");
+
+        let proc_id = ProcId::Direct(
+            ChannelAddr::any(ChannelTransport::Unix),
+            "early-exit".into(),
+        );
+        let handle = ProcHandle::new(proc_id.clone(), child);
+
+        // Simulate the exit monitor doing its job directly here.
+        // (Equivalent outcome: terminal state before Running.)
+        assert!(handle.mark_stopped(7));
+
+        // `ready()` should return Err with the terminal status.
+        match handle.ready().await {
+            Ok(()) => panic!("ready() unexpectedly succeeded"),
+            Err(ReadyError::Terminal(ProcStatus::Stopped { exit_code })) => {
+                assert_eq!(exit_code, 7)
+            }
+            Err(other) => panic!("expected Stopped(7), got {other:?}"),
+        }
     }
 
     #[tokio::test]
