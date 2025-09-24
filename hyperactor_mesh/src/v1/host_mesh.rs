@@ -19,6 +19,7 @@ use hyperactor::channel::ChannelAddr;
 use hyperactor::context;
 use ndslice::Extent;
 use ndslice::Region;
+use ndslice::extent;
 use ndslice::view;
 use ndslice::view::Ranked;
 use ndslice::view::RegionParseError;
@@ -224,6 +225,15 @@ impl HostMeshRef {
         })
     }
 
+    /// Create a new HostMeshRef from an arbitrary set of hosts. This is meant to
+    /// enable extrinsic bootstrapping.
+    pub fn from_hosts(hosts: Vec<ChannelAddr>) -> Self {
+        Self {
+            region: extent!(hosts = hosts.len()).into(),
+            ranks: Arc::new(hosts.into_iter().map(HostRef).collect()),
+        }
+    }
+
     /// Spawn a ProcMesh onto this host mesh.
     // TODO: add an "additional dims" API
     pub async fn spawn(&self, cx: &impl context::Actor, name: &str) -> v1::Result<ProcMesh> {
@@ -339,6 +349,7 @@ mod tests {
     use tokio::process::Command;
 
     use super::*;
+    use crate::Bootstrap;
     use crate::alloc::AllocSpec;
     use crate::alloc::Allocator;
     use crate::alloc::ProcessAllocator;
@@ -462,5 +473,43 @@ mod tests {
 
         let forward = last_rx.recv().await.unwrap();
         assert_eq!(forward.visited, expect_visited);
+    }
+
+    /// Allocate a new port on localhost. This drops the listener, releasing the socket,
+    /// before returning. Hyperactor's channel::net applies SO_REUSEADDR, so we do not hav
+    /// to wait out the socket's TIMED_WAIT state.
+    ///
+    /// Even so, this is racy.
+    fn free_localhost_addr() -> ChannelAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        ChannelAddr::Tcp(listener.local_addr().unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_extrinsic_allocation() {
+        let program = buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap();
+
+        let hosts = vec![free_localhost_addr(), free_localhost_addr()];
+
+        let mut children = Vec::new();
+        for host in hosts.iter() {
+            let mut cmd = Command::new(program.clone());
+            let boot = Bootstrap::Host { addr: host.clone() };
+            boot.to_env(&mut cmd);
+            cmd.kill_on_drop(true);
+            children.push(cmd.spawn().unwrap());
+        }
+
+        let host_mesh = HostMeshRef::from_hosts(hosts);
+        let proc_mesh = host_mesh
+            .spawn(&testing::instance().await, "test")
+            .await
+            .unwrap();
+        let actor_mesh: ActorMesh<testactor::TestActor> = proc_mesh
+            .spawn(&testing::instance().await, "test", &())
+            .await
+            .unwrap();
+
+        testactor::assert_mesh_shape(actor_mesh).await;
     }
 }

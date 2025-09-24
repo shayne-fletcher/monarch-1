@@ -150,8 +150,11 @@ impl Actor for HostMeshAgentProcMeshTrampoline {
         let manager = BootstrapProcManager::new_current_exe()?;
         let (host, _handle) = Host::serve(manager, transport.any()).await?;
 
-        let system_proc = host.system_proc().clone();
-        let host_mesh_agent = system_proc.spawn::<HostMeshAgent>("agent", host).await?;
+        let host_mesh_agent = host
+            .system_proc()
+            .clone()
+            .spawn::<HostMeshAgent>("agent", host)
+            .await?;
 
         Ok(Self {
             host_mesh_agent,

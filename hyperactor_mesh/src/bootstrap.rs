@@ -7,6 +7,7 @@
  */
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::env::VarError;
 use std::future;
 use std::io;
@@ -30,6 +31,7 @@ use hyperactor::channel::Tx;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
 use hyperactor::host;
+use hyperactor::host::Host;
 use hyperactor::host::HostError;
 use hyperactor::host::ProcManager;
 use hyperactor::mailbox::MailboxServer;
@@ -44,6 +46,7 @@ use tokio::sync::watch;
 use crate::logging::create_log_writers;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::v1;
+use crate::v1::host_mesh::mesh_agent::HostMeshAgent;
 
 pub const BOOTSTRAP_ADDR_ENV: &str = "HYPERACTOR_MESH_BOOTSTRAP_ADDR";
 pub const BOOTSTRAP_INDEX_ENV: &str = "HYPERACTOR_MESH_INDEX";
@@ -129,10 +132,25 @@ async fn exit_if_missed_heartbeat(bootstrap_index: usize, bootstrap_addr: Channe
     }
 }
 
-/// The bootstrap mode configures the behavior of the bootstrap process.
+#[macro_export]
+macro_rules! ok {
+    ($expr:expr $(,)?) => {
+        match $expr {
+            Ok(value) => value,
+            Err(e) => return ::anyhow::Error::from(e),
+        }
+    };
+}
+
+async fn halt<R>() -> R {
+    future::pending::<()>().await;
+    unreachable!()
+}
+
+/// Bootstrap configures the bootstrap behavior of a binary.
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BootstrapMode {
-    // "v1" proc bootstrap
+pub enum Bootstrap {
+    /// "v1" proc bootstrap
     Proc {
         /// The ProcId of the proc to be bootstrapped.
         proc_id: ProcId,
@@ -143,11 +161,18 @@ pub enum BootstrapMode {
         callback_addr: ChannelAddr,
     },
 
+    /// Host bootstrap. This sets up a new `Host`, managed by a
+    /// [`crate::v1::host_mesh::mesh_agent::HostMeshAgent`].
+    Host {
+        /// The address on which to serve the host.
+        addr: ChannelAddr,
+    },
+
     #[default]
     V0ProcMesh, // pass through to the v0 allocator
 }
 
-impl BootstrapMode {
+impl Bootstrap {
     /// Serialize the mode into a environment-variable-safe string by
     /// base64-encoding its JSON representation.
     fn to_env_safe_string(&self) -> v1::Result<String> {
@@ -159,6 +184,81 @@ impl BootstrapMode {
         let data = BASE64_STANDARD.decode(str)?;
         let data = std::str::from_utf8(&data)?;
         Ok(serde_json::from_str(data)?)
+    }
+
+    /// Get a bootstrap configuration from the environment; returns `None`
+    /// if the environment does not specify a boostrap config.
+    pub fn get_from_env() -> anyhow::Result<Option<Self>> {
+        match std::env::var("HYPERACTOR_MESH_BOOTSTRAP_MODE") {
+            Ok(mode) => match Bootstrap::from_env_safe_string(&mode) {
+                Ok(mode) => Ok(Some(mode)),
+                Err(e) => {
+                    Err(anyhow::Error::from(e).context("parsing HYPERACTOR_MESH_BOOTSTRAP_MODE"))
+                }
+            },
+            Err(VarError::NotPresent) => Ok(None),
+            Err(e) => Err(anyhow::Error::from(e).context("reading HYPERACTOR_MESH_BOOTSTRAP_MODE")),
+        }
+    }
+
+    /// Inject this bootstrap configuration into the environment of the provided command.
+    pub fn to_env(&self, cmd: &mut Command) {
+        cmd.env(
+            "HYPERACTOR_MESH_BOOTSTRAP_MODE",
+            self.to_env_safe_string().unwrap(),
+        );
+    }
+
+    /// Bootstrap this binary according to this configuration.
+    /// This either runs forever, or returns an error.
+    pub async fn bootstrap(self) -> anyhow::Error {
+        tracing::info!(
+            "bootstrapping mesh process: {}",
+            serde_json::to_string(&self).unwrap()
+        );
+        match self {
+            Bootstrap::Proc {
+                proc_id,
+                backend_addr,
+                callback_addr,
+            } => {
+                let result =
+                    host::spawn_proc(proc_id, backend_addr, callback_addr, |proc| async move {
+                        ProcMeshAgent::boot_v1(proc).await
+                    })
+                    .await;
+                match result {
+                    Ok(_proc) => halt().await,
+                    Err(e) => e.into(),
+                }
+            }
+            Bootstrap::Host { addr } => {
+                let manager = ok!(BootstrapProcManager::new_current_exe());
+                let (host, _handle) = ok!(Host::serve(manager, addr).await);
+                let addr = host.addr().clone();
+                let host_mesh_agent = ok!(host
+                    .system_proc()
+                    .clone()
+                    .spawn::<HostMeshAgent>("agent", host)
+                    .await);
+
+                tracing::info!(
+                    "serving host at {}, agent: {}",
+                    addr,
+                    host_mesh_agent.bind::<HostMeshAgent>()
+                );
+                halt().await
+            }
+            Bootstrap::V0ProcMesh => bootstrap_v0_proc_mesh().await,
+        }
+    }
+
+    /// A variant of [`bootstrap`] that logs the error and exits the process
+    /// if bootstrapping fails.
+    pub async fn bootstrap_or_die(self) -> ! {
+        let err = self.bootstrap().await;
+        tracing::error!("failed to bootstrap mesh process: {}", err);
+        std::process::exit(1)
     }
 }
 
@@ -737,6 +837,10 @@ pub struct BootstrapProcManager {
     /// Path to the bootstrap binary that this manager will launch for
     /// each proc.
     program: std::path::PathBuf,
+    /// argv[0], if specified
+    arg0: Option<String>,
+    /// argv[1..]
+    args: Vec<String>,
     /// Async registry of running children, keyed by [`ProcId`]. Holds
     /// [`BootstrapProcHandle`]s so callers can query or monitor
     /// status.
@@ -798,6 +902,8 @@ impl BootstrapProcManager {
     pub(crate) fn new(program: std::path::PathBuf) -> Self {
         Self {
             program,
+            arg0: None,
+            args: Vec::new(),
             children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
@@ -805,13 +911,24 @@ impl BootstrapProcManager {
 
     /// Convenience constructor that resolves the current executable
     /// (`std::env::current_exe`) and uses that as the bootstrap
-    /// binary.
+    /// binary. The program arguments are also captured and used to
+    /// configure child processes.
     ///
     /// Useful when the proc manager should re-exec itself as the
     /// child program. Returns an `io::Result` since querying the
     /// current executable path can fail.
     pub(crate) fn new_current_exe() -> io::Result<Self> {
-        Ok(Self::new(std::env::current_exe()?))
+        // Ok(Self::new(std::env::current_exe()?))
+        let mut args: VecDeque<String> = std::env::args().collect();
+        let arg0 = args.pop_front();
+
+        Ok(Self {
+            program: std::env::current_exe()?,
+            arg0,
+            args: args.into(),
+            children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        })
     }
 
     /// Test-only constructor that uses the Buck-built
@@ -940,12 +1057,18 @@ impl ProcManager for BootstrapProcManager {
         let (callback_addr, mut callback_rx) =
             channel::serve(ChannelAddr::any(ChannelTransport::Unix))?;
 
-        let mode = BootstrapMode::Proc {
+        let mode = Bootstrap::Proc {
             proc_id: proc_id.clone(),
             backend_addr,
             callback_addr,
         };
         let mut cmd = Command::new(&self.program);
+        if let Some(arg0) = &self.arg0 {
+            cmd.arg0(arg0);
+        }
+        for arg in &self.args {
+            cmd.arg(arg);
+        }
         cmd.env(
             "HYPERACTOR_MESH_BOOTSTRAP_MODE",
             mode.to_env_safe_string()
@@ -1052,38 +1175,8 @@ impl ProcManager for BootstrapProcManager {
 ///
 /// Use [`bootstrap_or_die`] to implement this behavior directly.
 pub async fn bootstrap() -> anyhow::Error {
-    let mode = match std::env::var("HYPERACTOR_MESH_BOOTSTRAP_MODE") {
-        Ok(mode) => match BootstrapMode::from_env_safe_string(&mode) {
-            Ok(mode) => mode,
-            Err(e) => {
-                return anyhow::Error::from(e).context("parsing HYPERACTOR_MESH_BOOTSTRAP_MODE");
-            }
-        },
-        Err(VarError::NotPresent) => BootstrapMode::default(),
-        Err(e) => return anyhow::Error::from(e).context("reading HYPERACTOR_MESH_BOOTSTRAP_MODE"),
-    };
-
-    match mode {
-        BootstrapMode::Proc {
-            proc_id,
-            backend_addr,
-            callback_addr,
-        } => {
-            let result =
-                host::spawn_proc(proc_id, backend_addr, callback_addr, |proc| async move {
-                    ProcMeshAgent::boot_v1(proc).await
-                })
-                .await;
-            match result {
-                Ok(_proc) => {
-                    future::pending::<()>().await;
-                    unreachable!()
-                }
-                Err(e) => e.into(),
-            }
-        }
-        BootstrapMode::V0ProcMesh => bootstrap_v0_proc_mesh().await,
-    }
+    let boot = ok!(Bootstrap::get_from_env()).unwrap_or_else(Bootstrap::default);
+    boot.bootstrap().await
 }
 
 /// Bootstrap a v0 proc mesh. This launches a control process that responds to
@@ -1232,8 +1325,8 @@ mod tests {
     #[test]
     fn test_bootstrap_mode_env_string() {
         let values = [
-            BootstrapMode::default(),
-            BootstrapMode::Proc {
+            Bootstrap::default(),
+            Bootstrap::Proc {
                 proc_id: id!(foo[0]),
                 backend_addr: ChannelAddr::any(ChannelTransport::Tcp),
                 callback_addr: ChannelAddr::any(ChannelTransport::Unix),
@@ -1242,7 +1335,7 @@ mod tests {
 
         for value in values {
             let safe = value.to_env_safe_string().unwrap();
-            assert_eq!(value, BootstrapMode::from_env_safe_string(&safe).unwrap());
+            assert_eq!(value, Bootstrap::from_env_safe_string(&safe).unwrap());
         }
     }
 

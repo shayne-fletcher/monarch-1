@@ -633,61 +633,8 @@ mod tests {
         let instance = testing::instance().await;
 
         for proc_mesh in testing::proc_meshes(&instance, extent!(replicas = 4, hosts = 2)).await {
-            let actor_mesh: ActorMesh<testactor::TestActor> =
-                proc_mesh.spawn(instance, "test", &()).await.unwrap();
-
-            // Verify casting to the root actor mesh
-            {
-                let (port, mut rx) = mailbox::open_port(&instance);
-                actor_mesh
-                    .cast(instance, testactor::GetActorId(port.bind()))
-                    .unwrap();
-
-                let mut expected_actor_ids: HashSet<_> = actor_mesh
-                    .values()
-                    .map(|actor_ref| actor_ref.actor_id().clone())
-                    .collect();
-
-                while !expected_actor_ids.is_empty() {
-                    let actor_id = rx.recv().await.unwrap();
-                    assert!(
-                        expected_actor_ids.remove(&actor_id),
-                        "got {actor_id}, expect {expected_actor_ids:?}"
-                    );
-                }
-
-                // No more messages
-                RealClock.sleep(Duration::from_secs(1)).await;
-                let result = rx.try_recv();
-                assert!(result.as_ref().unwrap().is_none(), "got {result:?}");
-            }
-
-            // Verify casting to the sliced actor mesh
-            let sliced_actor_mesh = actor_mesh.range("replicas", 1..3).unwrap();
-            {
-                let (port, mut rx) = mailbox::open_port(instance);
-                sliced_actor_mesh
-                    .cast(instance, testactor::GetActorId(port.bind()))
-                    .unwrap();
-
-                let mut expected_actor_ids: HashSet<_> = sliced_actor_mesh
-                    .values()
-                    .map(|actor_ref| actor_ref.actor_id().clone())
-                    .collect();
-
-                while !expected_actor_ids.is_empty() {
-                    let actor_id = rx.recv().await.unwrap();
-                    assert!(
-                        expected_actor_ids.remove(&actor_id),
-                        "got {actor_id}, expect {expected_actor_ids:?}"
-                    );
-                }
-
-                // No more messages
-                RealClock.sleep(Duration::from_secs(1)).await;
-                let result = rx.try_recv();
-                assert!(result.as_ref().unwrap().is_none(), "got {result:?}");
-            }
+            testactor::assert_mesh_shape(proc_mesh.spawn(instance, "test", &()).await.unwrap())
+                .await;
         }
     }
 }
