@@ -60,10 +60,14 @@ use crate::mailbox::PortSink;
 use crate::message::Bind;
 use crate::message::Bindings;
 use crate::message::Unbind;
-use crate::parse::Lexer;
-use crate::parse::ParseError;
-use crate::parse::Token;
-use crate::parse::parse;
+
+mod lex;
+mod parse;
+
+use parse::Lexer;
+use parse::ParseError;
+use parse::Token;
+use parse::parse;
 
 /// A universal reference to hierarchical identifiers in Hyperactor.
 ///

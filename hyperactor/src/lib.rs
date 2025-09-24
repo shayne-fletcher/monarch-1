@@ -85,7 +85,6 @@ pub mod message;
 pub mod metrics;
 mod ordering;
 pub mod panic_handler;
-mod parse;
 pub mod proc;
 pub mod reference;
 mod signal_handler;
