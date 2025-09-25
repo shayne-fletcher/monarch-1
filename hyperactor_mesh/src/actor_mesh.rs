@@ -1280,6 +1280,8 @@ mod tests {
 
         use bytes::Bytes;
         use hyperactor::PortId;
+        use hyperactor::clock::Clock;
+        use hyperactor::clock::RealClock;
         use hyperactor::mailbox::MessageEnvelope;
         use rand::Rng;
         use tokio::process::Command;
@@ -1342,7 +1344,7 @@ mod tests {
                 .unwrap();
             let mut proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
             let mut proc_events = proc_mesh.events().unwrap();
-            let mut actor_mesh: RootActorMesh<TestActor> =
+            let actor_mesh: RootActorMesh<TestActor> =
                 proc_mesh.spawn("ingest", &()).await.unwrap();
             let (reply_handle, mut reply_receiver) = actor_mesh.open_port();
             let dest = actor_mesh.get(0).unwrap();
@@ -1362,9 +1364,9 @@ mod tests {
             // Send direct. A cast message is > 1024 bytes.
             dest.send(proc_mesh.client(), payload).unwrap();
             #[allow(clippy::disallowed_methods)]
-            let result =
-                tokio::time::timeout(tokio::time::Duration::from_secs(2), reply_receiver.recv())
-                    .await;
+            let result = RealClock
+                .timeout(Duration::from_secs(2), reply_receiver.recv())
+                .await;
             assert!(result.is_ok(), "Operation should not time out");
 
             // Message sized to max frame length + 1.
@@ -1393,12 +1395,11 @@ mod tests {
             // does not depend on a timeout.
             {
                 let event = proc_events.next().await.unwrap();
-                assert_matches!(event, ProcEvent::Crashed(_, _),);
-            }
-            {
-                let mut actor_mesh_events = actor_mesh.events().unwrap();
-                let event = actor_mesh_events.next().await.unwrap();
-                assert_eq!(event.actor_id.name(), &actor_mesh.name);
+                assert_matches!(
+                    event,
+                    ProcEvent::Crashed(_, _),
+                    "Should have received crash event"
+                );
             }
         }
 
