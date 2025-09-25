@@ -29,6 +29,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::bootstrap::BootstrapProcManager;
+use crate::bootstrap::BootstrapProcManagerParams;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
 use crate::v1::Name;
@@ -144,10 +145,18 @@ pub(crate) struct HostMeshAgentProcMeshTrampoline {
 
 #[async_trait]
 impl Actor for HostMeshAgentProcMeshTrampoline {
-    type Params = (ChannelTransport, PortRef<ActorRef<HostMeshAgent>>);
+    type Params = (
+        ChannelTransport,
+        PortRef<ActorRef<HostMeshAgent>>,
+        Option<BootstrapProcManagerParams>,
+    );
 
-    async fn new((transport, reply_port): Self::Params) -> anyhow::Result<Self> {
-        let manager = BootstrapProcManager::new_current_exe()?;
+    async fn new((transport, reply_port, bootstrap_params): Self::Params) -> anyhow::Result<Self> {
+        let manager = if bootstrap_params.is_some() {
+            BootstrapProcManager::from_params(bootstrap_params.unwrap())
+        } else {
+            BootstrapProcManager::new_current_exe()?
+        };
         let (host, _handle) = Host::serve(manager, transport.any()).await?;
 
         let host_mesh_agent = host

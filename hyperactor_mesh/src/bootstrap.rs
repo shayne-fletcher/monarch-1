@@ -812,6 +812,13 @@ impl hyperactor::host::ProcHandle for BootstrapProcHandle {
     }
 }
 
+#[derive(Debug, Named, Serialize, Deserialize, Clone)]
+pub struct BootstrapProcManagerParams {
+    pub program: std::path::PathBuf,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+}
+
 /// A process manager for launching and supervising **bootstrap
 /// processes** (via the [`bootstrap`] entry point).
 ///
@@ -849,6 +856,7 @@ pub struct BootstrapProcManager {
     /// exclusively in the [`Drop`] impl to send `SIGKILL` without
     /// needing async context.
     pid_table: Arc<std::sync::Mutex<HashMap<ProcId, u32>>>,
+    env: HashMap<String, String>,
 }
 
 impl Drop for BootstrapProcManager {
@@ -906,6 +914,7 @@ impl BootstrapProcManager {
             args: Vec::new(),
             children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            env: HashMap::new(),
         }
     }
 
@@ -928,7 +937,19 @@ impl BootstrapProcManager {
             args: args.into(),
             children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            env: HashMap::new(),
         })
+    }
+
+    pub(crate) fn from_params(params: BootstrapProcManagerParams) -> Self {
+        Self {
+            program: params.program,
+            arg0: None,
+            args: params.args,
+            children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            env: params.env,
+        }
     }
 
     /// Test-only constructor that uses the Buck-built
@@ -1068,6 +1089,9 @@ impl ProcManager for BootstrapProcManager {
         }
         for arg in &self.args {
             cmd.arg(arg);
+        }
+        for (k, v) in &self.env {
+            cmd.env(k, v);
         }
         cmd.env(
             "HYPERACTOR_MESH_BOOTSTRAP_MODE",

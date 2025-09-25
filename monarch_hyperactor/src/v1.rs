@@ -9,4 +9,5 @@
 //! V1 API implementation for monarch_hyperactor using hyperactor_mesh::v1
 
 pub mod actor_mesh;
+pub mod host_mesh;
 pub mod proc_mesh;

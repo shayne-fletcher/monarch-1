@@ -202,4 +202,16 @@ class Region:
     a compact but useful representation of the ranks. However, this representation
     may change in the future.
     """
+    def __init__(self, labels: Sequence[str], slice: Slice) -> None: ...
     def as_shape(self) -> "Shape": ...
+    def labels(self) -> List[str]:
+        """
+        The labels for each dimension of the region.
+        """
+        ...
+
+    def slice(self) -> Slice:
+        """
+        The slice of the region.
+        """
+        ...

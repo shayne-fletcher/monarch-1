@@ -120,10 +120,25 @@ impl PyRegion {
 
 #[pymethods]
 impl PyRegion {
+    #[new]
+    fn new(labels: Vec<String>, slice: PySlice) -> PyResult<Self> {
+        Ok(PyRegion {
+            inner: Region::new(labels, slice.into()),
+        })
+    }
+
     fn as_shape(&self) -> PyShape {
         PyShape {
             inner: (&self.inner).into(),
         }
+    }
+
+    fn labels(&self) -> Vec<String> {
+        self.inner.labels().to_vec()
+    }
+
+    fn slice(&self) -> PySlice {
+        self.inner.slice().clone().into()
     }
 }
 

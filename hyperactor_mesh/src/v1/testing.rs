@@ -120,7 +120,7 @@ pub async fn host_mesh(extent: Extent) -> HostMesh {
         .await
         .unwrap();
 
-    HostMesh::allocate(instance().await, alloc, "test")
+    HostMesh::allocate(instance().await, Box::new(alloc), "test", None)
         .await
         .unwrap()
 }

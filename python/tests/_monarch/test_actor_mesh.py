@@ -21,9 +21,12 @@ from monarch._rust_bindings.monarch_hyperactor.actor import (
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
 
 from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
+    Alloc,
     AllocConstraints,
     AllocSpec,
 )
+from monarch._rust_bindings.monarch_hyperactor.shape import Region, Slice
+from monarch._src.actor.proc_mesh import _get_bootstrap_args, ProcessAllocator
 
 if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
@@ -31,6 +34,10 @@ if TYPE_CHECKING:
 from monarch._rust_bindings.monarch_hyperactor.mailbox import PortReceiver
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+from monarch._rust_bindings.monarch_hyperactor.v1.host_mesh import (
+    BootstrapProcManagerParams,
+    HostMesh,
+)
 from monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh import (
     ProcMesh as ProcMeshV1,
 )
@@ -47,20 +54,20 @@ def run_on_tokio(
     return lambda: PythonTask.from_coroutine(fn()).block_on()
 
 
-async def allocate() -> ProcMesh:
+async def alloc() -> Alloc:
     spec = AllocSpec(AllocConstraints(), replicas=3, hosts=8, gpus=8)
     allocator = monarch.LocalAllocator()
-    alloc = await allocator.allocate_nonblocking(spec)
-    proc_mesh = await ProcMesh.allocate_nonblocking(alloc)
+    return await allocator.allocate_nonblocking(spec)
+
+
+async def allocate() -> ProcMesh:
+    proc_mesh = await ProcMesh.allocate_nonblocking(await alloc())
     return proc_mesh
 
 
 async def allocate_v1() -> ProcMeshV1:
-    spec = AllocSpec(AllocConstraints(), replicas=3, hosts=8, gpus=8)
-    allocator = monarch.LocalAllocator()
-    alloc = await allocator.allocate_nonblocking(spec)
     proc_mesh = await ProcMeshV1.allocate_nonblocking(
-        context().actor_instance._as_rust(), alloc, "proc_mesh"
+        context().actor_instance._as_rust(), await alloc(), "proc_mesh"
     )
     return proc_mesh
 
@@ -237,5 +244,60 @@ async def test_cast_ref(use_v1: bool) -> None:
         )
         if not use_v1:
             await proc_mesh.stop_nonblocking()
+
+    run()
+
+
+# TODO - re-enable after resolving T232206970
+@pytest.mark.oss_skip
+@pytest.mark.timeout(120)
+async def test_host_mesh() -> None:
+    @run_on_tokio
+    async def run() -> None:
+        cmd, args, bootstrap_env = _get_bootstrap_args()
+        allocator = ProcessAllocator(cmd, args, bootstrap_env)
+        spec: AllocSpec = AllocSpec(AllocConstraints(), replicas=2, hosts=2, gpus=4)
+        alloc = allocator.allocate(spec)
+
+        host_mesh = await HostMesh.allocate_nonblocking(
+            context().actor_instance._as_rust(),
+            await alloc._hy_alloc,
+            "host_mesh",
+            BootstrapProcManagerParams(
+                cmd,
+                args if args else [],
+                bootstrap_env,
+            ),
+        ).spawn()
+
+        assert host_mesh.region.labels() == ["replicas", "hosts", "gpus"]
+        assert host_mesh.region.slice() == Slice(
+            offset=0, sizes=[2, 2, 4], strides=[8, 4, 1]
+        )
+
+        proc_mesh = await host_mesh.spawn_nonblocking(
+            context().actor_instance._as_rust(), "proc_mesh"
+        ).spawn()
+        actor_mesh = await spawn_actor_mesh(proc_mesh)
+
+        await verify_cast_to_call(actor_mesh, context().actor_instance, list(range(16)))
+
+        # Ranks 4, 6, 12, 14 (gpus 0 and 2 on host 1 on both replicas)
+        sliced_hm = host_mesh.sliced(
+            Region(
+                labels=["replicas", "gpus"],
+                slice=Slice(offset=4, sizes=[2, 2], strides=[8, 2]),
+            )
+        )
+
+        assert sliced_hm.region.labels() == ["replicas", "gpus"]
+        assert sliced_hm.region.slice() == Slice(offset=4, sizes=[2, 2], strides=[8, 2])
+
+        sliced_pm = await sliced_hm.spawn_nonblocking(
+            context().actor_instance._as_rust(), "sliced_pm"
+        )
+        sliced_am = await spawn_actor_mesh(sliced_pm)
+
+        await verify_cast_to_call(sliced_am, context().actor_instance, list(range(4)))
 
     run()
