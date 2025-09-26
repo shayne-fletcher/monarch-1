@@ -770,7 +770,7 @@ impl BootstrapProcHandle {
     /// Mirrors `tokio::process::Child::wait()`, but yields the
     /// higher-level [`ProcStatus`] instead of an `ExitStatus`.
     #[must_use]
-    pub async fn wait(&self) -> ProcStatus {
+    pub async fn wait_inner(&self) -> ProcStatus {
         let mut rx = self.watch();
         loop {
             let st = rx.borrow().clone();
@@ -799,9 +799,10 @@ impl BootstrapProcHandle {
     /// `Stopping` is not treated as terminal here; we continue
     /// waiting until `Ready` or a terminal state is seen.
     ///
-    /// Companion to [`BootstrapProcHandle::wait`]: `wait()` resolves
-    /// on exit; `ready()` resolves on startup.
-    pub async fn ready(&self) -> Result<(), ReadyError> {
+    /// Companion to [`BootstrapProcHandle::wait_inner`]:
+    /// `wait_inner()` resolves on exit; `ready_inner()` resolves on
+    /// startup.
+    pub async fn ready_inner(&self) -> Result<(), ReadyError> {
         let mut rx = self.watch();
         loop {
             let st = rx.borrow().clone();
@@ -818,8 +819,10 @@ impl BootstrapProcHandle {
     }
 }
 
+#[async_trait]
 impl hyperactor::host::ProcHandle for BootstrapProcHandle {
     type Agent = ProcMeshAgent;
+    type TerminalStatus = ProcStatus;
 
     #[inline]
     fn proc_id(&self) -> &ProcId {
@@ -839,6 +842,42 @@ impl hyperactor::host::ProcHandle for BootstrapProcHandle {
         match &*self.status.lock().expect("status mutex poisoned") {
             ProcStatus::Ready { agent, .. } => Some(agent.clone()),
             _ => None,
+        }
+    }
+
+    /// Wait until this proc first reaches the [`ProcStatus::Ready`]
+    /// state.
+    ///
+    /// Returns `Ok(())` once `Ready` is observed.
+    ///
+    /// If the proc transitions directly to a terminal state before
+    /// becoming `Ready`, returns `Err(ReadyError::Terminal(status))`.
+    ///
+    /// If the internal status watch closes unexpectedly before
+    /// `Ready` is observed, returns `Err(ReadyError::ChannelClosed)`.
+    async fn ready(&self) -> Result<(), hyperactor::host::ReadyError<Self::TerminalStatus>> {
+        match self.ready_inner().await {
+            Ok(()) => Ok(()),
+            Err(ReadyError::Terminal(status)) => {
+                Err(hyperactor::host::ReadyError::Terminal(status))
+            }
+            Err(ReadyError::ChannelClosed) => Err(hyperactor::host::ReadyError::ChannelClosed),
+        }
+    }
+
+    /// Wait until this proc reaches a terminal [`ProcStatus`].
+    ///
+    /// Returns `Ok(status)` when a terminal state is observed
+    /// (`Stopped`, `Killed`, or `Failed`).
+    ///
+    /// If the internal status watch closes before any terminal state
+    /// is seen, returns `Err(WaitError::ChannelClosed)`.
+    async fn wait(&self) -> Result<Self::TerminalStatus, hyperactor::host::WaitError> {
+        let status = self.wait_inner().await;
+        if status.is_exit() {
+            Ok(status)
+        } else {
+            Err(hyperactor::host::WaitError::ChannelClosed)
         }
     }
 }
@@ -1031,7 +1070,7 @@ impl BootstrapProcManager {
                     }
                 }
                 Err(e) => {
-                    let _ = handle.mark_failed(format!("wait() failed: {e}"));
+                    let _ = handle.mark_failed(format!("wait_inner() failed: {e}"));
                     if let Ok(mut table) = pid_table.lock() {
                         table.remove(&proc_id);
                     }
@@ -1640,6 +1679,7 @@ mod tests {
             BootstrapProcHandle::new(proc_id, child)
         }
 
+        #[tokio::test]
         async fn starting_to_running_ok() {
             let h = handle_for_test();
             assert!(matches!(h.status(), ProcStatus::Starting));
@@ -1789,7 +1829,7 @@ mod tests {
             );
         }
 
-        let st = handle.wait().await;
+        let st = handle.wait_inner().await;
         assert!(matches!(st, ProcStatus::Stopped { .. }), "status={st:?}");
     }
 
@@ -1835,7 +1875,7 @@ mod tests {
             libc::kill(pid, libc::SIGKILL);
         }
 
-        let st = handle.wait().await;
+        let st = handle.wait_inner().await;
         match st {
             ProcStatus::Killed { signal, .. } => assert_eq!(signal, libc::SIGKILL),
             other => panic!("expected Killed(SIGKILL), got {other:?}"),
@@ -1902,7 +1942,7 @@ mod tests {
         assert!(handle.mark_stopped(7));
 
         // `ready()` should return Err with the terminal status.
-        match handle.ready().await {
+        match handle.ready_inner().await {
             Ok(()) => panic!("ready() unexpectedly succeeded"),
             Err(ReadyError::Terminal(ProcStatus::Stopped { exit_code })) => {
                 assert_eq!(exit_code, 7)
@@ -2049,9 +2089,9 @@ mod tests {
         // Stamp Ready and assert ready().await unblocks.
         assert!(handle.mark_ready(pid, started_at, ready_addr.clone(), agent_ref));
         handle
-            .ready()
+            .ready_inner()
             .await
-            .expect("ready() should complete after Ready");
+            .expect("ready_inner() should complete after Ready");
 
         // Sanity-check the Ready fields we control
         // (pid/started_at/addr).
@@ -2212,6 +2252,88 @@ mod tests {
 
         for st in samples {
             let _ = format!("{}", st); // Just make sure it doesn't panic.
+        }
+    }
+
+    #[tokio::test]
+    async fn proc_handle_ready_ok_through_trait() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 0.1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+
+        let proc_id = ProcId::Direct(any_addr_for_test(), "ph-ready-ok".into());
+        let handle = BootstrapProcHandle::new(proc_id.clone(), child);
+
+        // Starting -> Running
+        let pid = handle.pid().expect("pid");
+        let t0 = RealClock.system_time_now();
+        assert!(handle.mark_running(pid, t0));
+
+        // Synthesize Ready data
+        let addr = any_addr_for_test();
+        let agent: ActorRef<ProcMeshAgent> =
+            ActorRef::attest(ActorId(proc_id.clone(), "agent".into(), 0));
+        assert!(handle.mark_ready(pid, t0, addr, agent));
+
+        // Call the trait method (not ready_inner).
+        let r = <BootstrapProcHandle as hyperactor::host::ProcHandle>::ready(&handle).await;
+        assert!(r.is_ok(), "expected Ok(()), got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn proc_handle_wait_returns_terminal_status() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+
+        let proc_id = ProcId::Direct(any_addr_for_test(), "ph-wait".into());
+        let handle = BootstrapProcHandle::new(proc_id, child);
+
+        // Drive directly to a terminal state before calling wait()
+        assert!(handle.mark_stopped(0));
+
+        // Call the trait method (not wait_inner)
+        let st = <BootstrapProcHandle as hyperactor::host::ProcHandle>::wait(&handle)
+            .await
+            .expect("wait should return Ok(terminal)");
+
+        match st {
+            ProcStatus::Stopped { exit_code } => assert_eq!(exit_code, 0),
+            other => panic!("expected Stopped(0), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_wrapper_maps_terminal_to_trait_error() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 7")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let proc_id = ProcId::Direct(any_addr_for_test(), "wrap".into());
+        let handle = BootstrapProcHandle::new(proc_id, child);
+
+        assert!(handle.mark_stopped(7));
+
+        match <BootstrapProcHandle as hyperactor::host::ProcHandle>::ready(&handle).await {
+            Ok(()) => panic!("expected Err"),
+            Err(hyperactor::host::ReadyError::Terminal(ProcStatus::Stopped { exit_code })) => {
+                assert_eq!(exit_code, 7);
+            }
+            Err(e) => panic!("unexpected error: {e:?}"),
         }
     }
 }

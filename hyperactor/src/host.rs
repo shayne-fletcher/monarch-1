@@ -44,13 +44,13 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::Future;
 use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use tokio::time::Duration;
 
 use crate::Actor;
 use crate::ActorHandle;
@@ -120,42 +120,6 @@ pub struct Host<M> {
     router: DialMailboxRouter,
     manager: M,
     service_proc: Proc,
-}
-
-/// Await until a [`ProcHandle`] reports both its `addr()` and
-/// `agent_ref()`, or fail if the timeout expires.
-///
-/// This is a **temporary shim** to bridge the gap until readiness is
-/// part of the `ProcHandle` trait itself. Right now, external proc
-/// managers like `BootstrapProcManager` may return a handle
-/// immediately after spawning the OS process, before the proc has
-/// finished bootstrapping and published its address/agent. This
-/// helper spins in a short sleep loop, checking for those fields to
-/// become `Some(_)`.
-///
-/// Callers (e.g. `Host::spawn`) use this to enforce that the returned
-/// `(ProcId, ActorRef)` pair is only visible once the proc is
-/// actually usable. In the long term, this will be replaced by an
-/// explicit `handle.ready().await` API so no polling is required
-/// here.
-async fn await_ready_with_timeout<H: ProcHandle>(
-    handle: &H,
-    proc_id: &ProcId,
-    timeout: Duration,
-) -> Result<(ChannelAddr, ActorRef<H::Agent>), HostError> {
-    let deadline = RealClock.now() + timeout;
-    loop {
-        if let (Some(addr), Some(agent)) = (handle.addr(), handle.agent_ref()) {
-            return Ok((addr, agent));
-        }
-        if RealClock.now() >= deadline {
-            return Err(HostError::ProcessConfigurationFailure(
-                proc_id.clone(),
-                anyhow::anyhow!("timeout waiting for proc to become Ready"),
-            ));
-        }
-        RealClock.sleep(Duration::from_millis(5)).await;
-    }
 }
 
 impl<M: ProcManager> Host<M> {
@@ -229,8 +193,42 @@ impl<M: ProcManager> Host<M> {
             .spawn(proc_id.clone(), self.backend_addr.clone())
             .await?;
 
-        let (addr, agent_ref) =
-            await_ready_with_timeout(&handle, &proc_id, Duration::from_secs(10)).await?;
+        // Await readiness (config-driven; 0s disables timeout).
+        let to: Duration = crate::config::global::get(crate::config::HOST_SPAWN_READY_TIMEOUT);
+        let ready: Result<(), HostError> = if to == Duration::from_secs(0) {
+            handle.ready().await.map_err(|e| {
+                HostError::ProcessConfigurationFailure(proc_id.clone(), anyhow::anyhow!("{e:?}"))
+            })
+        } else {
+            match RealClock.timeout(to, handle.ready()).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(HostError::ProcessConfigurationFailure(
+                    proc_id.clone(),
+                    anyhow::anyhow!("{e:?}"),
+                )),
+                Err(_) => Err(HostError::ProcessConfigurationFailure(
+                    proc_id.clone(),
+                    anyhow::anyhow!(format!("timeout waiting for Ready after {to:?}")),
+                )),
+            }
+        };
+
+        ready?;
+
+        // After Ready, addr() + agent_ref() must be present.
+        let addr = handle.addr().ok_or_else(|| {
+            HostError::ProcessConfigurationFailure(
+                proc_id.clone(),
+                anyhow::anyhow!("proc reported Ready but no addr() available"),
+            )
+        })?;
+        let agent_ref = handle.agent_ref().ok_or_else(|| {
+            HostError::ProcessConfigurationFailure(
+                proc_id.clone(),
+                anyhow::anyhow!("proc reported Ready but no agent_ref() available"),
+            )
+        })?;
+
         self.router.bind(proc_id.clone().into(), addr.clone());
         self.procs.insert(name, addr);
 
@@ -260,13 +258,40 @@ impl MailboxSender for ProcOrDial {
     }
 }
 
+/// Error returned by [`ProcHandle::ready`].
+#[derive(Debug, Clone)]
+pub enum ReadyError<TerminalStatus> {
+    /// The proc reached a terminal state before becoming Ready.
+    ///
+    /// Carries the observed terminal status.
+    Terminal(TerminalStatus),
+    /// The internal watch channel closed unexpectedly.
+    ChannelClosed,
+}
+
+/// Error returned by [`ProcHandle::wait`].
+#[derive(Debug, Clone)]
+pub enum WaitError {
+    /// Internal watch channel closed unexpectedly.
+    ChannelClosed,
+}
+
 /// Minimal uniform surface for a spawned-proc handle returned by a
 /// ProcManager. Each manager can return its own concrete handle, as
 /// long as it exposes these.
+#[async_trait]
 pub trait ProcHandle: Clone + Send + Sync + 'static {
     /// The type of the agent actor installed in ths proc by the
     /// manager.
     type Agent: Actor + RemoteActor;
+
+    /// The type of terminal status produced when the proc exits.
+    ///
+    /// For example, an external proc manager may use a rich status
+    /// enum (e.g. `ProcStatus`), while an in-process manager may use
+    /// a trivial unit type. This is the value returned by
+    /// [`ProcHandle::wait`] and carried by [`ReadyError::Terminal`].
+    type TerminalStatus: std::fmt::Debug + Clone + Send + Sync + 'static;
 
     /// The proc's logical identity on this host.
     fn proc_id(&self) -> &ProcId;
@@ -277,6 +302,14 @@ pub trait ProcHandle: Clone + Send + Sync + 'static {
 
     /// The agent actor reference hosted in the proc.
     fn agent_ref(&self) -> Option<ActorRef<Self::Agent>>;
+
+    /// Resolves when the proc becomes Ready. Multi-waiter,
+    /// non-consuming.
+    async fn ready(&self) -> Result<(), ReadyError<Self::TerminalStatus>>;
+
+    /// Resolves with the terminal status (Stopped/Killed/Failed/etc).
+    /// Multi-waiter, non-consuming.
+    async fn wait(&self) -> Result<Self::TerminalStatus, WaitError>;
 }
 
 /// A trait describing a manager of procs, responsible for bootstrapping
@@ -319,7 +352,7 @@ pub trait ProcManager {
 /// ```ignore
 /// fn takes_agent_ref<M: ProcManager>(r: ActorRef<ManagerAgent<M>>) { … }
 /// ```
-pub type ManagerAgent<M: ProcManager> = <M::Handle as ProcHandle>::Agent;
+pub type ManagerAgent<M> = <<M as ProcManager>::Handle as ProcHandle>::Agent; // rust issue #112792
 
 /// A ProcManager that spawns into local (in-process) procs. Used for
 /// testing.
@@ -371,8 +404,10 @@ impl<A: Actor + RemoteActor> Clone for LocalHandle<A> {
     }
 }
 
+#[async_trait]
 impl<A: Actor + RemoteActor> ProcHandle for LocalHandle<A> {
     type Agent = A;
+    type TerminalStatus = ();
 
     fn proc_id(&self) -> &ProcId {
         &self.proc_id
@@ -382,6 +417,17 @@ impl<A: Actor + RemoteActor> ProcHandle for LocalHandle<A> {
     }
     fn agent_ref(&self) -> Option<ActorRef<Self::Agent>> {
         Some(self.agent_ref.clone())
+    }
+    /// Always resolves immediately: a local proc is created
+    /// in-process and is usable as soon as the handle exists.
+    async fn ready(&self) -> Result<(), ReadyError<Self::TerminalStatus>> {
+        Ok(())
+    }
+    /// Always resolves immediately with `()`: a local proc has no
+    /// external lifecycle to await. There is no OS child process
+    /// behind this handle.
+    async fn wait(&self) -> Result<Self::TerminalStatus, WaitError> {
+        Ok(())
     }
 }
 
@@ -499,8 +545,10 @@ impl<A: Actor + RemoteActor> Clone for ProcessHandle<A> {
     }
 }
 
+#[async_trait]
 impl<A: Actor + RemoteActor> ProcHandle for ProcessHandle<A> {
     type Agent = A;
+    type TerminalStatus = ();
 
     fn proc_id(&self) -> &ProcId {
         &self.proc_id
@@ -510,6 +558,17 @@ impl<A: Actor + RemoteActor> ProcHandle for ProcessHandle<A> {
     }
     fn agent_ref(&self) -> Option<ActorRef<Self::Agent>> {
         Some(self.agent_ref.clone())
+    }
+    /// Resolves immediately. `ProcessProcManager::spawn` returns this
+    /// handle only after the child has called back with (addr,
+    /// agent), i.e. after readiness.
+    async fn ready(&self) -> Result<(), ReadyError<Self::TerminalStatus>> {
+        Ok(())
+    }
+    /// Resolves immediately with `()`. This handle does not track
+    /// child lifecycle; there is no watcher in this implementation.
+    async fn wait(&self) -> Result<Self::TerminalStatus, WaitError> {
+        Ok(())
     }
 }
 
@@ -673,10 +732,13 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::testing::EchoActor;
     use super::*;
     use crate::channel::ChannelTransport;
+    use crate::clock::Clock;
+    use crate::clock::RealClock;
     use crate::context::Mailbox;
 
     #[tokio::test]
@@ -782,8 +844,8 @@ mod tests {
         let (client_inst, _h) = client.instance("test").unwrap();
         let (port, rx) = client_inst.mailbox().open_once_port();
         echo1.send(&client_inst, port.bind()).unwrap();
-        #[allow(clippy::disallowed_methods)]
-        let id = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv())
+        let id = RealClock
+            .timeout(Duration::from_secs(5), rx.recv())
             .await
             .unwrap()
             .unwrap();
@@ -798,8 +860,8 @@ mod tests {
         // external client under the same host.
         let (port2, rx2) = client_inst.mailbox().open_once_port();
         echo2.send(&client_inst, port2.bind()).unwrap();
-        #[allow(clippy::disallowed_methods)]
-        let id2 = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx2.recv())
+        let id2 = RealClock
+            .timeout(Duration::from_secs(5), rx2.recv())
             .await
             .unwrap()
             .unwrap();
@@ -818,11 +880,232 @@ mod tests {
         // Send from system -> child via a message that ultimately
         // replies to client's port
         echo1.send(&sys_inst, port3.bind()).unwrap();
-        #[allow(clippy::disallowed_methods)]
-        let id3 = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx3.recv())
+        let id3 = RealClock
+            .timeout(Duration::from_secs(5), rx3.recv())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(id3, *echo1.actor_id());
+    }
+
+    #[tokio::test]
+    async fn local_ready_and_wait_are_immediate() {
+        // Build a LocalHandle directly.
+        let addr = ChannelAddr::any(ChannelTransport::Local);
+        let proc_id = ProcId::Direct(addr.clone(), "p".into());
+        let agent_ref = ActorRef::<()>::attest(proc_id.actor_id("agent", 0));
+        let h = LocalHandle::<()> {
+            proc_id,
+            addr,
+            agent_ref,
+        };
+
+        // ready() resolves immediately
+        assert!(h.ready().await.is_ok());
+
+        // wait() resolves immediately with unit TerminalStatus
+        assert!(h.wait().await.is_ok());
+
+        // Multiple concurrent waiters both succeed
+        let (r1, r2) = tokio::join!(h.ready(), h.ready());
+        assert!(r1.is_ok() && r2.is_ok());
+    }
+
+    // --
+    // Fixtures for `host::spawn` tests.
+
+    #[derive(Debug, Clone, Copy)]
+    enum ReadyMode {
+        OkAfter(Duration),
+        ErrTerminal,
+        ErrChannelClosed,
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestHandle {
+        id: ProcId,
+        addr: ChannelAddr,
+        agent: ActorRef<()>,
+        mode: ReadyMode,
+        omit_addr: bool,
+        omit_agent: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ProcHandle for TestHandle {
+        type Agent = ();
+        type TerminalStatus = ();
+
+        fn proc_id(&self) -> &ProcId {
+            &self.id
+        }
+        fn addr(&self) -> Option<ChannelAddr> {
+            if self.omit_addr {
+                None
+            } else {
+                Some(self.addr.clone())
+            }
+        }
+        fn agent_ref(&self) -> Option<ActorRef<Self::Agent>> {
+            if self.omit_agent {
+                None
+            } else {
+                Some(self.agent.clone())
+            }
+        }
+        async fn ready(&self) -> Result<(), ReadyError<Self::TerminalStatus>> {
+            match self.mode {
+                ReadyMode::OkAfter(d) => {
+                    if !d.is_zero() {
+                        RealClock.sleep(d).await;
+                    }
+                    Ok(())
+                }
+                ReadyMode::ErrTerminal => Err(ReadyError::Terminal(())),
+                ReadyMode::ErrChannelClosed => Err(ReadyError::ChannelClosed),
+            }
+        }
+        async fn wait(&self) -> Result<Self::TerminalStatus, WaitError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestManager {
+        mode: ReadyMode,
+        omit_addr: bool,
+        omit_agent: bool,
+        transport: ChannelTransport,
+    }
+
+    impl TestManager {
+        fn local(mode: ReadyMode) -> Self {
+            Self {
+                mode,
+                omit_addr: false,
+                omit_agent: false,
+                transport: ChannelTransport::Local,
+            }
+        }
+        fn with_omissions(mut self, addr: bool, agent: bool) -> Self {
+            self.omit_addr = addr;
+            self.omit_agent = agent;
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProcManager for TestManager {
+        type Handle = TestHandle;
+
+        fn transport(&self) -> ChannelTransport {
+            self.transport.clone()
+        }
+        async fn spawn(
+            &self,
+            proc_id: ProcId,
+            forwarder_addr: ChannelAddr,
+        ) -> Result<Self::Handle, HostError> {
+            let agent = ActorRef::<()>::attest(proc_id.actor_id("agent", 0));
+            Ok(TestHandle {
+                id: proc_id,
+                addr: forwarder_addr,
+                agent,
+                mode: self.mode,
+                omit_addr: self.omit_addr,
+                omit_agent: self.omit_agent,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn host_spawn_times_out_when_configured() {
+        let cfg = crate::config::global::lock();
+        let _g = cfg.override_key(
+            crate::config::HOST_SPAWN_READY_TIMEOUT,
+            Duration::from_millis(10),
+        );
+
+        let (mut host, _h) = Host::serve(
+            TestManager::local(ReadyMode::OkAfter(Duration::from_millis(50))),
+            ChannelAddr::any(ChannelTransport::Local),
+        )
+        .await
+        .unwrap();
+
+        let err = host.spawn("t".into()).await.expect_err("must time out");
+        assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
+    }
+
+    #[tokio::test]
+    async fn host_spawn_timeout_zero_disables_and_succeeds() {
+        let cfg = crate::config::global::lock();
+        let _g = cfg.override_key(
+            crate::config::HOST_SPAWN_READY_TIMEOUT,
+            Duration::from_secs(0),
+        );
+
+        let (mut host, _h) = Host::serve(
+            TestManager::local(ReadyMode::OkAfter(Duration::from_millis(20))),
+            ChannelAddr::any(ChannelTransport::Local),
+        )
+        .await
+        .unwrap();
+
+        let (pid, agent) = host.spawn("ok".into()).await.expect("must succeed");
+        assert_eq!(agent.actor_id().proc_id(), &pid);
+        assert!(host.procs.contains_key("ok"));
+    }
+
+    #[tokio::test]
+    async fn host_spawn_maps_channel_closed_ready_error_to_config_failure() {
+        let (mut host, _h) = Host::serve(
+            TestManager::local(ReadyMode::ErrChannelClosed),
+            ChannelAddr::any(ChannelTransport::Local),
+        )
+        .await
+        .unwrap();
+
+        let err = host.spawn("p".into()).await.expect_err("must fail");
+        assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
+    }
+
+    #[tokio::test]
+    async fn host_spawn_maps_terminal_ready_error_to_config_failure() {
+        let (mut host, _h) = Host::serve(
+            TestManager::local(ReadyMode::ErrTerminal),
+            ChannelAddr::any(ChannelTransport::Local),
+        )
+        .await
+        .unwrap();
+
+        let err = host.spawn("p".into()).await.expect_err("must fail");
+        assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
+    }
+
+    #[tokio::test]
+    async fn host_spawn_fails_if_ready_but_missing_addr() {
+        let (mut host, _h) = Host::serve(
+            TestManager::local(ReadyMode::OkAfter(Duration::ZERO)).with_omissions(true, false),
+            ChannelAddr::any(ChannelTransport::Local),
+        )
+        .await
+        .unwrap();
+
+        let err = host.spawn("no-addr".into()).await.expect_err("must fail");
+        assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
+    }
+
+    #[tokio::test]
+    async fn host_spawn_fails_if_ready_but_missing_agent() {
+        let (mut host, _h) = Host::serve(
+            TestManager::local(ReadyMode::OkAfter(Duration::ZERO)).with_omissions(false, true),
+            ChannelAddr::any(ChannelTransport::Local),
+        )
+        .await
+        .unwrap();
+
+        let err = host.spawn("no-agent".into()).await.expect_err("must fail");
+        assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
     }
 }
