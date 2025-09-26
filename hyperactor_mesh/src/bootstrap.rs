@@ -1413,7 +1413,7 @@ fn debug_sink() -> &'static Mutex<DebugSink> {
                 .open(debug_path.clone())
             {
                 Ok(f) => DebugSink::File(f),
-                Err(e) => {
+                Err(_e) => {
                     eprintln!(
                         "failed to open {} for bootstrap debug logging",
                         debug_path.display()

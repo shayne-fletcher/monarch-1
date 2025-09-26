@@ -27,7 +27,6 @@ use crate::attrs::AttrKeyInfo;
 use crate::attrs::Attrs;
 use crate::attrs::SerializableValue;
 use crate::attrs::declare_attrs;
-use crate::channel::ChannelTransport;
 use crate::data::Encoding;
 
 // Declare configuration keys using the new attrs system with defaults
