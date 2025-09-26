@@ -91,6 +91,13 @@ declare_attrs! {
 
     /// Whether to enable client sequence assignment.
     pub attr ENABLE_CLIENT_SEQ_ASSIGNMENT: bool = false;
+
+    /// Timeout for [`Host::spawn`] to await proc readiness.
+    ///
+    /// Default: 10 seconds. If set to zero, disables the timeout and
+    /// waits indefinitely.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_HOST_SPAWN_READY_TIMEOUT".to_string())
+    pub attr HOST_SPAWN_READY_TIMEOUT: Duration = Duration::from_secs(10);
 }
 
 /// Load configuration from environment variables
