@@ -262,23 +262,78 @@ impl MailboxSender for ProcOrDial {
 #[derive(Debug, Clone)]
 pub enum ReadyError<TerminalStatus> {
     /// The proc reached a terminal state before becoming Ready.
-    ///
-    /// Carries the observed terminal status.
     Terminal(TerminalStatus),
-    /// The internal watch channel closed unexpectedly.
+    /// Implementation lost its status channel / cannot observe state.
     ChannelClosed,
 }
 
 /// Error returned by [`ProcHandle::wait`].
 #[derive(Debug, Clone)]
 pub enum WaitError {
-    /// Internal watch channel closed unexpectedly.
+    /// Implementation lost its status channel / cannot observe state.
     ChannelClosed,
 }
 
-/// Minimal uniform surface for a spawned-proc handle returned by a
-/// ProcManager. Each manager can return its own concrete handle, as
-/// long as it exposes these.
+/// Error returned by [`ProcHandle::terminate`] and
+/// [`ProcHandle::kill`].
+///
+/// - `Unsupported`: the manager cannot perform the requested proc
+///   signaling (e.g., local/in-process manager that doesn't emulate
+///   kill).
+/// - `AlreadyTerminated(term)`: the proc was already terminal; `term`
+///   is the same value `wait()` would return.
+/// - `ChannelClosed`: the manager lost its lifecycle channel and
+///   cannot reliably observe state transitions.
+/// - `Io(err)`: manager-specific failure delivering the signal or
+///   performing shutdown (e.g., OS error on kill).
+#[derive(Debug)]
+pub enum TerminateError<TerminalStatus> {
+    /// Manager doesn't support signaling (e.g., Local manager).
+    Unsupported,
+    /// A terminal state was already reached while attempting
+    /// terminate/kill.
+    AlreadyTerminated(TerminalStatus),
+    /// Implementation lost its status channel / cannot observe state.
+    ChannelClosed,
+    /// Manager-specific failure to deliver signal or perform
+    /// shutdown.
+    Io(anyhow::Error),
+}
+
+/// Minimal uniform surface for a spawned-**proc** handle returned by
+/// a `ProcManager`. Each manager can return its own concrete handle,
+/// as long as it exposes these. A **proc** is the Hyperactor runtime
+/// + its actors (lifecycle controlled via `Proc` APIs such as
+/// `destroy_and_wait`). A proc **may** be hosted *inside* an OS
+/// **process**, but it is conceptually distinct:
+///
+/// - `LocalProcManager`: runs the proc **in this OS process**; there
+///   is no child process to signal. Lifecycle is entirely proc-level.
+/// - `ProcessProcManager` (test-only here): launches an **external OS
+///   process** which hosts the proc, but this toy manager does
+///   **not** wire a control plane for shutdown, nor an exit monitor.
+///
+/// This trait is therefore written in terms of the **proc**
+/// lifecycle:
+///
+/// - `ready()` resolves when the proc is Ready (mailbox bound; agent
+///   available).
+/// - `wait()` resolves with the proc's terminal status
+///   (Stopped/Killed/Failed).
+/// - `terminate()` requests a graceful shutdown of the *proc* and
+///   waits up to the deadline; managers that also own a child OS
+///   process may escalate to `SIGKILL` if the proc does not exit in
+///   time.
+/// - `kill()` requests an immediate, forced termination. For
+///    in-process procs, this may be implemented as an immediate
+///    drain/abort of actor tasks. For external procs, this is
+///    typically a `SIGKILL`.
+///
+/// The shape of the terminal value is `Self::TerminalStatus`.
+/// Managers that track rich info (exit code, signal, address, agent)
+/// can expose it; trivial managers may use `()`.
+///
+/// Managers that do not support signaling must return `Unsupported`.
 #[async_trait]
 pub trait ProcHandle: Clone + Send + Sync + 'static {
     /// The type of the agent actor installed in ths proc by the
@@ -310,6 +365,27 @@ pub trait ProcHandle: Clone + Send + Sync + 'static {
     /// Resolves with the terminal status (Stopped/Killed/Failed/etc).
     /// Multi-waiter, non-consuming.
     async fn wait(&self) -> Result<Self::TerminalStatus, WaitError>;
+
+    /// Politely stop the proc before the deadline; managers that own
+    /// a child OS process may escalate to a forced kill at the
+    /// deadline. Idempotent and race-safe: concurrent callers
+    /// coalesce; the first terminal outcome wins and all callers
+    /// observe it via `wait()`.
+    ///
+    /// Returns the single terminal status the proc reached (the same
+    /// value `wait()` will return). Never fabricates terminal states:
+    /// this is only returned after the exit monitor observes
+    /// termination.
+    async fn terminate(
+        &self,
+        timeout: Duration,
+    ) -> Result<Self::TerminalStatus, TerminateError<Self::TerminalStatus>>;
+
+    /// Force the proc down immediately. For in-process managers this
+    /// may abort actor tasks; for external managers this typically
+    /// sends `SIGKILL`. Also idempotent/race-safe; the terminal
+    /// outcome is the one observed by `wait()`.
+    async fn kill(&self) -> Result<Self::TerminalStatus, TerminateError<Self::TerminalStatus>>;
 }
 
 /// A trait describing a manager of procs, responsible for bootstrapping
@@ -354,8 +430,17 @@ pub trait ProcManager {
 /// ```
 pub type ManagerAgent<M> = <<M as ProcManager>::Handle as ProcHandle>::Agent; // rust issue #112792
 
-/// A ProcManager that spawns into local (in-process) procs. Used for
-/// testing.
+/// A ProcManager that spawns **in-process** procs (test-only).
+///
+/// The proc runs inside this same OS process; there is **no** child
+/// process to signal. Lifecycle is purely proc-level:
+/// - `terminate(timeout)`: delegates to
+///   `Proc::destroy_and_wait(timeout, None)`, which drains and, at the
+///   deadline, aborts remaining actors.
+/// - `kill()`: uses a zero deadline to emulate a forced stop via
+///   `destroy_and_wait(Duration::ZERO, None)`.
+/// - `wait()`: trivial (no external lifecycle to observe).
+///   No OS signals are sent or required.
 pub struct LocalProcManager<S> {
     procs: Arc<Mutex<HashMap<ProcId, Proc>>>,
     spawn: S,
@@ -372,8 +457,8 @@ impl<S> LocalProcManager<S> {
     }
 }
 
-/// A lightweight implementation of [`ProcHandle`] for procs
-/// managed in-process via [`LocalProcManager`].
+/// A lightweight [`ProcHandle`] for procs managed **in-process** via
+/// [`LocalProcManager`].
 ///
 /// This handle wraps the minimal identifying state of a spawned proc:
 /// - its [`ProcId`] (logical identity on the host),
@@ -381,16 +466,17 @@ impl<S> LocalProcManager<S> {
 ///   host router), and
 /// - the [`ActorRef`] to the agent actor hosted in the proc.
 ///
-/// Unlike external process handles, `LocalHandle` does not track an
-/// OS child process or lifecycle events. It exists to provide a
-/// uniform surface (`proc_id()`, `addr()`, `agent_ref()`) so that
-/// host code can treat local and external procs through the same
-/// trait.
+/// Unlike external handles, `LocalHandle` does **not** manage an OS
+/// child process. It provides a uniform surface (`proc_id()`,
+/// `addr()`, `agent_ref()`) and implements `terminate()`/`kill()` by
+/// calling into the underlying `Proc::destroy_and_wait`, i.e.,
+/// **proc-level** shutdown.
 #[derive(Debug)]
 pub struct LocalHandle<A: Actor + RemoteActor> {
     proc_id: ProcId,
     addr: ChannelAddr,
     agent_ref: ActorRef<A>,
+    procs: Arc<Mutex<HashMap<ProcId, Proc>>>,
 }
 
 // Manual `Clone` to avoid requiring `A: Clone`.
@@ -400,6 +486,7 @@ impl<A: Actor + RemoteActor> Clone for LocalHandle<A> {
             proc_id: self.proc_id.clone(),
             addr: self.addr.clone(),
             agent_ref: self.agent_ref.clone(),
+            procs: Arc::clone(&self.procs),
         }
     }
 }
@@ -418,6 +505,7 @@ impl<A: Actor + RemoteActor> ProcHandle for LocalHandle<A> {
     fn agent_ref(&self) -> Option<ActorRef<Self::Agent>> {
         Some(self.agent_ref.clone())
     }
+
     /// Always resolves immediately: a local proc is created
     /// in-process and is usable as soon as the handle exists.
     async fn ready(&self) -> Result<(), ReadyError<Self::TerminalStatus>> {
@@ -427,6 +515,51 @@ impl<A: Actor + RemoteActor> ProcHandle for LocalHandle<A> {
     /// external lifecycle to await. There is no OS child process
     /// behind this handle.
     async fn wait(&self) -> Result<Self::TerminalStatus, WaitError> {
+        Ok(())
+    }
+
+    async fn terminate(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), TerminateError<Self::TerminalStatus>> {
+        let mut proc = {
+            let guard = self.procs.lock().await;
+            match guard.get(self.proc_id()) {
+                Some(p) => p.clone(),
+                None => {
+                    // The proc was already removed; treat as already
+                    // terminal.
+                    return Err(TerminateError::AlreadyTerminated(()));
+                }
+            }
+        };
+
+        // Graceful stop of the *proc* (actors) with a deadline. This
+        // will drain and then abort remaining actors at expiry.
+        let _ = proc
+            .destroy_and_wait::<()>(timeout, None)
+            .await
+            .map_err(TerminateError::Io)?;
+
+        Ok(())
+    }
+
+    async fn kill(&self) -> Result<(), TerminateError<Self::TerminalStatus>> {
+        // Forced stop == zero deadline; `destroy_and_wait` will
+        // immediately abort remaining actors and return.
+        let mut proc = {
+            let guard = self.procs.lock().await;
+            match guard.get(self.proc_id()) {
+                Some(p) => p.clone(),
+                None => return Err(TerminateError::AlreadyTerminated(())),
+            }
+        };
+
+        let _ = proc
+            .destroy_and_wait::<()>(Duration::from_millis(0), None)
+            .await
+            .map_err(TerminateError::Io)?;
+
         Ok(())
     }
 }
@@ -468,11 +601,22 @@ where
             proc_id,
             addr: proc_addr,
             agent_ref: agent_handle.bind(),
+            procs: Arc::clone(&self.procs),
         })
     }
 }
 
-/// A ProcManager that manages each proc as a separate process.
+/// A ProcManager that manages each proc as a **separate OS process**
+/// (test-only toy).
+///
+/// This implementation launches a child via `Command` and relies on
+/// `kill_on_drop(true)` so that children are SIGKILLed if the manager
+/// (or host) drops. There is **no** proc control plane (no RPC to a
+/// proc agent for shutdown) and **no** exit monitor wired here.
+/// Consequently:
+/// - `terminate()` and `kill()` return `Unsupported`.
+/// - `wait()` is trivial (no lifecycle observation).
+///
 /// It follows a simple protocol:
 ///
 /// Each process is launched with the following environment variables:
@@ -517,16 +661,19 @@ impl<A> Drop for ProcessProcManager<A> {
 /// This handle records the logical identity and connectivity of an
 /// external child process:
 /// - its [`ProcId`] (unique identity on the host),
-/// - the proc’s [`ChannelAddr`] (address registered in the host
+/// - the proc's [`ChannelAddr`] (address registered in the host
 ///   router),
 /// - and the [`ActorRef`] of the agent actor spawned inside the proc.
 ///
 /// Unlike [`LocalHandle`], this corresponds to a real OS process
-/// whose lifecycle is supervised by the manager. The `ProcessHandle`
-/// itself does not own the `Child` or perform monitoring; it is a
-/// stable, clonable surface exposing the proc's identity, address,
-/// and agent reference so host code can interact uniformly with local
-/// and external procs.
+/// launched by the manager. In this **toy** implementation the handle
+/// does not own/monitor the `Child` and there is no shutdown control
+/// plane. It is a stable, clonable surface exposing the proc's
+/// identity, address, and agent reference so host code can interact
+/// uniformly with local/external procs. `terminate()`/`kill()` are
+/// intentionally `Unsupported` here; process cleanup relies on
+/// `cmd.kill_on_drop(true)` when launching the child (the OS will
+/// SIGKILL it if the handle is dropped).
 #[derive(Debug)]
 pub struct ProcessHandle<A: Actor + RemoteActor> {
     proc_id: ProcId,
@@ -559,6 +706,7 @@ impl<A: Actor + RemoteActor> ProcHandle for ProcessHandle<A> {
     fn agent_ref(&self) -> Option<ActorRef<Self::Agent>> {
         Some(self.agent_ref.clone())
     }
+
     /// Resolves immediately. `ProcessProcManager::spawn` returns this
     /// handle only after the child has called back with (addr,
     /// agent), i.e. after readiness.
@@ -569,6 +717,17 @@ impl<A: Actor + RemoteActor> ProcHandle for ProcessHandle<A> {
     /// child lifecycle; there is no watcher in this implementation.
     async fn wait(&self) -> Result<Self::TerminalStatus, WaitError> {
         Ok(())
+    }
+
+    async fn terminate(
+        &self,
+        _deadline: Duration,
+    ) -> Result<(), TerminateError<Self::TerminalStatus>> {
+        Err(TerminateError::Unsupported)
+    }
+
+    async fn kill(&self) -> Result<(), TerminateError<Self::TerminalStatus>> {
+        Err(TerminateError::Unsupported)
     }
 }
 
@@ -622,6 +781,14 @@ where
         // Wait for the child's callback with (addr, agent_ref)
         let (proc_addr, agent_ref) = callback_rx.recv().await?;
 
+        // TODO(production): For a non-test implementation, plumb a
+        // shutdown path:
+        // - expose a proc-level graceful stop RPC on the agent and
+        //   implement `terminate(timeout)` by invoking it and, on
+        //   deadline, call `Child::kill()`; implement `kill()` as
+        //   immediate `Child::kill()`.
+        // - wire an exit monitor so `wait()` resolves with a real
+        //   terminal status.
         Ok(ProcessHandle {
             proc_id,
             addr: proc_addr,
@@ -898,6 +1065,7 @@ mod tests {
             proc_id,
             addr,
             agent_ref,
+            procs: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // ready() resolves immediately
@@ -967,6 +1135,15 @@ mod tests {
         }
         async fn wait(&self) -> Result<Self::TerminalStatus, WaitError> {
             Ok(())
+        }
+        async fn terminate(
+            &self,
+            _timeout: Duration,
+        ) -> Result<Self::TerminalStatus, TerminateError<Self::TerminalStatus>> {
+            Err(TerminateError::Unsupported)
+        }
+        async fn kill(&self) -> Result<Self::TerminalStatus, TerminateError<Self::TerminalStatus>> {
+            Err(TerminateError::Unsupported)
         }
     }
 

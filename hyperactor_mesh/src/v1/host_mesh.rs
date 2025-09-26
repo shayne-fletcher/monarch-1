@@ -33,7 +33,7 @@ use crate::v1;
 use crate::v1::Name;
 use crate::v1::ProcMesh;
 use crate::v1::ProcMeshRef;
-use crate::v1::host_mesh::mesh_agent::HostMeshAgent;
+pub use crate::v1::host_mesh::mesh_agent::HostMeshAgent;
 use crate::v1::host_mesh::mesh_agent::HostMeshAgentProcMeshTrampoline;
 use crate::v1::proc_mesh::ProcRef;
 
@@ -73,6 +73,7 @@ impl FromStr for HostRef {
 }
 
 /// An owned mesh of hosts.
+#[allow(dead_code)]
 pub struct HostMesh {
     name: Name,
     extent: Extent,
@@ -80,6 +81,7 @@ pub struct HostMesh {
     current_ref: HostMeshRef,
 }
 
+#[allow(dead_code)]
 enum HostMeshAllocation {
     /// The host mesh was bootstrapped from a proc mesh.
     /// This is to support providing host meshes through Allocs.
@@ -104,29 +106,29 @@ impl HostMesh {
     /// channel, established by the host.
     ///
     /// ```text
-    ///                        ┌ ─ ─┌────────────────────┐                   
-    ///                             │allocated Proc:     │                   
-    ///                        │    │ ┌─────────────────┐│                   
-    ///                             │ │TrampolineActor  ││                   
-    ///                        │    │ │ ┌──────────────┐││                   
-    ///                             │ │ │Host          │││                   
-    ///               ┌────┬ ─ ┘    │ │ │ ┌──────────┐ │││                   
-    ///            ┌─▶│Proc│        │ │ │ │HostAgent │ │││                   
-    ///            │  └────┴ ─ ┐    │ │ │ └──────────┘ │││                   
-    ///            │  ┌────┐        │ │ │             ██████                 
-    /// ┌────────┐ ├─▶│Proc│   │    │ │ └──────────────┘││ ▲                 
+    ///                        ┌ ─ ─┌────────────────────┐
+    ///                             │allocated Proc:     │
+    ///                        │    │ ┌─────────────────┐│
+    ///                             │ │TrampolineActor  ││
+    ///                        │    │ │ ┌──────────────┐││
+    ///                             │ │ │Host          │││
+    ///               ┌────┬ ─ ┘    │ │ │ ┌──────────┐ │││
+    ///            ┌─▶│Proc│        │ │ │ │HostAgent │ │││
+    ///            │  └────┴ ─ ┐    │ │ │ └──────────┘ │││
+    ///            │  ┌────┐        │ │ │             ██████
+    /// ┌────────┐ ├─▶│Proc│   │    │ │ └──────────────┘││ ▲
     /// │ Client │─┤  └────┘        │ └─────────────────┘│ listening channel
-    /// └────────┘ │  ┌────┐   └ ─ ─└────────────────────┘                   
-    ///            ├─▶│Proc│                                                 
-    ///            │  └────┘                                                 
-    ///            │  ┌────┐                                                 
-    ///            └─▶│Proc│                                                 
-    ///               └────┘                                                 
-    ///                 ▲                                                    
-    ///                                                                     
-    ///          `Alloc`-provided                                            
-    ///                procs               
-    /// ```                                  
+    /// └────────┘ │  ┌────┐   └ ─ ─└────────────────────┘
+    ///            ├─▶│Proc│
+    ///            │  └────┘
+    ///            │  ┌────┐
+    ///            └─▶│Proc│
+    ///               └────┘
+    ///                 ▲
+    ///
+    ///          `Alloc`-provided
+    ///                procs
+    /// ```
     pub async fn allocate(
         cx: &impl context::Actor,
         alloc: Box<dyn Alloc + Send + Sync>,

@@ -76,8 +76,7 @@ impl ProcRef {
 
     /// Pings the proc, returning whether it is alive. This will be replaced by a
     /// finer-grained lifecycle status in the near future.
-    #[allow(dead_code)]
-    async fn status(&self, cx: &impl context::Actor) -> v1::Result<bool> {
+    pub(crate) async fn status(&self, cx: &impl context::Actor) -> v1::Result<bool> {
         let (port, mut rx) = cx.mailbox().open_port();
         self.agent
             .status(cx, port.bind())
@@ -148,6 +147,7 @@ impl ProcRef {
 }
 
 /// A mesh of processes.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ProcMesh {
     name: Name,
@@ -648,7 +648,6 @@ mod tests {
     use ndslice::extent;
     use timed_test::async_timed_test;
 
-    use crate::v1::ActorMesh;
     use crate::v1::testactor;
     use crate::v1::testing;
 
