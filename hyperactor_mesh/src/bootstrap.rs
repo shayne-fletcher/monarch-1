@@ -34,12 +34,15 @@ use hyperactor::channel::Rx;
 use hyperactor::channel::Tx;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
+use hyperactor::config::CONFIG_ENV_VAR;
+use hyperactor::declare_attrs;
 use hyperactor::host;
 use hyperactor::host::Host;
 use hyperactor::host::HostError;
 use hyperactor::host::ProcManager;
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::proc::Proc;
+use libc::c_int;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::process::Child;
@@ -52,6 +55,17 @@ use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::v1;
 use crate::v1::host_mesh::mesh_agent::HostAgentMode;
 use crate::v1::host_mesh::mesh_agent::HostMeshAgent;
+
+declare_attrs! {
+    /// If enabled (default), bootstrap child processes install
+    /// `PR_SET_PDEATHSIG(SIGKILL)` so the kernel reaps them if the
+    /// parent dies unexpectedly. This is a **production safety net**
+    /// against leaked children; tests usually disable it via
+    /// `std::env::set_var("HYPERACTOR_MESH_BOOTSTRAP_ENABLE_PDEATHSIG",
+    /// "false")`.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_BOOTSTRAP_ENABLE_PDEATHSIG".to_string())
+    attr MESH_BOOTSTRAP_ENABLE_PDEATHSIG: bool = true;
+}
 
 pub const BOOTSTRAP_ADDR_ENV: &str = "HYPERACTOR_MESH_BOOTSTRAP_ADDR";
 pub const BOOTSTRAP_INDEX_ENV: &str = "HYPERACTOR_MESH_INDEX";
@@ -252,6 +266,16 @@ impl Bootstrap {
                 backend_addr,
                 callback_addr,
             } => {
+                if hyperactor::config::global::get(MESH_BOOTSTRAP_ENABLE_PDEATHSIG) {
+                    // Safety net: normal shutdown is via
+                    // `host_mesh.shutdown(&instance)`; PR_SET_PDEATHSIG
+                    // is a last-resort guard against leaks if that
+                    // protocol is bypassed.
+                    let _ = install_pdeathsig_kill();
+                } else {
+                    eprintln!("(bootstrap) PDEATHSIG disabled via config");
+                }
+
                 let result =
                     host::spawn_proc(proc_id, backend_addr, callback_addr, |proc| async move {
                         ProcMeshAgent::boot_v1(proc).await
@@ -291,6 +315,26 @@ impl Bootstrap {
         tracing::error!("failed to bootstrap mesh process: {}", err);
         std::process::exit(1)
     }
+}
+
+/// Install "kill me if parent dies" and close the race window.
+pub fn install_pdeathsig_kill() -> io::Result<()> {
+    // SAFETY: Calling into libc; does not dereference memory, just
+    // asks the kernel to deliver SIGKILL on parent death.
+    let rc = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as c_int) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Race-close: if the parent died between our exec and prctl(),
+    // we won't get a signal, so detect that and exit now.
+    //
+    // If getppid() == 1, we've already been reparented (parent gone).
+    // SAFETY: `getppid()` is a simple libc syscall returning the
+    // parent PID; it has no side effects and does not touch memory.
+    if unsafe { libc::getppid() } == 1 {
+        std::process::exit(0);
+    }
+    Ok(())
 }
 
 /// Represents the lifecycle state of a **proc as hosted in an OS
@@ -2747,6 +2791,10 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_cannonical_simple() {
+        // SAFETY: unit-test scoped
+        unsafe {
+            std::env::set_var("HYPERACTOR_MESH_BOOTSTRAP_ENABLE_PDEATHSIG", "false");
+        }
         // Create a "root" direct addressed proc.
         let proc = Proc::direct(ChannelTransport::Unix.any(), "root".to_string())
             .await
@@ -2847,5 +2895,10 @@ mod tests {
             got_id,
             actor_mesh.values().next().unwrap().actor_id().clone()
         );
+
+        // **Important**: If we don't shutdown the hosts, the
+        // BootstrapProcManager's won't send SIGKILLs to their spawned
+        // children and there will be orphans left behind.
+        host_mesh.shutdown(&instance).await.expect("host shutdown");
     }
 }
