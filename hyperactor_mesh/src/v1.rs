@@ -13,8 +13,8 @@
 pub mod actor_mesh;
 pub mod host_mesh;
 pub mod proc_mesh;
-mod testactor;
-mod testing;
+pub mod testactor;
+pub mod testing;
 pub mod value_mesh;
 
 use std::str::FromStr;

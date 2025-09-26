@@ -376,12 +376,28 @@ impl MeshAgentMessageHandler for ProcMeshAgent {
         cx: &Context<Self>,
         status_port: PortRef<(usize, bool)>,
     ) -> Result<(), anyhow::Error> {
-        let rank = self
-            .state
-            .rank()
-            .ok_or_else(|| anyhow::anyhow!("tried to get status of unconfigured proc"))?;
-        status_port.send(cx, (rank, true))?;
-        Ok(())
+        match &self.state {
+            State::ConfiguredV0 { rank, .. } => {
+                // v0 path: configured with a concrete rank
+                status_port.send(cx, (*rank, true))?;
+                Ok(())
+            }
+            State::UnconfiguredV0 { .. } => {
+                // v0 path but not configured yet
+                Err(anyhow::anyhow!(
+                    "status unavailable: v0 agent not configured (waiting for Configure)"
+                ))
+            }
+            State::V1 => {
+                // v1/owned path does not support status (no rank semantics)
+                Err(anyhow::anyhow!(
+                    "status unsupported in v1/owned path (no rank)"
+                ))
+            }
+            State::Invalid => Err(anyhow::anyhow!(
+                "status unavailable: agent in invalid state"
+            )),
+        }
     }
 }
 
