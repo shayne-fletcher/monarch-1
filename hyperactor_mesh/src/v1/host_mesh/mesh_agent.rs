@@ -199,7 +199,7 @@ impl Actor for HostMeshAgentProcMeshTrampoline {
             HostAgentMode::Local(host)
         } else {
             let manager = if let Some(ref params) = bootstrap_params {
-                BootstrapProcManager::from_params(bootstrap_params.unwrap())
+                BootstrapProcManager::from_params(params.clone())
             } else {
                 BootstrapProcManager::new_current_exe()?
             };

@@ -9,11 +9,15 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::env::VarError;
+use std::fs::OpenOptions;
 use std::future;
 use std::io;
+use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -217,6 +221,31 @@ impl Bootstrap {
             "bootstrapping mesh process: {}",
             serde_json::to_string(&self).unwrap()
         );
+
+        if Debug::is_active() {
+            let mut buf = Vec::new();
+            writeln!(&mut buf, "bootstrapping {}:", std::process::id()).unwrap();
+            writeln!(
+                &mut buf,
+                "\tconfig: {}",
+                serde_json::to_string(&self).unwrap()
+            )
+            .unwrap();
+            match std::env::current_exe() {
+                Ok(path) => writeln!(&mut buf, "\tcurrent_exe: {}", path.display()).unwrap(),
+                Err(e) => writeln!(&mut buf, "\tcurrent_exe: error<{}>", e).unwrap(),
+            }
+            writeln!(&mut buf, "\targs:").unwrap();
+            for arg in std::env::args() {
+                writeln!(&mut buf, "\t\t{}", arg).unwrap();
+            }
+            writeln!(&mut buf, "\tenv:").unwrap();
+            for (key, val) in std::env::vars() {
+                writeln!(&mut buf, "\t\t{}={}", key, val).unwrap();
+            }
+            let _ = Debug.write(&buf);
+        }
+
         match self {
             Bootstrap::Proc {
                 proc_id,
@@ -1320,8 +1349,83 @@ async fn bootstrap_v0_proc_mesh() -> anyhow::Error {
 /// if bootstrapping fails.
 pub async fn bootstrap_or_die() -> ! {
     let err = bootstrap().await;
+    let _ = writeln!(Debug, "failed to bootstrap mesh process: {}", err);
     tracing::error!("failed to bootstrap mesh process: {}", err);
     std::process::exit(1)
+}
+
+#[derive(enum_as_inner::EnumAsInner)]
+enum DebugSink {
+    File(std::fs::File),
+    Sink,
+}
+
+impl DebugSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            DebugSink::File(f) => f.write(buf),
+            DebugSink::Sink => Ok(buf.len()),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            DebugSink::File(f) => f.flush(),
+            DebugSink::Sink => Ok(()),
+        }
+    }
+}
+
+fn debug_sink() -> &'static Mutex<DebugSink> {
+    static DEBUG_SINK: OnceLock<Mutex<DebugSink>> = OnceLock::new();
+    DEBUG_SINK.get_or_init(|| {
+        let debug_path = {
+            let mut p = std::env::temp_dir();
+            if let Ok(user) = std::env::var("USER") {
+                p.push(user);
+            }
+            std::fs::create_dir_all(&p).ok();
+            p.push("monarch-bootstrap-debug.log");
+            p
+        };
+        let sink = if debug_path.exists() {
+            match OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(debug_path.clone())
+            {
+                Ok(f) => DebugSink::File(f),
+                Err(e) => {
+                    eprintln!(
+                        "failed to open {} for bootstrap debug logging",
+                        debug_path.display()
+                    );
+                    DebugSink::Sink
+                }
+            }
+        } else {
+            DebugSink::Sink
+        };
+        Mutex::new(sink)
+    })
+}
+
+/// A bootstrap specific debug writer. If the file /tmp/monarch-bootstrap-debug.log
+/// exists, then the writer's destination is that file; otherwise it discards all writes.
+struct Debug;
+
+impl Debug {
+    fn is_active() -> bool {
+        debug_sink().lock().unwrap().is_file()
+    }
+}
+
+impl Write for Debug {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        debug_sink().lock().unwrap().write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        debug_sink().lock().unwrap().flush()
+    }
 }
 
 #[cfg(test)]

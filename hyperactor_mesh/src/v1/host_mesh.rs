@@ -352,7 +352,6 @@ mod tests {
 
     use super::*;
     use crate::Bootstrap;
-    use crate::alloc::Allocator;
     use crate::v1::ActorMesh;
     use crate::v1::testactor;
     use crate::v1::testing;
