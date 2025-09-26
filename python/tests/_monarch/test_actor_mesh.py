@@ -35,7 +35,7 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import PortReceiver
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.v1.host_mesh import (
-    BootstrapProcManagerParams,
+    BootstrapCommand,
     HostMesh,
 )
 from monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh import (
@@ -263,8 +263,9 @@ async def test_host_mesh() -> None:
             context().actor_instance._as_rust(),
             await alloc._hy_alloc,
             "host_mesh",
-            BootstrapProcManagerParams(
+            BootstrapCommand(
                 cmd,
+                None,
                 args if args else [],
                 bootstrap_env,
             ),

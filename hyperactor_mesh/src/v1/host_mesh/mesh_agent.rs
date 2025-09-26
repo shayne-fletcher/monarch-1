@@ -31,8 +31,8 @@ use hyperactor::host::LocalProcManager;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::bootstrap::BootstrapCommand;
 use crate::bootstrap::BootstrapProcManager;
-use crate::bootstrap::BootstrapProcManagerParams;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
 use crate::v1::Name;
@@ -185,24 +185,22 @@ impl Actor for HostMeshAgentProcMeshTrampoline {
     type Params = (
         ChannelTransport,
         PortRef<ActorRef<HostMeshAgent>>,
-        Option<BootstrapProcManagerParams>,
+        Option<BootstrapCommand>,
         bool, /* local? */
     );
 
-    async fn new(
-        (transport, reply_port, bootstrap_params, local): Self::Params,
-    ) -> anyhow::Result<Self> {
+    async fn new((transport, reply_port, command, local): Self::Params) -> anyhow::Result<Self> {
         let host = if local {
             let spawn: ProcManagerSpawnFn = Box::new(|proc| Box::pin(ProcMeshAgent::boot_v1(proc)));
             let manager = LocalProcManager::new(spawn);
             let (host, _) = Host::serve(manager, transport.any()).await?;
             HostAgentMode::Local(host)
         } else {
-            let manager = if let Some(ref params) = bootstrap_params {
-                BootstrapProcManager::from_params(params.clone())
-            } else {
-                BootstrapProcManager::new_current_exe()?
+            let command = match command {
+                Some(command) => command,
+                None => BootstrapCommand::current()?,
             };
+            let manager = BootstrapProcManager::new(command);
             let (host, _) = Host::serve(manager, transport.any()).await?;
             HostAgentMode::Process(host)
         };
@@ -257,7 +255,7 @@ mod tests {
     #[tokio::test]
     async fn test_basic() {
         let (host, _handle) = Host::serve(
-            BootstrapProcManager::new_for_test(),
+            BootstrapProcManager::new(BootstrapCommand::test()),
             ChannelTransport::Unix.any(),
         )
         .await

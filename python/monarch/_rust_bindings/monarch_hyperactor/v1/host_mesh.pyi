@@ -23,7 +23,7 @@ class HostMesh:
         instance: Instance,
         alloc: Alloc,
         name: str,
-        bootstrap_params: BootstrapProcManagerParams | None,
+        bootstrap_command: BootstrapCommand | None,
     ) -> PythonTask["HostMesh"]:
         """
         Allocate a host mesh according to the provided alloc.
@@ -32,7 +32,7 @@ class HostMesh:
         - `instance`: The actor instance used to allocate the mesh.
         - `alloc`: The alloc to allocate according to.
         - `name`: Name of the mesh.
-        - `bootstrap_params`: Parameters to pass to the BootstrapProcManager constructor.
+        - `bootstrap_command`: Override the bootstrap command used to bootstrap procs.
         """
         ...
 
@@ -69,18 +69,20 @@ class HostMesh:
     def __reduce__(self) -> Any: ...
 
 @final
-class BootstrapProcManagerParams:
+class BootstrapCommand:
     def __init__(
         self,
         program: str,
+        arg0: str | None,
         args: list[str],
         env: dict[str, str],
     ) -> None:
         """
-        Parameters to pass to the BootstrapProcManager constructor.
+        Bootstrap command specification.
 
         Arguments:
         - `program`: The program to execute.
+        - `arg0`: Optionally, the program's arg0. If not provided, the program's name will be used.
         - `args`: List of command line arguments.
         - `env`: Environment variables as key-value pairs.
         """

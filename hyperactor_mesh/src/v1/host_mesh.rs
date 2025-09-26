@@ -27,7 +27,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::alloc::Alloc;
-use crate::bootstrap::BootstrapProcManagerParams;
+use crate::bootstrap::BootstrapCommand;
 use crate::resource::CreateOrUpdateClient;
 use crate::v1;
 use crate::v1::Name;
@@ -131,7 +131,7 @@ impl HostMesh {
         cx: &impl context::Actor,
         alloc: Box<dyn Alloc + Send + Sync>,
         name: &str,
-        bootstrap_params: Option<BootstrapProcManagerParams>,
+        bootstrap_params: Option<BootstrapCommand>,
     ) -> v1::Result<Self> {
         let transport = alloc.transport();
         let extent = alloc.extent().clone();

@@ -263,7 +263,8 @@ impl Bootstrap {
                 }
             }
             Bootstrap::Host { addr } => {
-                let manager = ok!(BootstrapProcManager::new_current_exe());
+                let command = ok!(BootstrapCommand::current());
+                let manager = BootstrapProcManager::new(command);
                 let (host, _handle) = ok!(Host::serve(manager, addr).await);
                 let addr = host.addr().clone();
                 let host_mesh_agent = ok!(host
@@ -842,11 +843,45 @@ impl hyperactor::host::ProcHandle for BootstrapProcHandle {
     }
 }
 
-#[derive(Debug, Named, Serialize, Deserialize, Clone)]
-pub struct BootstrapProcManagerParams {
+/// A specification of the command used to bootstrap procs.
+#[derive(Debug, Named, Serialize, Deserialize, Clone, Default)]
+pub struct BootstrapCommand {
     pub program: std::path::PathBuf,
+    pub arg0: Option<String>,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
+}
+
+impl BootstrapCommand {
+    /// Creates a bootstrap command specification to replicate the
+    /// invocation of the currently running process.
+    pub fn current() -> io::Result<Self> {
+        let mut args: VecDeque<String> = std::env::args().collect();
+        let arg0 = args.pop_front();
+
+        Ok(Self {
+            program: std::env::current_exe()?,
+            arg0,
+            args: args.into(),
+            env: std::env::vars().collect(),
+        })
+    }
+
+    /// Bootstrap command used for testing, invoking the Buck-built
+    /// `monarch/hyperactor_mesh/bootstrap` binary.
+    ///
+    /// Intended for integration tests where we need to spawn real
+    /// bootstrap processes under proc manager control. Not available
+    /// outside of test builds.
+    #[cfg(test)]
+    pub(crate) fn test() -> Self {
+        Self {
+            program: buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
+            arg0: None,
+            args: vec![],
+            env: HashMap::new(),
+        }
+    }
 }
 
 /// A process manager for launching and supervising **bootstrap
@@ -871,13 +906,8 @@ pub struct BootstrapProcManagerParams {
 /// orphaned if the manager itself is dropped.
 #[derive(Debug)]
 pub struct BootstrapProcManager {
-    /// Path to the bootstrap binary that this manager will launch for
-    /// each proc.
-    program: std::path::PathBuf,
-    /// argv[0], if specified
-    arg0: Option<String>,
-    /// argv[1..]
-    args: Vec<String>,
+    /// The command specification used to bootstrap new processes.
+    command: BootstrapCommand,
     /// Async registry of running children, keyed by [`ProcId`]. Holds
     /// [`BootstrapProcHandle`]s so callers can query or monitor
     /// status.
@@ -886,7 +916,6 @@ pub struct BootstrapProcManager {
     /// exclusively in the [`Drop`] impl to send `SIGKILL` without
     /// needing async context.
     pid_table: Arc<std::sync::Mutex<HashMap<ProcId, u32>>>,
-    env: HashMap<String, String>,
 }
 
 impl Drop for BootstrapProcManager {
@@ -931,66 +960,17 @@ impl Drop for BootstrapProcManager {
 
 impl BootstrapProcManager {
     /// Construct a new [`BootstrapProcManager`] that will launch
-    /// procs using the given program binary.
+    /// procs using the given bootstrap command specification.
     ///
     /// This is the general entry point when you want to manage procs
     /// backed by a specific binary path (e.g. a bootstrap
     /// trampoline).
-    #[allow(dead_code)]
-    pub(crate) fn new(program: std::path::PathBuf) -> Self {
+    pub(crate) fn new(command: BootstrapCommand) -> Self {
         Self {
-            program,
-            arg0: None,
-            args: Vec::new(),
+            command,
             children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            env: HashMap::new(),
         }
-    }
-
-    /// Convenience constructor that resolves the current executable
-    /// (`std::env::current_exe`) and uses that as the bootstrap
-    /// binary. The program arguments are also captured and used to
-    /// configure child processes.
-    ///
-    /// Useful when the proc manager should re-exec itself as the
-    /// child program. Returns an `io::Result` since querying the
-    /// current executable path can fail.
-    pub(crate) fn new_current_exe() -> io::Result<Self> {
-        // Ok(Self::new(std::env::current_exe()?))
-        let mut args: VecDeque<String> = std::env::args().collect();
-        let arg0 = args.pop_front();
-
-        Ok(Self {
-            program: std::env::current_exe()?,
-            arg0,
-            args: args.into(),
-            children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            env: HashMap::new(),
-        })
-    }
-
-    pub(crate) fn from_params(params: BootstrapProcManagerParams) -> Self {
-        Self {
-            program: params.program,
-            arg0: None,
-            args: params.args,
-            children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            env: params.env,
-        }
-    }
-
-    /// Test-only constructor that uses the Buck-built
-    /// `monarch/hyperactor_mesh/bootstrap` binary.
-    ///
-    /// Intended for integration tests where we need to spawn real
-    /// bootstrap processes under proc manager control. Not available
-    /// outside of test builds.
-    #[cfg(test)]
-    pub(crate) fn new_for_test() -> Self {
-        Self::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap())
     }
 
     /// Return the current [`ProcStatus`] for the given [`ProcId`], if
@@ -1113,14 +1093,14 @@ impl ProcManager for BootstrapProcManager {
             backend_addr,
             callback_addr,
         };
-        let mut cmd = Command::new(&self.program);
-        if let Some(arg0) = &self.arg0 {
+        let mut cmd = Command::new(&self.command.program);
+        if let Some(arg0) = &self.command.arg0 {
             cmd.arg0(arg0);
         }
-        for arg in &self.args {
+        for arg in &self.command.args {
             cmd.arg(arg);
         }
-        for (k, v) in &self.env {
+        for (k, v) in &self.command.env {
             cmd.env(k, v);
         }
         cmd.env(
@@ -1477,7 +1457,11 @@ mod tests {
         use tokio::time::Duration;
 
         // Manager; program path is irrelevant for this test.
-        let manager = BootstrapProcManager::new(PathBuf::from("/bin/true"));
+        let command = BootstrapCommand {
+            program: PathBuf::from("/bin/true"),
+            ..Default::default()
+        };
+        let manager = BootstrapProcManager::new(command);
 
         // Spawn a long-running child process (sleep 30) with
         // kill_on_drop(true).
@@ -1777,7 +1761,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_exit_monitor_updates_status_on_clean_exit() {
-        let manager = BootstrapProcManager::new(PathBuf::from("/bin/true"));
+        let command = BootstrapCommand {
+            program: PathBuf::from("/bin/true"),
+            ..Default::default()
+        };
+        let manager = BootstrapProcManager::new(command);
 
         // Spawn a fast-exiting child.
         let mut cmd = Command::new("/bin/true");
@@ -1807,7 +1795,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_exit_monitor_updates_status_on_kill() {
-        let manager = BootstrapProcManager::new(PathBuf::from("/bin/sleep"));
+        let command = BootstrapCommand {
+            program: PathBuf::from("/bin/sleep"),
+            ..Default::default()
+        };
+        let manager = BootstrapProcManager::new(command);
 
         // Spawn a process that will live long enough to kill.
         let mut cmd = Command::new("/bin/sleep");
@@ -1921,14 +1913,20 @@ mod tests {
 
     #[tokio::test]
     async fn status_unknown_proc_is_none() {
-        let manager = BootstrapProcManager::new(PathBuf::from("/bin/true"));
+        let manager = BootstrapProcManager::new(BootstrapCommand {
+            program: PathBuf::from("/bin/true"),
+            ..Default::default()
+        });
         let unknown = ProcId::Direct(ChannelAddr::any(ChannelTransport::Unix), "nope".into());
         assert!(manager.status(&unknown).await.is_none());
     }
 
     #[tokio::test]
     async fn exit_monitor_child_already_taken_leaves_status_unchanged() {
-        let manager = BootstrapProcManager::new(PathBuf::from("/bin/sleep"));
+        let manager = BootstrapProcManager::new(BootstrapCommand {
+            program: PathBuf::from("/bin/sleep"),
+            ..Default::default()
+        });
 
         // Long-ish child so it's alive while we "steal" it.
         let mut cmd = Command::new("/bin/sleep");
@@ -1964,7 +1962,10 @@ mod tests {
 
     #[tokio::test]
     async fn pid_none_after_exit_monitor_takes_child() {
-        let manager = BootstrapProcManager::new(PathBuf::from("/bin/sleep"));
+        let manager = BootstrapProcManager::new(BootstrapCommand {
+            program: PathBuf::from("/bin/sleep"),
+            ..Default::default()
+        });
 
         let mut cmd = Command::new("/bin/sleep");
         cmd.arg("5").stdout(Stdio::null()).stderr(Stdio::null());
