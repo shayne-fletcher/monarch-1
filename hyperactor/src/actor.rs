@@ -33,11 +33,11 @@ use crate::Data;
 use crate::Message;
 use crate::Named;
 use crate::RemoteMessage;
-use crate::cap;
 use crate::checkpoint::CheckpointError;
 use crate::checkpoint::Checkpointable;
 use crate::clock::Clock;
 use crate::clock::RealClock;
+use crate::context;
 use crate::mailbox::MailboxError;
 use crate::mailbox::MailboxSenderError;
 use crate::mailbox::MessageEnvelope;
@@ -85,10 +85,10 @@ pub trait Actor: Sized + Send + Debug + 'static {
     /// Spawn a child actor, given a spawning capability (usually given by [`Instance`]).
     /// The spawned actor will be supervised by the parent (spawning) actor.
     async fn spawn(
-        cap: &impl cap::CanSpawn,
+        cx: &impl context::Actor,
         params: Self::Params,
     ) -> anyhow::Result<ActorHandle<Self>> {
-        cap.spawn(params).await
+        cx.instance().spawn(params).await
     }
 
     /// Spawns this actor in a detached state, handling its messages
@@ -678,7 +678,6 @@ mod tests {
     use super::*;
     use crate as hyperactor;
     use crate::Actor;
-    use crate::Mailbox;
     use crate::OncePortHandle;
     use crate::PortRef;
     use crate::checkpoint::CheckpointError;
@@ -878,7 +877,8 @@ mod tests {
         proc: Proc,
         values: MultiValues,
         handle: ActorHandle<MultiActor>,
-        client: Mailbox,
+        client: Instance<()>,
+        _client_handle: ActorHandle<()>,
     }
 
     impl MultiValuesTest {
@@ -889,12 +889,13 @@ mod tests {
                 .spawn::<MultiActor>("myactor", values.clone())
                 .await
                 .unwrap();
-            let client = proc.attach("client").unwrap();
+            let (client, client_handle) = proc.instance("client").unwrap();
             Self {
                 proc,
                 values,
                 handle,
                 client,
+                _client_handle: client_handle,
             }
         }
 

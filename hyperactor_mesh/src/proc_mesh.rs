@@ -303,7 +303,7 @@ impl ProcMesh {
         //    connected to a single root.
         router::global().bind_dial_router(&router);
 
-        let supervisor = client_proc.attach("supervisor")?;
+        let (supervisor, _supervisor_handle) = client_proc.instance("supervisor")?;
         let (supervision_port, supervision_events) =
             supervisor.open_port::<ActorSupervisionEvent>();
 

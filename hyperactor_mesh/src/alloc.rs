@@ -653,7 +653,7 @@ pub(crate) mod testing {
         router_channel_addr: ChannelAddr,
         mesh_agent: ActorRef<ProcMeshAgent>,
     ) -> ActorRef<TestActor> {
-        let supervisor = client_proc.attach("supervisor").unwrap();
+        let (supervisor, _supervisor_handle) = client_proc.instance("supervisor").unwrap();
         let (supervison_port, _) = supervisor.open_port();
         let (config_handle, _) = cx.mailbox().open_port();
         mesh_agent

@@ -71,7 +71,6 @@
 pub mod accum;
 pub mod actor;
 pub mod attrs;
-pub mod cap;
 pub mod channel;
 pub mod checkpoint;
 pub mod clock;
@@ -208,4 +207,6 @@ mod private {
     impl<A: crate::Actor> Sealed for &crate::proc::Instance<A> {}
     impl<A: crate::Actor> Sealed for crate::proc::Context<'_, A> {}
     impl<A: crate::Actor> Sealed for &crate::proc::Context<'_, A> {}
+    impl Sealed for crate::mailbox::Mailbox {}
+    impl Sealed for &crate::mailbox::Mailbox {}
 }

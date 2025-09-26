@@ -62,7 +62,6 @@ use crate::actor::RemoteActor;
 use crate::actor::RemoteHandles;
 use crate::actor::Signal;
 use crate::attrs::Attrs;
-use crate::cap;
 use crate::channel;
 use crate::channel::ChannelAddr;
 use crate::channel::ChannelError;
@@ -1015,7 +1014,7 @@ impl<A: Actor> Instance<A> {
 
     /// Send a message to the actor running on the proc.
     pub fn post(&self, port_id: PortId, headers: Attrs, message: Serialized) {
-        <Self as cap::sealed::CanSend>::post(self, port_id, headers, message)
+        <Self as context::MailboxExt>::post(self, port_id, headers, message)
     }
 
     /// Send a message to the actor itself with a delay usually to trigger some event.

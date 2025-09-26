@@ -29,7 +29,7 @@ use hyperactor::HandleClient;
 use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::PortRef;
-use hyperactor::cap::CanSend;
+use hyperactor::context;
 use hyperactor::mailbox::MailboxSenderError;
 use hyperactor_mesh::Mesh;
 use hyperactor_mesh::actor_mesh::ActorMesh;
@@ -267,7 +267,7 @@ impl Invocation {
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     fn add_user(
         &mut self,
-        sender: &impl CanSend,
+        sender: &impl context::Actor,
         unreported_exception: &mut Option<Arc<PythonMessage>>,
         user: Arc<sync::Mutex<Invocation>>,
     ) -> Result<(), MailboxSenderError> {
@@ -303,7 +303,7 @@ impl Invocation {
     }
 
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
-    fn complete(&mut self, sender: &impl CanSend) -> Result<(), MailboxSenderError> {
+    fn complete(&mut self, sender: &impl context::Actor) -> Result<(), MailboxSenderError> {
         let old_status = std::mem::replace(&mut self.status, Status::Complete {});
         match old_status {
             Status::Incomplete { results, .. } => match &self.response_port {
@@ -329,7 +329,7 @@ impl Invocation {
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     fn set_exception(
         &mut self,
-        sender: &impl CanSend,
+        sender: &impl context::Actor,
         unreported_exception: &mut Option<Arc<PythonMessage>>,
         exception: Arc<PythonMessage>,
     ) -> Result<(), MailboxSenderError> {
@@ -467,7 +467,7 @@ impl History {
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     pub fn add_invocation(
         &mut self,
-        sender: &impl CanSend,
+        sender: &impl context::Actor,
         seq: Seq,
         uses: Vec<Ref>,
         defs: Vec<Ref>,
@@ -507,7 +507,7 @@ impl History {
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     pub fn propagate_exception(
         &mut self,
-        sender: &impl CanSend,
+        sender: &impl context::Actor,
         seq: Seq,
         exception: WorkerError,
     ) -> Result<(), MailboxSenderError> {
@@ -561,7 +561,7 @@ impl History {
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     pub fn rank_completed(
         &mut self,
-        sender: &impl CanSend,
+        sender: &impl context::Actor,
         rank: usize,
         seq: Seq,
     ) -> Result<(), MailboxSenderError> {

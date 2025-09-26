@@ -27,8 +27,7 @@ use hyperactor::WorldId;
 use hyperactor::actor::RemoteActor;
 use hyperactor::attrs::Attrs;
 use hyperactor::attrs::declare_attrs;
-use hyperactor::cap;
-use hyperactor::cap::CanSend;
+use hyperactor::context;
 use hyperactor::mailbox::MailboxSenderError;
 use hyperactor::mailbox::PortReceiver;
 use hyperactor::message::Castable;
@@ -70,7 +69,7 @@ declare_attrs! {
 /// an `M`-typed message
 #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
 pub(crate) fn actor_mesh_cast<A, M>(
-    caps: &impl cap::CanSend,
+    cx: &impl context::Actor,
     actor_mesh_id: ActorMeshId,
     comm_actor_ref: &ActorRef<CommActor>,
     selection_of_root: Selection,
@@ -89,7 +88,7 @@ where
 
     let message = CastMessageEnvelope::new::<A, M>(
         actor_mesh_id.clone(),
-        caps.actor_id().clone(),
+        cx.mailbox().actor_id().clone(),
         cast_mesh_shape.clone(),
         message,
     )?;
@@ -109,14 +108,14 @@ where
 
     comm_actor_ref
         .port()
-        .send_with_headers(caps, headers, cast_message)?;
+        .send_with_headers(cx, headers, cast_message)?;
 
     Ok(())
 }
 
 #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
 pub(crate) fn cast_to_sliced_mesh<A, M>(
-    caps: &impl cap::CanSend,
+    cx: &impl context::Actor,
     actor_mesh_id: ActorMeshId,
     comm_actor_ref: &ActorRef<CommActor>,
     sel_of_sliced: &Selection,
@@ -144,7 +143,7 @@ where
 
     // Cast.
     actor_mesh_cast::<A, M>(
-        caps,
+        cx,
         actor_mesh_id,
         comm_actor_ref,
         sel_of_root,
@@ -165,7 +164,7 @@ pub trait ActorMesh: Mesh<Id = ActorMeshId> {
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
     fn cast<M>(
         &self,
-        sender: &impl CanSend,
+        cx: &impl context::Actor,
         selection: Selection,
         message: M,
     ) -> Result<(), CastError>
@@ -174,7 +173,7 @@ pub trait ActorMesh: Mesh<Id = ActorMeshId> {
         M: Castable + RemoteMessage,
     {
         actor_mesh_cast::<Self::Actor, M>(
-            sender,                        // send capability
+            cx,                            // actor context
             self.id(),                     // actor mesh id (destination mesh)
             self.proc_mesh().comm_actor(), // comm actor
             selection,                     // the selected actors
@@ -414,13 +413,13 @@ impl<A: RemoteActor> ActorMesh for SlicedActorMesh<'_, A> {
     }
 
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
-    fn cast<M>(&self, sender: &impl CanSend, sel: Selection, message: M) -> Result<(), CastError>
+    fn cast<M>(&self, cx: &impl context::Actor, sel: Selection, message: M) -> Result<(), CastError>
     where
         Self::Actor: RemoteHandles<IndexedErasedUnbound<M>>,
         M: Castable + RemoteMessage,
     {
         cast_to_sliced_mesh::<A, M>(
-            /*caps=*/ sender,
+            /*cx=*/ cx,
             /*actor_mesh_id=*/ self.id(),
             /*comm_actor_ref*/ self.proc_mesh().comm_actor(),
             /*sel_of_sliced=*/ &sel,

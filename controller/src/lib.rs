@@ -678,7 +678,8 @@ mod tests {
 
         IndexedErasedUnbound::<WorkerMessage>::bind_for_test_only(
             worker_ref.clone(),
-            worker.mailbox(),
+            worker.clone_for_py(),
+            worker.mailbox().clone(),
         )
         .unwrap();
 
@@ -870,7 +871,8 @@ mod tests {
             .unwrap();
         IndexedErasedUnbound::<WorkerMessage>::bind_for_test_only(
             worker_ref.clone(),
-            worker.mailbox(),
+            worker.clone_for_py(),
+            worker.mailbox().clone(),
         )
         .unwrap();
 
@@ -991,7 +993,8 @@ mod tests {
             .unwrap();
         IndexedErasedUnbound::<WorkerMessage>::bind_for_test_only(
             worker_ref.clone(),
-            worker.mailbox(),
+            worker.clone_for_py(),
+            worker.mailbox().clone(),
         )
         .unwrap();
 
@@ -1180,7 +1183,8 @@ mod tests {
             .unwrap();
         IndexedErasedUnbound::<WorkerMessage>::bind_for_test_only(
             worker1_ref.clone(),
-            worker1.mailbox(),
+            worker1.clone_for_py(),
+            worker1.mailbox().clone(),
         )
         .unwrap();
         let (worker2, worker2_ref, _) = proc2
@@ -1188,7 +1192,8 @@ mod tests {
             .unwrap();
         IndexedErasedUnbound::<WorkerMessage>::bind_for_test_only(
             worker2_ref.clone(),
-            worker2.mailbox(),
+            worker2.clone_for_py(),
+            worker2.mailbox().clone(),
         )
         .unwrap();
 
