@@ -27,7 +27,6 @@ use crate::attrs::AttrKeyInfo;
 use crate::attrs::Attrs;
 use crate::attrs::SerializableValue;
 use crate::attrs::declare_attrs;
-use crate::channel::ChannelTransport;
 use crate::data::Encoding;
 
 // Declare configuration keys using the new attrs system with defaults
@@ -276,13 +275,25 @@ pub mod global {
             let orig = {
                 let mut config = CONFIG.write().unwrap();
                 let orig = config.remove_value(key);
-                config.set(key, value);
+                config.set(key, value.clone());
                 orig
+            };
+
+            let orig_env = if let Some(env_var) = key.attrs().get(CONFIG_ENV_VAR) {
+                let orig = std::env::var(env_var).ok();
+                // SAFETY: this is used in tests
+                unsafe {
+                    std::env::set_var(env_var, value.display());
+                }
+                Some((env_var.clone(), orig))
+            } else {
+                None
             };
 
             ConfigValueGuard {
                 key,
                 orig,
+                orig_env,
                 _phantom: PhantomData,
             }
         }
@@ -292,6 +303,7 @@ pub mod global {
     pub struct ConfigValueGuard<'a, T: 'static> {
         key: crate::attrs::Key<T>,
         orig: Option<Box<dyn crate::attrs::SerializableValue>>,
+        orig_env: Option<(String, Option<String>)>,
         // This is here so we can hold onto a 'a lifetime.
         _phantom: PhantomData<&'a ()>,
     }
@@ -303,6 +315,19 @@ pub mod global {
                 config.insert_value(self.key, orig);
             } else {
                 config.remove_value(self.key);
+            }
+            if let Some((key, value)) = self.orig_env.take() {
+                if let Some(value) = value {
+                    // SAFETY: this is used in tests
+                    unsafe {
+                        std::env::set_var(key, value);
+                    }
+                } else {
+                    // SAFETY: this is used in tests
+                    unsafe {
+                        std::env::remove_var(&key);
+                    }
+                }
             }
         }
     }
@@ -529,6 +554,7 @@ mod tests {
         );
 
         // Test multiple overrides
+        let orig_value = std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").ok();
         {
             let _guard1 = config.override_key(CODEC_MAX_FRAME_LENGTH, 4096);
             let _guard2 = config.override_key(MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(60));
@@ -538,7 +564,16 @@ mod tests {
                 global::get(MESSAGE_DELIVERY_TIMEOUT),
                 Duration::from_secs(60)
             );
+            // This was overridden:
+            assert_eq!(
+                std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").unwrap(),
+                "1m"
+            );
         }
+        assert_eq!(
+            std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").ok(),
+            orig_value
+        );
 
         // All values should be restored
         assert_eq!(
