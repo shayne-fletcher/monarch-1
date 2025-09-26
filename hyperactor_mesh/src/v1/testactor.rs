@@ -11,8 +11,10 @@
 //! the bootstrap binary, which is not built in test mode (and anyway, test mode
 //! does not work across crate boundaries)
 
+#[cfg(test)]
 use std::collections::HashSet;
 use std::collections::VecDeque;
+#[cfg(test)]
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,18 +29,22 @@ use hyperactor::Named;
 use hyperactor::PortRef;
 use hyperactor::RefClient;
 use hyperactor::Unbind;
+#[cfg(test)]
 use hyperactor::clock::Clock as _;
+#[cfg(test)]
 use hyperactor::clock::RealClock;
+#[cfg(test)]
 use hyperactor::mailbox;
 use hyperactor::supervision::ActorSupervisionEvent;
 use ndslice::Point;
+#[cfg(test)]
 use ndslice::ViewExt;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::comm::multicast::CastInfo;
+#[cfg(test)]
 use crate::v1::ActorMesh;
-use crate::v1::ActorMeshRef;
 #[cfg(test)]
 use crate::v1::testing;
 
