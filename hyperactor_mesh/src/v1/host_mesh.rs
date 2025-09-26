@@ -135,6 +135,7 @@ impl HostMesh {
     ) -> v1::Result<Self> {
         let transport = alloc.transport();
         let extent = alloc.extent().clone();
+        let is_local = alloc.is_local();
         let proc_mesh = ProcMesh::allocate(cx, alloc, name).await?;
         let name = Name::new(name);
 
@@ -147,7 +148,7 @@ impl HostMesh {
             .spawn::<HostMeshAgentProcMeshTrampoline>(
                 cx,
                 "host_mesh_trampoline",
-                &(transport, mesh_agents.bind(), bootstrap_params),
+                &(transport, mesh_agents.bind(), bootstrap_params, is_local),
             )
             .await?;
 
@@ -351,9 +352,7 @@ mod tests {
 
     use super::*;
     use crate::Bootstrap;
-    use crate::alloc::AllocSpec;
     use crate::alloc::Allocator;
-    use crate::alloc::ProcessAllocator;
     use crate::v1::ActorMesh;
     use crate::v1::testactor;
     use crate::v1::testing;
@@ -390,91 +389,76 @@ mod tests {
 
     #[tokio::test]
     async fn test_allocate() {
-        // This only works with the process allocator since we assume a working
-        // bootstrap binary.
-        //
-        // TODO: have multiple trampoline modes (self_exe, etc.)
-
         let instance = testing::instance().await;
 
-        let mut allocator = ProcessAllocator::new(Command::new(
-            buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
-        ));
-        let alloc = allocator
-            .allocate(AllocSpec {
-                extent: extent!(replicas = 4),
-                constraints: Default::default(),
-                proc_name: None,
-            })
-            .await
-            .unwrap();
+        for alloc in testing::allocs(extent!(replicas = 4)).await {
+            let host_mesh = HostMesh::allocate(instance, alloc, "test", None)
+                .await
+                .unwrap();
+            let proc_mesh1 = host_mesh.spawn(instance, "test_1").await.unwrap();
+            let actor_mesh1: ActorMesh<testactor::TestActor> =
+                proc_mesh1.spawn(instance, "test", &()).await.unwrap();
+            let proc_mesh2 = host_mesh.spawn(instance, "test_2").await.unwrap();
+            let actor_mesh2: ActorMesh<testactor::TestActor> =
+                proc_mesh2.spawn(instance, "test", &()).await.unwrap();
 
-        let host_mesh = HostMesh::allocate(instance, Box::new(alloc), "test", None)
-            .await
-            .unwrap();
-        let proc_mesh1 = host_mesh.spawn(instance, "test_1").await.unwrap();
-        let actor_mesh1: ActorMesh<testactor::TestActor> =
-            proc_mesh1.spawn(instance, "test", &()).await.unwrap();
-        let proc_mesh2 = host_mesh.spawn(instance, "test_2").await.unwrap();
-        let actor_mesh2: ActorMesh<testactor::TestActor> =
-            proc_mesh2.spawn(instance, "test", &()).await.unwrap();
-
-        // Host meshes can be dereferenced to produce a concrete ref.
-        let host_mesh_ref: HostMeshRef = host_mesh.clone();
-        // Here, the underlying host mesh does not change:
-        assert_eq!(
-            host_mesh_ref.iter().collect::<Vec<_>>(),
-            host_mesh.iter().collect::<Vec<_>>(),
-        );
-
-        // Validate we can cast:
-
-        let (port, mut rx) = instance.mailbox().open_port();
-        actor_mesh1
-            .cast(instance, testactor::GetActorId(port.bind()))
-            .unwrap();
-
-        let mut expected_actor_ids: HashSet<_> = actor_mesh1
-            .values()
-            .map(|actor_ref| actor_ref.actor_id().clone())
-            .collect();
-
-        while !expected_actor_ids.is_empty() {
-            let actor_id = rx.recv().await.unwrap();
-            assert!(
-                expected_actor_ids.remove(&actor_id),
-                "got {actor_id}, expect {expected_actor_ids:?}"
+            // Host meshes can be dereferenced to produce a concrete ref.
+            let host_mesh_ref: HostMeshRef = host_mesh.clone();
+            // Here, the underlying host mesh does not change:
+            assert_eq!(
+                host_mesh_ref.iter().collect::<Vec<_>>(),
+                host_mesh.iter().collect::<Vec<_>>(),
             );
+
+            // Validate we can cast:
+
+            let (port, mut rx) = instance.mailbox().open_port();
+            actor_mesh1
+                .cast(instance, testactor::GetActorId(port.bind()))
+                .unwrap();
+
+            let mut expected_actor_ids: HashSet<_> = actor_mesh1
+                .values()
+                .map(|actor_ref| actor_ref.actor_id().clone())
+                .collect();
+
+            while !expected_actor_ids.is_empty() {
+                let actor_id = rx.recv().await.unwrap();
+                assert!(
+                    expected_actor_ids.remove(&actor_id),
+                    "got {actor_id}, expect {expected_actor_ids:?}"
+                );
+            }
+
+            // Now forward a message through all directed edges across the two meshes.
+            // This tests the full connectivity of all the hosts, procs, and actors
+            // involved in these two meshes.
+            let mut to_visit: VecDeque<_> = actor_mesh1
+                .values()
+                .chain(actor_mesh2.values())
+                .map(|actor_ref| actor_ref.port())
+                // Each ordered pair of ports
+                .permutations(2)
+                // Flatten them to create a path:
+                .flatten()
+                .collect();
+
+            let expect_visited: Vec<_> = to_visit.clone().into();
+
+            // We are going to send to the first, and then set up a port to receive the last.
+            let (last, mut last_rx) = instance.mailbox().open_port();
+            to_visit.push_back(last.bind());
+
+            let forward = testactor::Forward {
+                to_visit,
+                visited: Vec::new(),
+            };
+            let first = forward.to_visit.front().unwrap().clone();
+            first.send(instance, forward).unwrap();
+
+            let forward = last_rx.recv().await.unwrap();
+            assert_eq!(forward.visited, expect_visited);
         }
-
-        // Now forward a message through all directed edges across the two meshes.
-        // This tests the full connectivity of all the hosts, procs, and actors
-        // involved in these two meshes.
-        let mut to_visit: VecDeque<_> = actor_mesh1
-            .values()
-            .chain(actor_mesh2.values())
-            .map(|actor_ref| actor_ref.port())
-            // Each ordered pair of ports
-            .permutations(2)
-            // Flatten them to create a path:
-            .flatten()
-            .collect();
-
-        let expect_visited: Vec<_> = to_visit.clone().into();
-
-        // We are going to send to the first, and then set up a port to receive the last.
-        let (last, mut last_rx) = instance.mailbox().open_port();
-        to_visit.push_back(last.bind());
-
-        let forward = testactor::Forward {
-            to_visit,
-            visited: Vec::new(),
-        };
-        let first = forward.to_visit.front().unwrap().clone();
-        first.send(instance, forward).unwrap();
-
-        let forward = last_rx.recv().await.unwrap();
-        assert_eq!(forward.visited, expect_visited);
     }
 
     /// Allocate a new port on localhost. This drops the listener, releasing the socket,

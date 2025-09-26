@@ -702,7 +702,8 @@ impl FromStr for ActorId {
 #[derive(Debug, Named)]
 pub struct ActorRef<A: RemoteActor> {
     pub(crate) actor_id: ActorId,
-    phantom: PhantomData<A>,
+    // fn() -> A so that the struct remains Send
+    phantom: PhantomData<fn() -> A>,
 }
 
 impl<A: RemoteActor> ActorRef<A> {

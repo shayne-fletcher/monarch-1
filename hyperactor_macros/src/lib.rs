@@ -1250,7 +1250,7 @@ pub fn instrument_infallible(args: TokenStream, input: TokenStream) -> TokenStre
 ///
 /// In addition to deriving [`hyperactor::data::Named`], this macro will
 /// register the type using the [`hyperactor::register_type`] macro for
-/// concrete types. This behavior can be overriden by providing a literal
+/// concrete types. This behavior can be overridden by providing a literal
 /// booolean for the `register` attribute.
 ///
 /// This also requires the type to implement [`serde::Serialize`]
@@ -1594,7 +1594,6 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     if spawn {
         expanded.extend(quote! {
-
             hyperactor::remote!(#data_type_name);
         });
     }

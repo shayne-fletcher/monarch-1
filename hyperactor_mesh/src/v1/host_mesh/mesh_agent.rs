@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::pin::Pin;
 
 use async_trait::async_trait;
 use hyperactor::Actor;
@@ -20,11 +21,13 @@ use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::PortRef;
+use hyperactor::Proc;
 use hyperactor::ProcId;
 use hyperactor::RefClient;
 use hyperactor::channel::ChannelTransport;
 use hyperactor::host::Host;
 use hyperactor::host::HostError;
+use hyperactor::host::LocalProcManager;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -34,11 +37,40 @@ use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
 use crate::v1::Name;
 
-/// A mesh agent is responsible for managing a host in a [`HostMesh`],
+type ProcManagerSpawnFuture =
+    Pin<Box<dyn Future<Output = anyhow::Result<ActorHandle<ProcMeshAgent>>> + Send>>;
+type ProcManagerSpawnFn = Box<dyn Fn(Proc) -> ProcManagerSpawnFuture + Send + Sync>;
+
+/// Represents the different ways a [`Host`] can be managed by an agent.
+///
+/// A host can either:
+/// - [`Process`] — a host running as an external OS process, managed by
+///   [`BootstrapProcManager`].
+/// - [`Local`] — a host running in-process, managed by
+///   [`LocalProcManager`] with a custom spawn function.
+///
+/// This abstraction lets the same `HostAgent` work across both
+/// out-of-process and in-process execution modes.
+pub enum HostAgentMode {
+    Process(Host<BootstrapProcManager>),
+    Local(Host<LocalProcManager<ProcManagerSpawnFn>>),
+}
+
+impl HostAgentMode {
+    fn system_proc(&self) -> &Proc {
+        #[allow(clippy::match_same_arms)]
+        match self {
+            HostAgentMode::Process(host) => host.system_proc(),
+            HostAgentMode::Local(host) => host.system_proc(),
+        }
+    }
+}
+
+/// A mesh agent is responsible for managing a host iny a [`HostMesh`],
 /// through the resource behaviors defined in [`crate::resource`].
 #[hyperactor::export(handlers=[resource::CreateOrUpdate<()>, resource::GetState<ProcState>])]
 pub struct HostMeshAgent {
-    host: Host<BootstrapProcManager>,
+    host: HostAgentMode,
     created: HashMap<Name, Result<(ProcId, ActorRef<ProcMeshAgent>), HostError>>,
 }
 
@@ -53,9 +85,9 @@ impl fmt::Debug for HostMeshAgent {
 
 #[async_trait]
 impl Actor for HostMeshAgent {
-    type Params = Host<BootstrapProcManager>;
+    type Params = HostAgentMode;
 
-    async fn new(host: Host<BootstrapProcManager>) -> anyhow::Result<Self> {
+    async fn new(host: HostAgentMode) -> anyhow::Result<Self> {
         Ok(Self {
             host,
             created: HashMap::new(),
@@ -79,9 +111,14 @@ impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
             .created
             .insert(
                 create_or_update.name.clone(),
-                self.host
-                    .spawn(create_or_update.name.clone().to_string())
-                    .await,
+                match self.host {
+                    HostAgentMode::Process(ref mut host) => {
+                        host.spawn(create_or_update.name.clone().to_string()).await
+                    }
+                    HostAgentMode::Local(ref mut host) => {
+                        host.spawn(create_or_update.name.clone().to_string()).await
+                    }
+                },
             )
             .is_none();
 
@@ -149,15 +186,26 @@ impl Actor for HostMeshAgentProcMeshTrampoline {
         ChannelTransport,
         PortRef<ActorRef<HostMeshAgent>>,
         Option<BootstrapProcManagerParams>,
+        bool, /* local? */
     );
 
-    async fn new((transport, reply_port, bootstrap_params): Self::Params) -> anyhow::Result<Self> {
-        let manager = if bootstrap_params.is_some() {
-            BootstrapProcManager::from_params(bootstrap_params.unwrap())
+    async fn new(
+        (transport, reply_port, bootstrap_params, local): Self::Params,
+    ) -> anyhow::Result<Self> {
+        let host = if local {
+            let spawn: ProcManagerSpawnFn = Box::new(|proc| Box::pin(ProcMeshAgent::boot_v1(proc)));
+            let manager = LocalProcManager::new(spawn);
+            let (host, _) = Host::serve(manager, transport.any()).await?;
+            HostAgentMode::Local(host)
         } else {
-            BootstrapProcManager::new_current_exe()?
+            let manager = if let Some(ref params) = bootstrap_params {
+                BootstrapProcManager::from_params(bootstrap_params.unwrap())
+            } else {
+                BootstrapProcManager::new_current_exe()?
+            };
+            let (host, _) = Host::serve(manager, transport.any()).await?;
+            HostAgentMode::Process(host)
         };
-        let (host, _handle) = Host::serve(manager, transport.any()).await?;
 
         let host_mesh_agent = host
             .system_proc()
@@ -218,7 +266,7 @@ mod tests {
         let host_addr = host.addr().clone();
         let system_proc = host.system_proc().clone();
         let host_agent = system_proc
-            .spawn::<HostMeshAgent>("agent", host)
+            .spawn::<HostMeshAgent>("agent", HostAgentMode::Process(host))
             .await
             .unwrap();
 

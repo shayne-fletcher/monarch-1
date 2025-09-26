@@ -265,6 +265,12 @@ pub trait Alloc {
         }
         Ok(())
     }
+
+    /// Returns whether the alloc is a local alloc: that is, its procs are
+    /// not independent processes, but just threads in the selfsame process.
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
