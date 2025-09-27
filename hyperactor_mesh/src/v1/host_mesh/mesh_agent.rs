@@ -68,9 +68,9 @@ impl HostAgentMode {
 
 /// A mesh agent is responsible for managing a host iny a [`HostMesh`],
 /// through the resource behaviors defined in [`crate::resource`].
-#[hyperactor::export(handlers=[resource::CreateOrUpdate<()>, resource::GetState<ProcState>])]
+#[hyperactor::export(handlers=[resource::CreateOrUpdate<()>, resource::GetState<ProcState>, ShutdownHost])]
 pub struct HostMeshAgent {
-    host: HostAgentMode,
+    host: Option<HostAgentMode>,
     created: HashMap<Name, Result<(ProcId, ActorRef<ProcMeshAgent>), HostError>>,
 }
 
@@ -89,7 +89,7 @@ impl Actor for HostMeshAgent {
 
     async fn new(host: HostAgentMode) -> anyhow::Result<Self> {
         Ok(Self {
-            host,
+            host: Some(host),
             created: HashMap::new(),
         })
     }
@@ -107,15 +107,16 @@ impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
             return Ok(());
         }
 
+        let host = self.host.as_mut().expect("host present");
         let ok = self
             .created
             .insert(
                 create_or_update.name.clone(),
-                match self.host {
-                    HostAgentMode::Process(ref mut host) => {
+                match host {
+                    HostAgentMode::Process(host) => {
                         host.spawn(create_or_update.name.clone().to_string()).await
                     }
-                    HostAgentMode::Local(ref mut host) => {
+                    HostAgentMode::Local(host) => {
                         host.spawn(create_or_update.name.clone().to_string()).await
                     }
                 },
@@ -123,6 +124,29 @@ impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
             .is_none();
 
         create_or_update.reply.send(cx, ok)?;
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Named, Handler, RefClient)]
+pub struct ShutdownHost {
+    #[reply]
+    pub ack: hyperactor::PortRef<()>,
+}
+
+#[async_trait]
+impl Handler<ShutdownHost> for HostMeshAgent {
+    async fn handle(&mut self, cx: &Context<Self>, msg: ShutdownHost) -> anyhow::Result<()> {
+        // Prove we ran and let caller wait until this returns.
+        msg.ack.send(cx, ())?;
+
+        // Take ownership and drop the host; this drops the embedded
+        // BootstrapProcManager (which sends SIGKILL to any children
+        // it has spawned).
+        if let Some(host_mode) = self.host.take() {
+            drop(host_mode);
+        }
+
         Ok(())
     }
 }

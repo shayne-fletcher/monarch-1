@@ -525,6 +525,12 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 30)]
     async fn test_cast() {
+        // SAFETY: unit-test scoped
+        unsafe {
+            // PDEATHSIG is a production safety net. Disable for tests.
+            std::env::set_var("HYPERACTOR_MESH_BOOTSTRAP_ENABLE_PDEATHSIG", "false");
+        }
+
         let instance = testing::instance().await;
         let host_mesh = testing::host_mesh(extent!(host = 4)).await;
         let proc_mesh = host_mesh.spawn(instance, "test").await.unwrap();
@@ -554,5 +560,7 @@ mod tests {
             );
             assert_eq!(&sender_actor_id, instance.self_id());
         }
+
+        let _ = host_mesh.shutdown(&instance).await;
     }
 }

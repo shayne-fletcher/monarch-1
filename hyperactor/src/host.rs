@@ -440,6 +440,7 @@ pub type ManagerAgent<M> = <<M as ProcManager>::Handle as ProcHandle>::Agent; //
 /// - `kill()`: uses a zero deadline to emulate a forced stop via
 ///   `destroy_and_wait(Duration::ZERO, None)`.
 /// - `wait()`: trivial (no external lifecycle to observe).
+///
 ///   No OS signals are sent or required.
 pub struct LocalProcManager<S> {
     procs: Arc<Mutex<HashMap<ProcId, Proc>>>,
