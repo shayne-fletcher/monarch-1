@@ -1875,16 +1875,20 @@ mod tests {
             proc.spawn("log_client", ()).await.unwrap().bind();
         log_client.set_aggregate(&client, None).await.unwrap();
 
-        // Spawn the forwarder in this proc (it will serve BOOTSTRAP_LOG_CHANNEL).
+        // Spawn the forwarder in this proc (it will serve
+        // BOOTSTRAP_LOG_CHANNEL).
         let _log_forwarder: ActorRef<LogForwardActor> = proc
             .spawn("log_forwarder", log_client.clone())
             .await
             .unwrap()
             .bind();
 
+        // Dial the channel but don't post until we know the forwarder
+        // is receiving.
+        let tx = channel::dial::<LogMessage>(log_channel.clone()).unwrap();
+
         // Send a fake log message as if it came from the proc
         // manager's writer.
-        let tx = channel::dial::<LogMessage>(log_channel.clone()).unwrap();
         tx.post(LogMessage::Log {
             hostname: "testhost".into(),
             pid: 12345,
@@ -1893,8 +1897,6 @@ mod tests {
         });
 
         // Assert we see it via the tap.
-        // Give it up to 2 seconds to travel through forwarder ->
-        // client -> print_log_line -> tap.
         let line = RealClock
             .timeout(Duration::from_secs(2), tap_rx.recv())
             .await

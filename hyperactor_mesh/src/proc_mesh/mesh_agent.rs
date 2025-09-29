@@ -212,25 +212,6 @@ impl ProcMeshAgent {
     }
 
     pub(crate) async fn boot_v1(proc: Proc) -> Result<ActorHandle<Self>, anyhow::Error> {
-        // Spawn a LogClientActor in this proc. It aggregates and
-        // prints logs coming from our stdout/stderr (via the parent's
-        // log writers). This is the sink for all forwarded LogMessage
-        // traffic.
-        let log_client_ref = proc
-            .spawn("log_client", ())
-            .await?
-            .bind::<crate::logging::LogClientActor>();
-
-        // Spawn a LogForwardActor. It serves BOOTSTRAP_LOG_CHANNEL
-        // (set by the parent ProcManager) and forwards any LogMessage
-        // it receives there into the above LogClientActor. Together
-        // these give us structured log forwarding without blocking
-        // pipes.
-        let _log_fwd_ref = proc
-            .spawn("log_forwarder", log_client_ref.clone())
-            .await?
-            .bind::<crate::logging::LogForwardActor>();
-
         let agent = ProcMeshAgent {
             proc: proc.clone(),
             remote: Remote::collect(),
