@@ -1277,7 +1277,7 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
                         break (
                             next,
                             Err::<(), anyhow::Error>(err.into())
-                                .context(format!("{log_id}: error serializing ack",)),
+                                .context(format!("{log_id}: serializing ack")),
                             false,
                         );
                     }
@@ -1316,7 +1316,7 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
                             break (
                                 next,
                                 Err::<(), anyhow::Error>(err.into())
-                                    .context(format!("{log_id}: error acking peer message: {v:?}")),
+                                    .context(format!("{log_id}: acking peer message: {v:?}")),
                                 false
                             );
                         }
@@ -1339,7 +1339,7 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
                             next,
                             Err::<(), anyhow::Error>(err.into()).context(
                                 format!(
-                                    "{log_id}: error reading into Frame with M = {}",
+                                    "{log_id}: reading into Frame with M = {}",
                                     type_name::<M>(),
                                 )
                             ),
@@ -1354,7 +1354,7 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
                             next,
                             Err::<(), anyhow::Error>(err.into()).context(
                                 format!(
-                                    "{log_id}: failed to de-frame message with M = {}",
+                                    "{log_id}: de-frame message with M = {}",
                                     type_name::<M>(),
                                 )
                             ),
@@ -1399,7 +1399,7 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
                                     next.seq = seq+1;
                                 }
                                 Err(err) => {
-                                    break (next, Err::<(), anyhow::Error>(err).context(format!("{log_id}: error relaying message to mspc channel")), false)
+                                    break (next, Err::<(), anyhow::Error>(err).context(format!("{log_id}: relaying message to mspc channel")), false)
                                 }
                             }
                         },
@@ -1407,7 +1407,7 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
                             next,
                             Err::<(), anyhow::Error>(err.into()).context(
                                 format!(
-                                    "{log_id}: failed to deserialize message with M = {}",
+                                    "{log_id}: deserialize message with M = {}",
                                     type_name::<M>(),
                                 )
                             ),
@@ -1665,7 +1665,7 @@ impl SessionManager {
         let session_id = conn
             .handshake::<M>()
             .await
-            .context("error occoured when serving handshake")?;
+            .context("while serving handshake")?;
 
         let session_var = match self.sessions.entry(session_id) {
             Entry::Occupied(entry) => entry.get().clone(),
@@ -2194,12 +2194,12 @@ pub(crate) mod meta {
         let ca_cert_path =
             std::env::var_os(THRIFT_TLS_SRV_CA_PATH_ENV).unwrap_or(DEFAULT_SRV_CA_PATH.into());
         let ca_certs = rustls_pemfile::certs(&mut BufReader::new(
-            File::open(ca_cert_path).context("Failed to open {ca_cert_path:?}")?,
+            File::open(ca_cert_path).context("open {ca_cert_path:?}")?,
         ))?;
         for cert in ca_certs {
             root_cert_store
                 .add(cert.into())
-                .context("Failed to add certificate to root store")?;
+                .context("adding certificate to root store")?;
         }
         Ok(root_cert_store)
     }
@@ -2208,16 +2208,15 @@ pub(crate) mod meta {
     pub(crate) fn tls_acceptor(enforce_client_tls: bool) -> Result<TlsAcceptor> {
         let server_cert_path = DEFAULT_SERVER_PEM_PATH;
         let certs = rustls_pemfile::certs(&mut BufReader::new(
-            File::open(server_cert_path).context("failed to open {server_cert_path}")?,
+            File::open(server_cert_path).context("open {server_cert_path}")?,
         ))?
         .into_iter()
         .map(CertificateDer::from)
         .collect();
         // certs are good here
         let server_key_path = DEFAULT_SERVER_PEM_PATH;
-        let mut key_reader = BufReader::new(
-            File::open(server_key_path).context("failed to open {server_key_path}")?,
-        );
+        let mut key_reader =
+            BufReader::new(File::open(server_key_path).context("open {server_key_path}")?);
         let key = loop {
             break match rustls_pemfile::read_one(&mut key_reader)? {
                 Some(rustls_pemfile::Item::RSAKey(key)) => key,
@@ -2259,13 +2258,12 @@ pub(crate) mod meta {
             return Ok(None);
         };
         let certs = rustls_pemfile::certs(&mut BufReader::new(
-            File::open(cert_path).context("failed to open {cert_path}")?,
+            File::open(cert_path).context("open {cert_path}")?,
         ))?
         .into_iter()
         .map(CertificateDer::from)
         .collect();
-        let mut key_reader =
-            BufReader::new(File::open(key_path).context("failed to open {key_path}")?);
+        let mut key_reader = BufReader::new(File::open(key_path).context("open {key_path}")?);
         let key = loop {
             break match rustls_pemfile::read_one(&mut key_reader)? {
                 Some(rustls_pemfile::Item::RSAKey(key)) => key,
@@ -2292,7 +2290,7 @@ pub(crate) mod meta {
         let config = if let Some((certs, key)) = result {
             config
                 .with_client_auth_cert(certs, key)
-                .context("Failed to load client certs")?
+                .context("load client certs")?
         } else {
             config.with_no_client_auth()
         };
