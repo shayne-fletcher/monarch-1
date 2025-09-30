@@ -200,8 +200,7 @@ class ProcMesh(MeshTrait):
         ) -> HyProcMesh:
             hy_proc_mesh = await hy_proc_mesh_task
 
-            # FIXME: Fix log forwarding.
-            # await pm._logging_manager.init(hy_proc_mesh, stream_log_to_client)
+            await pm._logging_manager.init(hy_proc_mesh, stream_log_to_client)
 
             if setup_actor is not None:
                 await setup_actor.setup.call()

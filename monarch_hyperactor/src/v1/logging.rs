@@ -17,6 +17,7 @@ use hyperactor_mesh::logging::LogClientMessage;
 use hyperactor_mesh::logging::LogForwardActor;
 use hyperactor_mesh::logging::LogForwardMessage;
 use hyperactor_mesh::v1::ActorMesh;
+use hyperactor_mesh::v1::Name;
 use hyperactor_mesh::v1::actor_mesh::ActorMeshRef;
 use ndslice::View;
 use pyo3::Bound;
@@ -80,7 +81,10 @@ impl LoggingMeshClient {
         PyPythonTask::new(async move {
             let client_actor: ActorHandle<LogClientActor> =
                 instance_dispatch!(instance, async move |cx_instance| {
-                    cx_instance.proc().spawn("log_client", ()).await
+                    cx_instance
+                        .proc()
+                        .spawn(&Name::new("log_client").to_string(), ())
+                        .await
                 })?;
             let client_actor_ref = client_actor.bind();
             let forwarder_mesh = instance_dispatch!(instance, async |cx_instance| {
