@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::env::VarError;
+use std::fmt;
 use std::fs::OpenOptions;
 use std::future;
 use std::io;
@@ -50,6 +51,7 @@ use tokio::process::Command;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 
+use crate::alloc::logtailer::LogTailer;
 use crate::logging::create_log_writers;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::v1;
@@ -65,6 +67,13 @@ declare_attrs! {
     /// "false")`.
     @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_BOOTSTRAP_ENABLE_PDEATHSIG".to_string())
     pub attr MESH_BOOTSTRAP_ENABLE_PDEATHSIG: bool = true;
+
+    /// Maximum number of log lines retained in a proc's stderr/stdout
+    /// tail buffer. Used by [`LogTailer::tee`] when wiring child
+    /// pipes. Default: 100
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_TAIL_LOG_LINES".to_string())
+    pub attr MESH_TAIL_LOG_LINES: usize = 100;
+
 }
 
 pub const BOOTSTRAP_ADDR_ENV: &str = "HYPERACTOR_MESH_BOOTSTRAP_ADDR";
@@ -375,7 +384,10 @@ pub enum ProcStatus {
     Stopping { pid: u32, started_at: SystemTime },
     /// The process exited with a normal exit code. (Process-level:
     /// exit observed.)
-    Stopped { exit_code: i32 },
+    Stopped {
+        exit_code: i32,
+        stderr_tail: Vec<String>,
+    },
     /// The process was killed by a signal (e.g. SIGKILL).
     /// (Process-level: abnormal termination.)
     Killed { signal: i32, core_dumped: bool },
@@ -428,7 +440,7 @@ impl std::fmt::Display for ProcStatus {
                     .unwrap_or_default();
                 write!(f, "Stopping[{pid}]{uptime}")
             }
-            ProcStatus::Stopped { exit_code } => write!(f, "Stopped(exit={exit_code})"),
+            ProcStatus::Stopped { exit_code, .. } => write!(f, "Stopped(exit={exit_code})"),
             ProcStatus::Killed {
                 signal,
                 core_dumped,
@@ -483,6 +495,8 @@ impl std::error::Error for ReadyError {}
 /// - Retain the child handle only until the exit monitor claims it,
 ///   so the OS process can be awaited and its terminal status
 ///   recorded.
+/// - Hold stdout/stderr tailers until the exit monitor takes them,
+///   then join to recover buffered output for diagnostics.
 /// - Update status via the `mark_*` transitions and broadcast changes
 ///   over the watch channel so tasks can `await` lifecycle
 ///   transitions without polling.
@@ -499,7 +513,7 @@ impl std::error::Error for ReadyError {}
 /// - [`ProcState`]/[`ProcStopReason`] (in `alloc.rs`):
 ///   allocator-facing, historical event log; not directly updated by
 ///   this type.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BootstrapProcHandle {
     /// Logical identity of the proc in the mesh.
     proc_id: ProcId,
@@ -513,6 +527,14 @@ pub struct BootstrapProcHandle {
     /// claims it (consumed by `wait()` there). Not relied on for
     /// teardown; manager `Drop` handles best-effort SIGKILL.
     child: Arc<std::sync::Mutex<Option<Child>>>,
+    /// Stdout tailer for this proc. Created with `LogTailer::tee`, it
+    /// forwards output to a writer and keeps a bounded ring buffer.
+    /// Transferred to the exit monitor, which joins it after `wait()`
+    /// to recover buffered lines.
+    stdout_tailer: Arc<std::sync::Mutex<Option<LogTailer>>>,
+    /// Stderr tailer for this proc. Same behavior as `stdout_tailer`
+    /// but for stderr (used for exit-reason enrichment).
+    stderr_tailer: Arc<std::sync::Mutex<Option<LogTailer>>>,
     /// Watch sender for status transitions. Every `mark_*` goes
     /// through [`BootstrapProcHandle::transition`], which updates the
     /// snapshot under the lock and then `send`s the new
@@ -522,6 +544,21 @@ pub struct BootstrapProcHandle {
     /// `borrow()` the current status and `changed().await` future
     /// transitions independently.
     rx: tokio::sync::watch::Receiver<ProcStatus>,
+}
+
+impl fmt::Debug for BootstrapProcHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let status = self.status.lock().expect("status mutex poisoned").clone();
+        f.debug_struct("BootstrapProcHandle")
+            .field("proc_id", &self.proc_id)
+            .field("status", &status)
+            .field("child", &"<child>")
+            .field("tx", &"<watch::Sender>")
+            .field("rx", &"<watch::Receiver>")
+            // Intentionally skip stdout_tailer / stderr_tailer (not
+            // Debug).
+            .finish()
+    }
 }
 
 // Locking invariant:
@@ -548,6 +585,8 @@ impl BootstrapProcHandle {
             proc_id,
             status: Arc::new(std::sync::Mutex::new(ProcStatus::Starting)),
             child: Arc::new(std::sync::Mutex::new(Some(child))),
+            stdout_tailer: Arc::new(std::sync::Mutex::new(None)),
+            stderr_tailer: Arc::new(std::sync::Mutex::new(None)),
             tx,
             rx,
         }
@@ -758,13 +797,16 @@ impl BootstrapProcHandle {
 
     /// Record that the process has exited normally with the given
     /// exit code.
-    pub(crate) fn mark_stopped(&self, exit_code: i32) -> bool {
+    pub(crate) fn mark_stopped(&self, exit_code: i32, stderr_tail: Vec<String>) -> bool {
         self.transition(|st| match *st {
             ProcStatus::Starting
             | ProcStatus::Running { .. }
             | ProcStatus::Ready { .. }
             | ProcStatus::Stopping { .. } => {
-                *st = ProcStatus::Stopped { exit_code };
+                *st = ProcStatus::Stopped {
+                    exit_code,
+                    stderr_tail,
+                };
                 true
             }
             _ => {
@@ -940,6 +982,31 @@ impl BootstrapProcHandle {
                 Err(anyhow::anyhow!("kill({pid}, {sig}) failed: {e}"))
             }
         }
+    }
+
+    pub fn set_tailers(&self, out: Option<LogTailer>, err: Option<LogTailer>) {
+        *self
+            .stdout_tailer
+            .lock()
+            .expect("stdout_tailer mutex poisoned") = out;
+        *self
+            .stderr_tailer
+            .lock()
+            .expect("stderr_tailer mutex poisoned") = err;
+    }
+
+    fn take_tailers(&self) -> (Option<LogTailer>, Option<LogTailer>) {
+        let out = self
+            .stdout_tailer
+            .lock()
+            .expect("stdout_tailer mutex poisoned")
+            .take();
+        let err = self
+            .stderr_tailer
+            .lock()
+            .expect("stderr_tailer mutex poisoned")
+            .take();
+        (out, err)
     }
 }
 
@@ -1276,11 +1343,12 @@ impl BootstrapProcManager {
     fn spawn_exit_monitor(&self, proc_id: ProcId, handle: BootstrapProcHandle) {
         let pid_table = Arc::clone(&self.pid_table);
 
+        let (stdout_tailer, stderr_tailer) = handle.take_tailers();
+
         let maybe_child = {
             let mut guard = handle.child.lock().expect("child mutex");
             let taken = guard.take();
             debug_assert!(guard.is_none(), "no Child should remain in handles");
-
             taken
         };
 
@@ -1290,17 +1358,46 @@ impl BootstrapProcManager {
         };
 
         tokio::spawn(async move {
-            match child.wait().await {
+            let wait_res = child.wait().await;
+
+            let mut stderr_tail: Vec<String> = Vec::new();
+            if let Some(t) = stderr_tailer {
+                let (lines, _bytes) = t.join().await;
+                stderr_tail = lines;
+            }
+            if let Some(t) = stdout_tailer {
+                let (_lines, _bytes) = t.join().await;
+            }
+
+            match wait_res {
                 Ok(status) => {
                     if let Some(sig) = status.signal() {
                         let _ = handle.mark_killed(sig, status.core_dumped());
                         if let Ok(mut table) = pid_table.lock() {
                             table.remove(&proc_id);
                         }
+                        if stderr_tail.is_empty() {
+                            tracing::debug!("proc {proc_id} killed by signal {sig}");
+                        } else {
+                            let tail = stderr_tail.join("\n");
+                            tracing::debug!(
+                                "proc {proc_id} killed by signal {sig}; stderr tail:\n{tail}"
+                            );
+                        }
                     } else if let Some(code) = status.code() {
-                        let _ = handle.mark_stopped(code);
+                        let _ = handle.mark_stopped(code, stderr_tail.clone());
                         if let Ok(mut table) = pid_table.lock() {
                             table.remove(&proc_id);
+                        }
+                        let tail_str = if stderr_tail.is_empty() {
+                            None
+                        } else {
+                            Some(stderr_tail.join("\n"))
+                        };
+                        if code == 0 {
+                            tracing::debug!(%proc_id, exit_code = code, tail = tail_str.as_deref(), "proc exited");
+                        } else {
+                            tracing::info!(%proc_id, exit_code = code, tail = tail_str.as_deref(), "proc exited");
                         }
                     } else {
                         debug_assert!(
@@ -1314,12 +1411,24 @@ impl BootstrapProcManager {
                         if let Ok(mut table) = pid_table.lock() {
                             table.remove(&proc_id);
                         }
+                        if stderr_tail.is_empty() {
+                            tracing::warn!("proc {proc_id} unknown exit");
+                        } else {
+                            let tail = stderr_tail.join("\n");
+                            tracing::warn!("proc {proc_id} unknown exit; stderr tail:\n{tail}");
+                        }
                     }
                 }
                 Err(e) => {
                     let _ = handle.mark_failed(format!("wait_inner() failed: {e}"));
                     if let Ok(mut table) = pid_table.lock() {
                         table.remove(&proc_id);
+                    }
+                    if stderr_tail.is_empty() {
+                        tracing::info!("proc {proc_id} wait failed");
+                    } else {
+                        let tail = stderr_tail.join("\n");
+                        tracing::info!("proc {proc_id} wait failed; stderr tail:\n{tail}");
                     }
                 }
             }
@@ -1416,24 +1525,27 @@ impl ProcManager for BootstrapProcManager {
 
         // Writers: tee to local (stdout/stderr or file) + send over
         // channel
-        let (mut out_writer, mut err_writer) = create_log_writers(0, log_channel.clone(), pid)
+        let (out_writer, err_writer) = create_log_writers(0, log_channel.clone(), pid)
             .unwrap_or_else(|_| (Box::new(tokio::io::stdout()), Box::new(tokio::io::stderr())));
+
+        let mut stdout_tailer: Option<LogTailer> = None;
+        let mut stderr_tailer: Option<LogTailer> = None;
 
         // Take the pipes from the child.
         {
             let mut guard = handle.child.lock().expect("child mutex poisoned");
-
             if let Some(child) = guard.as_mut() {
-                if let Some(mut out) = child.stdout.take() {
-                    tokio::spawn(async move {
-                        let _ = tokio::io::copy(&mut out, &mut out_writer).await;
-                    });
+                // LogTailer::tee forwards to our writers and keeps a
+                // tail buffer.
+                let max_tail_lines = hyperactor::config::global::get(MESH_TAIL_LOG_LINES);
+                if let Some(out) = child.stdout.take() {
+                    stdout_tailer = Some(LogTailer::tee(max_tail_lines, out, out_writer));
                 }
-                if let Some(mut err) = child.stderr.take() {
-                    tokio::spawn(async move {
-                        let _ = tokio::io::copy(&mut err, &mut err_writer).await;
-                    });
+                if let Some(err) = child.stderr.take() {
+                    stderr_tailer = Some(LogTailer::tee(max_tail_lines, err, err_writer));
                 }
+                // Make the tailers visible to the exit monitor.
+                handle.set_tailers(stdout_tailer.take(), stderr_tailer.take());
             } else {
                 tracing::debug!("proc {proc_id}: child already taken before wiring IO");
             }
@@ -1712,6 +1824,7 @@ mod tests {
     use ndslice::Extent;
     use ndslice::ViewExt;
     use ndslice::extent;
+    use tokio::io;
     use tokio::process::Command;
 
     use super::*;
@@ -1963,8 +2076,11 @@ mod tests {
             assert!(h.mark_running(child_pid, child_started_at));
             assert!(h.mark_stopping());
             assert!(matches!(h.status(), ProcStatus::Stopping { .. }));
-            assert!(h.mark_stopped(0));
-            assert!(matches!(h.status(), ProcStatus::Stopped { exit_code: 0 }));
+            assert!(h.mark_stopped(0, Vec::new()));
+            assert!(matches!(
+                h.status(),
+                ProcStatus::Stopped { exit_code: 0, .. }
+            ));
         }
 
         #[tokio::test]
@@ -2012,12 +2128,15 @@ mod tests {
             }
             // Once Stopped, we can't go to Running/Killed/Failed/etc.
             assert!(h.mark_stopping());
-            assert!(h.mark_stopped(0));
+            assert!(h.mark_stopped(0, Vec::new()));
             assert!(!h.mark_running(child_pid, child_started_at));
             assert!(!h.mark_killed(9, false));
             assert!(!h.mark_failed("nope"));
 
-            assert!(matches!(h.status(), ProcStatus::Stopped { exit_code: 0 }));
+            assert!(matches!(
+                h.status(),
+                ProcStatus::Stopped { exit_code: 0, .. }
+            ));
         }
 
         #[tokio::test]
@@ -2036,7 +2155,7 @@ mod tests {
             // Ready -> Stopping -> Stopped should be legal.
             assert!(h.mark_ready(pid, t0, addr, agent_ref));
             assert!(h.mark_stopping());
-            assert!(h.mark_stopped(0));
+            assert!(h.mark_stopped(0, Vec::new()));
         }
 
         #[tokio::test]
@@ -2238,11 +2357,11 @@ mod tests {
         }
 
         // Running -> Stopped
-        assert!(handle.mark_stopped(0));
+        assert!(handle.mark_stopped(0, Vec::new()));
         rx.changed().await.ok(); // Observe the transition.
         assert!(matches!(
             &*rx.borrow(),
-            ProcStatus::Stopped { exit_code: 0 }
+            ProcStatus::Stopped { exit_code: 0, .. }
         ));
     }
 
@@ -2266,12 +2385,12 @@ mod tests {
 
         // Simulate the exit monitor doing its job directly here.
         // (Equivalent outcome: terminal state before Running.)
-        assert!(handle.mark_stopped(7));
+        assert!(handle.mark_stopped(7, Vec::new()));
 
         // `ready()` should return Err with the terminal status.
         match handle.ready_inner().await {
             Ok(()) => panic!("ready() unexpectedly succeeded"),
-            Err(ReadyError::Terminal(ProcStatus::Stopped { exit_code })) => {
+            Err(ReadyError::Terminal(ProcStatus::Stopped { exit_code, .. })) => {
                 assert_eq!(exit_code, 7)
             }
             Err(other) => panic!("expected Stopped(7), got {other:?}"),
@@ -2381,11 +2500,11 @@ mod tests {
 
         let status = c.wait().await.expect("wait");
         let code = status.code().unwrap_or(0);
-        assert!(handle.mark_stopped(code));
+        assert!(handle.mark_stopped(code, Vec::new()));
 
         assert!(matches!(
             handle.status(),
-            ProcStatus::Stopped { exit_code: 0 }
+            ProcStatus::Stopped { exit_code: 0, .. }
         ));
     }
 
@@ -2470,7 +2589,7 @@ mod tests {
         assert_eq!(handle.pid(), Some(pid));
 
         // Terminal (Stopped) → pid() None
-        assert!(handle.mark_stopped(0));
+        assert!(handle.mark_stopped(0, Vec::new()));
         assert_eq!(handle.pid(), None, "pid() should be None once terminal");
     }
 
@@ -2548,7 +2667,10 @@ mod tests {
 
     #[test]
     fn display_stopped_includes_exit_code() {
-        let st = ProcStatus::Stopped { exit_code: 7 };
+        let st = ProcStatus::Stopped {
+            exit_code: 7,
+            stderr_tail: Vec::new(),
+        };
         let s = format!("{}", st);
         assert!(s.contains("Stopped"));
         assert!(s.contains("7"));
@@ -2630,7 +2752,7 @@ mod tests {
         let handle = BootstrapProcHandle::new(proc_id, child);
 
         // Drive directly to a terminal state before calling wait()
-        assert!(handle.mark_stopped(0));
+        assert!(handle.mark_stopped(0, Vec::new()));
 
         // Call the trait method (not wait_inner)
         let st = <BootstrapProcHandle as hyperactor::host::ProcHandle>::wait(&handle)
@@ -2638,7 +2760,7 @@ mod tests {
             .expect("wait should return Ok(terminal)");
 
         match st {
-            ProcStatus::Stopped { exit_code } => assert_eq!(exit_code, 0),
+            ProcStatus::Stopped { exit_code, .. } => assert_eq!(exit_code, 0),
             other => panic!("expected Stopped(0), got {other:?}"),
         }
     }
@@ -2656,11 +2778,13 @@ mod tests {
         let proc_id = ProcId::Direct(any_addr_for_test(), "wrap".into());
         let handle = BootstrapProcHandle::new(proc_id, child);
 
-        assert!(handle.mark_stopped(7));
+        assert!(handle.mark_stopped(7, Vec::new()));
 
         match <BootstrapProcHandle as hyperactor::host::ProcHandle>::ready(&handle).await {
             Ok(()) => panic!("expected Err"),
-            Err(hyperactor::host::ReadyError::Terminal(ProcStatus::Stopped { exit_code })) => {
+            Err(hyperactor::host::ReadyError::Terminal(ProcStatus::Stopped {
+                exit_code, ..
+            })) => {
                 assert_eq!(exit_code, 7);
             }
             Err(e) => panic!("unexpected error: {e:?}"),
@@ -2719,7 +2843,7 @@ mod tests {
             Err(_) => panic!("terminate() future hung"),
             Ok(Ok(st)) => {
                 match st {
-                    ProcStatus::Stopped { exit_code } => {
+                    ProcStatus::Stopped { exit_code, .. } => {
                         // child called exit(0) on SIGTERM
                         assert_eq!(exit_code, 0, "expected clean exit; got {exit_code}");
                     }
@@ -2906,5 +3030,80 @@ mod tests {
         // BootstrapProcManager's won't send SIGKILLs to their spawned
         // children and there will be orphans left behind.
         host_mesh.shutdown(&instance).await.expect("host shutdown");
+    }
+
+    #[tokio::test]
+    async fn exit_tail_is_attached_and_logged() {
+        // Spawn a child that writes to stderr then exits 7.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("printf 'boom-1\\nboom-2\\n' 1>&2; exit 7")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let child = cmd.spawn().expect("spawn");
+
+        // Build a BootstrapProcHandle around this child (like
+        // manager.spawn() does).
+        let proc_id = hyperactor::id!(testproc[0]);
+        let handle = BootstrapProcHandle::new(proc_id.clone(), child);
+
+        // Wire tailers + dummy writers (stdout/stderr -> sinks), then
+        // stash them on the handle.
+        {
+            // Lock the child to get its pipes.
+            let mut guard = handle.child.lock().expect("child mutex poisoned");
+            if let Some(child) = guard.as_mut() {
+                let out = child.stdout.take().expect("child stdout must be piped");
+                let err = child.stderr.take().expect("child stderr must be piped");
+
+                // Use sinks as our "writers" (we don't care about
+                // forwarding in this test)
+                let out_writer: Box<dyn io::AsyncWrite + Send + Unpin> = Box::new(io::sink());
+                let err_writer: Box<dyn io::AsyncWrite + Send + Unpin> = Box::new(io::sink());
+
+                // Create the tailers (they spawn background drainers).
+                let max_tail_lines = 3;
+                let out_tailer = LogTailer::tee(max_tail_lines, out, out_writer);
+                let err_tailer = LogTailer::tee(max_tail_lines, err, err_writer);
+
+                // Make them visible to the exit monitor (so it can
+                // join on exit).
+                handle.set_tailers(Some(out_tailer), Some(err_tailer));
+            } else {
+                panic!("child already taken before wiring tailers");
+            }
+        }
+
+        // Start an exit monitor (consumes the Child and tailers from
+        // the handle).
+        let manager = BootstrapProcManager::new(BootstrapCommand {
+            program: std::path::PathBuf::from("/bin/true"), // unused in this test
+            ..Default::default()
+        });
+        manager.spawn_exit_monitor(proc_id.clone(), handle.clone());
+
+        // Await terminal status and assert on exit code and stderr
+        // tail.
+        let st = RealClock
+            .timeout(Duration::from_secs(2), handle.wait_inner())
+            .await
+            .expect("wait_inner() timed out (exit monitor stuck?)");
+        match st {
+            ProcStatus::Stopped {
+                exit_code,
+                stderr_tail,
+            } => {
+                assert_eq!(
+                    exit_code, 7,
+                    "unexpected exit code; stderr_tail={:?}",
+                    stderr_tail
+                );
+                let tail = stderr_tail.join("\n");
+                assert!(tail.contains("boom-1"), "missing boom-1; tail:\n{tail}");
+                assert!(tail.contains("boom-2"), "missing boom-2; tail:\n{tail}");
+            }
+            other => panic!("expected Stopped(7), got {other:?}"),
+        }
     }
 }

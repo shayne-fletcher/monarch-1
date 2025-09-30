@@ -6,8 +6,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#![allow(dead_code)] // until used
-
 use std::mem::swap;
 use std::mem::take;
 use std::ops::DerefMut;
