@@ -3044,7 +3044,7 @@ mod tests {
         // Request a new allocation of procs from the ProcessAllocator.
         let alloc = allocator
             .allocate(AllocSpec {
-                extent: extent!(replicas = 1),
+                extent: extent!(replicas = 48),
                 constraints: Default::default(),
                 proc_name: None,
             })
