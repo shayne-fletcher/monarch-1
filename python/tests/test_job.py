@@ -72,7 +72,7 @@ class MockJobTrait(JobTrait):
             return True
         return spec in self._compatible_specs
 
-    def kill(self):
+    def _kill(self):
         """Mock implementation that tracks the kill call."""
         self.kill_called = True
 
@@ -287,7 +287,7 @@ def test_cache_write():
 def test_kill():
     """Test the kill method."""
     job = MockJobTrait()
-
+    job.apply()
     # Kill shouldn't have been called yet
     assert not job.kill_called
 
@@ -394,10 +394,8 @@ def test_train_script_job_state_batch():
         job = LocalJob(("batch_launched_hosts",))
         job.apply(client_script=train_script)
         assert 0 == job.process.wait()
-        assert (
-            "batch_launched_hosts True"
-            in open(os.path.join(job._log_dir, "stdout.log"), "r").read()
-        )
+        stdout = open(os.path.join(job._log_dir, "stdout.log"), "r").read()
+        assert "batch_launched_hosts True" in stdout
         # look in job._log_dir for the stdout file which will have the batch_lauched_hosts True
     finally:
         # Clean up
