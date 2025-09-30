@@ -9,12 +9,16 @@
 use hyperactor::ActorRef;
 use hyperactor_mesh::v1::actor_mesh::ActorMesh;
 use hyperactor_mesh::v1::actor_mesh::ActorMeshRef;
+use ndslice::Region;
 use ndslice::Selection;
+use ndslice::Slice;
+use ndslice::selection::structurally_equal;
 use ndslice::view::Ranked;
 use ndslice::view::RankedSliceable;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyException;
 use pyo3::exceptions::PyNotImplementedError;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -89,9 +93,8 @@ impl ActorMeshProtocol for PythonActorMeshImpl {
     }
 
     fn supervision_event(&self) -> PyResult<Option<PyShared>> {
-        Err(PyErr::new::<PyNotImplementedError, _>(
-            "supervision_event is not implemented yet for v1::PythonActorMeshImpl",
-        ))
+        // FIXME: implement supervision events for v1 actor mesh.
+        Ok(None)
     }
 
     fn new_with_region(&self, region: &PyRegion) -> PyResult<Box<dyn ActorMeshProtocol>> {
@@ -113,13 +116,37 @@ impl ActorMeshProtocol for ActorMeshRef<PythonActor> {
     fn cast(
         &self,
         message: PythonMessage,
-        _selection: Selection,
+        selection: Selection,
         instance: &PyInstance,
     ) -> PyResult<()> {
-        instance_dispatch!(instance, |cx_instance| {
-            self.cast(cx_instance, message.clone())
-                .map_err(|err| PyException::new_err(err.to_string()))?;
-        });
+        if structurally_equal(&selection, &Selection::All(Box::new(Selection::True))) {
+            instance_dispatch!(instance, |cx_instance| {
+                self.cast(cx_instance, message.clone())
+                    .map_err(|err| PyException::new_err(err.to_string()))?;
+            });
+        } else if structurally_equal(&selection, &Selection::Any(Box::new(Selection::True))) {
+            let region = Ranked::region(self);
+            let random_rank = fastrand::usize(0..region.num_ranks());
+            let offset = region
+                .slice()
+                .get(random_rank)
+                .map_err(anyhow::Error::from)?;
+            let singleton_region = Region::new(
+                Vec::new(),
+                Slice::new(offset, Vec::new(), Vec::new()).map_err(anyhow::Error::from)?,
+            );
+            instance_dispatch!(instance, |cx_instance| {
+                self.sliced(singleton_region)
+                    .cast(cx_instance, message.clone())
+                    .map_err(|err| PyException::new_err(err.to_string()))?;
+            });
+        } else {
+            return Err(PyRuntimeError::new_err(format!(
+                "invalid selection: {:?}",
+                selection
+            )));
+        }
+
         Ok(())
     }
 
