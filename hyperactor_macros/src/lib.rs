@@ -66,6 +66,7 @@ enum FieldFlag {
 }
 
 /// Represents a variant of an enum.
+#[allow(dead_code)]
 enum Variant {
     /// A named variant (i.e., `MyVariant { .. }`).
     Named {
@@ -119,6 +120,7 @@ impl Variant {
     }
 
     /// The generics of the variant itself.
+    #[allow(dead_code)]
     fn generics(&self) -> &syn::Generics {
         match self {
             Variant::Named { generics, .. } => generics,

@@ -98,9 +98,9 @@ impl fmt::Display for ActorMeshId {
 impl FromStr for ActorMeshId {
     type Err = anyhow::Error;
 
+    #[allow(clippy::manual_strip)]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.starts_with("v0:") {
-            #[allow(clippy::manual_strip)]
             let parts: Vec<_> = s[3..].split(',').collect();
             if parts.len() != 2 {
                 return Err(anyhow::anyhow!("invalid v0 actor mesh id: {}", s));

@@ -1513,9 +1513,7 @@ mod tests {
         use hyperactor::channel::serve;
         use hyperactor::clock::Clock;
         use hyperactor::clock::RealClock;
-        use hyperactor_mesh_macros::sel;
         use ndslice::Selection;
-        use ndslice::extent;
 
         use crate::Mesh;
         use crate::ProcMesh;
