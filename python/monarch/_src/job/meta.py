@@ -4,7 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
+import tempfile
 import uuid
+from contextlib import ExitStack
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Literal, NamedTuple, Optional, Sequence, Tuple, Union
@@ -25,7 +28,7 @@ from monarch._src.actor.meta.allocator import (
     MastAllocatorConfig,
 )
 
-from monarch._src.job.job import JobState, JobTrait
+from monarch._src.job.job import BatchJob, JobState, JobTrait
 
 from monarch.tools.commands import create, info, kill
 from monarch.tools.components.meta import hyperactor
@@ -100,38 +103,47 @@ class MASTJob(JobTrait):
         self._spec.workspace[path] = path if local_path is None else local_path
 
     def _create(self, client_script: Optional[str] = None):
-        if client_script is not None:
-            raise NotImplementedError("scheduling a client script.")
+        if not self._spec.meshes:
+            raise ValueError("There needs to be at least one mesh in the job")
         packages = Packages()
         for p in self._spec.packages:
             packages.add_package(p)
 
-        workspace = Workspace(self._spec.workspace)
-        config = Config(
-            scheduler="mast_conda",
-            scheduler_args={
-                k: getattr(self._spec, k)
-                for k in (
-                    "hpcIdentity",
-                    "hpcJobOncall",
-                    "rmAttribution",
-                    "hpcClusterUuid",
-                )
-            },
-            appdef=hyperactor.host_mesh_conda(
-                meshes=[
-                    f"{name}:{num_hosts}:{host_type}"
-                    for name, num_hosts, host_type in self._spec.meshes
-                ],
-                additional_packages=packages,
-                timeout_sec=self._spec.timeout_sec,
-            ),
-            workspace=workspace,
+        appdef = hyperactor.host_mesh_conda(
+            meshes=[
+                f"{name}:{num_hosts}:{host_type}"
+                for name, num_hosts, host_type in self._spec.meshes
+            ],
+            additional_packages=packages,
+            timeout_sec=self._spec.timeout_sec,
         )
-        name = self._name = f"monarch-{uuid.uuid4().hex}"
-        print(f"Creating monarch mast job {name} ...")
-        create(config, name)
-        print("DONE")
+        with ExitStack() as stack:
+            workspace = Workspace(self._spec.workspace)
+            name = self._name = f"monarch-{uuid.uuid4().hex}"
+            if client_script is not None:
+                appdef.roles[0].env["MONARCH_BATCH_JOB"] = client_script
+                temp_dir = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+                path = temp_dir / "job_state.pkl"
+                BatchJob(self).dump(str(path))
+                workspace.dirs[temp_dir] = ".monarch"
+
+            config = Config(
+                scheduler="mast_conda",
+                scheduler_args={
+                    k: getattr(self._spec, k)
+                    for k in (
+                        "hpcIdentity",
+                        "hpcJobOncall",
+                        "rmAttribution",
+                        "hpcClusterUuid",
+                    )
+                },
+                appdef=appdef,
+                workspace=workspace,
+            )
+            print(f"Creating monarch mast job {name} ...")
+            create(config, name)
+            print("DONE")
 
     def can_run(self, spec: "JobTrait"):
         """

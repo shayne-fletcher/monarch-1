@@ -164,10 +164,6 @@ class JobTrait(ABC):
         # @lint-ignore PYTHONPICKLEISBAD
         return pickle.dumps(self)
 
-    @property
-    def _job(self):
-        return self if self._delegate is None else self._delegate._job
-
     @abstractmethod
     def _state(self) -> JobState: ...
 
@@ -242,7 +238,7 @@ class LocalJob(JobTrait):
         if client_script is None:
             return  # noop, because LocalJob always 'exists'
 
-        b = _BatchLocalJob(self._host_names)
+        b = BatchJob(self)
         b.dump(".monarch/job_state.pkl")
 
         log_dir = self._setup_log_directory()
@@ -297,21 +293,35 @@ class LocalJob(JobTrait):
         return self._proc
 
 
-class _BatchTrait:
+class BatchJob(JobTrait):
     """
-    Mixin that can be written to .monarch/job_state.pkl so that a batch job
-    always load its connection information from job_state.pkl.
+    Wrapper that can be put around other job traits to make
+    make it always load from the job_state.pkl when MONARCH_BATCH_JOB
+    is set.
     """
 
+    def __init__(self, job: JobTrait):
+        super().__init__()
+        self._job = job
+
     def can_run(self, spec: JobTrait):
-        if os.environ.get("MONARCH_BATCH_JOB", None) == "1":
+        if "MONARCH_BATCH_JOB" in os.environ:
+            import atexit
+
+            atexit.register(self._kill)
             return True
         return False
 
     @property
-    def _running(self) -> Self:
+    def _running(self) -> Optional[JobTrait]:
         return self
 
+    def _state(self):
+        return self._job._state()
 
-class _BatchLocalJob(_BatchTrait, LocalJob):
-    pass
+    def _create(self, client_script: Optional[str] = None):
+        return self._job._create(client_script)
+
+    def _kill(self):
+        print("Stopping Batch Job")
+        return self._job._kill()
