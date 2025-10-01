@@ -194,7 +194,11 @@ pub enum Bootstrap {
         backend_addr: ChannelAddr,
         /// The callback address used to indicate successful spawning.
         callback_addr: ChannelAddr,
-        /// Config snapshot for the child.
+        /// Optional config snapshot (base64-encoded JSON
+        /// `hyperactor::config::Attrs`). If present, it is
+        /// **applied** as the child's global config during bootstrap
+        /// (before any runtime/actors initialize). If absent, the
+        /// child falls back to env/defaults.
         config: Option<String>,
     },
 
@@ -204,7 +208,11 @@ pub enum Bootstrap {
         /// The address on which to serve the host.
         addr: ChannelAddr,
 
-        /// Config snapshot for the child.
+        /// Optional config snapshot (base64-encoded JSON
+        /// `hyperactor::config::Attrs`). If present, it is
+        /// **applied** as the process's global config during
+        /// bootstrap (before the host runtime initializes). If
+        /// absent, the process falls back to env/defaults.
         config: Option<String>,
     },
 
@@ -288,28 +296,11 @@ impl Bootstrap {
                 callback_addr,
                 config,
             } => {
-                if let Some(cfg_b64) = &config {
-                    match BASE64_STANDARD.decode(cfg_b64) {
-                        Ok(bytes) => {
-                            tracing::debug!(
-                                config_b64_len = cfg_b64.len(),
-                                config_decoded_len = bytes.len(),
-                                "bootstrap: received config snapshot (Proc)"
-                            );
-                            // TODO: Apply decoded config snapshot as
-                            // global config before proc init.
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                config_b64_len = cfg_b64.len(),
-                                error = %e,
-                                "bootstrap: config snapshot base64 decode failed (Proc); ignoring"
-                            );
-                        }
-                    }
-                } else {
-                    tracing::debug!("bootstrap: no config snapshot provided (Proc)");
-                }
+                // If provided, apply the producer-supplied config
+                // snapshot as this proc's global config (freezes
+                // further re-init). Otherwise the proc falls back to
+                // env/defaults.
+                hyperactor::config::global::maybe_apply_snapshot_from_b64("Proc", &config);
 
                 if hyperactor::config::global::get(MESH_BOOTSTRAP_ENABLE_PDEATHSIG) {
                     // Safety net: normal shutdown is via
@@ -332,28 +323,11 @@ impl Bootstrap {
                 }
             }
             Bootstrap::Host { addr, config } => {
-                if let Some(cfg_b64) = &config {
-                    match BASE64_STANDARD.decode(cfg_b64) {
-                        Ok(bytes) => {
-                            tracing::debug!(
-                                config_b64_len = cfg_b64.len(),
-                                config_decoded_len = bytes.len(),
-                                "bootstrap: received config snapshot (Host)"
-                            );
-                            // TODO: Apply decoded config snapshot as
-                            // global config before proc init.
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                config_b64_len = cfg_b64.len(),
-                                error = %e,
-                                "bootstrap: config snapshot base64 decode failed (Host); ignoring"
-                            );
-                        }
-                    }
-                } else {
-                    tracing::debug!("bootstrap: no config snapshot provided (Host)");
-                }
+                // If provided, apply the producer-supplied config
+                // snapshot as this host's global config (freezes
+                // further re-init). Otherwise the host falls back to
+                // env/defaults.
+                hyperactor::config::global::maybe_apply_snapshot_from_b64("Host", &config);
 
                 let command = ok!(BootstrapCommand::current());
                 let manager = BootstrapProcManager::new(command);
@@ -1513,12 +1487,12 @@ impl ProcManager for BootstrapProcManager {
     ///
     /// Spawns the configured bootstrap binary (`self.program`) in a
     /// fresh child process. The environment is populated with
-    /// variables that describe the bootstrap context — most
+    /// variables that describe the bootstrap context - most
     /// importantly `HYPERACTOR_MESH_BOOTSTRAP_MODE`, which carries a
     /// base64-encoded JSON [`Bootstrap::Proc`] payload (proc id,
     /// backend addr, callback addr, optional config snapshot).
     /// Additional variables like `BOOTSTRAP_LOG_CHANNEL` are also set
-    /// up for logging and control.
+    /// for logging/control.
     ///
     /// Responsibilities performed here:
     /// - Create a one-shot callback channel so the child can confirm
@@ -1546,6 +1520,8 @@ impl ProcManager for BootstrapProcManager {
         let (callback_addr, mut callback_rx) =
             channel::serve(ChannelAddr::any(ChannelTransport::Unix))?;
 
+        // Producer-side: capture current global attrs and embed as
+        // the child's bootstrap snapshot.
         let cfg = hyperactor::config::global::attrs();
         let cfg_json = serde_json::to_vec(&cfg).unwrap();
         let cfg_json_b64 = BASE64_STANDARD.encode(cfg_json);
@@ -1969,7 +1945,7 @@ mod tests {
     }
 
     // "Opaque string" guarantee: inner payload can be arbitrary bytes
-    // (we don’t validate here).
+    // (we don't validate here).
     #[test]
     fn test_bootstrap_env_config_is_opaque_string() {
         // Arbitrary binary blob -> base64. This simulates non-UTF8
