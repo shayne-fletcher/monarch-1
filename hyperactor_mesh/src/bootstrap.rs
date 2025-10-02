@@ -28,6 +28,7 @@ use humantime::format_duration;
 use hyperactor::ActorRef;
 use hyperactor::Named;
 use hyperactor::ProcId;
+use hyperactor::attrs::Attrs;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::channel::ChannelTransport;
@@ -175,8 +176,15 @@ async fn halt<R>() -> R {
     unreachable!()
 }
 
-/// Bootstrap configures the bootstrap behavior of a binary.
-#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Bootstrap configures how a mesh process starts up.
+///
+/// Both `Proc` and `Host` variants may include an optional
+/// configuration snapshot (`hyperactor::config::Attrs`). This
+/// snapshot is serialized into the bootstrap payload and made
+/// available to the child. Interpretation and application of that
+/// snapshot is up to the child process; if omitted, the child falls
+/// back to environment/default values.
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub enum Bootstrap {
     /// "v1" proc bootstrap
     Proc {
@@ -187,6 +195,8 @@ pub enum Bootstrap {
         backend_addr: ChannelAddr,
         /// The callback address used to indicate successful spawning.
         callback_addr: ChannelAddr,
+        /// Config snapshot for the child.
+        config: Option<Attrs>,
     },
 
     /// Host bootstrap. This sets up a new `Host`, managed by a
@@ -194,6 +204,9 @@ pub enum Bootstrap {
     Host {
         /// The address on which to serve the host.
         addr: ChannelAddr,
+
+        /// Config snapshot for the child.
+        config: Option<Attrs>,
     },
 
     #[default]
@@ -274,7 +287,16 @@ impl Bootstrap {
                 proc_id,
                 backend_addr,
                 callback_addr,
+                config,
             } => {
+                if config.is_some() {
+                    tracing::debug!(
+                        "bootstrap: Proc received config snapshot (carried, not applied)"
+                    );
+                } else {
+                    tracing::debug!("bootstrap: no config snapshot provided (Proc)");
+                }
+
                 if hyperactor::config::global::get(MESH_BOOTSTRAP_ENABLE_PDEATHSIG) {
                     // Safety net: normal shutdown is via
                     // `host_mesh.shutdown(&instance)`; PR_SET_PDEATHSIG
@@ -295,7 +317,15 @@ impl Bootstrap {
                     Err(e) => e.into(),
                 }
             }
-            Bootstrap::Host { addr } => {
+            Bootstrap::Host { addr, config } => {
+                if config.is_some() {
+                    tracing::debug!(
+                        "bootstrap: Host received config snapshot (carried, not applied)"
+                    );
+                } else {
+                    tracing::debug!("bootstrap: no config snapshot provided (Host)");
+                }
+
                 let command = ok!(BootstrapCommand::current());
                 let manager = BootstrapProcManager::new(command);
                 let (host, _handle) = ok!(Host::serve(manager, addr).await);
@@ -1453,9 +1483,13 @@ impl ProcManager for BootstrapProcManager {
     /// Launch a new proc under this [`BootstrapProcManager`].
     ///
     /// Spawns the configured bootstrap binary (`self.program`) in a
-    /// fresh child process, passing environment variables that
-    /// describe the [`BootstrapMode::Proc`] (proc ID, backend
-    /// address, callback address).
+    /// fresh child process. The environment is populated with
+    /// variables that describe the bootstrap context — most
+    /// importantly `HYPERACTOR_MESH_BOOTSTRAP_MODE`, which carries a
+    /// base64-encoded JSON [`Bootstrap::Proc`] payload (proc id,
+    /// backend addr, callback addr, optional config snapshot).
+    /// Additional variables like `BOOTSTRAP_LOG_CHANNEL` are also set
+    /// up for logging and control.
     ///
     /// Responsibilities performed here:
     /// - Create a one-shot callback channel so the child can confirm
@@ -1483,10 +1517,13 @@ impl ProcManager for BootstrapProcManager {
         let (callback_addr, mut callback_rx) =
             channel::serve(ChannelAddr::any(ChannelTransport::Unix))?;
 
+        let cfg = hyperactor::config::global::attrs();
+
         let mode = Bootstrap::Proc {
             proc_id: proc_id.clone(),
             backend_addr,
             callback_addr,
+            config: Some(cfg),
         };
         let mut cmd = Command::new(&self.command.program);
         if let Some(arg0) = &self.command.arg0 {
@@ -1842,19 +1879,105 @@ mod tests {
     }
 
     #[test]
-    fn test_bootstrap_mode_env_string() {
+    fn test_bootstrap_mode_env_string_none_config_proc() {
         let values = [
             Bootstrap::default(),
             Bootstrap::Proc {
                 proc_id: id!(foo[0]),
                 backend_addr: ChannelAddr::any(ChannelTransport::Tcp),
                 callback_addr: ChannelAddr::any(ChannelTransport::Unix),
+                config: None,
             },
         ];
 
         for value in values {
             let safe = value.to_env_safe_string().unwrap();
-            assert_eq!(value, Bootstrap::from_env_safe_string(&safe).unwrap());
+            let round = Bootstrap::from_env_safe_string(&safe).unwrap();
+
+            // Re-encode and compare: deterministic round-trip of the
+            // wire format.
+            let safe2 = round.to_env_safe_string().unwrap();
+            assert_eq!(safe, safe2, "env-safe round-trip should be stable");
+
+            // Sanity: the decoded variant is what we expect.
+            match (&value, &round) {
+                (Bootstrap::Proc { config: None, .. }, Bootstrap::Proc { config: None, .. }) => {}
+                (Bootstrap::V0ProcMesh, Bootstrap::V0ProcMesh) => {}
+                _ => panic!("decoded variant mismatch: got {:?}", round),
+            }
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_mode_env_string_none_config_host() {
+        let value = Bootstrap::Host {
+            addr: ChannelAddr::any(ChannelTransport::Unix),
+            config: None,
+        };
+
+        let safe = value.to_env_safe_string().unwrap();
+        let round = Bootstrap::from_env_safe_string(&safe).unwrap();
+
+        // Wire-format round-trip should be identical.
+        let safe2 = round.to_env_safe_string().unwrap();
+        assert_eq!(safe, safe2);
+
+        // Sanity: decoded variant is Host with None config.
+        match round {
+            Bootstrap::Host { config: None, .. } => {}
+            other => panic!("expected Host with None config, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_mode_env_string_invalid() {
+        // Not valid base64
+        assert!(Bootstrap::from_env_safe_string("!!!").is_err());
+    }
+
+    #[test]
+    fn test_bootstrap_env_roundtrip_with_config_proc_and_host() {
+        // Build a small, distinctive Attrs snapshot.
+        let mut attrs = Attrs::new();
+        attrs[MESH_TAIL_LOG_LINES] = 123;
+        attrs[MESH_BOOTSTRAP_ENABLE_PDEATHSIG] = false;
+
+        // Proc case
+        {
+            let original = Bootstrap::Proc {
+                proc_id: id!(foo[42]),
+                backend_addr: ChannelAddr::any(ChannelTransport::Unix),
+                callback_addr: ChannelAddr::any(ChannelTransport::Unix),
+                config: Some(attrs.clone()),
+            };
+            let env_str = original.to_env_safe_string().expect("encode bootstrap");
+            let decoded = Bootstrap::from_env_safe_string(&env_str).expect("decode bootstrap");
+            match &decoded {
+                Bootstrap::Proc { config, .. } => {
+                    let cfg = config.as_ref().expect("expected Some(attrs)");
+                    assert_eq!(cfg[MESH_TAIL_LOG_LINES], 123);
+                    assert!(!cfg[MESH_BOOTSTRAP_ENABLE_PDEATHSIG]);
+                }
+                other => panic!("unexpected variant after roundtrip: {:?}", other),
+            }
+        }
+
+        // Host case
+        {
+            let original = Bootstrap::Host {
+                addr: ChannelAddr::any(ChannelTransport::Unix),
+                config: Some(attrs.clone()),
+            };
+            let env_str = original.to_env_safe_string().expect("encode bootstrap");
+            let decoded = Bootstrap::from_env_safe_string(&env_str).expect("decode bootstrap");
+            match &decoded {
+                Bootstrap::Host { config, .. } => {
+                    let cfg = config.as_ref().expect("expected Some(attrs)");
+                    assert_eq!(cfg[MESH_TAIL_LOG_LINES], 123);
+                    assert!(!cfg[MESH_BOOTSTRAP_ENABLE_PDEATHSIG]);
+                }
+                other => panic!("unexpected variant after roundtrip: {:?}", other),
+            }
         }
     }
 
