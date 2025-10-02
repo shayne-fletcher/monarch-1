@@ -61,9 +61,33 @@ impl HostRef {
         ProcId::Direct(self.0.clone(), "service".to_string())
     }
 
+    /// Request an orderly teardown of this host and all procs it
+    /// spawned.
+    ///
+    /// This resolves the per-child grace **timeout** and the maximum
+    /// termination **concurrency** from config and sends a
+    /// [`ShutdownHost`] message to the host's agent. The agent then:
+    ///
+    /// 1) Performs a graceful termination pass over all tracked
+    ///    children (TERM → wait(`timeout`) → KILL), with at most
+    ///    `max_in_flight` running concurrently.
+    /// 2) After the pass completes, **drops the Host**, which also
+    ///    drops the embedded `BootstrapProcManager`. The manager's
+    ///    `Drop` serves as a last-resort safety net (it SIGKILLs
+    ///    anything that somehow remains).
+    ///
+    /// This call returns `Ok(()))` only after the agent has finished
+    /// the termination pass and released the host, so the host is no
+    /// longer reachable when this returns.
     async fn shutdown(&self, cx: &impl hyperactor::context::Actor) -> anyhow::Result<()> {
         let agent = self.mesh_agent();
-        agent.shutdown_host(cx).await?;
+        let terminate_timeout =
+            hyperactor::config::global::get(crate::bootstrap::MESH_TERMINATE_TIMEOUT);
+        let max_in_flight =
+            hyperactor::config::global::get(crate::bootstrap::MESH_TERMINATE_CONCURRENCY);
+        agent
+            .shutdown_host(cx, terminate_timeout, max_in_flight.clamp(1, 256))
+            .await?;
         Ok(())
     }
 }
