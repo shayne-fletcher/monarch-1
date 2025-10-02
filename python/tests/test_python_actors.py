@@ -30,6 +30,7 @@ from monarch._rust_bindings.monarch_hyperactor.actor import (
     PythonMessage,
     PythonMessageKind,
 )
+from monarch._rust_bindings.monarch_hyperactor.alloc import Alloc, AllocSpec
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     PortId,
     PortRef,
@@ -790,6 +791,11 @@ async def test_alloc_based_log_streaming(v1: bool) -> None:
                     else:
 
                         class ProcessAllocatorStreamLogs(ProcessAllocator):
+                            def allocate_nonblocking(
+                                self, spec: AllocSpec
+                            ) -> PythonTask[Alloc]:
+                                return super().allocate_nonblocking(spec)
+
                             def _stream_logs(self) -> bool:
                                 return stream_logs
 

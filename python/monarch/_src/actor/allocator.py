@@ -102,7 +102,6 @@ class AllocateMixin(abc.ABC):
         ...
 
 
-@final
 class ProcessAllocator(ProcessAllocatorBase, AllocateMixin):
     """
     An allocator that allocates by spawning local processes.
