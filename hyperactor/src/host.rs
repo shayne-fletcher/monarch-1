@@ -176,6 +176,11 @@ impl<M: ProcManager> Host<M> {
         Ok((host, frontend_handle))
     }
 
+    /// The underlying proc manager.
+    pub fn manager(&self) -> &M {
+        &self.manager
+    }
+
     /// The address which accepts messages destined for this host.
     pub fn addr(&self) -> &ChannelAddr {
         &self.frontend_addr

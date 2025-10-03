@@ -418,7 +418,7 @@ pub fn install_pdeathsig_kill() -> io::Result<()> {
 /// In short:
 /// - `ProcState`/`ProcStopReason`: historical / event-driven model
 /// - `ProcStatus`: immediate status surface for lifecycle control
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProcStatus {
     /// The OS process has been spawned but is not yet fully running.
     /// (Process-level: child handle exists, no confirmation yet.)
@@ -427,7 +427,7 @@ pub enum ProcStatus {
     /// (Process-level: `pid` is known; Proc-level: bootstrap
     /// may still be running.)
     Running { pid: u32, started_at: SystemTime },
-    /// Ready means boostrap has completed and the proc is serving.
+    /// Ready means bootstrap has completed and the proc is serving.
     /// (Process-level: `pid` is known; Proc-level: bootstrap
     /// completed.)
     Ready {
@@ -1301,7 +1301,7 @@ impl hyperactor::host::ProcHandle for BootstrapProcHandle {
 }
 
 /// A specification of the command used to bootstrap procs.
-#[derive(Debug, Named, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Named, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct BootstrapCommand {
     pub program: std::path::PathBuf,
     pub arg0: Option<String>,
@@ -1430,10 +1430,15 @@ impl BootstrapProcManager {
         }
     }
 
+    /// The bootstrap command used to launch processes.
+    pub fn command(&self) -> &BootstrapCommand {
+        &self.command
+    }
+
     /// Return the current [`ProcStatus`] for the given [`ProcId`], if
     /// the proc is known to this manager.
     ///
-    /// This queries the live [`BootstrapProcHandle`] stored in the
+    /// This querprocies the live [`BootstrapProcHandle`] stored in the
     /// manager's internal map. It provides an immediate snapshot of
     /// lifecycle state (`Starting`, `Running`, `Stopping`, `Stopped`,
     /// etc.).
