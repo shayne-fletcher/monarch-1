@@ -528,7 +528,7 @@ impl HostMeshRef {
         for (host_rank, host) in self.ranks.iter().enumerate() {
             for per_host_rank in 0..per_host.num_ranks() {
                 let proc_name = Name::new(format!("{}-{}", name, per_host_rank));
-                let _ok = host
+                let ok = host
                     .mesh_agent()
                     .create_or_update(cx, proc_name.clone(), ())
                     .await
@@ -538,6 +538,14 @@ impl HostMeshRef {
                             format!("failed while creating proc: {}", e),
                         )
                     })?;
+                if !ok {
+                    // TODO: clean up the rest of the procs
+                    return Err(v1::Error::ProcCreationError {
+                        proc_name,
+                        mesh_agent: host.mesh_agent(),
+                        host_rank,
+                    });
+                }
                 procs.push(ProcRef::new(
                     host.named_proc(&proc_name),
                     per_host.num_ranks() * host_rank + per_host_rank,

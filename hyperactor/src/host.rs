@@ -146,7 +146,14 @@ impl<M: ProcManager> Host<M> {
 
         // Set up a system proc. This is often used to manage the host itself.
         let service_proc_id = ProcId::Direct(frontend_addr.clone(), "service".to_string());
-        let service_proc = Proc::new(service_proc_id, router.boxed());
+        let service_proc = Proc::new(service_proc_id.clone(), router.boxed());
+
+        tracing::info!(
+            frontend_addr = frontend_addr.to_string(),
+            backend_addr = backend_addr.to_string(),
+            service_proc_id = service_proc_id.to_string(),
+            "serving host"
+        );
 
         let host = Host {
             procs: HashMap::new(),

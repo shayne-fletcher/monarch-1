@@ -97,6 +97,7 @@ impl Actor for HostMeshAgent {
 
 #[async_trait]
 impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
+    #[tracing::instrument("HostMeshAgent::CreateOrUpdate", level = "info", skip_all, fields(name=%create_or_update.name))]
     async fn handle(
         &mut self,
         cx: &Context<Self>,
@@ -108,22 +109,21 @@ impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
         }
 
         let host = self.host.as_mut().expect("host present");
-        let ok = self
-            .created
-            .insert(
-                create_or_update.name.clone(),
-                match host {
-                    HostAgentMode::Process(host) => {
-                        host.spawn(create_or_update.name.clone().to_string()).await
-                    }
-                    HostAgentMode::Local(host) => {
-                        host.spawn(create_or_update.name.clone().to_string()).await
-                    }
-                },
-            )
-            .is_none();
-
+        let created = match host {
+            HostAgentMode::Process(host) => {
+                host.spawn(create_or_update.name.clone().to_string()).await
+            }
+            HostAgentMode::Local(host) => {
+                host.spawn(create_or_update.name.clone().to_string()).await
+            }
+        };
+        let ok = created.is_ok();
+        if let Err(e) = &created {
+            tracing::error!("failed to spawn proc {}: {}", create_or_update.name, e);
+        }
+        self.created.insert(create_or_update.name.clone(), created);
         create_or_update.reply.send(cx, ok)?;
+
         Ok(())
     }
 }
@@ -242,6 +242,7 @@ impl Actor for HostMeshAgentProcMeshTrampoline {
                 Some(command) => command,
                 None => BootstrapCommand::current()?,
             };
+            tracing::info!("booting host with proc command {:?}", command);
             let manager = BootstrapProcManager::new(command);
             let (host, _) = Host::serve(manager, transport.any()).await?;
             HostAgentMode::Process(host)

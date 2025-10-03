@@ -23,6 +23,7 @@ pub use actor_mesh::ActorMesh;
 pub use actor_mesh::ActorMeshRef;
 pub use host_mesh::HostMeshRef;
 use hyperactor::ActorId;
+use hyperactor::ActorRef;
 use hyperactor::mailbox::MailboxSenderError;
 use ndslice::view;
 pub use proc_mesh::ProcMesh;
@@ -32,6 +33,7 @@ use serde::Serialize;
 pub use value_mesh::ValueMesh;
 
 use crate::shortuuid::ShortUuid;
+use crate::v1::host_mesh::HostMeshAgent;
 use crate::v1::host_mesh::HostMeshRefParseError;
 
 /// Errors that occur during mesh operations.
@@ -83,6 +85,13 @@ pub enum Error {
 
     #[error("error configuring host mesh agent {0}: {1}")]
     HostMeshAgentConfigurationError(ActorId, String),
+
+    #[error("error creating {proc_name} (host rank {host_rank}) on host mesh agent {mesh_agent}")]
+    ProcCreationError {
+        proc_name: Name,
+        mesh_agent: ActorRef<HostMeshAgent>,
+        host_rank: usize,
+    },
 
     #[error("error: {0} does not exist")]
     NotExist(Name),
