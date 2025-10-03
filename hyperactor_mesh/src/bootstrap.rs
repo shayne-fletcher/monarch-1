@@ -277,6 +277,13 @@ impl Bootstrap {
         if Debug::is_active() {
             let mut buf = Vec::new();
             writeln!(&mut buf, "bootstrapping {}:", std::process::id()).unwrap();
+            #[cfg(unix)]
+            writeln!(
+                &mut buf,
+                "\tparent pid: {}",
+                std::os::unix::process::parent_id()
+            )
+            .unwrap();
             writeln!(
                 &mut buf,
                 "\tconfig: {}",
@@ -296,6 +303,11 @@ impl Bootstrap {
                 writeln!(&mut buf, "\t\t{}={}", key, val).unwrap();
             }
             let _ = Debug.write(&buf);
+            if let Ok(s) = std::str::from_utf8(&buf) {
+                tracing::info!("{}", s);
+            } else {
+                tracing::info!("{:?}", buf);
+            }
         }
 
         match self {
@@ -1938,22 +1950,38 @@ fn debug_sink() -> &'static Mutex<DebugSink> {
     })
 }
 
+/// If true, send `Debug` messages to stderr.
+const DEBUG_TO_STDERR: bool = true;
+
 /// A bootstrap specific debug writer. If the file /tmp/monarch-bootstrap-debug.log
 /// exists, then the writer's destination is that file; otherwise it discards all writes.
 struct Debug;
 
 impl Debug {
     fn is_active() -> bool {
-        debug_sink().lock().unwrap().is_file()
+        DEBUG_TO_STDERR || debug_sink().lock().unwrap().is_file()
     }
 }
 
 impl Write for Debug {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        debug_sink().lock().unwrap().write(buf)
+        let res = debug_sink().lock().unwrap().write(buf);
+        if DEBUG_TO_STDERR {
+            let n = match res {
+                Ok(n) => n,
+                Err(_) => buf.len(),
+            };
+            let _ = io::stderr().write_all(&buf[..n]);
+        }
+
+        res
     }
     fn flush(&mut self) -> io::Result<()> {
-        debug_sink().lock().unwrap().flush()
+        let res = debug_sink().lock().unwrap().flush();
+        if DEBUG_TO_STDERR {
+            let _ = io::stderr().flush();
+        }
+        res
     }
 }
 
