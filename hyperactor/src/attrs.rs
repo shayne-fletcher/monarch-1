@@ -466,6 +466,12 @@ impl Attrs {
     ) {
         self.values.insert(name, value);
     }
+
+    /// Internal getter by key name for explicitly-set values (no
+    /// defaults).
+    pub(crate) fn get_value_by_name(&self, name: &'static str) -> Option<&dyn SerializableValue> {
+        self.values.get(name).map(|b| b.as_ref())
+    }
 }
 
 impl Clone for Attrs {
