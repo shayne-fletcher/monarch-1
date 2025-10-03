@@ -271,6 +271,10 @@ impl Deref for ProcMeshRef<'_> {
 
 /// A mesh of actor instances. ActorMeshes are obtained by spawning an
 /// actor on a [`ProcMesh`].
+///
+/// Generic bound: `A: RemoteActor` — this type hands out typed
+/// `ActorRef<A>` handles (see `ranks`), and `ActorRef` is only
+/// defined for `A: RemoteActor`.
 pub struct RootActorMesh<'a, A: RemoteActor> {
     proc_mesh: ProcMeshRef<'a>,
     name: String,

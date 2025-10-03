@@ -47,6 +47,9 @@ use crate::v1::ProcMeshRef;
 use crate::v1::ValueMesh;
 
 /// An ActorMesh is a collection of ranked A-typed actors.
+///
+/// Bound note: `A: RemoteActor` because the mesh stores/returns
+/// `ActorRef<A>`, which is only defined for `A: RemoteActor`.
 #[derive(Debug)]
 pub struct ActorMesh<A: RemoteActor> {
     proc_mesh: ProcMeshRef,
@@ -54,6 +57,8 @@ pub struct ActorMesh<A: RemoteActor> {
     current_ref: ActorMeshRef<A>,
 }
 
+// `A: RemoteActor` for the same reason as the struct: the mesh holds
+// `ActorRef<A>`.
 impl<A: RemoteActor> ActorMesh<A> {
     pub(crate) fn new(proc_mesh: ProcMeshRef, name: Name) -> Self {
         let current_ref =

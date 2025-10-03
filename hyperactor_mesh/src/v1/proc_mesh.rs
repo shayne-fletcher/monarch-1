@@ -142,6 +142,8 @@ impl ProcRef {
         self.proc_id.actor_id(name.to_string(), 0)
     }
 
+    /// Generic bound: `A: RemoteActor` - required because we return
+    /// an `ActorRef<A>`.
     pub(crate) fn attest<A: RemoteActor>(&self, name: &Name) -> ActorRef<A> {
         ActorRef::attest(self.actor_id(name))
     }
@@ -197,6 +199,8 @@ impl ProcMesh {
         };
 
         if let Some(comm_actor_name) = comm_actor_name {
+            // CommActor satisfies `Actor + RemoteActor`, so it can be
+            // spawned and safely referenced via ActorRef<CommActor>.
             let comm_actor_mesh = proc_mesh
                 .spawn_with_name::<CommActor>(cx, comm_actor_name, &Default::default())
                 .await?;
@@ -526,7 +530,15 @@ impl ProcMeshRef {
         Ok(vm)
     }
 
-    /// Spawn an actor on all of the procs in this mesh, returning a new ActorMesh.
+    /// Spawn an actor on all of the procs in this mesh, returning a
+    /// new ActorMesh.
+    ///
+    /// Bounds:
+    /// - `A: Actor` - the actor actually runs inside each proc.
+    /// - `A: RemoteActor` - so we can return typed `ActorRef<A>`s
+    ///   inside the `ActorMesh`.
+    /// - `A::Params: RemoteMessage` - spawn parameters must be
+    ///   serializable and routable.
     pub async fn spawn<A: Actor + RemoteActor>(
         &self,
         cx: &impl context::Actor,
@@ -539,6 +551,19 @@ impl ProcMeshRef {
         self.spawn_with_name(cx, Name::new(name), params).await
     }
 
+    /// Spawn an actor on all procs in this mesh under the given
+    /// [`Name`], returning a new `ActorMesh`.
+    ///
+    /// This is the underlying implementation used by [`spawn`]; it
+    /// differs only in that the actor name is passed explicitly
+    /// rather than as a `&str`.
+    ///
+    /// Bounds:
+    /// - `A: Actor` - the actor actually runs inside each proc.
+    /// - `A: RemoteActor` - so we can return typed `ActorRef<A>`s
+    ///   inside the `ActorMesh`.
+    /// - `A::Params: RemoteMessage` — spawn parameters must be
+    ///   serializable and routable.
     pub(crate) async fn spawn_with_name<A: Actor + RemoteActor>(
         &self,
         cx: &impl context::Actor,
@@ -549,6 +574,8 @@ impl ProcMeshRef {
         A::Params: RemoteMessage,
     {
         let remote = Remote::collect();
+        // `RemoteActor` ensures the type `A` is registered with
+        // `Remote`.
         let actor_type = remote
             .name_of::<A>()
             .ok_or(Error::ActorTypeNotRegistered(type_name::<A>().to_string()))?
