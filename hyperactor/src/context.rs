@@ -14,6 +14,8 @@
 //! Context traits are sealed, and thus can only be implemented by data types in the
 //! core hyperactor crate.
 
+use std::mem::take;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
@@ -24,12 +26,16 @@ use crate::ActorId;
 use crate::Instance;
 use crate::PortId;
 use crate::accum;
+use crate::accum::ErasedCommReducer;
+use crate::accum::ReducerOpts;
 use crate::accum::ReducerSpec;
 use crate::attrs::Attrs;
+use crate::config;
 use crate::data::Serialized;
 use crate::mailbox;
 use crate::mailbox::MailboxSender;
 use crate::mailbox::MessageEnvelope;
+use crate::time::Alarm;
 
 /// A mailbox context provides a mailbox.
 pub trait Mailbox: crate::private::Sealed + Send + Sync {
@@ -58,7 +64,12 @@ pub(crate) trait MailboxExt: Mailbox {
     fn post(&self, dest: PortId, headers: Attrs, data: Serialized);
 
     /// Split a port, using a provided reducer spec, if provided.
-    fn split(&self, port_id: PortId, reducer_spec: Option<ReducerSpec>) -> anyhow::Result<PortId>;
+    fn split(
+        &self,
+        port_id: PortId,
+        reducer_spec: Option<ReducerSpec>,
+        reducer_opts: Option<ReducerOpts>,
+    ) -> anyhow::Result<PortId>;
 }
 
 // Tracks mailboxes that have emitted a `CanSend::post` warning due to
@@ -90,7 +101,12 @@ impl<T: Mailbox + Send + Sync> MailboxExt for T {
         MailboxSender::post(self.mailbox(), envelope, return_handle);
     }
 
-    fn split(&self, port_id: PortId, reducer_spec: Option<ReducerSpec>) -> anyhow::Result<PortId> {
+    fn split(
+        &self,
+        port_id: PortId,
+        reducer_spec: Option<ReducerSpec>,
+        reducer_opts: Option<ReducerOpts>,
+    ) -> anyhow::Result<PortId> {
         fn post(mailbox: &mailbox::Mailbox, port_id: PortId, msg: Serialized) {
             mailbox::MailboxSender::post(
                 mailbox,
@@ -122,24 +138,70 @@ impl<T: Mailbox + Send + Sync> MailboxExt for T {
                 post(&mailbox, port_id.clone(), serialized);
                 Ok(())
             }),
-            Some(r) => {
-                let buffer = Mutex::new(mailbox::SplitPortBuffer::default());
-                Box::new(move |serialized: Serialized| {
+            Some(reducer) => {
+                let buffer: Arc<Mutex<UpdateBuffer>> =
+                    Arc::new(Mutex::new(UpdateBuffer::new(reducer)));
+
+                let alarm = Alarm::new();
+
+                {
+                    let mut sleeper = alarm.sleeper();
+                    let buffer = Arc::clone(&buffer);
+                    let port_id = port_id.clone();
+                    let mailbox = mailbox.clone();
+                    tokio::spawn(async move {
+                        while sleeper.sleep().await {
+                            let mut buf = buffer.lock().unwrap();
+                            match buf.reduce() {
+                                None => (),
+                                Some(Ok(reduced)) => post(&mailbox, port_id.clone(), reduced),
+                                // We simply ignore errors here, and let them be propagated
+                                // later in the enqueueing function.
+                                //
+                                // If this is the last update, then this strategy will cause a hang.
+                                // We should obtain a supervisor here from our send context and notify
+                                // it.
+                                Some(Err(e)) => tracing::error!(
+                                    "error while reducing update: {}; waiting until the next send to propagate",
+                                    e
+                                ),
+                            }
+                        }
+                    });
+                }
+
+                // Note: alarm is held in the closure while the port is active;
+                // when it is dropped, the alarm terminates, and so does the sleeper
+                // task.
+                let alarm = Mutex::new(alarm);
+
+                // Default to global configuration if not specified.
+                let reducer_opts = reducer_opts.unwrap_or_default();
+
+                Box::new(move |update: Serialized| {
                     // Hold the lock until messages are sent. This is to avoid another
                     // invocation of this method trying to send message concurrently and
                     // cause messages delivered out of order.
+                    //
+                    // We also always acquire alarm *after* the buffer, to avoid deadlocks.
                     let mut buf = buffer.lock().unwrap();
-                    if let Some(buffered) = buf.push(serialized) {
-                        let reduced = r.reduce_updates(buffered).map_err(|(e, mut b)| {
-                            (
-                                b.pop()
-                                    .expect("there should be at least one update from buffer"),
-                                e,
-                            )
-                        })?;
-                        post(&mailbox, port_id.clone(), reduced);
+                    let was_empty = buf.is_empty();
+                    match buf.push(update) {
+                        None if was_empty => {
+                            alarm
+                                .lock()
+                                .unwrap()
+                                .arm(reducer_opts.max_update_interval());
+                            Ok(())
+                        }
+                        None => Ok(()),
+                        Some(Ok(reduced)) => {
+                            alarm.lock().unwrap().disarm();
+                            post(&mailbox, port_id.clone(), reduced);
+                            Ok(())
+                        }
+                        Some(Err(e)) => Err((buf.pop().unwrap(), e)),
                     }
-                    Ok(())
                 })
             }
         };
@@ -151,5 +213,54 @@ impl<T: Mailbox + Send + Sync> MailboxExt for T {
             },
         );
         Ok(split_port)
+    }
+}
+
+struct UpdateBuffer {
+    buffered: Vec<Serialized>,
+    reducer: Box<dyn ErasedCommReducer + Send + Sync + 'static>,
+}
+
+impl UpdateBuffer {
+    fn new(reducer: Box<dyn ErasedCommReducer + Send + Sync + 'static>) -> Self {
+        Self {
+            buffered: Vec::new(),
+            reducer,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.buffered.is_empty()
+    }
+
+    fn pop(&mut self) -> Option<Serialized> {
+        self.buffered.pop()
+    }
+
+    /// Push a new item to the buffer, and optionally return any items that should
+    /// be flushed.
+    fn push(&mut self, serialized: Serialized) -> Option<anyhow::Result<Serialized>> {
+        let limit = config::global::get(config::SPLIT_MAX_BUFFER_SIZE);
+
+        self.buffered.push(serialized);
+        if self.buffered.len() >= limit {
+            self.reduce()
+        } else {
+            None
+        }
+    }
+
+    fn reduce(&mut self) -> Option<anyhow::Result<Serialized>> {
+        if self.buffered.is_empty() {
+            None
+        } else {
+            match self.reducer.reduce_updates(take(&mut self.buffered)) {
+                Ok(reduced) => Some(Ok(reduced)),
+                Err((e, b)) => {
+                    self.buffered = b;
+                    Some(Err(e))
+                }
+            }
+        }
     }
 }

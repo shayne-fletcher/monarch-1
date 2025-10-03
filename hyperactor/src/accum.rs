@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -18,6 +19,7 @@ use serde::de::DeserializeOwned;
 
 use crate as hyperactor; // for macros
 use crate::Named;
+use crate::config;
 use crate::data::Serialized;
 use crate::reference::Index;
 
@@ -43,6 +45,21 @@ pub struct ReducerSpec {
     pub typehash: u64,
     /// The parameters used to build the reducer.
     pub builder_params: Option<Serialized>,
+}
+
+/// Runtime behavior of reducers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named, Default)]
+pub struct ReducerOpts {
+    /// The maximum interval between updates. When unspecified, a default
+    /// interval is used.
+    pub max_update_interval: Option<Duration>,
+}
+
+impl ReducerOpts {
+    pub(crate) fn max_update_interval(&self) -> Duration {
+        self.max_update_interval
+            .unwrap_or(config::global::get(config::SPLIT_MAX_BUFFER_AGE))
+    }
 }
 
 /// Commutative reducer for an accumulator. This is used to coallesce updates.

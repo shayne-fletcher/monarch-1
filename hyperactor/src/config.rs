@@ -63,6 +63,10 @@ declare_attrs! {
     @meta(CONFIG_ENV_VAR = "HYPERACTOR_SPLIT_MAX_BUFFER_SIZE".to_string())
     pub attr SPLIT_MAX_BUFFER_SIZE: usize = 5;
 
+    /// The maximum time an update can be buffered before being reduced.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_SPLIT_MAX_BUFFER_AGE".to_string())
+    pub attr SPLIT_MAX_BUFFER_AGE: Duration = Duration::from_millis(50);
+
     /// Timeout used by proc mesh for stopping an actor.
     @meta(CONFIG_ENV_VAR = "HYPERACTOR_STOP_ACTOR_TIMEOUT".to_string())
     pub attr STOP_ACTOR_TIMEOUT: Duration = Duration::from_secs(1);

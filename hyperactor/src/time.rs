@@ -6,8 +6,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#![allow(dead_code)] // until next diff..
-
 //! This module contains various utilities for dealing with time.
 
 use std::sync::Arc;

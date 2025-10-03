@@ -104,6 +104,7 @@ use crate::Named;
 use crate::OncePortRef;
 use crate::PortRef;
 use crate::accum::Accumulator;
+use crate::accum::ReducerOpts;
 use crate::accum::ReducerSpec;
 use crate::actor::Signal;
 use crate::actor::remote::USER_PORT_OFFSET;
@@ -1272,6 +1273,7 @@ impl Mailbox {
                 sender: UnboundedPortSender::Func(Arc::new(enqueue)),
                 bound: Arc::new(OnceLock::new()),
                 reducer_spec,
+                reducer_opts: None, // TODO: provide open_accum_port_opts
             },
             PortReceiver::new(receiver, port_id, /*coalesce=*/ true, self.clone()),
         )
@@ -1290,6 +1292,7 @@ impl Mailbox {
             sender: UnboundedPortSender::Func(Arc::new(enqueue)),
             bound: Arc::new(OnceLock::new()),
             reducer_spec: None,
+            reducer_opts: None,
         }
     }
 
@@ -1516,24 +1519,6 @@ impl MailboxSender for Mailbox {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct SplitPortBuffer(Vec<Serialized>);
-
-impl SplitPortBuffer {
-    /// Push a new item to the buffer, and optionally return any items that should
-    /// be flushed.
-    pub(crate) fn push(&mut self, serialized: Serialized) -> Option<Vec<Serialized>> {
-        let limit = crate::config::global::get(crate::config::SPLIT_MAX_BUFFER_SIZE);
-
-        self.0.push(serialized);
-        if self.0.len() >= limit {
-            Some(std::mem::take(&mut self.0))
-        } else {
-            None
-        }
-    }
-}
-
 /// A port to which M-typed messages can be delivered. Ports may be
 /// serialized to be sent to other actors. However, when a port is
 /// deserialized, it may no longer be used to send messages directly
@@ -1556,6 +1541,8 @@ pub struct PortHandle<M: Message> {
     // Typehash of an optional reducer. When it's defined, we include it in port
     /// references to optionally enable incremental accumulation.
     reducer_spec: Option<ReducerSpec>,
+    /// Reduction options. If unspecified, we use `ReducerOpts::default`.
+    reducer_opts: Option<ReducerOpts>,
 }
 
 impl<M: Message> PortHandle<M> {
@@ -1566,6 +1553,7 @@ impl<M: Message> PortHandle<M> {
             sender,
             bound: Arc::new(OnceLock::new()),
             reducer_spec: None,
+            reducer_opts: None,
         }
     }
 
@@ -1635,6 +1623,7 @@ impl<M: Message> Clone for PortHandle<M> {
             sender: self.sender.clone(),
             bound: self.bound.clone(),
             reducer_spec: self.reducer_spec.clone(),
+            reducer_opts: self.reducer_opts.clone(),
         }
     }
 }
@@ -3251,7 +3240,10 @@ mod tests {
         port_id2_1: PortId,
     }
 
-    async fn setup_split_port_ids(reducer_spec: Option<ReducerSpec>) -> Setup {
+    async fn setup_split_port_ids(
+        reducer_spec: Option<ReducerSpec>,
+        reducer_opts: Option<ReducerOpts>,
+    ) -> Setup {
         let proc = Proc::local();
         let (actor0, actor0_handle) = proc.instance("actor0").unwrap();
         let (actor1, actor1_handle) = proc.instance("actor1").unwrap();
@@ -3261,11 +3253,17 @@ mod tests {
         let port_id = port_handle.bind().port_id().clone();
 
         // Split it twice on actor1
-        let port_id1 = port_id.split(&actor1, reducer_spec.clone()).unwrap();
-        let port_id2 = port_id.split(&actor1, reducer_spec.clone()).unwrap();
+        let port_id1 = port_id
+            .split(&actor1, reducer_spec.clone(), reducer_opts.clone())
+            .unwrap();
+        let port_id2 = port_id
+            .split(&actor1, reducer_spec.clone(), reducer_opts.clone())
+            .unwrap();
 
         // A split port id can also be split
-        let port_id2_1 = port_id2.split(&actor1, reducer_spec).unwrap();
+        let port_id2_1 = port_id2
+            .split(&actor1, reducer_spec, reducer_opts.clone())
+            .unwrap();
 
         Setup {
             receiver,
@@ -3296,7 +3294,7 @@ mod tests {
             port_id2,
             port_id2_1,
             ..
-        } = setup_split_port_ids(None).await;
+        } = setup_split_port_ids(None, None).await;
         // Can send messages to receiver from all port handles
         post(&actor0, port_id.clone(), 1);
         assert_eq!(receiver.recv().await.unwrap(), 1);
@@ -3350,7 +3348,7 @@ mod tests {
             port_id2,
             port_id2_1,
             ..
-        } = setup_split_port_ids(reducer_spec).await;
+        } = setup_split_port_ids(reducer_spec, None).await;
         post(&actor0, port_id.clone(), 4);
         post(&actor1, port_id1.clone(), 2);
         post(&actor1, port_id2.clone(), 3);
@@ -3371,13 +3369,18 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 30)]
     async fn test_split_port_id_every_n_messages() {
+        let config = crate::config::global::lock();
+        let _config_guard = config.override_key(
+            crate::config::SPLIT_MAX_BUFFER_AGE,
+            Duration::from_secs(600),
+        );
         let proc = Proc::local();
         let (actor, _actor_handle) = proc.instance("actor").unwrap();
         let (port_handle, mut receiver) = actor.open_port::<u64>();
         let port_id = port_handle.bind().port_id().clone();
         // Split it
         let reducer_spec = accum::sum::<u64>().reducer_spec();
-        let split_port_id = port_id.split(&actor, reducer_spec).unwrap();
+        let split_port_id = port_id.split(&actor, reducer_spec, None).unwrap();
 
         // Send 9 messages.
         for msg in [1, 5, 3, 4, 2, 91, 92, 93, 94] {
@@ -3393,6 +3396,89 @@ mod tests {
         // the last message unfortranately will never come because they do not
         // reach batch size.
         RealClock.sleep(Duration::from_secs(2)).await;
+        let msg = receiver.try_recv().unwrap();
+        assert_eq!(msg, None);
+    }
+
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_split_port_timeout_flush() {
+        let config = crate::config::global::lock();
+        let _config_guard = config.override_key(crate::config::SPLIT_MAX_BUFFER_SIZE, 100);
+
+        let Setup {
+            mut receiver,
+            actor0: _,
+            actor1,
+            port_id: _,
+            port_id1,
+            port_id2: _,
+            port_id2_1: _,
+            ..
+        } = setup_split_port_ids(
+            Some(accum::sum::<u64>().reducer_spec().unwrap()),
+            Some(ReducerOpts {
+                max_update_interval: Some(Duration::from_millis(50)),
+            }),
+        )
+        .await;
+
+        post(&actor1, port_id1.clone(), 10);
+        post(&actor1, port_id1.clone(), 20);
+        post(&actor1, port_id1.clone(), 30);
+
+        // Messages should accumulate for 50ms.
+        RealClock.sleep(Duration::from_millis(10)).await;
+        let msg = receiver.try_recv().unwrap();
+        assert_eq!(msg, None);
+
+        // Wait until we are flushed.
+        RealClock.sleep(Duration::from_millis(100)).await;
+
+        // Now we are reduced and accumulated:
+        let msg = receiver.recv().await.unwrap();
+        assert_eq!(msg, 60); // 10 + 20 + 30
+
+        // No further messages:
+        let msg = receiver.try_recv().unwrap();
+        assert_eq!(msg, None);
+    }
+
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_split_port_timeout_and_size_flush() {
+        let config = crate::config::global::lock();
+        let _config_guard = config.override_key(crate::config::SPLIT_MAX_BUFFER_SIZE, 3);
+
+        let Setup {
+            mut receiver,
+            actor0: _,
+            actor1,
+            port_id: _,
+            port_id1,
+            port_id2: _,
+            port_id2_1: _,
+            ..
+        } = setup_split_port_ids(
+            Some(accum::sum::<u64>().reducer_spec().unwrap()),
+            Some(ReducerOpts {
+                max_update_interval: Some(Duration::from_millis(50)),
+            }),
+        )
+        .await;
+
+        post(&actor1, port_id1.clone(), 10);
+        post(&actor1, port_id1.clone(), 20);
+        post(&actor1, port_id1.clone(), 30);
+        post(&actor1, port_id1.clone(), 40);
+
+        // Should have flushed at the third message.
+        let msg = receiver.recv().await.unwrap();
+        assert_eq!(msg, 60);
+
+        // After 50ms, the next reduce will flush:
+        let msg = receiver.recv().await.unwrap();
+        assert_eq!(msg, 40);
+
+        // No further messages
         let msg = receiver.try_recv().unwrap();
         assert_eq!(msg, None);
     }

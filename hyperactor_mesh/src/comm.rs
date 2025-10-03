@@ -264,17 +264,17 @@ impl CommActor {
         // Split ports, if any, and update message with new ports. In this
         // way, children actors will reply to this comm actor's ports, instead
         // of to the original ports provided by parent.
-        message
-            .data_mut()
-            .visit_mut::<UnboundPort>(|UnboundPort(port_id, reducer_spec)| {
-                let split = port_id.split(cx, reducer_spec.clone())?;
+        message.data_mut().visit_mut::<UnboundPort>(
+            |UnboundPort(port_id, reducer_spec, reducer_opts)| {
+                let split = port_id.split(cx, reducer_spec.clone(), reducer_opts.clone())?;
 
                 #[cfg(test)]
                 tests::collect_split_port(port_id, &split, deliver_here);
 
                 *port_id = split;
                 Ok(())
-            })?;
+            },
+        )?;
 
         // Deliver message here, if necessary.
         if deliver_here {
