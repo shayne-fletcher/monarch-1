@@ -744,7 +744,13 @@ impl Proc {
 
     /// Resolve an actor reference to an actor residing on this proc.
     /// Returns None if the actor is not found on this proc.
-    pub fn resolve_actor_ref<R: RemoteActor + Actor>(
+    ///
+    /// Bounds:
+    /// - `R: Actor` — must be a real actor that can live in this
+    ///   proc.
+    /// - `R: RemoteActor` — required because the input is an
+    ///   `ActorRef<R>`.
+    pub fn resolve_actor_ref<R: Actor + RemoteActor>(
         &self,
         actor_ref: &ActorRef<R>,
     ) -> Option<ActorHandle<R>> {
