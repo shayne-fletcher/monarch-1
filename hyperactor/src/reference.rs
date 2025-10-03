@@ -1022,7 +1022,7 @@ impl<M: RemoteMessage> PortRef<M> {
                 MailboxSenderErrorKind::Serialize(err.into()),
             )
         })?;
-        self.send_serialized(cx, serialized, headers);
+        self.send_serialized(cx, headers, serialized);
         Ok(())
     }
 
@@ -1031,8 +1031,8 @@ impl<M: RemoteMessage> PortRef<M> {
     pub fn send_serialized(
         &self,
         cx: &impl context::Mailbox,
-        message: Serialized,
         mut headers: Attrs,
+        message: Serialized,
     ) {
         crate::mailbox::headers::set_send_timestamp(&mut headers);
         cx.post(self.port_id.clone(), headers, message);
