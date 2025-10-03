@@ -343,7 +343,12 @@ class ProcMesh(MeshTrait):
                 )._class
                 is _ControllerController
             ), "Expected v0 _ControllerController, got v1 _ControllerController"
-            pm._controller_controller = instance._controller_controller  # type: ignore
+            if instance._controller_controller is None:
+                pm._controller_controller = _get_controller_controller()[1]
+            else:
+                pm._controller_controller = cast(
+                    _ControllerController, instance._controller_controller
+                )
             instance._add_child(pm)
 
         async def task(
