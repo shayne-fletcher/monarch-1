@@ -10,6 +10,7 @@ use std::str::FromStr;
 
 use anyhow;
 use hyperactor::channel::ChannelAddr;
+use hyperactor::channel::MetaTlsAddr;
 
 /// Extended type to represent a system address which can be a ChannelAdd or a MAST job name.
 #[derive(Clone, Debug)]
@@ -62,7 +63,10 @@ async fn parse_system_address_or_mast_job(address: &str) -> Result<ChannelAddr, 
             let (host, port) = SMCClient::new(fbinit::expect_init(), smc_tier)?
                 .get_system_address()
                 .await?;
-            let channel_address = ChannelAddr::MetaTls(canonicalize_hostname(&host), port);
+            let channel_address = ChannelAddr::MetaTls(MetaTlsAddr::Host {
+                hostname: canonicalize_hostname(&host),
+                port,
+            });
             Ok(channel_address)
         }
     }

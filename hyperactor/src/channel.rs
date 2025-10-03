@@ -19,6 +19,7 @@ use std::os::linux::net::SocketAddrExt;
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use enum_as_inner::EnumAsInner;
 use lazy_static::lazy_static;
 use local_ip_address::local_ipv6;
 use serde::Deserialize;
@@ -256,6 +257,60 @@ pub enum TlsMode {
     // TODO: consider adding IpV4 support.
 }
 
+/// Address format for MetaTls channels. Supports both hostname/port pairs
+/// (required for clients for host identity) and direct socket addresses
+/// (allowed for servers).
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Ord,
+    PartialOrd,
+    EnumAsInner
+)]
+pub enum MetaTlsAddr {
+    /// Hostname and port pair. Required for clients to establish host identity.
+    Host {
+        /// The hostname to connect to.
+        hostname: Hostname,
+        /// The port to connect to.
+        port: Port,
+    },
+    /// Direct socket address. Allowed for servers.
+    Socket(SocketAddr),
+}
+
+impl MetaTlsAddr {
+    /// Returns the port number for this address.
+    pub fn port(&self) -> Port {
+        match self {
+            Self::Host { port, .. } => *port,
+            Self::Socket(addr) => addr.port(),
+        }
+    }
+
+    /// Returns the hostname if this is a Host variant, None otherwise.
+    pub fn hostname(&self) -> Option<&str> {
+        match self {
+            Self::Host { hostname, .. } => Some(hostname),
+            Self::Socket(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for MetaTlsAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Host { hostname, port } => write!(f, "{}:{}", hostname, port),
+            Self::Socket(addr) => write!(f, "{}", addr),
+        }
+    }
+}
+
 /// Types of channel transports.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Named)]
 pub enum ChannelTransport {
@@ -402,8 +457,9 @@ pub enum ChannelAddr {
     Tcp(SocketAddr),
 
     /// An address to establish TCP channels with TLS support within Meta.
-    /// Composed of hostname and port.
-    MetaTls(Hostname, Port),
+    /// Supports both hostname/port pairs (required for clients) and
+    /// socket addresses (allowed for servers).
+    MetaTls(MetaTlsAddr),
 
     /// Local addresses are registered in-process and given an integral
     /// index.
@@ -471,7 +527,10 @@ impl ChannelAddr {
                         .and_then(|addr| addr.to_string().parse().ok())
                         .expect("failed to retrieve ipv6 address"),
                 };
-                Self::MetaTls(host_address, 0)
+                Self::MetaTls(MetaTlsAddr::Host {
+                    hostname: host_address,
+                    port: 0,
+                })
             }
             ChannelTransport::Local => Self::Local(0),
             ChannelTransport::Sim(transport) => sim::any(*transport),
@@ -484,12 +543,16 @@ impl ChannelAddr {
     pub fn transport(&self) -> ChannelTransport {
         match self {
             Self::Tcp(_) => ChannelTransport::Tcp,
-            Self::MetaTls(address, _) => match address.parse::<IpAddr>() {
-                Ok(ip) => match ip {
+            Self::MetaTls(addr) => match addr {
+                MetaTlsAddr::Host { hostname, .. } => match hostname.parse::<IpAddr>() {
+                    Ok(IpAddr::V6(_)) => ChannelTransport::MetaTls(TlsMode::IpV6),
+                    Ok(IpAddr::V4(_)) => ChannelTransport::MetaTls(TlsMode::Hostname),
+                    Err(_) => ChannelTransport::MetaTls(TlsMode::Hostname),
+                },
+                MetaTlsAddr::Socket(socket_addr) => match socket_addr.ip() {
                     IpAddr::V6(_) => ChannelTransport::MetaTls(TlsMode::IpV6),
                     IpAddr::V4(_) => ChannelTransport::MetaTls(TlsMode::Hostname),
                 },
-                Err(_) => ChannelTransport::MetaTls(TlsMode::Hostname),
             },
             Self::Local(_) => ChannelTransport::Local,
             Self::Sim(addr) => ChannelTransport::Sim(Box::new(addr.transport())),
@@ -502,7 +565,7 @@ impl fmt::Display for ChannelAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Tcp(addr) => write!(f, "tcp:{}", addr),
-            Self::MetaTls(hostname, port) => write!(f, "metatls:{}:{}", hostname, port),
+            Self::MetaTls(addr) => write!(f, "metatls:{}", addr),
             Self::Local(index) => write!(f, "local:{}", index),
             Self::Sim(sim_addr) => write!(f, "sim:{}", sim_addr),
             Self::Unix(addr) => write!(f, "unix:{}", addr),
@@ -630,7 +693,7 @@ pub fn dial<M: RemoteMessage>(addr: ChannelAddr) -> Result<ChannelTx<M>, Channel
     let inner = match addr {
         ChannelAddr::Local(port) => ChannelTxKind::Local(local::dial(port)?),
         ChannelAddr::Tcp(addr) => ChannelTxKind::Tcp(net::tcp::dial(addr)),
-        ChannelAddr::MetaTls(host, port) => ChannelTxKind::MetaTls(net::meta::dial(host, port)),
+        ChannelAddr::MetaTls(meta_addr) => ChannelTxKind::MetaTls(net::meta::dial(meta_addr)?),
         ChannelAddr::Sim(sim_addr) => ChannelTxKind::Sim(sim::dial::<M>(sim_addr)?),
         ChannelAddr::Unix(path) => ChannelTxKind::Unix(net::unix::dial(path)),
     };
@@ -649,8 +712,8 @@ pub fn serve<M: RemoteMessage>(
             let (addr, rx) = net::tcp::serve::<M>(addr)?;
             Ok((addr, ChannelRxKind::Tcp(rx)))
         }
-        ChannelAddr::MetaTls(hostname, port) => {
-            let (addr, rx) = net::meta::serve::<M>(hostname, port)?;
+        ChannelAddr::MetaTls(meta_addr) => {
+            let (addr, rx) = net::meta::serve::<M>(meta_addr)?;
             Ok((addr, ChannelRxKind::MetaTls(rx)))
         }
         ChannelAddr::Unix(path) => {
