@@ -31,7 +31,10 @@ use serde::Serialize;
 
 use crate::alloc::Alloc;
 use crate::bootstrap::BootstrapCommand;
+use crate::resource;
 use crate::resource::CreateOrUpdateClient;
+use crate::resource::GetRankStatusClient;
+use crate::resource::RankedValues;
 use crate::v1;
 use crate::v1::Name;
 use crate::v1::ProcMesh;
@@ -487,6 +490,9 @@ impl HostMeshRef {
 
     /// Spawn a ProcMesh onto this host mesh. The per_host extent specifies the shape
     /// of the procs to spawn on each host.
+    ///
+    /// Currently, spawn issues direct calls to each host agent. This will be fixed by
+    /// maintaining a comm actor on the host service procs themselves.
     pub async fn spawn(
         &self,
         cx: &impl context::Actor,
@@ -525,12 +531,19 @@ impl HostMeshRef {
 
         let mesh_name = Name::new(name);
         let mut procs = Vec::new();
+        let num_ranks = self.region().num_ranks() * per_host.num_ranks();
+        let (port, mut rx) = cx.mailbox().open_accum_port(RankedValues::default());
+        // We CreateOrUpdate each proc, and then fence on getting statuses back.
+        // This is currently necessary because otherwise there is a race between
+        // the procs being created, and subsequent messages becoming unroutable
+        // (the agent actor manages the local muxer). We can solve this by allowing
+        // buffering in the host-level muxer.
         for (host_rank, host) in self.ranks.iter().enumerate() {
             for per_host_rank in 0..per_host.num_ranks() {
+                let create_rank = per_host.num_ranks() * host_rank + per_host_rank;
                 let proc_name = Name::new(format!("{}-{}", name, per_host_rank));
-                let ok = host
-                    .mesh_agent()
-                    .create_or_update(cx, proc_name.clone(), ())
+                host.mesh_agent()
+                    .create_or_update(cx, proc_name.clone(), resource::Rank::new(create_rank), ())
                     .await
                     .map_err(|e| {
                         v1::Error::HostMeshAgentConfigurationError(
@@ -538,20 +551,42 @@ impl HostMeshRef {
                             format!("failed while creating proc: {}", e),
                         )
                     })?;
-                if !ok {
-                    // TODO: clean up the rest of the procs
-                    return Err(v1::Error::ProcCreationError {
-                        proc_name,
-                        mesh_agent: host.mesh_agent(),
-                        host_rank,
-                    });
-                }
+                host.mesh_agent()
+                    .get_rank_status(cx, proc_name.clone(), port.bind())
+                    .await
+                    .map_err(|e| {
+                        v1::Error::HostMeshAgentConfigurationError(
+                            host.mesh_agent().actor_id().clone(),
+                            format!("failed while querying proc status: {}", e),
+                        )
+                    })?;
                 procs.push(ProcRef::new(
                     host.named_proc(&proc_name),
-                    per_host.num_ranks() * host_rank + per_host_rank,
+                    create_rank,
                     // TODO: specify or retrieve from state instead, to avoid attestation.
                     ActorRef::attest(host.named_proc(&proc_name).actor_id("agent", 0)),
                 ));
+            }
+        }
+
+        // fence: wait for everyone to report back.
+        loop {
+            let statuses = rx.recv().await?;
+            if let Some((ranks, status)) =
+                statuses.iter().find(|(_, status)| status.is_terminating())
+            {
+                let rank = ranks.start;
+                let proc_name = Name::new(format!("{}-{}", name, rank % per_host.num_ranks()));
+                return Err(v1::Error::ProcCreationError {
+                    proc_name,
+                    mesh_agent: self.ranks[rank].mesh_agent(),
+                    host_rank: rank / per_host.num_ranks(),
+                    status: status.clone(),
+                });
+            }
+
+            if statuses.rank(num_ranks) == num_ranks {
+                break;
             }
         }
 
@@ -635,6 +670,7 @@ impl FromStr for HostMeshRef {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::collections::HashSet;
     use std::collections::VecDeque;
 
@@ -696,8 +732,10 @@ mod tests {
                 .spawn(instance, "test_1", Extent::unity())
                 .await
                 .unwrap();
+
             let actor_mesh1: ActorMesh<testactor::TestActor> =
                 proc_mesh1.spawn(instance, "test", &()).await.unwrap();
+
             let proc_mesh2 = host_mesh
                 .spawn(instance, "test_2", extent!(gpus = 3, extra = 2))
                 .await
@@ -707,6 +745,7 @@ mod tests {
                 extent!(replicas = 4, gpus = 3, extra = 2)
             );
             assert_eq!(proc_mesh2.values().count(), 24);
+
             let actor_mesh2: ActorMesh<testactor::TestActor> =
                 proc_mesh2.spawn(instance, "test", &()).await.unwrap();
             assert_eq!(
@@ -801,6 +840,7 @@ mod tests {
             let mut cmd = Command::new(program.clone());
             let boot = Bootstrap::Host {
                 addr: host.clone(),
+                command: None, // use current binary
                 config: None,
             };
             boot.to_env(&mut cmd);
@@ -810,10 +850,12 @@ mod tests {
 
         let instance = testing::instance().await;
         let host_mesh = HostMeshRef::from_hosts(hosts);
+
         let proc_mesh = host_mesh
             .spawn(&testing::instance().await, "test", Extent::unity())
             .await
             .unwrap();
+
         let actor_mesh: ActorMesh<testactor::TestActor> = proc_mesh
             .spawn(&testing::instance().await, "test", &())
             .await
@@ -825,5 +867,38 @@ mod tests {
             .shutdown(&instance)
             .await
             .expect("hosts shutdown");
+    }
+
+    #[tokio::test]
+    async fn test_failing_proc_allocation() {
+        let program = buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap();
+
+        let hosts = vec![free_localhost_addr(), free_localhost_addr()];
+
+        let mut children = Vec::new();
+        for host in hosts.iter() {
+            let mut cmd = Command::new(program.clone());
+            let boot = Bootstrap::Host {
+                addr: host.clone(),
+                config: None,
+                // The entire purpose of this is to fail:
+                command: Some(BootstrapCommand::from("/bin/false")),
+            };
+            boot.to_env(&mut cmd);
+            cmd.kill_on_drop(true);
+            children.push(cmd.spawn().unwrap());
+        }
+        let host_mesh = HostMeshRef::from_hosts(hosts);
+
+        let instance = testing::instance().await;
+
+        let err = host_mesh
+            .spawn(&instance, "test", Extent::unity())
+            .await
+            .unwrap_err();
+        assert_matches!(
+            err, v1::Error::ProcCreationError { status: resource::Status::Failed(msg), .. }
+            if msg.contains("failed to configure process: Terminal(Stopped { exit_code: 1")
+        );
     }
 }

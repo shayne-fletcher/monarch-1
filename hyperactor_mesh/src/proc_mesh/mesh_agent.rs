@@ -164,13 +164,21 @@ impl State {
     }
 }
 
+/// Actor state used for v1 API.
+#[derive(Debug)]
+struct ActorInstanceState {
+    create_rank: usize,
+    spawn: Result<ActorId, anyhow::Error>,
+}
+
 /// A mesh agent is responsible for managing procs in a [`ProcMesh`].
 #[derive(Debug)]
 #[hyperactor::export(
     handlers=[
         MeshAgentMessage,
-        resource::CreateOrUpdate<ActorSpec>,
+        resource::CreateOrUpdate<ActorSpec> { cast = true },
         resource::GetState<ActorState> { cast = true },
+        resource::GetRankStatus { cast = true },
     ]
 )]
 pub struct ProcMeshAgent {
@@ -178,7 +186,7 @@ pub struct ProcMeshAgent {
     remote: Remote,
     state: State,
     /// Actors created and tracked through the resource behavior.
-    created: HashMap<Name, Result<ActorId, anyhow::Error>>,
+    actor_states: HashMap<Name, ActorInstanceState>,
     /// If true, and supervisor is None, record supervision events to be reported
     /// to owning actors later.
     record_supervision_events: bool,
@@ -203,7 +211,7 @@ impl ProcMeshAgent {
             proc: proc.clone(),
             remote: Remote::collect(),
             state: State::UnconfiguredV0 { sender },
-            created: HashMap::new(),
+            actor_states: HashMap::new(),
             record_supervision_events: false,
             supervision_events: HashMap::new(),
         };
@@ -216,7 +224,7 @@ impl ProcMeshAgent {
             proc: proc.clone(),
             remote: Remote::collect(),
             state: State::V1,
-            created: HashMap::new(),
+            actor_states: HashMap::new(),
             record_supervision_events: true,
             supervision_events: HashMap::new(),
         };
@@ -442,10 +450,10 @@ pub struct ActorState {
 impl Handler<resource::CreateOrUpdate<ActorSpec>> for ProcMeshAgent {
     async fn handle(
         &mut self,
-        cx: &Context<Self>,
+        _cx: &Context<Self>,
         create_or_update: resource::CreateOrUpdate<ActorSpec>,
     ) -> anyhow::Result<()> {
-        if self.created.contains_key(&create_or_update.name) {
+        if self.actor_states.contains_key(&create_or_update.name) {
             // There is no update.
             return Ok(());
         }
@@ -454,19 +462,63 @@ impl Handler<resource::CreateOrUpdate<ActorSpec>> for ProcMeshAgent {
             actor_type,
             params_data,
         } = create_or_update.spec;
-        self.created.insert(
+        self.actor_states.insert(
             create_or_update.name.clone(),
-            self.remote
-                .gspawn(
-                    &self.proc,
-                    &actor_type,
-                    &create_or_update.name.to_string(),
-                    params_data,
-                )
-                .await,
+            ActorInstanceState {
+                create_rank: create_or_update.rank.unwrap(),
+                spawn: self
+                    .remote
+                    .gspawn(
+                        &self.proc,
+                        &actor_type,
+                        &create_or_update.name.to_string(),
+                        params_data,
+                    )
+                    .await,
+            },
         );
 
-        create_or_update.reply.send(cx, true)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<resource::GetRankStatus> for ProcMeshAgent {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        get_rank_status: resource::GetRankStatus,
+    ) -> anyhow::Result<()> {
+        let (rank, status) = match self.actor_states.get(&get_rank_status.name) {
+            Some(ActorInstanceState {
+                spawn: Ok(actor_id),
+                create_rank,
+            }) => {
+                let supervision_events = self
+                    .supervision_events
+                    .get(actor_id)
+                    .map_or_else(Vec::new, |a| a.clone());
+                (
+                    *create_rank,
+                    if supervision_events.is_empty() {
+                        resource::Status::Running
+                    } else {
+                        resource::Status::Failed(format!(
+                            "because of supervision events: {:?}",
+                            supervision_events
+                        ))
+                    },
+                )
+            }
+            Some(ActorInstanceState {
+                spawn: Err(e),
+                create_rank,
+            }) => (*create_rank, resource::Status::Failed(e.to_string())),
+            // TODO: represent unknown rank
+            None => (usize::MAX, resource::Status::NotExist),
+        };
+
+        get_rank_status.reply.send(cx, (rank, status).into())?;
         Ok(())
     }
 }
@@ -478,12 +530,11 @@ impl Handler<resource::GetState<ActorState>> for ProcMeshAgent {
         cx: &Context<Self>,
         get_state: resource::GetState<ActorState>,
     ) -> anyhow::Result<()> {
-        let rank = self
-            .state
-            .rank()
-            .ok_or_else(|| anyhow::anyhow!("tried to get status of unconfigured proc"))?;
-        let state = match self.created.get(&get_state.name) {
-            Some(Ok(actor_id)) => {
+        let state = match self.actor_states.get(&get_state.name) {
+            Some(ActorInstanceState {
+                create_rank,
+                spawn: Ok(actor_id),
+            }) => {
                 let supervision_events = self
                     .supervision_events
                     .get(actor_id)
@@ -501,12 +552,12 @@ impl Handler<resource::GetState<ActorState>> for ProcMeshAgent {
                     status,
                     state: Some(ActorState {
                         actor_id: actor_id.clone(),
-                        create_rank: rank,
+                        create_rank: *create_rank,
                         supervision_events,
                     }),
                 }
             }
-            Some(Err(e)) => resource::State {
+            Some(ActorInstanceState { spawn: Err(e), .. }) => resource::State {
                 name: get_state.name.clone(),
                 status: resource::Status::Failed(e.to_string()),
                 state: None,

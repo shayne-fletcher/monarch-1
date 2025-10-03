@@ -136,6 +136,15 @@ impl<M> Unbound<M> {
     pub fn new(message: M, bindings: Bindings) -> Self {
         Self { message, bindings }
     }
+
+    /// Use the provided function to update values inside bindings in the same
+    /// order as they were pushed into bindings.
+    pub fn visit_mut<T: Serialize + DeserializeOwned + Named>(
+        &mut self,
+        f: impl FnMut(&mut T) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        self.bindings.visit_mut(f)
+    }
 }
 
 impl<M: Bind> Unbound<M> {

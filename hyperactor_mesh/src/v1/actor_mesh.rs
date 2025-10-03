@@ -22,6 +22,7 @@ use hyperactor::attrs::Attrs;
 use hyperactor::context;
 use hyperactor::message::Castable;
 use hyperactor::message::IndexedErasedUnbound;
+use hyperactor::message::Unbound;
 use hyperactor_mesh_macros::sel;
 use ndslice::Selection;
 use ndslice::ViewExt as _;
@@ -140,6 +141,7 @@ impl<A: Actor + RemoteActor> ActorMeshRef<A> {
             self.cast_v0(cx, message, root_comm_actor)
         } else {
             for (point, actor) in self.iter() {
+                let create_rank = point.rank();
                 let mut headers = Attrs::new();
                 headers.set(
                     multicast::CAST_ORIGINATING_SENDER,
@@ -147,8 +149,21 @@ impl<A: Actor + RemoteActor> ActorMeshRef<A> {
                 );
                 headers.set(multicast::CAST_POINT, point);
 
+                // Make sure that we re-bind ranks, as these may be used for
+                // bootstrapping comm actors.
+                let mut unbound = Unbound::try_from_message(message.clone())
+                    .map_err(|e| Error::CastingError(self.name.clone(), e))?;
+                unbound
+                    .visit_mut::<resource::Rank>(|resource::Rank(rank)| {
+                        *rank = Some(create_rank);
+                        Ok(())
+                    })
+                    .map_err(|e| Error::CastingError(self.name.clone(), e))?;
+                let rebound_message = unbound
+                    .bind()
+                    .map_err(|e| Error::CastingError(self.name.clone(), e))?;
                 actor
-                    .send_with_headers(cx, headers, message.clone())
+                    .send_with_headers(cx, headers, rebound_message)
                     .map_err(|e| Error::SendingError(actor.actor_id().clone(), Box::new(e)))?;
             }
             Ok(())

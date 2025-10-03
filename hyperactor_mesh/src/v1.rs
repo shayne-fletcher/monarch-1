@@ -32,6 +32,7 @@ use serde::Deserialize;
 use serde::Serialize;
 pub use value_mesh::ValueMesh;
 
+use crate::resource;
 use crate::shortuuid::ShortUuid;
 use crate::v1::host_mesh::HostMeshAgent;
 use crate::v1::host_mesh::HostMeshRefParseError;
@@ -74,6 +75,7 @@ pub enum Error {
     #[error("actor not registered for type {0}")]
     ActorTypeNotRegistered(String),
 
+    // TODO: this should be a valuemesh of statuses
     #[error("error while spawning actor {0}: {1}")]
     GspawnError(Name, String),
 
@@ -91,6 +93,7 @@ pub enum Error {
         proc_name: Name,
         mesh_agent: ActorRef<HostMeshAgent>,
         host_rank: usize,
+        status: resource::Status,
     },
 
     #[error("error: {0} does not exist")]

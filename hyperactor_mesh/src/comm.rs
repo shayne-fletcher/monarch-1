@@ -8,6 +8,7 @@
 
 use crate::comm::multicast::CAST_ORIGINATING_SENDER;
 use crate::reference::ActorMeshId;
+use crate::resource;
 pub mod multicast;
 
 use std::cmp::Ordering;
@@ -279,6 +280,13 @@ impl CommActor {
         if deliver_here {
             let rank_on_root_mesh = mode.self_rank(cx.self_id())?;
             let cast_rank = message.relative_rank(rank_on_root_mesh)?;
+            // Replace ranks with self ranks.
+            message
+                .data_mut()
+                .visit_mut::<resource::Rank>(|resource::Rank(rank)| {
+                    *rank = Some(cast_rank);
+                    Ok(())
+                })?;
             let cast_shape = message.shape();
             let point = cast_shape
                 .extent()

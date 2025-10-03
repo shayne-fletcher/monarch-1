@@ -213,6 +213,19 @@ impl Handler<GetCastInfo> for TestActor {
     }
 }
 
+#[derive(Default, Debug)]
+#[hyperactor::export(spawn = true)]
+pub struct FailingCreateTestActor;
+
+#[async_trait]
+impl Actor for FailingCreateTestActor {
+    type Params = ();
+
+    async fn new(params: Self::Params) -> Result<Self, hyperactor::anyhow::Error> {
+        Err(anyhow::anyhow!("test failure"))
+    }
+}
+
 #[cfg(test)]
 /// Asserts that the provided actor mesh has the expected shape,
 /// and all actors are assigned the correct ranks. We also test

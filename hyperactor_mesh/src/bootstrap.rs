@@ -15,6 +15,7 @@ use std::future;
 use std::io;
 use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -220,7 +221,9 @@ pub enum Bootstrap {
     Host {
         /// The address on which to serve the host.
         addr: ChannelAddr,
-
+        /// If specified, use the provided command instead of
+        /// [`BootstrapCommand::current`].
+        command: Option<BootstrapCommand>,
         /// Config snapshot for the child.
         config: Option<Attrs>,
     },
@@ -345,7 +348,11 @@ impl Bootstrap {
                     Err(e) => e.into(),
                 }
             }
-            Bootstrap::Host { addr, config } => {
+            Bootstrap::Host {
+                addr,
+                command,
+                config,
+            } => {
                 if config.is_some() {
                     tracing::debug!(
                         "bootstrap: Host received config snapshot (carried, not applied)"
@@ -354,7 +361,10 @@ impl Bootstrap {
                     tracing::debug!("bootstrap: no config snapshot provided (Host)");
                 }
 
-                let command = ok!(BootstrapCommand::current());
+                let command = match command {
+                    Some(command) => command,
+                    None => ok!(BootstrapCommand::current()),
+                };
                 let manager = BootstrapProcManager::new(command);
                 let (host, _handle) = ok!(Host::serve(manager, addr).await);
                 let addr = host.addr().clone();
@@ -1303,7 +1313,7 @@ impl hyperactor::host::ProcHandle for BootstrapProcHandle {
 /// A specification of the command used to bootstrap procs.
 #[derive(Debug, Named, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct BootstrapCommand {
-    pub program: std::path::PathBuf,
+    pub program: PathBuf,
     pub arg0: Option<String>,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
@@ -1334,6 +1344,18 @@ impl BootstrapCommand {
     pub(crate) fn test() -> Self {
         Self {
             program: buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
+            arg0: None,
+            args: vec![],
+            env: HashMap::new(),
+        }
+    }
+}
+
+impl<T: Into<PathBuf>> From<T> for BootstrapCommand {
+    /// Creates a bootstrap command from the provided path.
+    fn from(s: T) -> Self {
+        Self {
+            program: s.into(),
             arg0: None,
             args: vec![],
             env: HashMap::new(),
@@ -1956,7 +1978,7 @@ fn debug_sink() -> &'static Mutex<DebugSink> {
 }
 
 /// If true, send `Debug` messages to stderr.
-const DEBUG_TO_STDERR: bool = true;
+const DEBUG_TO_STDERR: bool = false;
 
 /// A bootstrap specific debug writer. If the file /tmp/monarch-bootstrap-debug.log
 /// exists, then the writer's destination is that file; otherwise it discards all writes.
@@ -2059,6 +2081,7 @@ mod tests {
     fn test_bootstrap_mode_env_string_none_config_host() {
         let value = Bootstrap::Host {
             addr: ChannelAddr::any(ChannelTransport::Unix),
+            command: None,
             config: None,
         };
 
@@ -2113,6 +2136,7 @@ mod tests {
         {
             let original = Bootstrap::Host {
                 addr: ChannelAddr::any(ChannelTransport::Unix),
+                command: None,
                 config: Some(attrs.clone()),
             };
             let env_str = original.to_env_safe_string().expect("encode bootstrap");

@@ -9,14 +9,27 @@
 //! This modules defines a set of common message types used for managing resources
 //! in hyperactor meshes.
 
+use core::slice::GetDisjointMutIndex as _;
 use std::fmt::Debug;
+use std::hash::Hash;
+use std::marker::PhantomData;
+use std::mem::replace;
+use std::mem::take;
+use std::ops::Range;
 
+use enum_as_inner::EnumAsInner;
+use hyperactor::Bind;
 use hyperactor::HandleClient;
 use hyperactor::Handler;
 use hyperactor::Named;
 use hyperactor::PortRef;
 use hyperactor::RefClient;
 use hyperactor::RemoteMessage;
+use hyperactor::Unbind;
+use hyperactor::accum::Accumulator;
+use hyperactor::accum::CommReducer;
+use hyperactor::accum::ReducerFactory;
+use hyperactor::accum::ReducerSpec;
 use hyperactor::message::Bind;
 use hyperactor::message::Bindings;
 use hyperactor::message::Unbind;
@@ -35,7 +48,9 @@ use crate::v1::Name;
     PartialOrd,
     Ord,
     PartialEq,
-    Eq
+    Eq,
+    Hash,
+    EnumAsInner
 )]
 pub enum Status {
     /// The resource does not exist.
@@ -52,6 +67,67 @@ pub enum Status {
     Failed(String),
 }
 
+impl Status {
+    /// Returns whether the status is a terminating status.
+    pub fn is_terminating(&self) -> bool {
+        matches!(self, Status::Stopping | Status::Stopped | Status::Failed(_))
+    }
+}
+
+/// Data type used to communicate ranks.
+/// Implements [`Bind`] and [`Unbind`]; the comm actor replaces
+/// instances with the delivered rank.
+#[derive(Clone, Debug, Serialize, Deserialize, Named, PartialEq, Eq, Default)]
+pub struct Rank(pub Option<usize>);
+
+impl Rank {
+    /// Create a new rank with the provided value.
+    pub fn new(rank: usize) -> Self {
+        Self(Some(rank))
+    }
+
+    /// Unwrap the rank; panics if not set.
+    pub fn unwrap(&self) -> usize {
+        self.0.unwrap()
+    }
+}
+
+impl Unbind for Rank {
+    fn unbind(&self, bindings: &mut Bindings) -> anyhow::Result<()> {
+        bindings.push_back(self)
+    }
+}
+
+impl Bind for Rank {
+    fn bind(&mut self, bindings: &mut Bindings) -> anyhow::Result<()> {
+        let bound = bindings.try_pop_front::<Rank>()?;
+        self.0 = bound.0;
+        Ok(())
+    }
+}
+
+/// Get the status of a resource at a rank. This message is designed to be
+/// cast and efficiently accumulated.
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    Named,
+    Handler,
+    HandleClient,
+    RefClient,
+    Bind,
+    Unbind
+)]
+pub struct GetRankStatus {
+    /// The name of the resource.
+    pub name: Name,
+    /// The status of the rank.
+    #[binding(include)]
+    pub reply: PortRef<RankedValues<Status>>,
+}
+
 /// The state of a resource.
 #[derive(Clone, Debug, Serialize, Deserialize, Named, PartialEq, Eq)]
 pub struct State<S> {
@@ -64,15 +140,26 @@ pub struct State<S> {
 }
 
 /// Create or update a resource according to a spec.
-#[derive(Debug, Serialize, Deserialize, Named, Handler, HandleClient, RefClient)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Named,
+    Handler,
+    HandleClient,
+    RefClient,
+    Bind,
+    Unbind
+)]
 pub struct CreateOrUpdate<S> {
     /// The name of the resource to create or update.
     pub name: Name,
+    /// The rank of the resource, when available.
+    #[binding(include)]
+    pub rank: Rank,
     /// The specification of the resource.
     pub spec: S,
-    /// Whether the operation succeeded.
-    #[reply]
-    pub reply: PortRef<bool>,
 }
 
 /// Retrieve the current state of the resource.
@@ -115,5 +202,227 @@ where
             name: self.name.clone(),
             reply: self.reply.clone(),
         }
+    }
+}
+
+/// RankedValues compactly represents rank-indexed values of type T.
+/// It stores contiguous values in a set of intervals; thus it is
+/// efficient and compact when the cardinality of T-typed values is
+/// low.
+#[derive(Debug, Clone, Named, Serialize, Deserialize)]
+pub struct RankedValues<T> {
+    intervals: Vec<(Range<usize>, T)>,
+}
+
+impl<T> Default for RankedValues<T> {
+    fn default() -> Self {
+        Self {
+            intervals: Vec::new(),
+        }
+    }
+}
+
+impl<T> RankedValues<T> {
+    /// Iterate over contiguous rank intervals of values.
+    pub fn iter(&self) -> impl Iterator<Item = &(Range<usize>, T)> + '_ {
+        self.intervals.iter()
+    }
+
+    /// The (set) rank of the RankedValues is the number of values stored with
+    /// rank less than `value`.
+    pub fn rank(&self, value: usize) -> usize {
+        self.iter()
+            .take_while(|(ranks, _)| ranks.start <= value)
+            .map(|(ranks, _)| ranks.end.min(value) - ranks.start)
+            .sum()
+    }
+}
+
+impl<T: Eq + Clone> RankedValues<T> {
+    /// Merge `other` into this set of ranked values. Values in `other` that overlap
+    /// with `self` take prededence.
+    ///
+    /// This currently uses a simple algorithm that merges the full set of RankedValues.
+    /// This remains efficient when the cardinality of T-typed values is low. However,
+    /// it does not efficiently merge high cardinality value sets. Consider using interval
+    /// trees or bitmap techniques like Roaring Bitmaps in these cases.
+    pub fn merge_from(&mut self, other: Self) {
+        let mut left_iter = take(&mut self.intervals).into_iter();
+        let mut right_iter = other.intervals.into_iter();
+
+        let mut left = left_iter.next();
+        let mut right = right_iter.next();
+
+        while left.is_some() && right.is_some() {
+            let (left_ranks, left_value) = left.as_mut().unwrap();
+            let (right_ranks, right_value) = right.as_mut().unwrap();
+
+            if left_ranks.is_overlapping(right_ranks) {
+                if left_value == right_value {
+                    let ranks = left_ranks.start.min(right_ranks.start)..right_ranks.end;
+                    let (_, value) = replace(&mut right, right_iter.next()).unwrap();
+                    left_ranks.start = ranks.end;
+                    if left_ranks.is_empty() {
+                        left = left_iter.next();
+                    }
+                    self.append(ranks, value);
+                } else if left_ranks.start < right_ranks.start {
+                    let ranks = left_ranks.start..right_ranks.start;
+                    left_ranks.start = ranks.end;
+                    // TODO: get rid of clone
+                    self.append(ranks, left_value.clone());
+                } else {
+                    let (ranks, value) = replace(&mut right, right_iter.next()).unwrap();
+                    left_ranks.start = ranks.end;
+                    if left_ranks.is_empty() {
+                        left = left_iter.next();
+                    }
+                    self.append(ranks, value);
+                }
+            } else if left_ranks.start < right_ranks.start {
+                let (ranks, value) = replace(&mut left, left_iter.next()).unwrap();
+                self.append(ranks, value);
+            } else {
+                let (ranks, value) = replace(&mut right, right_iter.next()).unwrap();
+                self.append(ranks, value);
+            }
+        }
+
+        while let Some((left_ranks, left_value)) = left {
+            self.append(left_ranks, left_value);
+            left = left_iter.next();
+        }
+        while let Some((right_ranks, right_value)) = right {
+            self.append(right_ranks, right_value);
+            right = right_iter.next();
+        }
+    }
+
+    fn append(&mut self, range: Range<usize>, value: T) {
+        if let Some(last) = self.intervals.last_mut()
+            && last.0.end == range.start
+            && last.1 == value
+        {
+            last.0.end = range.end;
+        } else {
+            self.intervals.push((range, value));
+        }
+    }
+}
+
+impl<T> From<(usize, T)> for RankedValues<T> {
+    fn from((rank, value): (usize, T)) -> Self {
+        Self {
+            intervals: vec![(rank..rank + 1, value)],
+        }
+    }
+}
+
+/// Enabled for test only because we have to guarantee that the input
+/// iterator is well-formed.
+#[cfg(test)]
+impl<T> FromIterator<(Range<usize>, T)> for RankedValues<T> {
+    fn from_iter<I: IntoIterator<Item = (Range<usize>, T)>>(iter: I) -> Self {
+        Self {
+            intervals: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl<T: Eq + Clone + Named> Accumulator for RankedValues<T> {
+    type State = Self;
+    type Update = Self;
+
+    fn accumulate(&self, state: &mut Self::State, update: Self::Update) -> anyhow::Result<()> {
+        state.merge_from(update);
+        Ok(())
+    }
+
+    fn reducer_spec(&self) -> Option<ReducerSpec> {
+        None
+        // TODO: make this work. When it is enabled, the comm actor simply halts.
+        // Some(ReducerSpec {
+        //     typehash: <RankedValuesReducer<T> as Named>::typehash(),
+        //     builder_params: None,
+        // })
+    }
+}
+
+#[derive(Named)]
+struct RankedValuesReducer<T>(std::marker::PhantomData<T>);
+
+impl<T: Hash + Eq + Ord + Clone> CommReducer for RankedValuesReducer<T> {
+    type Update = RankedValues<T>;
+
+    fn reduce(&self, mut left: Self::Update, right: Self::Update) -> anyhow::Result<Self::Update> {
+        left.merge_from(right);
+        Ok(left)
+    }
+}
+
+// register for concrete types:
+
+hyperactor::submit! {
+    ReducerFactory {
+        typehash_f: <RankedValuesReducer<Status> as Named>::typehash,
+        builder_f: |_| Ok(Box::new(RankedValuesReducer::<Status>(PhantomData))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ranked_values_merge() {
+        #[derive(PartialEq, Debug, Eq, Clone)]
+        enum Side {
+            Left,
+            Right,
+            Both,
+        }
+        use Side::Both;
+        use Side::Left;
+        use Side::Right;
+
+        let mut left: RankedValues<Side> = [
+            (0..10, Left),
+            (15..20, Left),
+            (30..50, Both),
+            (60..70, Both),
+        ]
+        .into_iter()
+        .collect();
+
+        let right: RankedValues<Side> = [
+            (9..12, Right),
+            (25..30, Right),
+            (30..40, Both),
+            (40..50, Right),
+            (50..60, Both),
+        ]
+        .into_iter()
+        .collect();
+
+        left.merge_from(right);
+        assert_eq!(
+            left.iter().cloned().collect::<Vec<_>>(),
+            vec![
+                (0..9, Left),
+                (9..12, Right),
+                (15..20, Left),
+                (25..30, Right),
+                (30..40, Both),
+                (40..50, Right),
+                // Merge consecutive:
+                (50..70, Both)
+            ]
+        );
+
+        assert_eq!(left.rank(5), 5);
+        assert_eq!(left.rank(10), 10);
+        assert_eq!(left.rank(16), 13);
+        assert_eq!(left.rank(70), 62);
+        assert_eq!(left.rank(100), 62);
     }
 }

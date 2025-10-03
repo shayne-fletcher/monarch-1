@@ -71,10 +71,17 @@ impl HostAgentMode {
 
 /// A mesh agent is responsible for managing a host iny a [`HostMesh`],
 /// through the resource behaviors defined in [`crate::resource`].
-#[hyperactor::export(handlers=[resource::CreateOrUpdate<()>, resource::GetState<ProcState>, ShutdownHost])]
+#[hyperactor::export(
+    handlers=[
+        resource::CreateOrUpdate<()>,
+        resource::GetState<ProcState>,
+        resource::GetRankStatus,
+        ShutdownHost
+    ]
+)]
 pub struct HostMeshAgent {
     host: Option<HostAgentMode>,
-    created: HashMap<Name, Result<(ProcId, ActorRef<ProcMeshAgent>), HostError>>,
+    created: HashMap<Name, (usize, Result<(ProcId, ActorRef<ProcMeshAgent>), HostError>)>,
 }
 
 impl fmt::Debug for HostMeshAgent {
@@ -103,11 +110,11 @@ impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
     #[tracing::instrument("HostMeshAgent::CreateOrUpdate", level = "info", skip_all, fields(name=%create_or_update.name))]
     async fn handle(
         &mut self,
-        cx: &Context<Self>,
+        _cx: &Context<Self>,
         create_or_update: resource::CreateOrUpdate<()>,
     ) -> anyhow::Result<()> {
         if self.created.contains_key(&create_or_update.name) {
-            // There is no update.
+            // Already created: there is no update.
             return Ok(());
         }
 
@@ -120,12 +127,39 @@ impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
                 host.spawn(create_or_update.name.clone().to_string()).await
             }
         };
-        let ok = created.is_ok();
+
         if let Err(e) = &created {
             tracing::error!("failed to spawn proc {}: {}", create_or_update.name, e);
         }
-        self.created.insert(create_or_update.name.clone(), created);
-        create_or_update.reply.send(cx, ok)?;
+        self.created.insert(
+            create_or_update.name.clone(),
+            (create_or_update.rank.unwrap(), created),
+        );
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<resource::GetRankStatus> for HostMeshAgent {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        get_rank_status: resource::GetRankStatus,
+    ) -> anyhow::Result<()> {
+        let Some(created) = self.created.get(&get_rank_status.name) else {
+            // TODO: how can we get the host's rank here? we should model its absence explicitly.
+            get_rank_status
+                .reply
+                .send(cx, (usize::MAX, resource::Status::NotExist).into())?;
+            return Ok(());
+        };
+
+        let rank_status = match created {
+            (rank, Ok(_)) => (*rank, resource::Status::Running),
+            (rank, Err(e)) => (*rank, resource::Status::Failed(e.to_string())),
+        };
+        get_rank_status.reply.send(cx, rank_status.into())?;
 
         Ok(())
     }
@@ -194,7 +228,7 @@ impl Handler<resource::GetState<ProcState>> for HostMeshAgent {
             .as_process()
             .map(Host::manager);
         let state = match self.created.get(&get_state.name) {
-            Some(Ok((proc_id, mesh_agent))) => resource::State {
+            Some((_rank, Ok((proc_id, mesh_agent)))) => resource::State {
                 name: get_state.name.clone(),
                 status: resource::Status::Running,
                 state: Some(ProcState {
@@ -207,7 +241,7 @@ impl Handler<resource::GetState<ProcState>> for HostMeshAgent {
                     },
                 }),
             },
-            Some(Err(e)) => resource::State {
+            Some((_rank, Err(e))) => resource::State {
                 name: get_state.name.clone(),
                 status: resource::Status::Failed(e.to_string()),
                 state: None,
@@ -339,12 +373,10 @@ mod tests {
 
         // First, create the proc, then query its state:
 
-        assert!(
-            host_agent
-                .create_or_update(&client, name.clone(), ())
-                .await
-                .unwrap()
-        );
+        host_agent
+            .create_or_update(&client, name.clone(), resource::Rank::new(0), ())
+            .await
+            .unwrap();
         assert_matches!(
             host_agent.get_state(&client, name.clone()).await.unwrap(),
             resource::State {

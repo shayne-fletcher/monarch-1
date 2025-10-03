@@ -92,7 +92,7 @@ pub async fn allocs(extent: Extent) -> Vec<Box<dyn Alloc + Send + Sync>> {
     };
 
     vec![
-        Box::new(LocalAllocator.allocate(spec.clone()).await.unwrap()),
+        // Box::new(LocalAllocator.allocate(spec.clone()).await.unwrap()),
         Box::new(
             ProcessAllocator::new(Command::new(
                 buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
