@@ -1515,11 +1515,22 @@ def test_select_result() -> None:
     assert r == (0, 1)
 
 
+class SleepActor(Actor):
+    @endpoint
+    async def sleep(self, t: float) -> None:
+        await asyncio.sleep(t)
+
+
 @pytest.mark.parametrize("v1", [True, False])
 def test_mesh_len(v1: bool):
     proc_mesh = spawn_procs_on_fake_host(v1, {"gpus": 12})
-    s = proc_mesh.spawn("sync_actor", SyncActor)
+    s = proc_mesh.spawn("sleep_actor", SleepActor)
     assert 12 == len(s)
+    # FIXME: Actually figure out what's going on here.
+    # Call an endpoint on the actor before the test
+    # exits. Otherwise we might get a fatal PyGILState_Release
+    # error.
+    s.sleep.call(1).get()
 
 
 class UndeliverableMessageReceiver(Actor):
