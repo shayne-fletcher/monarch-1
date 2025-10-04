@@ -28,6 +28,7 @@ use hyperactor_mesh::alloc::remoteprocess::RemoteProcessAlloc;
 use hyperactor_mesh::alloc::remoteprocess::RemoteProcessAllocHost;
 use hyperactor_mesh::alloc::remoteprocess::RemoteProcessAllocInitializer;
 use hyperactor_mesh::alloc::sim::SimAllocator;
+use hyperactor_mesh::proc_mesh::default_transport;
 use ndslice::Extent;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
@@ -91,10 +92,6 @@ impl Alloc for ReshapedAlloc {
 
     fn world_id(&self) -> &WorldId {
         self.base.world_id()
-    }
-
-    fn transport(&self) -> ChannelTransport {
-        self.base.transport()
     }
 
     async fn stop(&mut self) -> Result<(), AllocatorError> {
@@ -174,7 +171,14 @@ impl PyAllocConstraints {
     module = "monarch._rust_bindings.monarch_hyperactor.alloc"
 )]
 pub struct PyAllocSpec {
-    pub inner: AllocSpec,
+    inner: AllocSpec,
+    // When this PyAllocSpec is converted to AllocSpec, if this
+    // field does not have a value, then the returned AllocSpec
+    // will be a clone of `inner` with the transport field set
+    // to the current default transport. If the field does have
+    // a value, the returned AllocSpec will be a clone of `inner`
+    // with the transport field set to this value.
+    transport: Option<ChannelTransport>,
 }
 
 #[pymethods]
@@ -208,7 +212,9 @@ impl PyAllocSpec {
                 extent,
                 constraints: constraints.inner.clone(),
                 proc_name: None,
+                transport: default_transport(),
             },
+            transport: None,
         })
     }
     #[getter]
@@ -218,6 +224,14 @@ impl PyAllocSpec {
             d.set_item(name, size)?;
         }
         Ok(d)
+    }
+}
+
+impl From<&PyAllocSpec> for AllocSpec {
+    fn from(spec: &PyAllocSpec) -> Self {
+        let mut inner = spec.inner.clone();
+        inner.transport = spec.transport.clone().unwrap_or_else(default_transport);
+        inner
     }
 }
 
@@ -239,7 +253,7 @@ impl PyLocalAllocator {
         // We could use Bound here, and acquire the GIL inside of `future_into_py`, but
         // it is rather awkward with the current APIs, and we can anyway support Arc/Mutex
         // pretty easily.
-        let spec = spec.inner.clone();
+        let spec = spec.into();
         PyPythonTask::new(async move {
             LocalAllocator
                 .allocate(spec)
@@ -265,10 +279,7 @@ impl PySimAllocator {
     }
 
     fn allocate_nonblocking(&self, spec: &PyAllocSpec) -> PyResult<PyPythonTask> {
-        // We could use Bound here, and acquire the GIL inside of `future_into_py`, but
-        // it is rather awkward with the current APIs, and we can anyway support Arc/Mutex
-        // pretty easily.
-        let spec = spec.inner.clone();
+        let spec = spec.into();
         PyPythonTask::new(async move {
             SimAllocator
                 .allocate(spec)
@@ -310,7 +321,7 @@ impl PyProcessAllocator {
         // it is rather awkward with the current APIs, and we can anyway support Arc/Mutex
         // pretty easily.
         let instance = Arc::clone(&self.inner);
-        let spec = spec.inner.clone();
+        let spec = spec.into();
         PyPythonTask::new(async move {
             instance
                 .lock()
@@ -449,14 +460,30 @@ impl Allocator for PyRemoteAllocator {
             .await
             .map_err(|e| AllocatorError::Other(e.into()))?;
 
-        let alloc = RemoteProcessAlloc::new(
-            spec,
-            WorldId(self.world_id.clone()),
-            transport,
-            port,
-            initializer,
-        )
-        .await?;
+        let mut spec = spec;
+        if spec.transport != transport {
+            Python::with_gil(|py| -> PyResult<()> {
+                // TODO(slurye): Temporary until we start enforcing that people have properly
+                // configured the default transport.
+                py.import("warnings")?.getattr("warn")?.call1((format!(
+                    "The AllocSpec passed to RemoteAllocator.allocate has transport {}, \
+                        but the transport from the remote process alloc initializer is {}. \
+                        This will soon be an error unless you explicitly configure monarch's \
+                        default transport to {}. The current default transport is {}.",
+                    spec.transport,
+                    transport,
+                    transport,
+                    default_transport()
+                ),))?;
+                spec.transport = transport;
+                Ok(())
+            })
+            .map_err(|e| AllocatorError::Other(e.into()))?;
+        }
+
+        let alloc =
+            RemoteProcessAlloc::new(spec, WorldId(self.world_id.clone()), port, initializer)
+                .await?;
         Ok(alloc)
     }
 }
@@ -476,7 +503,7 @@ impl PyRemoteAllocator {
     }
 
     fn allocate_nonblocking(&self, spec: &PyAllocSpec) -> PyResult<PyPythonTask> {
-        let spec = spec.inner.clone();
+        let spec = spec.into();
         let mut cloned = self.clone();
 
         PyPythonTask::new(async move {

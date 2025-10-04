@@ -83,6 +83,9 @@ pub struct AllocSpec {
     /// If specified, return procs using direct addressing with
     /// the provided proc name.
     pub proc_name: Option<String>,
+
+    /// The transport to use for the procs in this alloc.
+    pub transport: ChannelTransport,
 }
 
 /// The core allocator trait, implemented by all allocators.
@@ -249,7 +252,9 @@ pub trait Alloc {
     fn world_id(&self) -> &WorldId;
 
     /// The channel transport used the procs in this alloc.
-    fn transport(&self) -> ChannelTransport;
+    fn transport(&self) -> ChannelTransport {
+        self.spec().transport.clone()
+    }
 
     /// Stop this alloc, shutting down all of its procs. A clean
     /// shutdown should result in Stop events from all allocs,
@@ -513,10 +518,6 @@ pub mod test_utils {
             self.alloc.world_id()
         }
 
-        fn transport(&self) -> ChannelTransport {
-            self.alloc.transport()
-        }
-
         async fn stop(&mut self) -> Result<(), AllocatorError> {
             self.alloc.stop().await
         }
@@ -548,6 +549,7 @@ pub(crate) mod testing {
     use super::*;
     use crate::alloc::test_utils::TestActor;
     use crate::alloc::test_utils::Wait;
+    use crate::proc_mesh::default_transport;
     use crate::proc_mesh::mesh_agent::GspawnResult;
     use crate::proc_mesh::mesh_agent::MeshAgentMessageClient;
 
@@ -568,6 +570,7 @@ pub(crate) mod testing {
                 extent: extent.clone(),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: default_transport(),
             })
             .await
             .unwrap();
@@ -718,6 +721,7 @@ pub(crate) mod testing {
                 extent: extent! { replica = 1 },
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             })
             .await
             .unwrap();

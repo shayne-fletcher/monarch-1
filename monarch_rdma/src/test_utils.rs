@@ -79,6 +79,7 @@ pub mod test_utils {
 
     use hyperactor::ActorRef;
     use hyperactor::Instance;
+    use hyperactor::channel::ChannelTransport;
     use hyperactor::clock::Clock;
     use hyperactor::clock::RealClock;
     use hyperactor_mesh::Mesh;
@@ -341,6 +342,7 @@ pub mod test_utils {
                     extent: extent! { proc = 1 },
                     constraints: Default::default(),
                     proc_name: None,
+                    transport: ChannelTransport::Local,
                 })
                 .await
                 .unwrap();
@@ -356,6 +358,7 @@ pub mod test_utils {
                     extent: extent! { proc = 1 },
                     constraints: Default::default(),
                     proc_name: None,
+                    transport: ChannelTransport::Local,
                 })
                 .await
                 .unwrap();

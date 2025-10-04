@@ -247,6 +247,7 @@ mod tests {
     use hyperactor::Handler;
     use hyperactor::PortRef;
     use hyperactor::Unbind;
+    use hyperactor::channel::ChannelTransport;
     use hyperactor_mesh_macros::sel;
     use ndslice::Extent;
     use ndslice::extent;
@@ -322,6 +323,7 @@ mod tests {
                 extent: extent(),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Local,
             })
             .await
             .unwrap();
@@ -330,6 +332,7 @@ mod tests {
                 extent: extent(),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Local,
             })
             .await
             .unwrap();

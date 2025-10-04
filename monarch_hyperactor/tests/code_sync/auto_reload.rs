@@ -8,6 +8,7 @@
 
 use anyhow::Result;
 use anyhow::anyhow;
+use hyperactor::channel::ChannelTransport;
 use hyperactor_mesh::actor_mesh::ActorMesh;
 use hyperactor_mesh::alloc::AllocSpec;
 use hyperactor_mesh::alloc::Allocator;
@@ -48,6 +49,7 @@ CONSTANT = "initial_constant"
             extent: extent! { replica = 1 },
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Local,
         })
         .await?;
 

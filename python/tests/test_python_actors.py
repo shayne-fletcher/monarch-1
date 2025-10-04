@@ -1513,6 +1513,9 @@ def test_select_result() -> None:
     b = PythonTask.spawn_blocking(lambda: s(0))
     r = PythonTask.select_one([a.task(), b.task()]).block_on()
     assert r == (0, 1)
+    # FIXME: Sleep for 6 seconds to ensure that task `a` completes
+    # before the test exits. Otherwise we get a SIGABRT.
+    time.sleep(6)
 
 
 class SleepActor(Actor):

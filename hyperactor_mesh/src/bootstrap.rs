@@ -3239,6 +3239,7 @@ mod tests {
                 extent: extent!(replicas = 1),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             })
             .await
             .unwrap();

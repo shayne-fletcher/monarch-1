@@ -13,6 +13,7 @@ use criterion::Criterion;
 use criterion::Throughput;
 use criterion::criterion_group;
 use criterion::criterion_main;
+use hyperactor::channel::ChannelTransport;
 use hyperactor_mesh::ProcMesh;
 use hyperactor_mesh::actor_mesh::ActorMesh;
 use hyperactor_mesh::actor_mesh::RootActorMesh;
@@ -45,6 +46,7 @@ fn bench_actor_scaling(c: &mut Criterion) {
                         extent: extent!(hosts = host_count, gpus = gpus),
                         constraints: Default::default(),
                         proc_name: None,
+                        transport: ChannelTransport::Local,
                     })
                     .await
                     .unwrap();
@@ -142,6 +144,7 @@ fn bench_actor_mesh_message_sizes(c: &mut Criterion) {
                                 extent: extent!(gpus = actor_count),
                                 constraints: Default::default(),
                                 proc_name: None,
+                                transport: ChannelTransport::Local,
                             })
                             .await
                             .unwrap();

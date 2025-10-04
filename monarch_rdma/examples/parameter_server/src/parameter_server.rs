@@ -66,6 +66,7 @@ use hyperactor::Named;
 use hyperactor::OncePortRef;
 use hyperactor::PortRef;
 use hyperactor::Unbind;
+use hyperactor::channel::ChannelTransport;
 use hyperactor::context::Mailbox as _;
 use hyperactor::supervision::ActorSupervisionEvent;
 use hyperactor_mesh::Mesh;
@@ -476,6 +477,7 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
                 extent: extent! {replica=1, host=1, gpu=1},
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             })
             .await?,
     )
@@ -503,6 +505,7 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
                 extent: extent! {replica=1, host=1, gpu=num_workers},
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             })
             .await?,
     )

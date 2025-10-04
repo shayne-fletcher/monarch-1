@@ -6,6 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use hyperactor::channel::ChannelTransport;
 /// Test binary for ProcessAllocator child process cleanup behavior.
 /// This binary creates a ProcessAllocator and spawns several child processes,
 /// then keeps running until killed. It's designed to test whether child
@@ -47,6 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             extent: extent! { replica = 4 },
             constraints: AllocConstraints::default(),
             proc_name: None,
+            transport: ChannelTransport::Unix,
         })
         .await?;
 

@@ -67,6 +67,7 @@ use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::OncePortRef;
 use hyperactor::Unbind;
+use hyperactor::channel::ChannelTransport;
 use hyperactor::supervision::ActorSupervisionEvent;
 use hyperactor_mesh::Mesh;
 use hyperactor_mesh::ProcMesh;
@@ -686,6 +687,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 extent: extent! {replica=1, host=1, gpu=1},
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             })
             .await?,
     )
@@ -698,6 +700,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 extent: extent! {replica=1, host=1, gpu=1},
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             })
             .await?,
     )

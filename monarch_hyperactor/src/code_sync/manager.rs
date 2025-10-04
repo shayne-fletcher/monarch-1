@@ -479,6 +479,7 @@ pub async fn code_sync_mesh(
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
+    use hyperactor::channel::ChannelTransport;
     use hyperactor_mesh::alloc::AllocSpec;
     use hyperactor_mesh::alloc::Allocator;
     use hyperactor_mesh::alloc::local::LocalAllocator;
@@ -575,6 +576,7 @@ mod tests {
                 extent: extent! { replica = 2 },
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Local,
             })
             .await?;
 

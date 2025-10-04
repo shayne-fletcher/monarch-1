@@ -92,9 +92,9 @@ async fn main() {
                 extent: extent!(host = hosts_per_proc_mesh, gpu = 1),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             },
             WorldId("test_world_id".to_string()),
-            ChannelTransport::Unix,
             0,
             initializer,
         )

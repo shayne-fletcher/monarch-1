@@ -135,6 +135,7 @@ mod tests {
             extent: extent! { x=1, y=4 },
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Unix,
         };
 
         let mut initializer = remoteprocess::MockRemoteProcessAllocInitializer::new();
@@ -147,15 +148,10 @@ mod tests {
 
         let world_id = WorldId("__unused__".to_string());
 
-        let mut alloc = remoteprocess::RemoteProcessAlloc::new(
-            spec.clone(),
-            world_id,
-            ChannelTransport::Unix,
-            0,
-            initializer,
-        )
-        .await
-        .unwrap();
+        let mut alloc =
+            remoteprocess::RemoteProcessAlloc::new(spec.clone(), world_id, 0, initializer)
+                .await
+                .unwrap();
 
         // make sure we accounted for `world_size` number of Created and Stopped proc states
         let world_size = spec.extent.num_ranks();
@@ -201,6 +197,7 @@ mod tests {
             extent: extent! { x=1, y=4 },
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Unix,
         };
 
         let mut initializer = remoteprocess::MockRemoteProcessAllocInitializer::new();
@@ -217,15 +214,10 @@ mod tests {
         RealClock.sleep(timeout * 2).await;
 
         // Attempt to allocate, it should fail because a timeout happens before
-        let mut alloc = remoteprocess::RemoteProcessAlloc::new(
-            spec.clone(),
-            world_id.clone(),
-            ChannelTransport::Unix,
-            0,
-            initializer,
-        )
-        .await
-        .unwrap();
+        let mut alloc =
+            remoteprocess::RemoteProcessAlloc::new(spec.clone(), world_id.clone(), 0, initializer)
+                .await
+                .unwrap();
         let res = alloc.next().await.unwrap();
         // Should fail because the allocator timed out.
         if let alloc::ProcState::Failed {
@@ -260,6 +252,7 @@ mod tests {
             extent: extent! { x=1, y=4 },
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Unix,
         };
 
         let mut initializer = remoteprocess::MockRemoteProcessAllocInitializer::new();
@@ -275,15 +268,10 @@ mod tests {
         let world_id = WorldId("__unused__".to_string());
 
         // Attempt to allocate, it should succeed because a timeout happens before
-        let mut alloc = remoteprocess::RemoteProcessAlloc::new(
-            spec.clone(),
-            world_id.clone(),
-            ChannelTransport::Unix,
-            0,
-            initializer,
-        )
-        .await
-        .unwrap();
+        let mut alloc =
+            remoteprocess::RemoteProcessAlloc::new(spec.clone(), world_id.clone(), 0, initializer)
+                .await
+                .unwrap();
         // Ensure the process starts.
         alloc.next().await.unwrap();
         // Now stop the alloc and wait for a timeout to ensure the allocator exited.
@@ -297,15 +285,10 @@ mod tests {
         initializer
             .expect_initialize_alloc()
             .return_once(move || Ok(vec![alloc_host]));
-        let mut alloc = remoteprocess::RemoteProcessAlloc::new(
-            spec.clone(),
-            world_id.clone(),
-            ChannelTransport::Unix,
-            0,
-            initializer,
-        )
-        .await
-        .unwrap();
+        let mut alloc =
+            remoteprocess::RemoteProcessAlloc::new(spec.clone(), world_id.clone(), 0, initializer)
+                .await
+                .unwrap();
         let res = alloc.next().await.unwrap();
         // Should fail because the allocator timed out.
         if let alloc::ProcState::Failed {
@@ -340,6 +323,7 @@ mod tests {
             extent: extent! { x=1, y=4 },
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Unix,
         };
 
         let mut initializer = remoteprocess::MockRemoteProcessAllocInitializer::new();
@@ -354,15 +338,10 @@ mod tests {
         let world_id = WorldId("__unused__".to_string());
 
         // Attempt to allocate, it should succeed because a timeout happens before
-        let mut alloc = remoteprocess::RemoteProcessAlloc::new(
-            spec.clone(),
-            world_id.clone(),
-            ChannelTransport::Unix,
-            0,
-            initializer,
-        )
-        .await
-        .unwrap();
+        let mut alloc =
+            remoteprocess::RemoteProcessAlloc::new(spec.clone(), world_id.clone(), 0, initializer)
+                .await
+                .unwrap();
         // Ensure the process starts. Since the command is "sleep", it should
         // start without stopping.
         // make sure we accounted for `world_size` number of Created and Stopped proc states

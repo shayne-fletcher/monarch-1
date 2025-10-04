@@ -84,9 +84,14 @@ use std::sync::OnceLock;
 use std::sync::RwLock;
 
 declare_attrs! {
-    /// Transport type to use for the root client.
-    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_ROOT_CLIENT_TRANSPORT".to_string())
-    attr ROOT_CLIENT_TRANSPORT: ChannelTransport = ChannelTransport::Unix;
+    /// Default transport type to use across the application.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_DEFAULT_TRANSPORT".to_string())
+    attr DEFAULT_TRANSPORT: ChannelTransport = ChannelTransport::Unix;
+}
+
+/// Get the default transport type to use across the application.
+pub fn default_transport() -> ChannelTransport {
+    config::global::get_cloned(DEFAULT_TRANSPORT)
 }
 
 /// Single, process-wide supervision sink storage.
@@ -152,7 +157,7 @@ pub fn global_root_client() -> &'static Instance<()> {
     static GLOBAL_INSTANCE: OnceLock<(Instance<()>, ActorHandle<()>)> = OnceLock::new();
     &GLOBAL_INSTANCE.get_or_init(|| {
         let client_proc = Proc::direct_with_default(
-            ChannelAddr::any(config::global::get_cloned(ROOT_CLIENT_TRANSPORT)),
+            ChannelAddr::any(default_transport()),
             "mesh_root_client_proc".into(),
             router::global().clone().boxed(),
         )
@@ -1017,6 +1022,7 @@ mod tests {
                 extent: extent!(replica = 4),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Local,
             })
             .await
             .unwrap();
@@ -1034,6 +1040,7 @@ mod tests {
                 extent: extent!(replica = 4),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Local,
             })
             .await
             .unwrap();
@@ -1068,6 +1075,7 @@ mod tests {
                 extent: extent!(replica = 2),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Local,
             })
             .await
             .unwrap();
@@ -1119,6 +1127,7 @@ mod tests {
                 extent: extent!(replica = 1),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Local,
             })
             .await
             .unwrap();

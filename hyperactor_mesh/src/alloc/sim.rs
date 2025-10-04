@@ -65,11 +65,10 @@ pub struct SimAlloc {
 }
 
 impl SimAlloc {
-    fn new(spec: AllocSpec) -> Self {
-        let inner = LocalAlloc::new_with_transport(
-            spec,
-            ChannelTransport::Sim(Box::new(ChannelTransport::Unix)),
-        );
+    fn new(mut spec: AllocSpec) -> Self {
+        spec.transport = ChannelTransport::Sim(Box::new(ChannelTransport::Unix));
+
+        let inner = LocalAlloc::new(spec);
         let client_proc_id = ProcId::Ranked(WorldId(format!("{}_manager", inner.name())), 0);
 
         let ext = inner.extent();
@@ -147,10 +146,6 @@ impl Alloc for SimAlloc {
         self.inner.world_id()
     }
 
-    fn transport(&self) -> ChannelTransport {
-        self.inner.transport()
-    }
-
     async fn stop(&mut self) -> Result<(), AllocatorError> {
         self.inner.stop().await
     }
@@ -200,6 +195,7 @@ mod tests {
                     match_labels: HashMap::new(),
                 },
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             })
             .await
             .unwrap();

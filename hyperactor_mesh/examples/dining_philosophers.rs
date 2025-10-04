@@ -21,6 +21,7 @@ use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::PortRef;
 use hyperactor::Unbind;
+use hyperactor::channel::ChannelTransport;
 use hyperactor_mesh::ProcMesh;
 use hyperactor_mesh::actor_mesh::ActorMesh;
 use hyperactor_mesh::alloc::AllocSpec;
@@ -232,6 +233,7 @@ async fn main() -> Result<ExitCode> {
             extent: extent! {replica = group_size},
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Local,
         })
         .await?;
 

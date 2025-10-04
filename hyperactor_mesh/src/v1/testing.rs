@@ -26,6 +26,7 @@ use crate::alloc::AllocSpec;
 use crate::alloc::Allocator;
 use crate::alloc::LocalAllocator;
 use crate::alloc::ProcessAllocator;
+use crate::proc_mesh::default_transport;
 use crate::v1::ProcMesh;
 use crate::v1::host_mesh::HostMesh;
 
@@ -53,6 +54,7 @@ pub async fn proc_meshes(cx: &impl context::Actor, extent: Extent) -> Vec<ProcMe
                 extent: extent.clone(),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Local,
             })
             .await
             .unwrap();
@@ -71,6 +73,7 @@ pub async fn proc_meshes(cx: &impl context::Actor, extent: Extent) -> Vec<ProcMe
                 extent,
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             })
             .await
             .unwrap();
@@ -89,6 +92,7 @@ pub async fn allocs(extent: Extent) -> Vec<Box<dyn Alloc + Send + Sync>> {
         extent: extent.clone(),
         constraints: Default::default(),
         proc_name: None,
+        transport: default_transport(),
     };
 
     vec![
@@ -116,6 +120,7 @@ pub async fn local_proc_mesh(extent: Extent) -> (ProcMesh, Instance<()>, DialMai
             extent,
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Local,
         })
         .await
         .unwrap();
@@ -138,6 +143,7 @@ pub async fn host_mesh(extent: Extent) -> HostMesh {
             extent,
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Unix,
         })
         .await
         .unwrap();

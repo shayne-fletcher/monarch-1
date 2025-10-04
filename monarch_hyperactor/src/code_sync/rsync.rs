@@ -454,6 +454,7 @@ where
 mod tests {
     use anyhow::Result;
     use anyhow::anyhow;
+    use hyperactor::channel::ChannelTransport;
     use hyperactor_mesh::alloc::AllocSpec;
     use hyperactor_mesh::alloc::Allocator;
     use hyperactor_mesh::alloc::local::LocalAllocator;
@@ -502,6 +503,7 @@ mod tests {
                 extent: extent! { replica = 1 },
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Local,
             })
             .await?;
 

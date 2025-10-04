@@ -19,6 +19,7 @@ use hyperactor::Context;
 use hyperactor::Handler;
 use hyperactor::Named;
 use hyperactor::PortRef;
+use hyperactor::channel::ChannelTransport;
 use hyperactor_mesh::Mesh;
 use hyperactor_mesh::ProcMesh;
 use hyperactor_mesh::RootActorMesh;
@@ -119,6 +120,7 @@ impl Actor for ProxyActor {
                 extent: extent! { replica = 1 },
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             })
             .await
             .unwrap();
@@ -156,6 +158,7 @@ async fn run_client(exe_path: PathBuf, keep_alive: bool) -> Result<(), anyhow::E
             extent: extent! { replica = 1 },
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Unix,
         })
         .await
         .unwrap();

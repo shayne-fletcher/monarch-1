@@ -19,7 +19,6 @@ use hyperactor::ProcId;
 use hyperactor::WorldId;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
-use hyperactor::channel::ChannelTransport;
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::mailbox::MailboxServerHandle;
 use hyperactor::proc::Proc;
@@ -76,15 +75,10 @@ pub struct LocalAlloc {
     todo_rx: mpsc::UnboundedReceiver<Action>,
     stopped: bool,
     failed: bool,
-    transport: ChannelTransport,
 }
 
 impl LocalAlloc {
-    fn new(spec: AllocSpec) -> Self {
-        Self::new_with_transport(spec, ChannelTransport::Local)
-    }
-
-    pub(crate) fn new_with_transport(spec: AllocSpec, transport: ChannelTransport) -> Self {
+    pub(crate) fn new(spec: AllocSpec) -> Self {
         let name = ShortUuid::generate();
         let (todo_tx, todo_rx) = mpsc::unbounded_channel();
         for rank in 0..spec.extent.num_ranks() {
@@ -100,7 +94,6 @@ impl LocalAlloc {
             todo_rx,
             stopped: false,
             failed: false,
-            transport,
         }
     }
 
@@ -263,10 +256,6 @@ impl Alloc for LocalAlloc {
 
     fn world_id(&self) -> &WorldId {
         &self.world_id
-    }
-
-    fn transport(&self) -> ChannelTransport {
-        self.transport.clone()
     }
 
     async fn stop(&mut self) -> Result<(), AllocatorError> {
