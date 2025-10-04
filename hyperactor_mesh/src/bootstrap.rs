@@ -40,6 +40,7 @@ use hyperactor::channel::Tx;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
 use hyperactor::config::CONFIG_ENV_VAR;
+use hyperactor::config::global as config;
 use hyperactor::declare_attrs;
 use hyperactor::host;
 use hyperactor::host::Host;
@@ -212,7 +213,10 @@ pub enum Bootstrap {
         backend_addr: ChannelAddr,
         /// The callback address used to indicate successful spawning.
         callback_addr: ChannelAddr,
-        /// Config snapshot for the child.
+        /// Optional config snapshot (`hyperactor::config::Attrs`)
+        /// captured by the parent. If present, the child installs it
+        /// as the `Runtime` layer so the parent's effective config
+        /// takes precedence over Env/File/Defaults.
         config: Option<Attrs>,
     },
 
@@ -224,7 +228,10 @@ pub enum Bootstrap {
         /// If specified, use the provided command instead of
         /// [`BootstrapCommand::current`].
         command: Option<BootstrapCommand>,
-        /// Config snapshot for the child.
+        /// Optional config snapshot (`hyperactor::config::Attrs`)
+        /// captured by the parent. If present, the child installs it
+        /// as the `Runtime` layer so the parent’s effective config
+        /// takes precedence over Env/File/Defaults.
         config: Option<Attrs>,
     },
 
@@ -320,10 +327,9 @@ impl Bootstrap {
                 callback_addr,
                 config,
             } => {
-                if config.is_some() {
-                    tracing::debug!(
-                        "bootstrap: Proc received config snapshot (carried, not applied)"
-                    );
+                if let Some(attrs) = config {
+                    config::set(config::Source::Runtime, attrs);
+                    tracing::debug!("bootstrap: installed Runtime config snapshot (Proc)");
                 } else {
                     tracing::debug!("bootstrap: no config snapshot provided (Proc)");
                 }
@@ -353,10 +359,9 @@ impl Bootstrap {
                 command,
                 config,
             } => {
-                if config.is_some() {
-                    tracing::debug!(
-                        "bootstrap: Host received config snapshot (carried, not applied)"
-                    );
+                if let Some(attrs) = config {
+                    config::set(config::Source::Runtime, attrs);
+                    tracing::debug!("bootstrap: installed Runtime config snapshot (Host)");
                 } else {
                     tracing::debug!("bootstrap: no config snapshot provided (Host)");
                 }
