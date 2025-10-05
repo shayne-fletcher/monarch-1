@@ -35,7 +35,7 @@
   - [Handler](actors/handler.md)
   - [RemoteableActor](actors/remotable_actor.md)
   - [Checkpointable](actors/checkpointable.md)
-  - [RemoteActor](actors/remote_actor.md)
+  - [Referable](actors/remote_actor.md)
   - [Binds](actors/binds.md)
   - [RemoteHandles](actors/remote_handles.md)
   - [ActorHandle](actors/actor_handle.md)

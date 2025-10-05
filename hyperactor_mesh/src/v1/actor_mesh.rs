@@ -17,7 +17,7 @@ use hyperactor::Actor;
 use hyperactor::ActorRef;
 use hyperactor::RemoteHandles;
 use hyperactor::RemoteMessage;
-use hyperactor::actor::RemoteActor;
+use hyperactor::actor::Referable;
 use hyperactor::attrs::Attrs;
 use hyperactor::context;
 use hyperactor::message::Castable;
@@ -48,18 +48,18 @@ use crate::v1::ValueMesh;
 
 /// An ActorMesh is a collection of ranked A-typed actors.
 ///
-/// Bound note: `A: RemoteActor` because the mesh stores/returns
-/// `ActorRef<A>`, which is only defined for `A: RemoteActor`.
+/// Bound note: `A: Referable` because the mesh stores/returns
+/// `ActorRef<A>`, which is only defined for `A: Referable`.
 #[derive(Debug)]
-pub struct ActorMesh<A: RemoteActor> {
+pub struct ActorMesh<A: Referable> {
     proc_mesh: ProcMeshRef,
     name: Name,
     current_ref: ActorMeshRef<A>,
 }
 
-// `A: RemoteActor` for the same reason as the struct: the mesh holds
+// `A: Referable` for the same reason as the struct: the mesh holds
 // `ActorRef<A>`.
-impl<A: RemoteActor> ActorMesh<A> {
+impl<A: Referable> ActorMesh<A> {
     pub(crate) fn new(proc_mesh: ProcMeshRef, name: Name) -> Self {
         let current_ref =
             ActorMeshRef::with_page_size(name.clone(), proc_mesh.clone(), DEFAULT_PAGE);
@@ -72,7 +72,7 @@ impl<A: RemoteActor> ActorMesh<A> {
     }
 }
 
-impl<A: RemoteActor> Deref for ActorMesh<A> {
+impl<A: Referable> Deref for ActorMesh<A> {
     type Target = ActorMeshRef<A>;
 
     fn deref(&self) -> &Self::Target {
@@ -82,7 +82,7 @@ impl<A: RemoteActor> Deref for ActorMesh<A> {
 
 /// Manual implementation of Clone because `A` doesn't need to implement Clone
 /// but we still want to be able to clone the ActorMesh.
-impl<A: RemoteActor> Clone for ActorMesh<A> {
+impl<A: Referable> Clone for ActorMesh<A> {
     fn clone(&self) -> Self {
         Self {
             proc_mesh: self.proc_mesh.clone(),
@@ -98,11 +98,11 @@ impl<A: RemoteActor> Clone for ActorMesh<A> {
 const DEFAULT_PAGE: usize = 1024;
 
 /// A lazily materialized page of ActorRefs.
-struct Page<A: RemoteActor> {
+struct Page<A: Referable> {
     slots: Box<[OnceCell<ActorRef<A>>]>,
 }
 
-impl<A: RemoteActor> Page<A> {
+impl<A: Referable> Page<A> {
     fn new(len: usize) -> Self {
         let mut v = Vec::with_capacity(len);
         for _ in 0..len {
@@ -115,7 +115,7 @@ impl<A: RemoteActor> Page<A> {
 }
 
 /// A reference to a stable snapshot of an [`ActorMesh`].
-pub struct ActorMeshRef<A: RemoteActor> {
+pub struct ActorMeshRef<A: Referable> {
     proc_mesh: ProcMeshRef,
     name: Name,
 
@@ -135,7 +135,7 @@ pub struct ActorMeshRef<A: RemoteActor> {
     _phantom: PhantomData<A>,
 }
 
-impl<A: Actor + RemoteActor> ActorMeshRef<A> {
+impl<A: Actor + Referable> ActorMeshRef<A> {
     /// Cast a message to all actors in this mesh.
     pub fn cast<M>(&self, cx: &impl context::Actor, message: M) -> v1::Result<()>
     where
@@ -222,7 +222,7 @@ impl<A: Actor + RemoteActor> ActorMeshRef<A> {
     }
 }
 
-impl<A: RemoteActor> ActorMeshRef<A> {
+impl<A: Referable> ActorMeshRef<A> {
     pub(crate) fn new(name: Name, proc_mesh: ProcMeshRef) -> Self {
         Self::with_page_size(name, proc_mesh, DEFAULT_PAGE)
     }
@@ -285,7 +285,7 @@ impl<A: RemoteActor> ActorMeshRef<A> {
     }
 }
 
-impl<A: RemoteActor> Clone for ActorMeshRef<A> {
+impl<A: Referable> Clone for ActorMeshRef<A> {
     fn clone(&self) -> Self {
         Self {
             proc_mesh: self.proc_mesh.clone(),
@@ -297,21 +297,21 @@ impl<A: RemoteActor> Clone for ActorMeshRef<A> {
     }
 }
 
-impl<A: RemoteActor> PartialEq for ActorMeshRef<A> {
+impl<A: Referable> PartialEq for ActorMeshRef<A> {
     fn eq(&self, other: &Self) -> bool {
         self.proc_mesh == other.proc_mesh && self.name == other.name
     }
 }
-impl<A: RemoteActor> Eq for ActorMeshRef<A> {}
+impl<A: Referable> Eq for ActorMeshRef<A> {}
 
-impl<A: RemoteActor> Hash for ActorMeshRef<A> {
+impl<A: Referable> Hash for ActorMeshRef<A> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.proc_mesh.hash(state);
         self.name.hash(state);
     }
 }
 
-impl<A: RemoteActor> fmt::Debug for ActorMeshRef<A> {
+impl<A: Referable> fmt::Debug for ActorMeshRef<A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ActorMeshRef")
             .field("proc_mesh", &self.proc_mesh)
@@ -322,7 +322,7 @@ impl<A: RemoteActor> fmt::Debug for ActorMeshRef<A> {
 }
 
 // Implement Serialize manually, without requiring A: Serialize
-impl<A: RemoteActor> Serialize for ActorMeshRef<A> {
+impl<A: Referable> Serialize for ActorMeshRef<A> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -333,7 +333,7 @@ impl<A: RemoteActor> Serialize for ActorMeshRef<A> {
 }
 
 // Implement Deserialize manually, without requiring A: Deserialize
-impl<'de, A: RemoteActor> Deserialize<'de> for ActorMeshRef<A> {
+impl<'de, A: Referable> Deserialize<'de> for ActorMeshRef<A> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -343,7 +343,7 @@ impl<'de, A: RemoteActor> Deserialize<'de> for ActorMeshRef<A> {
     }
 }
 
-impl<A: RemoteActor> view::Ranked for ActorMeshRef<A> {
+impl<A: Referable> view::Ranked for ActorMeshRef<A> {
     type Item = ActorRef<A>;
 
     #[inline]
@@ -357,7 +357,7 @@ impl<A: RemoteActor> view::Ranked for ActorMeshRef<A> {
     }
 }
 
-impl<A: RemoteActor> view::RankedSliceable for ActorMeshRef<A> {
+impl<A: Referable> view::RankedSliceable for ActorMeshRef<A> {
     fn sliced(&self, region: Region) -> Self {
         debug_assert!(region.is_subset(view::Ranked::region(self)));
         let proc_mesh = self.proc_mesh.subset(region).unwrap();

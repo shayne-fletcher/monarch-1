@@ -108,7 +108,7 @@ pub fn bind<R: Binds<A>>(&self) -> ActorRef<R>
 ```
 This method requires that `R` implements the `Binds<A>` trait. The `Binds` trait specifies how to associate a remote-facing reference type with the concrete ports handled by the actor:
 ```rust
-pub trait Binds<A: Actor>: RemoteActor {
+pub trait Binds<A: Actor>: Referable {
     fn bind(ports: &Ports<A>);
 }
 ```

@@ -10,7 +10,7 @@ This chapter introduces the actor system in hyperactor. We'll cover:
 - The [`Handler`](./handler.md) trait for defining message-handling behavior
 - The [`RemotableActor`](./remotable_actor.md) trait for enabling remote spawning
 - The [`Checkpointable`](./checkpointable.md) trait for supporting actor persistence and recovery
-- The [`RemoteActor`](./remote_actor.md) marker trait for remotely referencable types
+- The [`Referable`](./remote_actor.md) marker trait for remotely referencable types
 - The [`Binds`](./binds.md) trait for wiring exported ports to reference types
 - The [`RemoteHandles`](./remote_handles.md) trait for associating message types with a reference
 - The [`ActorHandle`](./actor_handle.md) type for referencing and communicating with running actors

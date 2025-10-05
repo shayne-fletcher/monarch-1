@@ -62,7 +62,7 @@ use crate::PortHandle;
 use crate::Proc;
 use crate::ProcId;
 use crate::actor::Binds;
-use crate::actor::RemoteActor;
+use crate::actor::Referable;
 use crate::channel;
 use crate::channel::ChannelAddr;
 use crate::channel::ChannelError;
@@ -482,8 +482,8 @@ pub trait ProcHandle: Clone + Send + Sync + 'static {
     /// Must implement both:
     /// - [`Actor`], because the agent actually runs inside the proc,
     ///   and
-    /// - [`RemoteActor`], so callers can hold `ActorRef<Self::Agent>`.
-    type Agent: Actor + RemoteActor;
+    /// - [`Referable`], so callers can hold `ActorRef<Self::Agent>`.
+    type Agent: Actor + Referable;
 
     /// The type of terminal status produced when the proc exits.
     ///
@@ -661,9 +661,9 @@ where
 /// **proc-level** shutdown.
 ///
 /// **Type parameter:** `A` is constrained by the `ProcHandle::Agent`
-/// bound (`Actor + RemoteActor`).
+/// bound (`Actor + Referable`).
 #[derive(Debug)]
-pub struct LocalHandle<A: Actor + RemoteActor> {
+pub struct LocalHandle<A: Actor + Referable> {
     proc_id: ProcId,
     addr: ChannelAddr,
     agent_ref: ActorRef<A>,
@@ -671,7 +671,7 @@ pub struct LocalHandle<A: Actor + RemoteActor> {
 }
 
 // Manual `Clone` to avoid requiring `A: Clone`.
-impl<A: Actor + RemoteActor> Clone for LocalHandle<A> {
+impl<A: Actor + Referable> Clone for LocalHandle<A> {
     fn clone(&self) -> Self {
         Self {
             proc_id: self.proc_id.clone(),
@@ -683,8 +683,8 @@ impl<A: Actor + RemoteActor> Clone for LocalHandle<A> {
 }
 
 #[async_trait]
-impl<A: Actor + RemoteActor> ProcHandle for LocalHandle<A> {
-    /// `Agent = A` (inherits `Actor + RemoteActor` from the trait
+impl<A: Actor + Referable> ProcHandle for LocalHandle<A> {
+    /// `Agent = A` (inherits `Actor + Referable` from the trait
     /// bound).
     type Agent = A;
     type TerminalStatus = ();
@@ -760,9 +760,9 @@ impl<A: Actor + RemoteActor> ProcHandle for LocalHandle<A> {
 /// Local, in-process ProcManager.
 ///
 /// **Type bounds:**
-/// - `A: Actor + RemoteActor + Binds<A>`
+/// - `A: Actor + Referable + Binds<A>`
 ///   - `Actor`: the agent actually runs inside the proc.
-///   - `RemoteActor`: callers hold `ActorRef<A>` to the agent; this
+///   - `Referable`: callers hold `ActorRef<A>` to the agent; this
 ///     bound is required for typed remote refs.
 ///   - `Binds<A>`: lets the runtime wire the agent's message ports.
 /// - `F: Future<Output = anyhow::Result<ActorHandle<A>>> + Send`:
@@ -774,7 +774,7 @@ impl<A: Actor + RemoteActor> ProcHandle for LocalHandle<A> {
 #[async_trait]
 impl<A, S, F> ProcManager for LocalProcManager<S>
 where
-    A: Actor + RemoteActor + Binds<A>,
+    A: Actor + Referable + Binds<A>,
     F: Future<Output = anyhow::Result<ActorHandle<A>>> + Send,
     S: Fn(Proc) -> F + Sync,
 {
@@ -882,20 +882,20 @@ impl<A> Drop for ProcessProcManager<A> {
 /// `cmd.kill_on_drop(true)` when launching the child (the OS will
 /// SIGKILL it if the handle is dropped).
 ///
-/// The type bound `A: Actor + RemoteActor` comes from the
+/// The type bound `A: Actor + Referable` comes from the
 /// [`ProcHandle::Agent`] requirement: `Actor` because the agent
-/// actually runs inside the proc, and `RemoteActor` because it must
+/// actually runs inside the proc, and `Referable` because it must
 /// be referenceable via [`ActorRef<A>`] (i.e., safe to carry as a
 /// typed remote reference).
 #[derive(Debug)]
-pub struct ProcessHandle<A: Actor + RemoteActor> {
+pub struct ProcessHandle<A: Actor + Referable> {
     proc_id: ProcId,
     addr: ChannelAddr,
     agent_ref: ActorRef<A>,
 }
 
 // Manual `Clone` to avoid requiring `A: Clone`.
-impl<A: Actor + RemoteActor> Clone for ProcessHandle<A> {
+impl<A: Actor + Referable> Clone for ProcessHandle<A> {
     fn clone(&self) -> Self {
         Self {
             proc_id: self.proc_id.clone(),
@@ -906,9 +906,9 @@ impl<A: Actor + RemoteActor> Clone for ProcessHandle<A> {
 }
 
 #[async_trait]
-impl<A: Actor + RemoteActor> ProcHandle for ProcessHandle<A> {
+impl<A: Actor + Referable> ProcHandle for ProcessHandle<A> {
     /// Agent must be both an `Actor` (runs in the proc) and a
-    /// `RemoteActor` (so it can be referenced via `ActorRef<A>`).
+    /// `Referable` (so it can be referenced via `ActorRef<A>`).
     type Agent = A;
     type TerminalStatus = ();
 
@@ -950,8 +950,8 @@ impl<A: Actor + RemoteActor> ProcHandle for ProcessHandle<A> {
 impl<A> ProcManager for ProcessProcManager<A>
 where
     // Agent actor runs in the proc (`Actor`) and must be
-    // referenceable (`RemoteActor`).
-    A: Actor + RemoteActor,
+    // referenceable (`Referable`).
+    A: Actor + Referable,
 {
     type Handle = ProcessHandle<A>;
 
@@ -1016,9 +1016,9 @@ where
 
 impl<A> ProcessProcManager<A>
 where
-    // `Actor`: runs in the proc; `RemoteActor`: referenceable via
+    // `Actor`: runs in the proc; `Referable`: referenceable via
     // ActorRef; `Binds<A>`: wires ports.
-    A: Actor + RemoteActor + Binds<A>,
+    A: Actor + Referable + Binds<A>,
 {
     /// Boot a process in a ProcessProcManager<A>. Should be called from processes spawned
     /// by the process manager. `boot_proc` will spawn the provided actor type (with parameters)
@@ -1058,9 +1058,9 @@ pub async fn spawn_proc<A, S, F>(
     spawn: S,
 ) -> Result<Proc, HostError>
 where
-    // `Actor`: runs in the proc; `RemoteActor`: allows ActorRef<A>;
+    // `Actor`: runs in the proc; `Referable`: allows ActorRef<A>;
     // `Binds<A>`: wires ports
-    A: Actor + RemoteActor + Binds<A>,
+    A: Actor + Referable + Binds<A>,
     S: FnOnce(Proc) -> F,
     F: Future<Output = Result<ActorHandle<A>, anyhow::Error>>,
 {

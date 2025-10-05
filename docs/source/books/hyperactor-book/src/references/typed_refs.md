@@ -6,7 +6,7 @@ Typed references are strongly typed wrappers over raw identifiers like `ActorId`
 
 There are three main typed reference types:
 
-- [`ActorRef<A>`](#actorrefa): A typed reference to an actor implementing the `RemoteActor` trait.
+- [`ActorRef<A>`](#actorrefa): A typed reference to an actor implementing the `Referable` trait.
 - [`PortRef<M>`](#portrefm): A reference to a reusable mailbox port for messages of type `M` implementing the `RemoteMessage` trait.
 - [`OncePortRef<M>`](#onceportrefm): A reference to a one-shot port for receiving a single response of type `M` implementing the `RemoteMessage` trait.
 
@@ -16,7 +16,7 @@ These types are used as parameters in messages, return values from bindings, and
 
 ## `ActorRef<A>`
 
-`ActorRef<A>` is a typed reference to an actor of type `A`. It provides a way to identify and address remote actors that implement `RemoteActor`.
+`ActorRef<A>` is a typed reference to an actor of type `A`. It provides a way to identify and address remote actors that implement `Referable`.
 
 ```rust
 let actor_ref: ActorRef<MyActor> = ActorRef::attest(actor_id);
@@ -29,7 +29,7 @@ Unlike `ActorHandle<A>`, an `ActorRef` is just a reference — it doesn’t guar
 ### Definition
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ActorRef<A: RemoteActor> {
+pub struct ActorRef<A: Referable> {
     actor_id: ActorId,
     phantom: PhantomData<A>,
 }
@@ -80,7 +80,7 @@ Just like `PortRef`, this wraps a `PortId` with a phantom message type `M` for t
 
 ## `GangRef<A>`
 
-A `GangRef<A>` is a typed reference to a gang of actors, all of which implement the same `RemoteActor` type `A`.
+A `GangRef<A>` is a typed reference to a gang of actors, all of which implement the same `Referable` type `A`.
 ```rust
 let gang_ref: GangRef<MyActor> = GangId::new(...).into();
 ```
@@ -93,7 +93,7 @@ This allows you to route messages to specific members of a replicated actor grou
 ### Definition
 ```rust
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Hash, Ord)]
-pub struct GangRef<A: RemoteActor> {
+pub struct GangRef<A: Referable> {
     gang_id: GangId,
     phantom: PhantomData<A>,
 }

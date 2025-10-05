@@ -18,7 +18,7 @@ use hyperactor::AttrValue;
 use hyperactor::Named;
 use hyperactor::RemoteHandles;
 use hyperactor::RemoteMessage;
-use hyperactor::actor::RemoteActor;
+use hyperactor::actor::Referable;
 use hyperactor::context;
 use hyperactor::message::Castable;
 use hyperactor::message::IndexedErasedUnbound;
@@ -119,7 +119,7 @@ impl FromStr for ActorMeshId {
 
 /// Types references to Actor Meshes.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub struct ActorMeshRef<A: RemoteActor> {
+pub struct ActorMeshRef<A: Referable> {
     pub(crate) mesh_id: ActorMeshId,
     /// The shape of the root mesh.
     root: Shape,
@@ -132,7 +132,7 @@ pub struct ActorMeshRef<A: RemoteActor> {
     phantom: PhantomData<A>,
 }
 
-impl<A: RemoteActor> ActorMeshRef<A> {
+impl<A: Referable> ActorMeshRef<A> {
     /// The caller guarantees that the provided mesh ID is also a valid,
     /// typed reference.  This is usually invoked to provide a guarantee
     /// that an externally-provided mesh ID (e.g., through a command
@@ -226,7 +226,7 @@ impl<A: RemoteActor> ActorMeshRef<A> {
     }
 }
 
-impl<A: RemoteActor> Clone for ActorMeshRef<A> {
+impl<A: Referable> Clone for ActorMeshRef<A> {
     fn clone(&self) -> Self {
         Self {
             mesh_id: self.mesh_id.clone(),

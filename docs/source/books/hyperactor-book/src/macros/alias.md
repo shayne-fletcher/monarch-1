@@ -85,7 +85,7 @@ Expanding the example above yields a zero-sized façade actor with trait impls:
 ```rust
 pub struct ShoppingApi;
 
-impl hyperactor::actor::RemoteActor for ShoppingApi {}
+impl hyperactor::actor::Referable for ShoppingApi {}
 
 impl<A> hyperactor::actor::Binds<A> for ShoppingApi
 where
