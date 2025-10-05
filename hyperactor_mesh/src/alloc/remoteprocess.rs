@@ -2042,13 +2042,15 @@ mod test_alloc {
         let task1_allocator = RemoteProcessAllocator::new();
         let task1_addr = ChannelAddr::any(ChannelTransport::Unix);
         let task1_addr_string = task1_addr.to_string();
-        let task1_cmd =
-            Command::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap());
+        let task1_cmd = Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        ));
         let task2_allocator = RemoteProcessAllocator::new();
         let task2_addr = ChannelAddr::any(ChannelTransport::Unix);
         let task2_addr_string = task2_addr.to_string();
-        let task2_cmd =
-            Command::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap());
+        let task2_cmd = Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        ));
         let task1_allocator_copy = task1_allocator.clone();
         let task1_allocator_handle = tokio::spawn(async move {
             tracing::info!("spawning task1");
@@ -2169,13 +2171,15 @@ mod test_alloc {
         let task1_allocator = RemoteProcessAllocator::new();
         let task1_addr = ChannelAddr::any(ChannelTransport::Unix);
         let task1_addr_string = task1_addr.to_string();
-        let task1_cmd =
-            Command::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap());
+        let task1_cmd = Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        ));
         let task2_allocator = RemoteProcessAllocator::new();
         let task2_addr = ChannelAddr::any(ChannelTransport::Unix);
         let task2_addr_string = task2_addr.to_string();
-        let task2_cmd =
-            Command::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap());
+        let task2_cmd = Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        ));
         let task1_allocator_copy = task1_allocator.clone();
         let task1_allocator_handle = tokio::spawn(async move {
             tracing::info!("spawning task1");
@@ -2297,8 +2301,9 @@ mod test_alloc {
         let task1_allocator = RemoteProcessAllocator::new();
         let task1_addr = ChannelAddr::any(ChannelTransport::Unix);
         let task1_addr_string = task1_addr.to_string();
-        let task1_cmd =
-            Command::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap());
+        let task1_cmd = Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        ));
         let task2_allocator = RemoteProcessAllocator::new();
         let task2_addr = ChannelAddr::any(ChannelTransport::Unix);
         let task2_addr_string = task2_addr.to_string();
@@ -2421,10 +2426,9 @@ mod test_alloc {
         let remote_process_allocators = addresses
             .iter()
             .map(|addr| {
-                Command::new(
-                    buck_resources::get("monarch/hyperactor_mesh/remote_process_allocator")
-                        .unwrap(),
-                )
+                Command::new(crate::testresource::get(
+                    "monarch/hyperactor_mesh/remote_process_allocator",
+                ))
                 .env("RUST_LOG", "info")
                 .arg(format!("--addr={addr}"))
                 .stdout(std::process::Stdio::piped())
@@ -2436,9 +2440,9 @@ mod test_alloc {
         let done_allocating_addr = ChannelAddr::any(ChannelTransport::Unix);
         let (done_allocating_addr, mut done_allocating_rx) =
             channel::serve::<()>(done_allocating_addr).unwrap();
-        let mut remote_process_alloc = Command::new(
-            buck_resources::get("monarch/hyperactor_mesh/remote_process_alloc").unwrap(),
-        )
+        let mut remote_process_alloc = Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/remote_process_alloc",
+        ))
         .arg(format!("--done-allocating-addr={}", done_allocating_addr))
         .arg(format!("--addresses={}", addresses.join(",")))
         .arg(format!("--num-proc-meshes={}", num_proc_meshes))

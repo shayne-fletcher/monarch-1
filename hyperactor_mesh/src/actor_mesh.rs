@@ -1345,9 +1345,9 @@ mod tests {
         use crate::alloc::process::ProcessAllocator;
 
         fn process_allocator() -> ProcessAllocator {
-            ProcessAllocator::new(Command::new(
-                buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
-            ))
+            ProcessAllocator::new(Command::new(crate::testresource::get(
+                "monarch/hyperactor_mesh/bootstrap",
+            )))
         }
 
         #[cfg(fbcode_build)] // we use an external binary, produced by buck

@@ -32,6 +32,7 @@ mod router;
 pub mod shared_cell;
 pub mod shortuuid;
 pub mod test_utils;
+mod testresource;
 pub mod v1;
 
 pub use actor_mesh::RootActorMesh;

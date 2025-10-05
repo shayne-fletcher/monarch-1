@@ -831,7 +831,7 @@ mod tests {
         let config = hyperactor::config::global::lock();
         let _guard = config.override_key(crate::bootstrap::MESH_BOOTSTRAP_ENABLE_PDEATHSIG, false);
 
-        let program = buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap();
+        let program = crate::testresource::get("monarch/hyperactor_mesh/bootstrap");
 
         let hosts = vec![free_localhost_addr(), free_localhost_addr()];
 

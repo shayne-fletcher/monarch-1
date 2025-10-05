@@ -713,8 +713,9 @@ pub(crate) mod testing {
             Duration::from_secs(1),
         );
 
-        let command =
-            Command::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap());
+        let command = Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        ));
         let mut allocator = ProcessAllocator::new(command);
         let mut alloc = allocator
             .allocate(AllocSpec {

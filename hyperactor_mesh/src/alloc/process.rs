@@ -603,12 +603,12 @@ mod tests {
 
     #[cfg(fbcode_build)] // we use an external binary, produced by buck
     crate::alloc_test_suite!(ProcessAllocator::new(Command::new(
-        buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap()
+        crate::testresource::get("monarch/hyperactor_mesh/bootstrap")
     )));
 
     #[tokio::test]
     async fn test_sigterm_on_group_fail() {
-        let bootstrap_binary = buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap();
+        let bootstrap_binary = crate::testresource::get("monarch/hyperactor_mesh/bootstrap");
         let mut allocator = ProcessAllocator::new(Command::new(bootstrap_binary));
 
         let mut alloc = allocator

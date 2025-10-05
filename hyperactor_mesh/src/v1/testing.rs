@@ -65,9 +65,9 @@ pub async fn proc_meshes(cx: &impl context::Actor, extent: Extent) -> Vec<ProcMe
     });
 
     meshes.push({
-        let mut allocator = ProcessAllocator::new(Command::new(
-            buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
-        ));
+        let mut allocator = ProcessAllocator::new(Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        )));
         let alloc = allocator
             .allocate(AllocSpec {
                 extent,
@@ -98,9 +98,9 @@ pub async fn allocs(extent: Extent) -> Vec<Box<dyn Alloc + Send + Sync>> {
     vec![
         // Box::new(LocalAllocator.allocate(spec.clone()).await.unwrap()),
         Box::new(
-            ProcessAllocator::new(Command::new(
-                buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
-            ))
+            ProcessAllocator::new(Command::new(crate::testresource::get(
+                "monarch/hyperactor_mesh/bootstrap",
+            )))
             .allocate(spec.clone())
             .await
             .unwrap(),
@@ -135,9 +135,9 @@ pub async fn local_proc_mesh(extent: Extent) -> (ProcMesh, Instance<()>, DialMai
 
 /// Create a host mesh using multiple processes running on the test machine.
 pub async fn host_mesh(extent: Extent) -> HostMesh {
-    let mut allocator = ProcessAllocator::new(Command::new(
-        buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
-    ));
+    let mut allocator = ProcessAllocator::new(Command::new(crate::testresource::get(
+        "monarch/hyperactor_mesh/bootstrap",
+    )));
     let alloc = allocator
         .allocate(AllocSpec {
             extent,
