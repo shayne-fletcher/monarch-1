@@ -13,7 +13,7 @@ use hyperactor::Context;
 use hyperactor::Named;
 use hyperactor::RemoteHandles;
 use hyperactor::RemoteMessage;
-use hyperactor::actor::RemoteActor;
+use hyperactor::actor::Referable;
 use hyperactor::attrs::Attrs;
 use hyperactor::data::Serialized;
 use hyperactor::declare_attrs;
@@ -69,7 +69,7 @@ impl CastMessageEnvelope {
         message: M,
     ) -> Result<Self, anyhow::Error>
     where
-        A: RemoteActor + RemoteHandles<IndexedErasedUnbound<M>>,
+        A: Referable + RemoteHandles<IndexedErasedUnbound<M>>,
         M: Castable + RemoteMessage,
     {
         let data = ErasedUnbound::try_from_message(message)?;
@@ -184,7 +184,7 @@ impl DestinationPort {
     /// Create a new DestinationPort for a global actor name and message type.
     pub fn new<A, M>(actor_name: String) -> Self
     where
-        A: RemoteActor + RemoteHandles<IndexedErasedUnbound<M>>,
+        A: Referable + RemoteHandles<IndexedErasedUnbound<M>>,
         M: Castable + RemoteMessage,
     {
         Self {

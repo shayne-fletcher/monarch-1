@@ -48,7 +48,7 @@ Returns a stable `TypeId` for the actor type. Used to identify actor types at ru
 ## Blanket Implementation
 
 The RemotableActor trait is automatically implemented for any actor type `A` that:
-- implements `Actor` and `RemoteActor`,
+- implements `Actor` and `Referable`,
 - and whose `Params` type implements `RemoteMessage`.
 
 This allows `A` to be remotely registered and instantiated from serialized data, typically via the runtime's registration mechanism.
@@ -56,7 +56,7 @@ This allows `A` to be remotely registered and instantiated from serialized data,
 ```rust
 impl<A> RemotableActor for A
 where
-    A: Actor + RemoteActor,
+    A: Actor + Referable,
     A: Binds<A>,
     A::Params: RemoteMessage,
 {

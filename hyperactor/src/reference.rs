@@ -49,7 +49,7 @@ use crate::RemoteHandles;
 use crate::RemoteMessage;
 use crate::accum::ReducerOpts;
 use crate::accum::ReducerSpec;
-use crate::actor::RemoteActor;
+use crate::actor::Referable;
 use crate::attrs::Attrs;
 use crate::channel::ChannelAddr;
 use crate::context;
@@ -677,13 +677,13 @@ impl fmt::Display for ActorId {
         }
     }
 }
-impl<A: RemoteActor> From<ActorRef<A>> for ActorId {
+impl<A: Referable> From<ActorRef<A>> for ActorId {
     fn from(actor_ref: ActorRef<A>) -> Self {
         actor_ref.actor_id.clone()
     }
 }
 
-impl<'a, A: RemoteActor> From<&'a ActorRef<A>> for &'a ActorId {
+impl<'a, A: Referable> From<&'a ActorRef<A>> for &'a ActorId {
     fn from(actor_ref: &'a ActorRef<A>) -> Self {
         &actor_ref.actor_id
     }
@@ -702,13 +702,13 @@ impl FromStr for ActorId {
 
 /// ActorRefs are typed references to actors.
 #[derive(Debug, Named)]
-pub struct ActorRef<A: RemoteActor> {
+pub struct ActorRef<A: Referable> {
     pub(crate) actor_id: ActorId,
     // fn() -> A so that the struct remains Send
     phantom: PhantomData<fn() -> A>,
 }
 
-impl<A: RemoteActor> ActorRef<A> {
+impl<A: Referable> ActorRef<A> {
     /// Get the remote port for message type [`M`] for the referenced actor.
     pub fn port<M: RemoteMessage>(&self) -> PortRef<M>
     where
@@ -776,7 +776,7 @@ impl<A: RemoteActor> ActorRef<A> {
 }
 
 // Implement Serialize manually, without requiring A: Serialize
-impl<A: RemoteActor> Serialize for ActorRef<A> {
+impl<A: Referable> Serialize for ActorRef<A> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -787,7 +787,7 @@ impl<A: RemoteActor> Serialize for ActorRef<A> {
 }
 
 // Implement Deserialize manually, without requiring A: Deserialize
-impl<'de, A: RemoteActor> Deserialize<'de> for ActorRef<A> {
+impl<'de, A: Referable> Deserialize<'de> for ActorRef<A> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -800,7 +800,7 @@ impl<'de, A: RemoteActor> Deserialize<'de> for ActorRef<A> {
     }
 }
 
-impl<A: RemoteActor> fmt::Display for ActorRef<A> {
+impl<A: Referable> fmt::Display for ActorRef<A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.actor_id, f)?;
         write!(f, "<{}>", std::any::type_name::<A>())
@@ -808,7 +808,7 @@ impl<A: RemoteActor> fmt::Display for ActorRef<A> {
 }
 
 // We implement Clone manually to avoid imposing A: Clone.
-impl<A: RemoteActor> Clone for ActorRef<A> {
+impl<A: Referable> Clone for ActorRef<A> {
     fn clone(&self) -> Self {
         Self {
             actor_id: self.actor_id.clone(),
@@ -817,27 +817,27 @@ impl<A: RemoteActor> Clone for ActorRef<A> {
     }
 }
 
-impl<A: RemoteActor> PartialEq for ActorRef<A> {
+impl<A: Referable> PartialEq for ActorRef<A> {
     fn eq(&self, other: &Self) -> bool {
         self.actor_id == other.actor_id
     }
 }
 
-impl<A: RemoteActor> Eq for ActorRef<A> {}
+impl<A: Referable> Eq for ActorRef<A> {}
 
-impl<A: RemoteActor> PartialOrd for ActorRef<A> {
+impl<A: Referable> PartialOrd for ActorRef<A> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<A: RemoteActor> Ord for ActorRef<A> {
+impl<A: Referable> Ord for ActorRef<A> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.actor_id.cmp(&other.actor_id)
     }
 }
 
-impl<A: RemoteActor> Hash for ActorRef<A> {
+impl<A: Referable> Hash for ActorRef<A> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.actor_id.hash(state);
     }
@@ -1288,12 +1288,12 @@ fn chop<'a>(mut s: &'a str, delims: &'a [&'a str]) -> impl Iterator<Item = &'a s
 
 /// GangRefs are typed references to gangs.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Hash, Ord)]
-pub struct GangRef<A: RemoteActor> {
+pub struct GangRef<A: Referable> {
     gang_id: GangId,
     phantom: PhantomData<A>,
 }
 
-impl<A: RemoteActor> GangRef<A> {
+impl<A: Referable> GangRef<A> {
     /// Return an ActorRef corresponding with the provided rank in
     /// this gang.  Does not check the validity of the rank, so the
     /// returned identifier is not guaranteed to refer to a valid rank.
@@ -1315,7 +1315,7 @@ impl<A: RemoteActor> GangRef<A> {
     }
 }
 
-impl<A: RemoteActor> Clone for GangRef<A> {
+impl<A: Referable> Clone for GangRef<A> {
     fn clone(&self) -> Self {
         Self {
             gang_id: self.gang_id.clone(),
@@ -1325,7 +1325,7 @@ impl<A: RemoteActor> Clone for GangRef<A> {
 }
 
 // TODO: remove, replace with attest
-impl<A: RemoteActor> From<GangId> for GangRef<A> {
+impl<A: Referable> From<GangId> for GangRef<A> {
     fn from(gang_id: GangId) -> Self {
         Self {
             gang_id,
@@ -1334,13 +1334,13 @@ impl<A: RemoteActor> From<GangId> for GangRef<A> {
     }
 }
 
-impl<A: RemoteActor> From<GangRef<A>> for GangId {
+impl<A: Referable> From<GangRef<A>> for GangId {
     fn from(gang_ref: GangRef<A>) -> Self {
         gang_ref.gang_id
     }
 }
 
-impl<'a, A: RemoteActor> From<&'a GangRef<A>> for &'a GangId {
+impl<'a, A: Referable> From<&'a GangRef<A>> for &'a GangId {
     fn from(gang_ref: &'a GangRef<A>) -> Self {
         &gang_ref.gang_id
     }

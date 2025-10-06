@@ -1573,7 +1573,7 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut expanded = quote! {
         #input
 
-        impl hyperactor::actor::RemoteActor for #data_type_name {}
+        impl hyperactor::actor::Referable for #data_type_name {}
 
         #(#handles)*
 
@@ -1619,7 +1619,7 @@ impl syn::parse::Parse for AliasInput {
     }
 }
 
-/// Create a [`RemoteActor`] handling a specific set of message types.
+/// Create a [`Referable`] handling a specific set of message types.
 /// This is used to create an [`ActorRef`] without having to depend on the
 /// actor's implementation. If the message type need to be cast, add `castable`
 /// flag to those types. e.g. the following example creats an alias with 5
@@ -1643,7 +1643,7 @@ pub fn alias(input: TokenStream) -> TokenStream {
         #[doc = "The generated alias struct."]
         #[derive(Debug, hyperactor::Named, serde::Serialize, serde::Deserialize)]
         pub struct #alias;
-        impl hyperactor::actor::RemoteActor for #alias {}
+        impl hyperactor::actor::Referable for #alias {}
 
         impl<A> hyperactor::actor::Binds<A> for #alias
         where

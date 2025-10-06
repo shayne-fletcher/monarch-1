@@ -24,7 +24,7 @@ use hyperactor::RemoteHandles;
 use hyperactor::RemoteMessage;
 use hyperactor::Unbind;
 use hyperactor::WorldId;
-use hyperactor::actor::RemoteActor;
+use hyperactor::actor::Referable;
 use hyperactor::attrs::Attrs;
 use hyperactor::attrs::declare_attrs;
 use hyperactor::config;
@@ -84,7 +84,7 @@ pub(crate) fn actor_mesh_cast<A, M>(
     message: M,
 ) -> Result<(), CastError>
 where
-    A: RemoteActor + RemoteHandles<IndexedErasedUnbound<M>>,
+    A: Referable + RemoteHandles<IndexedErasedUnbound<M>>,
     M: Castable + RemoteMessage,
 {
     let _ = metrics::ACTOR_MESH_CAST_DURATION.start(hyperactor::kv_pairs!(
@@ -154,7 +154,7 @@ pub(crate) fn cast_to_sliced_mesh<A, M>(
     root_mesh_shape: &Shape,
 ) -> Result<(), CastError>
 where
-    A: RemoteActor + RemoteHandles<IndexedErasedUnbound<M>>,
+    A: Referable + RemoteHandles<IndexedErasedUnbound<M>>,
     M: Castable + RemoteMessage,
 {
     let root_slice = root_mesh_shape.slice();
@@ -187,7 +187,7 @@ where
 #[async_trait]
 pub trait ActorMesh: Mesh<Id = ActorMeshId> {
     /// The type of actor in the mesh.
-    type Actor: RemoteActor;
+    type Actor: Referable;
 
     /// Cast an `M`-typed message to the ranks selected by `sel` in
     /// this ActorMesh.
@@ -272,10 +272,10 @@ impl Deref for ProcMeshRef<'_> {
 /// A mesh of actor instances. ActorMeshes are obtained by spawning an
 /// actor on a [`ProcMesh`].
 ///
-/// Generic bound: `A: RemoteActor` — this type hands out typed
+/// Generic bound: `A: Referable` — this type hands out typed
 /// `ActorRef<A>` handles (see `ranks`), and `ActorRef` is only
-/// defined for `A: RemoteActor`.
-pub struct RootActorMesh<'a, A: RemoteActor> {
+/// defined for `A: Referable`.
+pub struct RootActorMesh<'a, A: Referable> {
     proc_mesh: ProcMeshRef<'a>,
     name: String,
     pub(crate) ranks: Vec<ActorRef<A>>, // temporary until we remove `ArcActorMesh`.
@@ -284,7 +284,7 @@ pub struct RootActorMesh<'a, A: RemoteActor> {
     actor_supervision_rx: Option<mpsc::UnboundedReceiver<ActorSupervisionEvent>>,
 }
 
-impl<'a, A: RemoteActor> RootActorMesh<'a, A> {
+impl<'a, A: Referable> RootActorMesh<'a, A> {
     pub(crate) fn new(
         proc_mesh: &'a ProcMesh,
         name: String,
@@ -352,7 +352,7 @@ impl ActorSupervisionEvents {
 }
 
 #[async_trait]
-impl<'a, A: RemoteActor> Mesh for RootActorMesh<'a, A> {
+impl<'a, A: Referable> Mesh for RootActorMesh<'a, A> {
     type Node = ActorRef<A>;
     type Id = ActorMeshId;
     type Sliced<'b>
@@ -381,7 +381,7 @@ impl<'a, A: RemoteActor> Mesh for RootActorMesh<'a, A> {
     }
 }
 
-impl<A: RemoteActor> ActorMesh for RootActorMesh<'_, A> {
+impl<A: Referable> ActorMesh for RootActorMesh<'_, A> {
     type Actor = A;
 
     fn proc_mesh(&self) -> &ProcMesh {
@@ -393,9 +393,9 @@ impl<A: RemoteActor> ActorMesh for RootActorMesh<'_, A> {
     }
 }
 
-pub struct SlicedActorMesh<'a, A: RemoteActor>(&'a RootActorMesh<'a, A>, Shape);
+pub struct SlicedActorMesh<'a, A: Referable>(&'a RootActorMesh<'a, A>, Shape);
 
-impl<'a, A: RemoteActor> SlicedActorMesh<'a, A> {
+impl<'a, A: Referable> SlicedActorMesh<'a, A> {
     pub fn new(actor_mesh: &'a RootActorMesh<'a, A>, shape: Shape) -> Self {
         Self(actor_mesh, shape)
     }
@@ -406,7 +406,7 @@ impl<'a, A: RemoteActor> SlicedActorMesh<'a, A> {
 }
 
 #[async_trait]
-impl<A: RemoteActor> Mesh for SlicedActorMesh<'_, A> {
+impl<A: Referable> Mesh for SlicedActorMesh<'_, A> {
     type Node = ActorRef<A>;
     type Id = ActorMeshId;
     type Sliced<'b>
@@ -435,7 +435,7 @@ impl<A: RemoteActor> Mesh for SlicedActorMesh<'_, A> {
     }
 }
 
-impl<A: RemoteActor> ActorMesh for SlicedActorMesh<'_, A> {
+impl<A: Referable> ActorMesh for SlicedActorMesh<'_, A> {
     type Actor = A;
 
     fn proc_mesh(&self) -> &ProcMesh {

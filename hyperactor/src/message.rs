@@ -43,7 +43,7 @@ use crate::Mailbox;
 use crate::Named;
 use crate::RemoteHandles;
 use crate::RemoteMessage;
-use crate::actor::RemoteActor;
+use crate::actor::Referable;
 use crate::context;
 use crate::data::Serialized;
 
@@ -238,7 +238,7 @@ impl<M: Bind> IndexedErasedUnbound<M> {
         mailbox: Mailbox,
     ) -> anyhow::Result<()>
     where
-        A: RemoteActor + RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
+        A: Referable + RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
         M: RemoteMessage,
         C: context::Actor + Send + Sync + 'static,
     {

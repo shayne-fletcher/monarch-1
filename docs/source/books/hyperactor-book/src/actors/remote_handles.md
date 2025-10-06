@@ -1,8 +1,8 @@
 # RemoteHandles
 
-The `RemoteHandles<M>` trait is a marker used to declare that a given `RemoteActor` type can handle messages of type `M`.
+The `RemoteHandles<M>` trait is a marker used to declare that a given `Referable` type can handle messages of type `M`.
 ```rust
-pub trait RemoteHandles<M: RemoteMessage>: RemoteActor {}
+pub trait RemoteHandles<M: RemoteMessage>: Referable {}
 ```
 
 An implementation like:

@@ -59,7 +59,7 @@ use crate::actor::ActorErrorKind;
 use crate::actor::ActorHandle;
 use crate::actor::ActorStatus;
 use crate::actor::Binds;
-use crate::actor::RemoteActor;
+use crate::actor::Referable;
 use crate::actor::RemoteHandles;
 use crate::actor::Signal;
 use crate::attrs::Attrs;
@@ -474,7 +474,7 @@ impl Proc {
     ) -> Result<(Instance<()>, ActorRef<R>, PortReceiver<M>), anyhow::Error>
     where
         M: RemoteMessage,
-        R: RemoteActor + RemoteHandles<M>,
+        R: Referable + RemoteHandles<M>,
     {
         let (instance, _handle) = self.instance(name)?;
         let (handle, rx) = instance.open_port::<M>();
@@ -748,9 +748,9 @@ impl Proc {
     /// Bounds:
     /// - `R: Actor` — must be a real actor that can live in this
     ///   proc.
-    /// - `R: RemoteActor` — required because the input is an
+    /// - `R: Referable` — required because the input is an
     ///   `ActorRef<R>`.
-    pub fn resolve_actor_ref<R: Actor + RemoteActor>(
+    pub fn resolve_actor_ref<R: Actor + Referable>(
         &self,
         actor_ref: &ActorRef<R>,
     ) -> Option<ActorHandle<R>> {

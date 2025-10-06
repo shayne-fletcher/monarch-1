@@ -30,7 +30,7 @@ use hyperactor::RefClient;
 use hyperactor::RemoteMessage;
 use hyperactor::WorldId;
 use hyperactor::actor::ActorHandle;
-use hyperactor::actor::RemoteActor;
+use hyperactor::actor::Referable;
 use hyperactor::actor::remote::Remote;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
@@ -829,7 +829,7 @@ impl Handler<ActorSupervisionEvent> for ProcActor {
 
 /// Convenience utility to spawn an actor on a proc. Spawn returns
 /// with the new ActorRef on success.
-pub async fn spawn<A: Actor + RemoteActor>(
+pub async fn spawn<A: Actor + Referable>(
     cx: &impl context::Actor,
     proc_actor: &ActorRef<ProcActor>,
     actor_name: &str,

@@ -2,7 +2,7 @@
 
 The `Binds` trait defines how an actor's ports are associated with the message types it can receive remotely.
 ```rust
-pub trait Binds<A: Actor>: RemoteActor {
+pub trait Binds<A: Actor>: Referable {
     fn bind(ports: &Ports<A>);
 }
 ```

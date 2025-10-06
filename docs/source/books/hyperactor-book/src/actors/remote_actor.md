@@ -1,7 +1,7 @@
-# RemoteActor
+# Referable
 
 ```rust
-pub trait RemoteActor: Named + Send + Sync {}
+pub trait Referable: Named + Send + Sync {}
 ```
 This is a marker trait indicating that a type is eligible to serve as a reference to a remote actor (i.e., an actor that may reside on a different proc).
 

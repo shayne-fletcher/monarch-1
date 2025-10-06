@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicBool;
 use hyperactor::Actor;
 use hyperactor::RemoteMessage;
 use hyperactor::WorldId;
-use hyperactor::actor::RemoteActor;
+use hyperactor::actor::Referable;
 use hyperactor::context::Mailbox as _;
 use hyperactor::proc::Instance;
 use hyperactor::proc::Proc;
@@ -87,7 +87,7 @@ impl From<ProcMesh> for TrackedProcMesh {
 }
 
 impl TrackedProcMesh {
-    pub async fn spawn<A: Actor + RemoteActor>(
+    pub async fn spawn<A: Actor + Referable>(
         &self,
         actor_name: &str,
         params: &A::Params,

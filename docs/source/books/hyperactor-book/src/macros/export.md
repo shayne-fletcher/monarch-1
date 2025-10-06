@@ -17,7 +17,7 @@ The macro expands to include:
  - A `Named` implementation for the actor
  - A `Binds<Self>` implementation that registers supported message types
  - Implementations of `RemoteHandles<T>` for each type in the `handlers = [...]` list
- - A `RemoteActor` marker implementation
+ - A `Referable` marker implementation
  - If `spawn = true`, a `RemotableActor` implementation and an inventory registration of the `spawn` function.
 
 This enables the actor to be:
@@ -27,7 +27,7 @@ This enables the actor to be:
 
 ## Generated Implementations (simplified)
 ```rust
-impl RemoteActor for ShoppingListActor {}
+impl Referable for ShoppingListActor {}
 
 impl RemoteHandles<ShoppingList> for ShoppingListActor {}
 impl RemoteHandles<Signal> for ShoppingListActor {}
