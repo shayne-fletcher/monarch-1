@@ -126,13 +126,11 @@ pub(crate) fn redirect_stdio_to_user_pid_file() -> anyhow::Result<()> {
 
 /// Redirects stdio to a log file if stdout is broken.
 pub(crate) fn handle_broken_pipes() {
-    if any_stdio_broken() {
-        if redirect_stdio_to_user_pid_file().is_ok() {
-            tracing::info!(
-                "stdio for {} redirected due to broken pipe",
-                std::process::id()
-            );
-        }
+    if any_stdio_broken() && redirect_stdio_to_user_pid_file().is_ok() {
+        tracing::info!(
+            "stdio for {} redirected due to broken pipe",
+            std::process::id()
+        );
     }
 }
 

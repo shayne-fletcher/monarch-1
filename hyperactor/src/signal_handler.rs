@@ -130,38 +130,37 @@ impl GlobalSignalManager {
         let listener = tokio::spawn(async move {
             if let Ok(mut signals) =
                 signal_hook_tokio::Signals::new([signal::SIGINT as i32, signal::SIGTERM as i32])
+                && let Some(signal) = signals.next().await
             {
-                if let Some(signal) = signals.next().await {
-                    // If parent died, stdout/stderr are broken pipes
-                    // that cause uninterruptible sleep on write.
-                    // Detect and redirect to file to prevent hanging.
-                    crate::stdio_redirect::handle_broken_pipes();
+                // If parent died, stdout/stderr are broken pipes
+                // that cause uninterruptible sleep on write.
+                // Detect and redirect to file to prevent hanging.
+                crate::stdio_redirect::handle_broken_pipes();
 
-                    tracing::info!("received signal: {}", signal);
+                tracing::info!("received signal: {}", signal);
 
-                    get_signal_manager().execute_all_cleanups().await;
+                get_signal_manager().execute_all_cleanups().await;
 
-                    match signal::Signal::try_from(signal) {
-                        Ok(sig) => {
-                            if let Err(err) =
-                                // SAFETY: We're setting the handle to SigDfl (default system behaviour)
-                                unsafe { signal::signal(sig, signal::SigHandler::SigDfl) }
-                            {
-                                tracing::error!(
-                                    "failed to restore default signal handler for {}: {}",
-                                    sig,
-                                    err
-                                );
-                            }
-
-                            // Re-raise the signal to trigger default behavior (process termination)
-                            if let Err(err) = signal::raise(sig) {
-                                tracing::error!("failed to re-raise signal {}: {}", sig, err);
-                            }
+                match signal::Signal::try_from(signal) {
+                    Ok(sig) => {
+                        if let Err(err) =
+                            // SAFETY: We're setting the handle to SigDfl (default system behaviour)
+                            unsafe { signal::signal(sig, signal::SigHandler::SigDfl) }
+                        {
+                            tracing::error!(
+                                "failed to restore default signal handler for {}: {}",
+                                sig,
+                                err
+                            );
                         }
-                        Err(err) => {
-                            tracing::error!("failed to convert signal {}: {}", signal, err);
+
+                        // Re-raise the signal to trigger default behavior (process termination)
+                        if let Err(err) = signal::raise(sig) {
+                            tracing::error!("failed to re-raise signal {}: {}", sig, err);
                         }
+                    }
+                    Err(err) => {
+                        tracing::error!("failed to convert signal {}: {}", signal, err);
                     }
                 }
             }

@@ -190,6 +190,12 @@ pub struct SharedCellPool {
     token: AtomicUsize,
 }
 
+impl Default for SharedCellPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SharedCellPool {
     pub fn new() -> Self {
         Self {

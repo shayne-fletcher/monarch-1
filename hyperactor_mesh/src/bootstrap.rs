@@ -50,7 +50,6 @@ use hyperactor::host::ProcManager;
 use hyperactor::host::TerminateSummary;
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::proc::Proc;
-use libc::c_int;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::process::Child;
@@ -405,7 +404,7 @@ pub fn install_pdeathsig_kill() -> io::Result<()> {
     {
         // SAFETY: Calling into libc; does not dereference memory, just
         // asks the kernel to deliver SIGKILL on parent death.
-        let rc = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as c_int) };
+        let rc = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_int) };
         if rc != 0 {
             return Err(io::Error::last_os_error());
         }

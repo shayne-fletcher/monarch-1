@@ -33,7 +33,10 @@ where
                     status
                 )),
             },
-            Ok(ForkResult::Child) => Ok(f().await),
+            Ok(ForkResult::Child) => {
+                let _: () = f().await;
+                Ok(())
+            }
             Err(_) => Err(anyhow::anyhow!("fork failed")),
         }
     }

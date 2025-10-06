@@ -492,11 +492,9 @@ impl ActorStatus {
             Self::Initializing => Self::Initializing,
             Self::Client => Self::Client,
             Self::Idle => Self::Idle,
-            Self::Processing(instant, handler) => {
-                Self::Processing(instant.clone(), handler.clone())
-            }
-            Self::Saving(instant) => Self::Saving(instant.clone()),
-            Self::Loading(instant) => Self::Loading(instant.clone()),
+            Self::Processing(instant, handler) => Self::Processing(*instant, handler.clone()),
+            Self::Saving(instant) => Self::Saving(*instant),
+            Self::Loading(instant) => Self::Loading(*instant),
             Self::Stopping => Self::Stopping,
             Self::Stopped => Self::Stopped,
             Self::Failed(err) => Self::Failed(err.clone()),
@@ -521,7 +519,7 @@ impl fmt::Display for ActorStatus {
                     "processing for {}ms",
                     RealClock
                         .system_time_now()
-                        .duration_since(instant.clone())
+                        .duration_since(*instant)
                         .unwrap_or_default()
                         .as_millis()
                 )
@@ -533,7 +531,7 @@ impl fmt::Display for ActorStatus {
                     handler,
                     RealClock
                         .system_time_now()
-                        .duration_since(instant.clone())
+                        .duration_since(*instant)
                         .unwrap_or_default()
                         .as_millis()
                 )
@@ -546,7 +544,7 @@ impl fmt::Display for ActorStatus {
                     arm,
                     RealClock
                         .system_time_now()
-                        .duration_since(instant.clone())
+                        .duration_since(*instant)
                         .unwrap_or_default()
                         .as_millis()
                 )
@@ -557,7 +555,7 @@ impl fmt::Display for ActorStatus {
                     "saving for {}ms",
                     RealClock
                         .system_time_now()
-                        .duration_since(instant.clone())
+                        .duration_since(*instant)
                         .unwrap_or_default()
                         .as_millis()
                 )
@@ -568,7 +566,7 @@ impl fmt::Display for ActorStatus {
                     "loading for {}ms",
                     RealClock
                         .system_time_now()
-                        .duration_since(instant.clone())
+                        .duration_since(*instant)
                         .unwrap_or_default()
                         .as_millis()
                 )

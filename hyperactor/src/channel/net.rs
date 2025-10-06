@@ -393,17 +393,14 @@ impl<M: RemoteMessage> NetTx<M> {
             }
 
             fn requeue_unacked(&mut self, unacked: MessageDeque<M>) {
-                match (unacked.back(), self.deque.front()) {
-                    (Some(last), Some(first)) => {
-                        assert!(
-                            last.seq < first.seq,
-                            "{}: seq should be in ascending order, but got {} vs {}",
-                            self.log_id,
-                            last.seq,
-                            first.seq,
-                        );
-                    }
-                    _ => (),
+                if let (Some(last), Some(first)) = (unacked.back(), self.deque.front()) {
+                    assert!(
+                        last.seq < first.seq,
+                        "{}: seq should be in ascending order, but got {} vs {}",
+                        self.log_id,
+                        last.seq,
+                        first.seq,
+                    );
                 }
 
                 let mut outbox = unacked;
@@ -537,7 +534,7 @@ impl<M: RemoteMessage> NetTx<M> {
                     Some(msg) => {
                         RealClock
                             .sleep_until(
-                                msg.received_at.clone()
+                                msg.received_at
                                     + config::global::get(config::MESSAGE_DELIVERY_TIMEOUT),
                             )
                             .await
@@ -964,10 +961,10 @@ impl<M: RemoteMessage> NetTx<M> {
                 }
             };
 
-            if !matches!(state, State::Closing { .. }) {
-                if let Conn::Disconnected(ref mut backoff) = conn {
-                    RealClock.sleep(backoff.next_backoff().unwrap()).await;
-                }
+            if !matches!(state, State::Closing { .. })
+                && let Conn::Disconnected(ref mut backoff) = conn
+            {
+                RealClock.sleep(backoff.next_backoff().unwrap()).await;
             }
         }; // loop
         tracing::debug!("{log_id}: NetTx exited its loop with state: {state}");
@@ -1435,13 +1432,10 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
         let mut final_ack = final_next.ack;
         // Flush any ongoing write.
         if self.write_state.is_writing() {
-            match self.write_state.send().await {
-                Ok(acked_seq) => {
-                    if acked_seq > final_ack {
-                        final_ack = acked_seq;
-                    }
+            if let Ok(acked_seq) = self.write_state.send().await {
+                if acked_seq > final_ack {
+                    final_ack = acked_seq;
                 }
-                Err(_) => (),
             };
         }
         // best effort: "flush" any remaining ack before closing this session
@@ -1480,26 +1474,23 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
             let Ok(writer) = replace(&mut self.write_state, WriteState::Broken).into_idle() else {
                 panic!("illegal state");
             };
-            match serialize_response(NetRxResponse::Reject) {
-                Ok(data) => {
-                    match FrameWrite::new(
-                        writer,
-                        data,
-                        config::global::get(config::CODEC_MAX_FRAME_LENGTH),
-                    ) {
-                        Ok(fw) => {
-                            self.write_state = WriteState::Writing(fw, 0);
-                            let _ = self.write_state.send().await;
-                        }
-                        Err((w, e)) => {
-                            debug_assert_eq!(e.kind(), io::ErrorKind::InvalidData);
-                            tracing::debug!("failed to create reject frame (should be tiny): {e}");
-                            self.write_state = WriteState::Idle(w);
-                            // drop the reject; we're closing anyway
-                        }
+            if let Ok(data) = serialize_response(NetRxResponse::Reject) {
+                match FrameWrite::new(
+                    writer,
+                    data,
+                    config::global::get(config::CODEC_MAX_FRAME_LENGTH),
+                ) {
+                    Ok(fw) => {
+                        self.write_state = WriteState::Writing(fw, 0);
+                        let _ = self.write_state.send().await;
+                    }
+                    Err((w, e)) => {
+                        debug_assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+                        tracing::debug!("failed to create reject frame (should be tiny): {e}");
+                        self.write_state = WriteState::Idle(w);
+                        // drop the reject; we're closing anyway
                     }
                 }
-                Err(_) => (),
             };
         }
 
@@ -2104,7 +2095,7 @@ pub(crate) mod tcp {
         type Stream = TcpStream;
 
         fn dest(&self) -> ChannelAddr {
-            ChannelAddr::Tcp(self.0.clone())
+            ChannelAddr::Tcp(self.0)
         }
 
         async fn connect(&self) -> Result<Self::Stream, ClientError> {

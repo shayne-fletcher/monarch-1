@@ -681,13 +681,13 @@ impl SimNet {
             self.state
                 .scheduled_events
                 .entry(scheduled_event.time)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(scheduled_event);
         } else {
             self.state
                 .unadvanceable_scheduled_events
                 .entry(scheduled_event.time)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(scheduled_event);
         }
     }

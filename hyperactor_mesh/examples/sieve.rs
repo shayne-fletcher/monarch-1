@@ -74,7 +74,7 @@ pub struct SieveActor {
 #[async_trait]
 impl Handler<NextNumber> for SieveActor {
     async fn handle(&mut self, cx: &Context<Self>, msg: NextNumber) -> Result<()> {
-        if msg.number % self.prime != 0 {
+        if !msg.number.is_multiple_of(self.prime) {
             match &self.next {
                 Some(next) => {
                     next.send(msg)?;
