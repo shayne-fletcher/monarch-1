@@ -135,6 +135,9 @@ pub struct AttrKeyInfo {
     pub parse: fn(&str) -> Result<Box<dyn SerializableValue>, anyhow::Error>,
     /// Default value for the attribute, if any.
     pub default: Option<&'static dyn SerializableValue>,
+    /// A reference to the relevant key object with the associated
+    /// type parameter erased. Can be downcast to a concrete Key<T>.
+    pub erased: &'static dyn ErasedKey,
 }
 
 inventory::collect!(AttrKeyInfo);
@@ -198,6 +201,39 @@ impl<T: 'static> Clone for Key<T> {
 }
 
 impl<T: 'static> Copy for Key<T> {}
+
+/// A trait for type-erased keys.
+pub trait ErasedKey: Any + Send + Sync + 'static {
+    /// The name of the key.
+    fn name(&self) -> &'static str;
+
+    /// The typehash of the key's associated type.
+    fn typehash(&self) -> u64;
+
+    /// The typename of the key's associated type.
+    fn typename(&self) -> &'static str;
+}
+
+impl dyn ErasedKey {
+    /// Downcast a type-erased key to a specific key type.
+    pub fn downcast_ref<T: Named + 'static>(&'static self) -> Option<&'static Key<T>> {
+        (self as &dyn Any).downcast_ref::<Key<T>>()
+    }
+}
+
+impl<T: AttrValue> ErasedKey for Key<T> {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn typehash(&self) -> u64 {
+        T::typehash()
+    }
+
+    fn typename(&self) -> &'static str {
+        T::typename()
+    }
+}
 
 // Enable attr[key] syntax.
 impl<T: AttrValue> Index<Key<T>> for Attrs {
@@ -778,6 +814,7 @@ macro_rules! declare_attrs {
                     Ok(Box::new(value) as Box<dyn $crate::attrs::SerializableValue>)
                 },
                 default: Some($crate::paste! { &[<$name _DEFAULT>] }),
+                erased: &$name,
             }
         }
     };
@@ -830,6 +867,7 @@ macro_rules! declare_attrs {
                     Ok(Box::new(value) as Box<dyn $crate::attrs::SerializableValue>)
                 },
                 default: None,
+                erased: &$name,
             }
         }
     };

@@ -10,7 +10,8 @@ from enum import Enum
 
 class ChannelTransport(Enum):
     Tcp = "tcp"
-    MetaTls = "metatls"
+    MetaTlsWithHostname = "metatls(hostname)"
+    MetaTlsWithIpV6 = "metatls(ipv6)"
     Local = "local"
     Unix = "unix"
     # Sim  # TODO add support

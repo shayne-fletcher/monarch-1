@@ -10,6 +10,10 @@
 Type hints for the monarch_hyperactor.config Rust bindings.
 """
 
+from typing import Any, Dict
+
+from monarch._rust_bindings.monarch_hyperactor.channel import ChannelTransport
+
 def reload_config_from_env() -> None:
     """
     Reload configuration from environment variables.
@@ -18,3 +22,8 @@ def reload_config_from_env() -> None:
     the global configuration.
     """
     ...
+
+def configure(
+    default_transport: ChannelTransport = ChannelTransport.Unix,
+) -> None: ...
+def get_configuration() -> Dict[str, Any]: ...

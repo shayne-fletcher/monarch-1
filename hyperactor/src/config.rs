@@ -48,6 +48,10 @@ declare_attrs! {
     /// key.
     pub attr CONFIG_ENV_VAR: String;
 
+    /// This is a meta-attribute specifying the name of the kwarg to pass to monarch.configure()
+    /// to set the attribute value in the global config.
+    pub attr PYTHON_CONFIG_KEY: String;
+
     /// Maximum frame length for codec
     @meta(CONFIG_ENV_VAR = "HYPERACTOR_CODEC_MAX_FRAME_LENGTH".to_string())
     pub attr CODEC_MAX_FRAME_LENGTH: usize = 10 * 1024 * 1024 * 1024; // 10 GiB
