@@ -126,20 +126,20 @@ async def main():
     start_time = time.time()
 
     # Start up a ProcMesh.
-    local_proc_mesh: ProcMesh = await this_host().spawn_procs(
+    local_proc_mesh: ProcMesh = this_host().spawn_procs(
         per_host={"procs": NUM_CRAWLERS}
     )
 
     # Create queues across the mesh and use slice to target the first one; we will not use the rest.
     # TODO: One ProcMesh::slice is implemented, avoid spawning the extra ones here.
-    all_queues = await local_proc_mesh.spawn("queues", QueueActor)
+    all_queues = local_proc_mesh.spawn("queues", QueueActor)
     target_queue = all_queues.slice(procs=slice(0, 1))
 
     # Prime the queue with the base URL we want to crawl.
     await target_queue.insert.call_one(BASE, DEPTH)
 
     # Make the crawlers and pass in the queues; crawlers will just use the first one as well.
-    crawlers = await local_proc_mesh.spawn("crawlers", CrawlActor, all_queues)
+    crawlers = local_proc_mesh.spawn("crawlers", CrawlActor, all_queues)
 
     # Run the crawlers; display the count of documents they crawled when done.
     results = await crawlers.crawl.call()
