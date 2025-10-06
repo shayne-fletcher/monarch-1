@@ -401,7 +401,7 @@ impl Handler<ActorSupervisionEvent> for ProcMeshAgent {
             tracing::info!("Received supervision event: {:?}, recording", event);
             self.supervision_events
                 .entry(event.actor_id.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(event.clone());
         }
         if let Some(supervisor) = self.state.supervisor() {

@@ -712,7 +712,7 @@ impl Proc {
             .iter()
             .filter(|(actor_id, _)| !stopped_actors.contains(actor_id))
             .map(|(actor_id, _)| {
-                let f = self.abort_root_actor(actor_id, this_handle.clone());
+                let f = self.abort_root_actor(actor_id, this_handle);
                 async move {
                     let _ = if let Some(f) = f { Some(f.await) } else { None };
                     // If `is_none(&_)` then the proc's `ledger.roots`
@@ -1200,11 +1200,8 @@ impl<A: Actor> Instance<A> {
 
         let (mut signal_receiver, _) = actor_loop_receivers;
         while self.cell.child_count() > 0 {
-            match signal_receiver.recv().await? {
-                Signal::ChildStopped(pid) => {
-                    assert!(self.cell.get_child(pid).is_none());
-                }
-                _ => (),
+            if let Signal::ChildStopped(pid) = signal_receiver.recv().await? {
+                assert!(self.cell.get_child(pid).is_none());
             }
         }
 
@@ -1345,7 +1342,7 @@ impl<A: Actor> Instance<A> {
             )
         });
 
-        let _ = self.change_status(ActorStatus::Processing(
+        self.change_status(ActorStatus::Processing(
             self.clock().system_time_now(),
             handler,
         ));
@@ -1427,7 +1424,7 @@ impl<A: Actor> Instance<A> {
             ports: self.ports.clone(),
             status_tx: self.status_tx.clone(),
             sequencer: self.sequencer.clone(),
-            id: self.id.clone(),
+            id: self.id,
         }
     }
 
@@ -1799,6 +1796,12 @@ impl Drop for InstanceState {
 #[derive(Debug, Clone)]
 pub struct WeakInstanceCell {
     inner: Weak<InstanceState>,
+}
+
+impl Default for WeakInstanceCell {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WeakInstanceCell {

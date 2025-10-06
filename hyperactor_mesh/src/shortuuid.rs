@@ -74,7 +74,7 @@ impl ShortUuid {
             let c = FLICKR_BASE_58.chars().nth(remainder).unwrap();
             result.push(c);
             // Make sure the first position is never a digit.
-            if !raw && pos == 11 && c >= '0' && c <= '9' {
+            if !raw && pos == 11 && c.is_ascii_digit() {
                 result.push('_');
             }
         }

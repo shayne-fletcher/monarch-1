@@ -527,7 +527,7 @@ impl<T: LogSender + Unpin + 'static, S: io::AsyncWrite + Send + Unpin + 'static>
         match Pin::new(&mut this.std_writer).poll_write(cx, buf) {
             Poll::Ready(Ok(_)) => {
                 // Forward the buffer directly to the log sender without parsing
-                let output_target = this.output_target.clone();
+                let output_target = this.output_target;
                 let data_to_send = buf.to_vec();
 
                 // Use the log sender directly without cloning

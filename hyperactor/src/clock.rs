@@ -43,7 +43,7 @@ struct SimTime {
 static SIM_TIME: LazyLock<SimTime> = LazyLock::new(|| {
     let now = tokio::time::Instant::now();
     SimTime {
-        start: now.clone(),
+        start: now,
         now: Mutex::new(now),
         system_start: SystemTime::now(),
     }
@@ -222,11 +222,11 @@ impl Clock for SimClock {
     }
     /// Get the current time according to the simnet
     fn now(&self) -> tokio::time::Instant {
-        SIM_TIME.now.lock().unwrap().clone()
+        *SIM_TIME.now.lock().unwrap()
     }
 
     fn system_time_now(&self) -> SystemTime {
-        SIM_TIME.system_start.clone() + self.now().duration_since(SIM_TIME.start)
+        SIM_TIME.system_start + self.now().duration_since(SIM_TIME.start)
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -290,7 +290,7 @@ impl SimClock {
 
     /// Instant marking the start of the simulation
     pub fn start(&self) -> tokio::time::Instant {
-        SIM_TIME.start.clone()
+        SIM_TIME.start
     }
 }
 

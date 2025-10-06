@@ -343,7 +343,7 @@ impl AttrValue for std::time::Duration {
 
 impl AttrValue for std::time::SystemTime {
     fn display(&self) -> String {
-        let datetime: DateTime<Utc> = self.clone().into();
+        let datetime: DateTime<Utc> = (*self).into();
         datetime.to_rfc3339()
     }
 

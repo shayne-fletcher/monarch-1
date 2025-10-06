@@ -129,7 +129,7 @@ impl AlarmSleeper {
                 AlarmStatus::Armed {
                     version: _,
                     deadline,
-                } => Some(deadline.clone()),
+                } => Some(deadline),
             };
 
             if let Some(deadline) = deadline {

@@ -858,7 +858,7 @@ impl Selection {
                 let index = coords[dim];
                 index >= min
                     && index < max
-                    && (index - min) % step == 0
+                    && (index - min).is_multiple_of(step)
                     && inner.contains_rec(coords, dim + 1)
             }
             Selection::Intersection(a, b) => {
@@ -1148,7 +1148,7 @@ impl ReifySlice for Slice {
             let slice_stride = slice.strides()[dim];
             let base_stride = self.strides()[dim];
 
-            if slice_stride % base_stride == 0 {
+            if slice_stride.is_multiple_of(base_stride) {
                 // Layout-aligned with base.
                 let step = slice_stride / base_stride;
                 let end = start + step * len;
@@ -1284,9 +1284,9 @@ mod iterutils {
 /// [`all`]: crate::selection::dsl::all
 /// [`Shape`]: crate::shape::Shape
 /// [`Selection`]: crate::selection::Selection
-pub fn selection_from_one<'a, R>(
+pub fn selection_from_one<R>(
     shape: &shape::Shape,
-    label: &'a str,
+    label: &str,
     rng: R,
 ) -> Result<Selection, ShapeError>
 where

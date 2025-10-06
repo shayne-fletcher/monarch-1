@@ -185,6 +185,12 @@ pub mod test_utils {
         observer: Option<mpsc::UnboundedSender<(String, M)>>,
     }
 
+    impl<M: RemoteMessage> Default for TestLog<M> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl<M: RemoteMessage> TestLog<M> {
         /// Create a new, empty [`TestLog`].
         pub fn new() -> Self {
@@ -255,10 +261,10 @@ pub mod test_utils {
                 .map(|(seq_id, msg)| Ok((*seq_id, msg.clone())))
                 .collect();
             for entry in filtered_items.iter() {
-                if let Some(observer) = &self.observer {
-                    if let Ok((_, msg)) = entry.as_ref() {
-                        observer.send(("read".to_string(), msg.clone())).unwrap();
-                    }
+                if let Some(observer) = &self.observer
+                    && let Ok((_, msg)) = entry.as_ref()
+                {
+                    observer.send(("read".to_string(), msg.clone())).unwrap();
                 }
             }
             Ok(futures::stream::iter(filtered_items.into_iter()))

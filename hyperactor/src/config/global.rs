@@ -353,7 +353,7 @@ fn test_override_index(layers: &Layers) -> Option<usize> {
         .position(|l| matches!(l.source, Source::TestOverride))
 }
 
-fn ensure_test_override_layer_mut<'a>(layers: &'a mut Layers) -> &'a mut Attrs {
+fn ensure_test_override_layer_mut(layers: &mut Layers) -> &mut Attrs {
     if let Some(i) = test_override_index(layers) {
         return &mut layers.ordered[i].attrs;
     }

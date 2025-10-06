@@ -699,12 +699,11 @@ pub(crate) mod test_util {
                 use tokio::time::Duration;
                 use tokio::time::timeout;
                 #[allow(clippy::disallowed_methods)]
-                match timeout(Duration::from_secs(1), rx.recv()).await {
-                    Ok(_) => message
+                if let Ok(_) = timeout(Duration::from_secs(1), rx.recv()).await {
+                    message
                         .1
                         .send(cx, "the impossible happened".to_owned())
-                        .unwrap(),
-                    _ => (),
+                        .unwrap()
                 }
 
                 Ok(())

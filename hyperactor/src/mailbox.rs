@@ -1719,10 +1719,10 @@ impl<M> PortReceiver<M> {
     pub fn try_recv(&mut self) -> Result<Option<M>, MailboxError> {
         let mut next = self.receiver.try_recv();
         // To coalesce, drain the mpsc queue and only keep the last one.
-        if self.coalesce {
-            if let Some(latest) = self.drain().pop() {
-                next = Ok(latest);
-            }
+        if self.coalesce
+            && let Some(latest) = self.drain().pop()
+        {
+            next = Ok(latest);
         }
         match next {
             Ok(msg) => Ok(Some(msg)),
@@ -1740,10 +1740,10 @@ impl<M> PortReceiver<M> {
         let mut next = self.receiver.recv().await;
         // To coalesce, get the last message from the queue if there are
         // more on the mspc queue.
-        if self.coalesce {
-            if let Some(latest) = self.drain().pop() {
-                next = Some(latest);
-            }
+        if self.coalesce
+            && let Some(latest) = self.drain().pop()
+        {
+            next = Some(latest);
         }
         next.ok_or(MailboxError::new(
             self.actor_id().clone(),
@@ -2152,6 +2152,12 @@ pub struct MailboxMuxer {
     mailboxes: Arc<DashMap<ActorId, Box<dyn MailboxSender + Send + Sync>>>,
 }
 
+impl Default for MailboxMuxer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MailboxMuxer {
     /// Create a new, empty, muxer.
     pub fn new() -> Self {
@@ -2214,6 +2220,12 @@ impl MailboxSender for MailboxMuxer {
 #[derive(Debug, Clone)]
 pub struct MailboxRouter {
     entries: Arc<RwLock<BTreeMap<Reference, Arc<dyn MailboxSender + Send + Sync>>>>,
+}
+
+impl Default for MailboxRouter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MailboxRouter {
@@ -2364,6 +2376,12 @@ pub struct DialMailboxRouter {
     direct_addressed_remote_only: bool,
 }
 
+impl Default for DialMailboxRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DialMailboxRouter {
     /// Create a new [`DialMailboxRouter`] with an empty routing table.
     pub fn new() -> Self {
@@ -2403,11 +2421,11 @@ impl DialMailboxRouter {
     /// cache to ensure fresh routing on next use.
     pub fn bind(&self, dest: Reference, addr: ChannelAddr) {
         if let Ok(mut w) = self.address_book.write() {
-            if let Some(old_addr) = w.insert(dest.clone(), addr.clone()) {
-                if old_addr != addr {
-                    tracing::info!("rebinding {:?} from {:?} to {:?}", dest, old_addr, addr);
-                    self.sender_cache.remove(&old_addr);
-                }
+            if let Some(old_addr) = w.insert(dest.clone(), addr.clone())
+                && old_addr != addr
+            {
+                tracing::info!("rebinding {:?} from {:?} to {:?}", dest, old_addr, addr);
+                self.sender_cache.remove(&old_addr);
             }
         } else {
             tracing::error!("address book poisoned during bind of {:?}", dest);

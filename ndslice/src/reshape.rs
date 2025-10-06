@@ -752,17 +752,17 @@ pub fn reshape_selection(
                                     break;
                                 }
 
-                                if row % row_pattern_period == end_row % row_pattern_period {
-                                    if col < end % new_dimension_n_size {
-                                        result.push(Selection::Range(
-                                            Range(end_row, Some(end_row + 1), 1),
-                                            Box::new(Selection::Range(
-                                                Range(col, Some(end % new_dimension_n_size), step),
-                                                Box::new(inner.clone()),
-                                            )),
-                                        ));
-                                        break;
-                                    }
+                                if row % row_pattern_period == end_row % row_pattern_period
+                                    && col < end % new_dimension_n_size
+                                {
+                                    result.push(Selection::Range(
+                                        Range(end_row, Some(end_row + 1), 1),
+                                        Box::new(Selection::Range(
+                                            Range(col, Some(end % new_dimension_n_size), step),
+                                            Box::new(inner.clone()),
+                                        )),
+                                    ));
+                                    break;
                                 }
                             }
                         }
