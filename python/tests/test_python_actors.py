@@ -21,6 +21,7 @@ import threading
 import time
 import unittest
 import unittest.mock
+from tempfile import TemporaryDirectory
 from types import ModuleType
 from typing import cast, Dict, Tuple
 
@@ -66,6 +67,7 @@ from monarch._src.actor.v1.proc_mesh import ProcMesh as ProcMeshV1
 from monarch.actor import (
     Accumulator,
     Actor,
+    attach_to_workers,
     current_actor_name,
     current_rank,
     current_size,
@@ -1705,3 +1707,42 @@ def test_get_or_spawn_controller_inside_actor_endpoint():
     actor_2 = get_or_spawn_controller("actor_2", SpawningActorFromEndpointActor).get()
     # verify that actor_2 was spawned from actor_1 with the correct root
     assert actor_2.return_root.call_one().get() == "actor_1"
+
+
+class Hello(Actor):
+    @endpoint
+    def doit(self) -> str:
+        return "hello!"
+
+
+def test_simple_bootstrap():
+    with TemporaryDirectory() as d:
+        procs = []
+        workers = []
+
+        for i in range(4):
+            addr = f"ipc://{d}/{i}"
+            env = {**os.environ}
+            if "FB_XAR_INVOKED_NAME" in os.environ:
+                env["PYTHONPATH"] = ":".join(sys.path)
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    f'import sys; from monarch.actor import run_worker_loop_forever; run_worker_loop_forever(address={repr(addr)}, ca="trust_all_connections")',
+                ],
+                env=env,
+            )
+            procs.append(proc)
+            workers.append(addr)
+
+        hosts = attach_to_workers(ca="trust_all_connections", workers=workers)
+
+        hello = hosts.spawn_procs().spawn("hello", Hello)
+
+        r = hello.doit.call().get()
+        for _, v in r.items():
+            assert v == "hello!"
+        for proc in procs:
+            proc.kill()
+            proc.wait()

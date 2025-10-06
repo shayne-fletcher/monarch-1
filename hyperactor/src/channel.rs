@@ -577,7 +577,6 @@ impl FromStr for ChannelAddr {
     type Err = anyhow::Error;
 
     fn from_str(addr: &str) -> Result<Self, Self::Err> {
-        // "!" is the legacy delimiter; ":" is preferred
         match addr.split_once('!').or_else(|| addr.split_once(':')) {
             Some(("local", rest)) => rest
                 .parse::<u64>()
@@ -593,6 +592,102 @@ impl FromStr for ChannelAddr {
             Some((r#type, _)) => Err(anyhow::anyhow!("no such channel type: {type}")),
             None => Err(anyhow::anyhow!("no channel type specified")),
         }
+    }
+}
+
+impl ChannelAddr {
+    /// Parse ZMQ-style URL format: scheme://address
+    /// Supports:
+    /// - tcp://hostname:port or tcp://*:port (wildcard binding)
+    /// - inproc://endpoint-name (equivalent to local)
+    /// - ipc://path (equivalent to unix)
+    /// - metatls://hostname:port or metatls://*:port
+    pub fn from_zmq_url(address: &str) -> Result<Self, anyhow::Error> {
+        // Try ZMQ-style URL format first (scheme://...)
+        let (scheme, address) = address.split_once("://").ok_or_else(|| {
+            anyhow::anyhow!("address must be in url form scheme://endppoint {}", address)
+        })?;
+
+        match scheme {
+            "tcp" => {
+                let (host, port) = Self::split_host_port(address)?;
+
+                if host == "*" {
+                    // Wildcard binding - use IPv6 unspecified address
+                    Ok(Self::Tcp(SocketAddr::new("::".parse().unwrap(), port)))
+                } else {
+                    // Resolve hostname to IP address for proper SocketAddr creation
+                    let socket_addr = Self::resolve_hostname_to_socket_addr(host, port)?;
+                    Ok(Self::Tcp(socket_addr))
+                }
+            }
+            "inproc" => {
+                // inproc://port -> local:port
+                // Port must be a valid u64 number
+                let port = address.parse::<u64>().map_err(|_| {
+                    anyhow::anyhow!("inproc endpoint must be a valid port number: {}", address)
+                })?;
+                Ok(Self::Local(port))
+            }
+            "ipc" => {
+                // ipc://path -> unix:path
+                Ok(Self::Unix(net::unix::SocketAddr::from_str(address)?))
+            }
+            "metatls" => {
+                let (host, port) = Self::split_host_port(address)?;
+
+                if host == "*" {
+                    // Wildcard binding - use IPv6 unspecified address directly without hostname resolution
+                    Ok(Self::MetaTls(MetaTlsAddr::Host {
+                        hostname: std::net::Ipv6Addr::UNSPECIFIED.to_string(),
+                        port,
+                    }))
+                } else {
+                    Ok(Self::MetaTls(MetaTlsAddr::Host {
+                        hostname: host.to_string(),
+                        port,
+                    }))
+                }
+            }
+            scheme => Err(anyhow::anyhow!("unsupported ZMQ scheme: {}", scheme)),
+        }
+    }
+
+    /// Split host:port string, supporting IPv6 addresses
+    fn split_host_port(address: &str) -> Result<(&str, u16), anyhow::Error> {
+        if let Some((host, port_str)) = address.rsplit_once(':') {
+            let port: u16 = port_str
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid port: {}", port_str))?;
+            Ok((host, port))
+        } else {
+            Err(anyhow::anyhow!("invalid address format: {}", address))
+        }
+    }
+
+    /// Resolve hostname to SocketAddr, handling both IP addresses and hostnames
+    fn resolve_hostname_to_socket_addr(host: &str, port: u16) -> Result<SocketAddr, anyhow::Error> {
+        // Handle IPv6 addresses in brackets by stripping the brackets
+        let host_clean = if host.starts_with('[') && host.ends_with(']') {
+            &host[1..host.len() - 1]
+        } else {
+            host
+        };
+
+        // First try to parse as an IP address directly
+        if let Ok(ip_addr) = host_clean.parse::<IpAddr>() {
+            return Ok(SocketAddr::new(ip_addr, port));
+        }
+
+        // If not an IP, try hostname resolution
+        use std::net::ToSocketAddrs;
+        let mut addrs = (host_clean, port)
+            .to_socket_addrs()
+            .map_err(|e| anyhow::anyhow!("failed to resolve hostname '{}': {}", host_clean, e))?;
+
+        addrs
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no addresses found for hostname '{}'", host_clean))
     }
 }
 
@@ -830,6 +925,78 @@ mod tests {
             };
             assert_eq!(format!("{}", err), error);
         }
+    }
+
+    #[test]
+    fn test_zmq_style_channel_addr() {
+        // Test TCP addresses
+        assert_eq!(
+            ChannelAddr::from_zmq_url("tcp://127.0.0.1:8080").unwrap(),
+            ChannelAddr::Tcp("127.0.0.1:8080".parse().unwrap())
+        );
+
+        // Test TCP wildcard binding
+        assert_eq!(
+            ChannelAddr::from_zmq_url("tcp://*:5555").unwrap(),
+            ChannelAddr::Tcp("[::]:5555".parse().unwrap())
+        );
+
+        // Test inproc (maps to local with numeric endpoint)
+        assert_eq!(
+            ChannelAddr::from_zmq_url("inproc://12345").unwrap(),
+            ChannelAddr::Local(12345)
+        );
+
+        // Test ipc (maps to unix)
+        assert_eq!(
+            ChannelAddr::from_zmq_url("ipc:///tmp/my-socket").unwrap(),
+            ChannelAddr::Unix(unix::SocketAddr::from_pathname("/tmp/my-socket").unwrap())
+        );
+
+        // Test metatls with hostname
+        assert_eq!(
+            ChannelAddr::from_zmq_url("metatls://example.com:443").unwrap(),
+            ChannelAddr::MetaTls(MetaTlsAddr::Host {
+                hostname: "example.com".to_string(),
+                port: 443
+            })
+        );
+
+        // Test metatls with IP address (should be normalized)
+        assert_eq!(
+            ChannelAddr::from_zmq_url("metatls://192.168.1.1:443").unwrap(),
+            ChannelAddr::MetaTls(MetaTlsAddr::Host {
+                hostname: "192.168.1.1".to_string(),
+                port: 443
+            })
+        );
+
+        // Test metatls with wildcard (should use IPv6 unspecified address)
+        assert_eq!(
+            ChannelAddr::from_zmq_url("metatls://*:8443").unwrap(),
+            ChannelAddr::MetaTls(MetaTlsAddr::Host {
+                hostname: "::".to_string(),
+                port: 8443
+            })
+        );
+
+        // Test TCP hostname resolution (should resolve hostname to IP)
+        // Note: This test may fail in environments without proper DNS resolution
+        // We test that it at least doesn't fail to parse
+        let tcp_hostname_result = ChannelAddr::from_zmq_url("tcp://localhost:8080");
+        assert!(tcp_hostname_result.is_ok());
+
+        // Test IPv6 address
+        assert_eq!(
+            ChannelAddr::from_zmq_url("tcp://[::1]:1234").unwrap(),
+            ChannelAddr::Tcp("[::1]:1234".parse().unwrap())
+        );
+
+        // Test error cases
+        assert!(ChannelAddr::from_zmq_url("invalid://scheme").is_err());
+        assert!(ChannelAddr::from_zmq_url("tcp://invalid-port").is_err());
+        assert!(ChannelAddr::from_zmq_url("metatls://no-port").is_err());
+        assert!(ChannelAddr::from_zmq_url("inproc://not-a-number").is_err());
     }
 
     #[tokio::test]

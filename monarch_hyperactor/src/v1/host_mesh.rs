@@ -87,13 +87,13 @@ impl PyBootstrapCommand {
     name = "HostMesh",
     module = "monarch._rust_bindings.monarch_hyperactor.v1.host_mesh"
 )]
-enum PyHostMesh {
+pub(crate) enum PyHostMesh {
     Owned(PyHostMeshImpl),
     Ref(PyHostMeshRefImpl),
 }
 
 impl PyHostMesh {
-    fn new_owned(inner: HostMesh) -> Self {
+    pub(crate) fn new_owned(inner: HostMesh) -> Self {
         Self::Owned(PyHostMeshImpl(SharedCell::from(inner)))
     }
 

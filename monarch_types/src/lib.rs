@@ -45,7 +45,7 @@ pub trait MapPyErr<T> {
 }
 impl<T, E> MapPyErr<T> for Result<T, E>
 where
-    E: Error,
+    E: ToString,
 {
     fn map_pyerr(self) -> Result<T, PyErr> {
         self.map_err(|err| PyErr::new::<PyValueError, _>(err.to_string()))

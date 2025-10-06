@@ -27,6 +27,7 @@ from monarch._src.actor.actor_mesh import (
     send,
     ValueMesh,
 )
+from monarch._src.actor.bootstrap import attach_to_workers, run_worker_loop_forever
 from monarch._src.actor.debugger.debug_controller import debug_controller
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
@@ -74,4 +75,6 @@ __all__ = [
     "PortReceiver",
     "Endpoint",
     "Extent",
+    "run_worker_loop_forever",
+    "attach_to_workers",
 ]
