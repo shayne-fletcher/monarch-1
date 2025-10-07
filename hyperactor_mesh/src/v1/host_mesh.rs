@@ -511,23 +511,11 @@ impl HostMeshRef {
             )));
         }
 
-        let labels = self
-            .region
-            .labels()
-            .to_vec()
-            .into_iter()
-            .chain(per_host.labels().to_vec().into_iter())
-            .collect();
-        let sizes = self
+        let extent = self
             .region
             .extent()
-            .sizes()
-            .to_vec()
-            .into_iter()
-            .chain(per_host.sizes().to_vec().into_iter())
-            .collect();
-        let extent =
-            Extent::new(labels, sizes).map_err(|err| v1::Error::ConfigurationError(err.into()))?;
+            .concat(&per_host)
+            .map_err(|err| v1::Error::ConfigurationError(err.into()))?;
 
         let mesh_name = Name::new(name);
         let mut procs = Vec::new();
