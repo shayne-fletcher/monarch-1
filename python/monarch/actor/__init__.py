@@ -18,6 +18,7 @@ from monarch._src.actor.actor_mesh import (
     as_endpoint,
     Channel,
     context,
+    Context,
     current_actor_name,
     current_rank,
     current_size,
@@ -80,4 +81,5 @@ __all__ = [
     "run_worker_loop_forever",
     "attach_to_workers",
     "enable_transport",
+    "Context",
 ]
