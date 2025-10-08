@@ -128,7 +128,7 @@ def test_nested_meshes() -> None:
     for i, nested in enumerate([nested_0, nested_1]):
         region = cast(
             ProcMesh, cast(ActorMesh[TestActor], nested)._proc_mesh
-        ).host_mesh.region
+        )._host_mesh.region
         assert region.labels == ["hosts"]
         assert region.slice() == Slice(offset=i, sizes=[1], strides=[1])
     res_0 = nested_0.slice(gpus=0).call_on_other_mesh.call_one(nested_1).get()

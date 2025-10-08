@@ -47,12 +47,7 @@ def this_host() -> "HostMesh":
 
     This is just shorthand for looking it up via the context
     """
-    proc = this_proc()
-    if proc.host_mesh.is_fake_in_process:
-        return create_local_host_mesh("root_host")
-    host_mesh = proc.host_mesh
-    assert isinstance(host_mesh, HostMesh), "expected v1 HostMesh, got v0 HostMesh"
-    return host_mesh
+    return this_proc().host_mesh
 
 
 def this_proc() -> "ProcMesh":
@@ -240,6 +235,14 @@ class HostMesh(MeshTrait):
     @property
     def is_fake_in_process(self) -> bool:
         return self._is_fake_in_process
+
+    def __eq__(self, other: "HostMesh") -> bool:
+        return (
+            self._hy_host_mesh.block_on() == other._hy_host_mesh.block_on()
+            and self._region == other._region
+            and self.stream_logs == other.stream_logs
+            and self.is_fake_in_process == other.is_fake_in_process
+        )
 
 
 def fake_in_process_host(name: str) -> "HostMesh":

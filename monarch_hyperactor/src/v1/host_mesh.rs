@@ -182,6 +182,10 @@ impl PyHostMesh {
                 .getattr("py_host_mesh_from_bytes")?;
         Ok((from_bytes, py_bytes))
     }
+
+    fn __eq__(&self, other: &PyHostMesh) -> PyResult<bool> {
+        Ok(self.mesh_ref()? == other.mesh_ref()?)
+    }
 }
 
 #[derive(Clone)]
@@ -189,14 +193,14 @@ impl PyHostMesh {
     name = "HostMeshImpl",
     module = "monarch._rust_bindings.monarch_hyperactor.v1.host_mesh"
 )]
-struct PyHostMeshImpl(SharedCell<HostMesh>);
+pub(crate) struct PyHostMeshImpl(SharedCell<HostMesh>);
 
 #[derive(Debug, Clone)]
 #[pyclass(
     name = "HostMeshRefImpl",
     module = "monarch._rust_bindings.monarch_hyperactor.v1.host_mesh"
 )]
-struct PyHostMeshRefImpl(HostMeshRef);
+pub(crate) struct PyHostMeshRefImpl(HostMeshRef);
 
 impl PyHostMeshRefImpl {
     fn __repr__(&self) -> PyResult<String> {

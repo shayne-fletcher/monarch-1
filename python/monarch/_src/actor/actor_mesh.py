@@ -494,6 +494,16 @@ class ValueMesh(MeshTrait, Generic[R]):
         for i, _global_rank in enumerate(self._shape.ranks()):
             yield Point(i, extent), self._hy.get(i)
 
+    def values(self) -> Iterable[R]:
+        """
+        Generator that iterates over just the values in the mesh.
+
+        Returns:
+            Values at all coordinates.
+        """
+        for _, value in self.items():
+            yield value
+
     def __iter__(self) -> Iterator[Tuple[Point, R]]:
         return iter(self.items())
 

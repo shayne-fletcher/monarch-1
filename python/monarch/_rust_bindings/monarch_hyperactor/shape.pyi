@@ -97,6 +97,19 @@ class Slice:
         ...
 
     def __repr__(self) -> str: ...
+    def get(self, index: int) -> int:
+        """
+        Given a logical index in row-major order, compute the physical
+        memory offset according to the slice layout. Inverse of `index`.
+        """
+        ...
+
+    def index(self, value: int) -> int:
+        """
+        Given a physical memory offset, compute the logical index in
+        row-major order. Inverse of `get`.
+        """
+        ...
 
 @final
 class Shape:
@@ -175,6 +188,7 @@ class Extent(collections.abc.Mapping):
     def __len__(self) -> int: ...
     @property
     def region(self) -> "Region": ...
+    def __eq__(self, other: "Extent") -> bool: ...
 
 class Point(collections.abc.Mapping):
     """
@@ -220,3 +234,10 @@ class Region:
         ...
 
     def __reduce__(self) -> Any: ...
+    def point_of_base_rank(self, rank: int) -> "Point":
+        """
+        Get the point in this region that corresponds to the given base rank
+        in the super-region that this region is a subset of.
+        """
+        ...
+    def __eq__(self, other: "Region") -> bool: ...

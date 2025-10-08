@@ -201,6 +201,12 @@ impl PySlice {
     fn new_row_major(sizes: Vec<usize>) -> PySlice {
         ndslice::Slice::new_row_major(sizes).into()
     }
+
+    fn get(&self, index: usize) -> PyResult<usize> {
+        self.inner
+            .get(index)
+            .map_err(|err| PyValueError::new_err(err.to_string()))
+    }
 }
 
 impl From<&PySlice> for ndslice::Slice {

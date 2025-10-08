@@ -102,6 +102,14 @@ impl PyExtent {
             inner: self.inner.region(),
         }
     }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if let Ok(other) = other.extract::<PyExtent>() {
+            Ok(self.inner == other.inner)
+        } else {
+            Ok(false)
+        }
+    }
 }
 
 impl From<Extent> for PyExtent {
@@ -172,6 +180,21 @@ impl PyRegion {
         Ok(bincode::deserialize::<Region>(bytes.as_bytes())
             .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?
             .into())
+    }
+
+    fn point_of_base_rank(&self, rank: usize) -> PyResult<PyPoint> {
+        self.inner
+            .point_of_base_rank(rank)
+            .map_pyerr()
+            .map(PyPoint::from)
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if let Ok(other) = other.extract::<PyRegion>() {
+            Ok(self.inner == other.inner)
+        } else {
+            Ok(false)
+        }
     }
 }
 
