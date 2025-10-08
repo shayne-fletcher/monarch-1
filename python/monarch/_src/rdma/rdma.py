@@ -27,7 +27,7 @@ from typing import Dict
 from monarch._src.actor.actor_mesh import Actor, context
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
-from monarch._src.actor.proc_mesh import get_or_spawn_controller, ProcMesh
+from monarch._src.actor.v1 import get_or_spawn_controller, ProcMesh
 from pyre_extensions import none_throws
 
 

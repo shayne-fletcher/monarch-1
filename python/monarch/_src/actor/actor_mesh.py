@@ -237,7 +237,7 @@ _transport: Optional[ChannelTransport] = None
 _transport_lock = threading.Lock()
 
 
-def enable_transport(transport: ChannelTransport) -> None:
+def enable_transport(transport: "ChannelTransport | str") -> None:
     """
     Allow monarch to communicate with transport type 'transport'
     This must be called before any other calls in the monarch API.
@@ -247,6 +247,15 @@ def enable_transport(transport: ChannelTransport) -> None:
     Currently only one transport type may be enabled at one time.
     In the future we may allow multiple to be enabled.
     """
+    if isinstance(transport, str):
+        transport = {
+            "tcp": ChannelTransport.Tcp,
+            "ipc": ChannelTransport.Unix,
+            "metatls": ChannelTransport.MetaTlsWithIpV6,
+        }.get(transport)
+        if transport is None:
+            raise ValueError(f"unknown transport: {transport}")
+
     if _context.get(None) is not None:
         raise RuntimeError(
             "`enable_transport()` must be called before any other calls in the monarch API. "

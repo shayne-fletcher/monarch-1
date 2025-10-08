@@ -16,15 +16,12 @@ from abc import ABC, abstractmethod
 from typing import cast, Dict, List, Literal, NamedTuple, Optional, Sequence
 
 from monarch._rust_bindings.monarch_hyperactor.channel import ChannelTransport
-from monarch._rust_bindings.monarch_hyperactor.config import configure
 
 from monarch._src.actor.bootstrap import attach_to_workers
 
 # note: the jobs api is intended as a library so it should
 # only be importing _public_ monarch API functions.
-from monarch._src.actor.host_mesh import HostMesh, this_host
-
-from typing_extensions import Self
+from monarch.actor import enable_transport, HostMesh, this_host
 
 
 class JobState:
@@ -441,39 +438,6 @@ class LoginJob(JobTrait):
                 pass
 
 
-class FakeLocalLoginJob(LoginJob):
-    """
-
-    Fake it that we are logging in by just making a local process that runs the bootstrap.
-    """
-
-    def __init__(self):
-        super().__init__()
-        configure(default_transport=ChannelTransport.Tcp)
-
-        self._next_port = 12345
-
-    def _start_host(self, host: str) -> ProcessState:
-        port = self._next_port
-        self._next_port += 1
-
-        env = {**os.environ}
-        if "FB_XAR_INVOKED_NAME" in os.environ:
-            env["PYTHONPATH"] = ":".join(sys.path)
-        addr = f"tcp://[::1]:{port}"
-        bind_addr = f"tcp://[::1]:{port}"
-        proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                f'from monarch.actor import run_worker_loop_forever; run_worker_loop_forever(address={repr(bind_addr)}, ca="trust_all_connections")',
-            ],
-            env=env,
-            start_new_session=True,
-        )
-        return ProcessState(proc.pid, addr)
-
-
 class SSHJob(LoginJob):
     def __init__(
         self,
@@ -481,7 +445,7 @@ class SSHJob(LoginJob):
         ssh_args: Sequence[str] = (),
         monarch_port: int = 22222,
     ):
-        configure(default_transport=ChannelTransport.Tcp)
+        enable_transport("tcp")
         self._python_exe = python_exe
         self._ssh_args = ssh_args
         self._port = monarch_port
