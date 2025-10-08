@@ -67,6 +67,7 @@ from monarch._src.actor.v1.proc_mesh import (
     get_or_spawn_controller as get_or_spawn_controller_v1,
     ProcMesh as ProcMeshV1,
 )
+from monarch._src.job.job import LoginJob, ProcessState
 
 from monarch.actor import (
     Accumulator,
@@ -1800,3 +1801,44 @@ def test_this_host() -> None:
         expected_hosts_by_rank[6],
         expected_hosts_by_rank[10],
     ]
+
+
+class FakeLocalLoginJob(LoginJob):
+    """
+
+    Fake it that we are logging in by just making a local process that runs the bootstrap.
+    """
+
+    def __init__(self, dir: str):
+        super().__init__()
+        self._dir = dir
+
+    def _start_host(self, host: str) -> ProcessState:
+        env = {**os.environ}
+        if "FB_XAR_INVOKED_NAME" in os.environ:
+            env["PYTHONPATH"] = ":".join(sys.path)
+        addr = f"ipc://{self._dir}/{host}"
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                f'from monarch.actor import run_worker_loop_forever; run_worker_loop_forever(address={repr(addr)}, ca="trust_all_connections")',
+            ],
+            env=env,
+            start_new_session=True,
+        )
+        return ProcessState(proc.pid, addr)
+
+
+def test_login_job():
+    with TemporaryDirectory() as temp_dir:
+        j = FakeLocalLoginJob(temp_dir)
+        j.add_mesh("hosts", ["fake", "hosts"])
+        state = j.state(cached_path=None)
+
+        hello = state.hosts.spawn_procs().spawn("hello", Hello)
+        r = hello.doit.call().get()
+        for _, v in r.items():
+            assert v == "hello!"
+
+        j.kill()
