@@ -27,6 +27,8 @@ are launch across hosts. HostMesh represents a mesh of hosts. ProcMesh is a mesh
 
 .. autofunction:: get_or_spawn_controller
 
+.. autofunction:: this_host
+
 
 Defining Actors
 ===============
