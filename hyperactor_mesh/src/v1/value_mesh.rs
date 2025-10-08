@@ -17,6 +17,8 @@ use futures::Future;
 use ndslice::view;
 use ndslice::view::Ranked;
 use ndslice::view::Region;
+use serde::Deserialize;
+use serde::Serialize;
 
 /// A mesh of values, one per rank in `region`.
 ///
@@ -27,7 +29,7 @@ use ndslice::view::Region;
 /// # Invariants
 /// - Complete: every rank in `region` has exactly one value.
 /// - Order: iteration and indexing follow the region's linearization.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)] // only if T implements
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)] // only if T implements
 pub struct ValueMesh<T> {
     /// The logical multidimensional domain of the mesh.
     ///
@@ -48,6 +50,58 @@ pub struct ValueMesh<T> {
     rep: Rep<T>,
 }
 
+/// A single run-length–encoded (RLE) segment within a [`ValueMesh`].
+///
+/// Each `Run` represents a contiguous range of ranks `[start, end)`
+/// that all share the same value, referenced indirectly via a table
+/// index `id`. This allows compact storage of large regions with
+/// repeated values.
+///
+/// Runs are serialized in a stable, portable format using `u64` for
+/// range bounds (`start`, `end`) to avoid platform‐dependent `usize`
+/// encoding differences.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct Run {
+    /// Inclusive start of the contiguous range of ranks (0-based).
+    start: u64,
+    /// Exclusive end of the contiguous range of ranks (0-based).
+    end: u64,
+    /// Index into the value table for this run's shared value.
+    id: u32,
+}
+
+impl Run {
+    /// Creates a new `Run` covering ranks `[start, end)` that all
+    /// share the same table entry `id`.
+    ///
+    /// Converts `usize` bounds to `u64` for stable serialization.
+    fn new(start: usize, end: usize, id: u32) -> Self {
+        Self {
+            start: start as u64,
+            end: end as u64,
+            id,
+        }
+    }
+}
+
+impl TryFrom<Run> for (Range<usize>, u32) {
+    type Error = &'static str;
+
+    /// Converts a serialized [`Run`] back into its in-memory form
+    /// `(Range<usize>, u32)`.
+    ///
+    /// Performs checked conversion of the 64-bit wire fields back
+    /// into `usize` indices, returning an error if either bound
+    /// exceeds the platform’s addressable range. This ensures safe
+    /// round-tripping between the serialized wire format and native
+    /// representation.
+    fn try_from(r: Run) -> Result<Self, Self::Error> {
+        let start = usize::try_from(r.start).map_err(|_| "run.start too large")?;
+        let end = usize::try_from(r.end).map_err(|_| "run.end too large")?;
+        Ok((start..end, r.id))
+    }
+}
+
 /// Internal storage representation for a [`ValueMesh`].
 ///
 /// This enum abstracts how the per-rank values are stored.
@@ -61,7 +115,8 @@ pub struct ValueMesh<T> {
 /// Users of [`ValueMesh`] normally never interact with `Rep`
 /// directly; all iteration and slicing APIs present a dense logical
 /// view.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)] // only if T implements
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)] // only if T implements
+#[serde(tag = "rep", rename_all = "snake_case")]
 enum Rep<T> {
     /// Fully expanded representation: one element per rank.
     ///
@@ -92,7 +147,7 @@ enum Rep<T> {
 
         /// List of `(range, table_id)` pairs describing contiguous
         /// runs of identical values in region order.
-        runs: Vec<(Range<usize>, u32)>,
+        runs: Vec<Run>,
     },
 }
 
@@ -202,13 +257,15 @@ impl<T: 'static> view::Ranked for ValueMesh<T> {
             Rep::Dense { values } => values.get(rank),
 
             Rep::Compressed { table, runs } => {
+                let rank = rank as u64;
+
                 // Binary search over runs: find the one whose range
                 // contains `rank`.
                 let idx = runs
-                    .binary_search_by(|(r, _)| {
-                        if r.end <= rank {
+                    .binary_search_by(|run| {
+                        if run.end <= rank {
                             Ordering::Less
-                        } else if r.start > rank {
+                        } else if run.start > rank {
                             Ordering::Greater
                         } else {
                             Ordering::Equal
@@ -217,7 +274,7 @@ impl<T: 'static> view::Ranked for ValueMesh<T> {
                     .ok()?;
 
                 // Map the run's table ID to its actual value.
-                let id = runs[idx].1 as usize;
+                let id = runs[idx].id as usize;
                 table.get(id)
             }
         }
@@ -581,10 +638,7 @@ impl<T: Clone> ValueMesh<T> {
 /// # Returns
 /// A tuple `(table, runs)` that together form the compressed
 /// representation. Expanding the runs reproduces the original data.
-fn compress_adjacent_with<T: Clone, F>(
-    values: Vec<T>,
-    mut same: F,
-) -> (Vec<T>, Vec<(Range<usize>, u32)>)
+fn compress_adjacent_with<T: Clone, F>(values: Vec<T>, mut same: F) -> (Vec<T>, Vec<Run>)
 where
     F: FnMut(&T, &T) -> bool,
 {
@@ -605,7 +659,7 @@ where
     for (i, _value) in values.iter().enumerate().skip(1) {
         if !same(&values[i], &table[cur_id as usize]) {
             // Close current run [start, i)
-            runs.push((start..i, cur_id));
+            runs.push(Run::new(start, i, cur_id));
 
             // Start a new run
             start = i;
@@ -615,7 +669,7 @@ where
     }
 
     // Close the final run
-    runs.push((start..values.len(), cur_id));
+    runs.push(Run::new(start, values.len(), cur_id));
 
     (table, runs)
 }
@@ -644,6 +698,7 @@ mod tests {
     use ndslice::view::ViewExt;
     use proptest::prelude::*;
     use proptest::strategy::ValueTree;
+    use serde_json;
 
     use super::*;
 
@@ -1295,5 +1350,68 @@ mod tests {
         assert_eq!(collected, vec![123]);
         assert_eq!(vm.get(0), Some(&123));
         assert_eq!(vm.get(1), None);
+    }
+
+    #[test]
+    fn test_dense_round_trip() {
+        // Build a simple dense mesh of 5 integers.
+        let region: Region = extent!(x = 5).into();
+        let dense = ValueMesh::new(region.clone(), vec![1, 2, 3, 4, 5]).unwrap();
+
+        let json = serde_json::to_string_pretty(&dense).unwrap();
+        let restored: ValueMesh<i32> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(dense, restored);
+
+        // Dense meshes should stay dense on the wire: check the
+        // tagged variant.
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // enum tag is nested: {"rep": {"rep":"dense", ...}}
+        let tag = v
+            .get("rep")
+            .and_then(|o| o.get("rep"))
+            .and_then(|s| s.as_str());
+        assert_eq!(tag, Some("dense"));
+    }
+
+    #[test]
+    fn test_compressed_round_trip() {
+        // Build a dense mesh, compress it, and verify it stays
+        // compressed on the wire.
+        let region: Region = extent!(x = 10).into();
+        let mut mesh = ValueMesh::new(region.clone(), vec![1, 1, 1, 2, 2, 3, 3, 3, 3, 3]).unwrap();
+        mesh.compress_adjacent_in_place();
+
+        let json = serde_json::to_string_pretty(&mesh).unwrap();
+        let restored: ValueMesh<i32> = serde_json::from_str(&json).unwrap();
+
+        // Logical equality preserved.
+        assert_eq!(mesh, restored);
+
+        // Compressed meshes should stay compressed on the wire.
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // enum tag is nested: {"rep": {"rep":"compressed", ...}}
+        let tag = v
+            .get("rep")
+            .and_then(|o| o.get("rep"))
+            .and_then(|s| s.as_str());
+        assert_eq!(tag, Some("compressed"));
+    }
+
+    #[test]
+    fn test_stable_run_encoding() {
+        let run = Run::new(0, 10, 42);
+        let json = serde_json::to_string(&run).unwrap();
+        let decoded: Run = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(run, decoded);
+        assert_eq!(run.start, 0);
+        assert_eq!(run.end, 10);
+        assert_eq!(run.id, 42);
+
+        // Ensure conversion back to Range<usize> works.
+        let (range, id): (Range<usize>, u32) = run.try_into().unwrap();
+        assert_eq!(range, 0..10);
+        assert_eq!(id, 42);
     }
 }
