@@ -92,7 +92,7 @@ pub mod supervision;
 pub mod sync;
 /// Test utilities
 pub mod test_utils;
-mod time;
+pub mod time;
 
 pub use actor::Actor;
 pub use actor::ActorHandle;

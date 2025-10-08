@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 
 use hyperactor::Actor;
 use hyperactor::ActorId;
@@ -22,7 +23,12 @@ use hyperactor::actor::Referable;
 use hyperactor::actor::remote::Remote;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
+use hyperactor::clock::Clock;
+use hyperactor::clock::RealClock;
+use hyperactor::config;
+use hyperactor::config::CONFIG_ENV_VAR;
 use hyperactor::context;
+use hyperactor::declare_attrs;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxServer;
 use ndslice::Extent;
@@ -47,7 +53,9 @@ use crate::proc_mesh::mesh_agent::MeshAgentMessageClient;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::proc_mesh::mesh_agent::ReconfigurableMailboxSender;
 use crate::resource;
+use crate::resource::GetRankStatus;
 use crate::resource::RankedValues;
+use crate::resource::Status;
 use crate::v1;
 use crate::v1::ActorMesh;
 use crate::v1::ActorMeshRef;
@@ -55,6 +63,12 @@ use crate::v1::Error;
 use crate::v1::HostMeshRef;
 use crate::v1::Name;
 use crate::v1::ValueMesh;
+
+declare_attrs! {
+    /// The maximum idle time between updates while spawning actor meshes.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_ACTOR_SPAWN_MAX_IDLE".to_string())
+    pub attr ACTOR_SPAWN_MAX_IDLE: Duration = Duration::from_secs(30);
+}
 
 /// A reference to a single [`hyperactor::Proc`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -595,7 +609,7 @@ impl ProcMeshRef {
             },
         )?;
 
-        let (port, mut rx) = cx.mailbox().open_accum_port(RankedValues::default());
+        let (port, rx) = cx.mailbox().open_accum_port(RankedValues::default());
 
         self.agent_mesh().cast(
             cx,
@@ -605,34 +619,33 @@ impl ProcMeshRef {
             },
         )?;
 
-        // Wait for everyone to report back.
-        // TODO: move out of critical path
-        let statuses = loop {
-            let statuses = rx.recv().await?;
-            if statuses.rank(self.ranks.len()) == self.ranks.len() {
-                break statuses;
-            }
-        };
+        let start_time = RealClock.now();
 
-        let failed: Vec<_> = statuses
-            .iter()
-            .filter_map(|(ranks, status)| {
-                if status.is_terminating() {
-                    Some(ranks.clone())
+        match GetRankStatus::wait(
+            rx,
+            self.ranks.len(),
+            config::global::get(ACTOR_SPAWN_MAX_IDLE),
+        )
+        .await
+        {
+            Ok(statuses) => {
+                if statuses.first_terminating().is_none() {
+                    Ok(ActorMesh::new(self.clone(), name))
                 } else {
-                    None
+                    Err(Error::ActorSpawnError { statuses })
                 }
-            })
-            .flatten()
-            .collect();
-        if !failed.is_empty() {
-            return Err(Error::GspawnError(
-                name,
-                format!("failed ranks: {:?}", failed,),
-            ));
-        }
+            }
+            Err(complete) => {
+                // Fill the remaining statuses with a timeout error.
+                let mut statuses = RankedValues::from((
+                    0..self.ranks.len(),
+                    Status::Timeout(start_time.elapsed()),
+                ));
+                statuses.merge_from(complete);
 
-        Ok(ActorMesh::new(self.clone(), name))
+                Err(Error::ActorSpawnError { statuses })
+            }
+        }
     }
 }
 
@@ -670,13 +683,12 @@ impl view::RankedSliceable for ProcMeshRef {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
-
     use ndslice::ViewExt;
     use ndslice::extent;
     use timed_test::async_timed_test;
 
-    use crate::v1;
+    use crate::resource::RankedValues;
+    use crate::resource::Status;
     use crate::v1::testactor;
     use crate::v1::testing;
 
@@ -725,7 +737,11 @@ mod tests {
                 .spawn::<testactor::FailingCreateTestActor>(instance, "testfail", &())
                 .await
                 .unwrap_err();
-            assert_matches!(err, v1::Error::GspawnError(_, _))
+            let statuses = err.into_actor_spawn_error().unwrap();
+            assert_eq!(
+                statuses,
+                RankedValues::from((0..8, Status::Failed("test failure".to_string()))),
+            );
         }
     }
 }

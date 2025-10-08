@@ -7,12 +7,18 @@
  */
 
 use hyperactor::channel::ChannelTransport;
+use hyperactor::clock::Clock;
+use hyperactor::clock::RealClock;
+use hyperactor::config;
+use hyperactor::config::CONFIG_ENV_VAR;
+use hyperactor::declare_attrs;
 pub mod mesh_agent;
 
 use std::collections::HashSet;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use hyperactor::ActorRef;
 use hyperactor::Named;
@@ -33,8 +39,10 @@ use crate::alloc::Alloc;
 use crate::bootstrap::BootstrapCommand;
 use crate::resource;
 use crate::resource::CreateOrUpdateClient;
+use crate::resource::GetRankStatus;
 use crate::resource::GetRankStatusClient;
 use crate::resource::RankedValues;
+use crate::resource::Status;
 use crate::v1;
 use crate::v1::Name;
 use crate::v1::ProcMesh;
@@ -43,6 +51,12 @@ pub use crate::v1::host_mesh::mesh_agent::HostMeshAgent;
 use crate::v1::host_mesh::mesh_agent::HostMeshAgentProcMeshTrampoline;
 use crate::v1::host_mesh::mesh_agent::ShutdownHostClient;
 use crate::v1::proc_mesh::ProcRef;
+
+declare_attrs! {
+    /// The maximum idle time between updates while spawning proc meshes.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_PROC_SPAWN_MAX_IDLE".to_string())
+    pub attr PROC_SPAWN_MAX_IDLE: Duration = Duration::from_secs(30);
+}
 
 /// A reference to a single host.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Named, Serialize, Deserialize)]
@@ -520,7 +534,7 @@ impl HostMeshRef {
         let mesh_name = Name::new(name);
         let mut procs = Vec::new();
         let num_ranks = self.region().num_ranks() * per_host.num_ranks();
-        let (port, mut rx) = cx.mailbox().open_accum_port(RankedValues::default());
+        let (port, rx) = cx.mailbox().open_accum_port(RankedValues::default());
         // We CreateOrUpdate each proc, and then fence on getting statuses back.
         // This is currently necessary because otherwise there is a race between
         // the procs being created, and subsequent messages becoming unroutable
@@ -557,24 +571,27 @@ impl HostMeshRef {
             }
         }
 
-        // fence: wait for everyone to report back.
-        loop {
-            let statuses = rx.recv().await?;
-            if let Some((ranks, status)) =
-                statuses.iter().find(|(_, status)| status.is_terminating())
-            {
-                let rank = ranks.start;
-                let proc_name = Name::new(format!("{}-{}", name, rank % per_host.num_ranks()));
-                return Err(v1::Error::ProcCreationError {
-                    proc_name,
-                    mesh_agent: self.ranks[rank].mesh_agent(),
-                    host_rank: rank / per_host.num_ranks(),
-                    status: status.clone(),
-                });
-            }
+        let start_time = RealClock.now();
 
-            if statuses.rank(num_ranks) == num_ranks {
-                break;
+        match GetRankStatus::wait(rx, num_ranks, config::global::get(PROC_SPAWN_MAX_IDLE)).await {
+            Ok(statuses) => {
+                if let Some((rank, status)) = statuses.first_terminating() {
+                    let proc_name = Name::new(format!("{}-{}", name, rank % per_host.num_ranks()));
+                    return Err(v1::Error::ProcCreationError {
+                        proc_name,
+                        mesh_agent: self.ranks[rank].mesh_agent(),
+                        host_rank: rank / per_host.num_ranks(),
+                        status: status.clone(),
+                    });
+                }
+            }
+            Err(complete) => {
+                // Fill the remaining statuses with a timeout error.
+                let mut statuses =
+                    RankedValues::from((0..num_ranks, Status::Timeout(start_time.elapsed())));
+                statuses.merge_from(complete);
+
+                return Err(v1::Error::ProcSpawnError { statuses });
             }
         }
 
@@ -670,6 +687,7 @@ mod tests {
 
     use super::*;
     use crate::Bootstrap;
+    use crate::resource::Status;
     use crate::v1::ActorMesh;
     use crate::v1::testactor;
     use crate::v1::testing;
@@ -859,7 +877,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_failing_proc_allocation() {
-        let program = buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap();
+        let program = crate::testresource::get("monarch/hyperactor_mesh/bootstrap");
 
         let hosts = vec![free_localhost_addr(), free_localhost_addr()];
 
@@ -870,7 +888,7 @@ mod tests {
                 addr: host.clone(),
                 config: None,
                 // The entire purpose of this is to fail:
-                command: Some(BootstrapCommand::from("/bin/false")),
+                command: Some(BootstrapCommand::from("false")),
             };
             boot.to_env(&mut cmd);
             cmd.kill_on_drop(true);
@@ -887,6 +905,50 @@ mod tests {
         assert_matches!(
             err, v1::Error::ProcCreationError { status: resource::Status::Failed(msg), .. }
             if msg.contains("failed to configure process: Terminal(Stopped { exit_code: 1")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_halting_proc_allocation() {
+        let config = config::global::lock();
+        let _guard1 = config.override_key(PROC_SPAWN_MAX_IDLE, Duration::from_secs(5));
+
+        let program = crate::testresource::get("monarch/hyperactor_mesh/bootstrap");
+
+        let hosts = vec![free_localhost_addr(), free_localhost_addr()];
+
+        let mut children = Vec::new();
+
+        for (index, host) in hosts.iter().enumerate() {
+            let mut cmd = Command::new(program.clone());
+            let command = if index == 0 {
+                let mut command = BootstrapCommand::from("sleep");
+                command.args.push("60".to_string());
+                Some(command)
+            } else {
+                None
+            };
+            let boot = Bootstrap::Host {
+                addr: host.clone(),
+                config: None,
+                command,
+            };
+            boot.to_env(&mut cmd);
+            cmd.kill_on_drop(true);
+            children.push(cmd.spawn().unwrap());
+        }
+        let host_mesh = HostMeshRef::from_hosts(hosts);
+
+        let instance = testing::instance().await;
+
+        let err = host_mesh
+            .spawn(&instance, "test", Extent::unity())
+            .await
+            .unwrap_err();
+        let statuses = err.into_proc_spawn_error().unwrap();
+        assert_matches!(
+            &statuses.materialized_iter(2).cloned().collect::<Vec<_>>()[..],
+            &[Status::Timeout(_), Status::Running]
         );
     }
 }

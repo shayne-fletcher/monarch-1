@@ -10,12 +10,17 @@
 //! in hyperactor meshes.
 
 use core::slice::GetDisjointMutIndex as _;
+use std::collections::HashMap;
+use std::fmt;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::mem::replace;
 use std::mem::take;
+use std::ops::Deref;
+use std::ops::DerefMut;
 use std::ops::Range;
+use std::time::Duration;
 
 use enum_as_inner::EnumAsInner;
 use hyperactor::Bind;
@@ -30,6 +35,8 @@ use hyperactor::accum::Accumulator;
 use hyperactor::accum::CommReducer;
 use hyperactor::accum::ReducerFactory;
 use hyperactor::accum::ReducerSpec;
+use hyperactor::mailbox::MailboxError;
+use hyperactor::mailbox::PortReceiver;
 use hyperactor::message::Bind;
 use hyperactor::message::Bindings;
 use hyperactor::message::Unbind;
@@ -50,7 +57,8 @@ use crate::v1::Name;
     PartialEq,
     Eq,
     Hash,
-    EnumAsInner
+    EnumAsInner,
+    strum::Display
 )]
 pub enum Status {
     /// The resource does not exist.
@@ -65,12 +73,17 @@ pub enum Status {
     Stopped,
     /// The resource has failed, with an error message.
     Failed(String),
+    /// The resource has been declared failed after a timeout.
+    Timeout(Duration),
 }
 
 impl Status {
     /// Returns whether the status is a terminating status.
     pub fn is_terminating(&self) -> bool {
-        matches!(self, Status::Stopping | Status::Stopped | Status::Failed(_))
+        matches!(
+            self,
+            Status::Stopping | Status::Stopped | Status::Failed(_) | Status::Timeout(_)
+        )
     }
 }
 
@@ -126,6 +139,34 @@ pub struct GetRankStatus {
     /// The status of the rank.
     #[binding(include)]
     pub reply: PortRef<RankedValues<Status>>,
+}
+
+impl GetRankStatus {
+    pub async fn wait(
+        mut rx: PortReceiver<RankedValues<Status>>,
+        num_ranks: usize,
+        max_idle_time: Duration,
+    ) -> Result<RankedValues<Status>, RankedValues<Status>> {
+        let mut alarm = hyperactor::time::Alarm::new();
+        alarm.arm(max_idle_time);
+        let mut statuses = RankedValues::default();
+        loop {
+            let mut sleeper = alarm.sleeper();
+            tokio::select! {
+                _ = sleeper.sleep() => return Err(statuses),
+                new_statuses = rx.recv() => {
+                    match new_statuses {
+                        Ok(new_statuses) => statuses = new_statuses,
+                        Err(_) => return Err(statuses),
+                    }
+                }
+            }
+            alarm.arm(max_idle_time);
+            if statuses.rank(num_ranks) == num_ranks {
+                break Ok(statuses);
+            }
+        }
+    }
 }
 
 /// The state of a resource.
@@ -214,6 +255,14 @@ pub struct RankedValues<T> {
     intervals: Vec<(Range<usize>, T)>,
 }
 
+impl<T: PartialEq> PartialEq for RankedValues<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.intervals == other.intervals
+    }
+}
+
+impl<T: Eq> Eq for RankedValues<T> {}
+
 impl<T> Default for RankedValues<T> {
     fn default() -> Self {
         Self {
@@ -235,6 +284,28 @@ impl<T> RankedValues<T> {
             .take_while(|(ranks, _)| ranks.start <= value)
             .map(|(ranks, _)| ranks.end.min(value) - ranks.start)
             .sum()
+    }
+}
+
+impl<T: Clone> RankedValues<T> {
+    pub fn materialized_iter(&self, until: usize) -> impl Iterator<Item = &T> + '_ {
+        assert_eq!(self.rank(until), until, "insufficient rank");
+        self.iter()
+            .flat_map(|(range, value)| std::iter::repeat(value).take(range.end - range.start))
+    }
+}
+
+impl<T: Hash + Eq + Clone> RankedValues<T> {
+    /// Invert this ranked values into a [`ValuesByRank<T>`].
+    pub fn invert(&self) -> ValuesByRank<T> {
+        let mut inverted: HashMap<T, Vec<Range<usize>>> = HashMap::new();
+        for (range, value) in self.iter() {
+            inverted
+                .entry(value.clone())
+                .or_default()
+                .push(range.clone());
+        }
+        ValuesByRank { values: inverted }
     }
 }
 
@@ -298,6 +369,11 @@ impl<T: Eq + Clone> RankedValues<T> {
         }
     }
 
+    /// Merge the contents of this RankedValues into another RankedValues.
+    pub fn merge_into(self, other: &mut Self) {
+        other.merge_from(self);
+    }
+
     fn append(&mut self, range: Range<usize>, value: T) {
         if let Some(last) = self.intervals.last_mut()
             && last.0.end == range.start
@@ -310,11 +386,81 @@ impl<T: Eq + Clone> RankedValues<T> {
     }
 }
 
+impl RankedValues<Status> {
+    pub fn first_terminating(&self) -> Option<(usize, Status)> {
+        self.intervals
+            .iter()
+            .find(|(_, status)| status.is_terminating())
+            .map(|(range, status)| (range.start, status.clone()))
+    }
+}
+
 impl<T> From<(usize, T)> for RankedValues<T> {
     fn from((rank, value): (usize, T)) -> Self {
         Self {
             intervals: vec![(rank..rank + 1, value)],
         }
+    }
+}
+
+impl<T> From<(Range<usize>, T)> for RankedValues<T> {
+    fn from((range, value): (Range<usize>, T)) -> Self {
+        Self {
+            intervals: vec![(range, value)],
+        }
+    }
+}
+
+/// An inverted index of RankedValues, providing all ranks for
+/// which each unique T-typed value appears.
+#[derive(Clone, Debug)]
+pub struct ValuesByRank<T> {
+    values: HashMap<T, Vec<Range<usize>>>,
+}
+
+impl<T: Eq + Hash> PartialEq for ValuesByRank<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.values == other.values
+    }
+}
+
+impl<T: Eq + Hash> Eq for ValuesByRank<T> {}
+
+impl<T: fmt::Display> fmt::Display for ValuesByRank<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut first_value = true;
+        for (value, ranges) in self.iter() {
+            if first_value {
+                first_value = false;
+            } else {
+                write!(f, ";")?;
+            }
+            write!(f, "{}=", value)?;
+            let mut first_range = true;
+            for range in ranges.iter() {
+                if first_range {
+                    first_range = false;
+                } else {
+                    write!(f, ",")?;
+                }
+                write!(f, "{}..{}", range.start, range.end)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<T> Deref for ValuesByRank<T> {
+    type Target = HashMap<T, Vec<Range<usize>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl<T> DerefMut for ValuesByRank<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.values
     }
 }
 
@@ -424,5 +570,37 @@ mod tests {
         assert_eq!(left.rank(16), 13);
         assert_eq!(left.rank(70), 62);
         assert_eq!(left.rank(100), 62);
+    }
+
+    #[test]
+    fn test_equality() {
+        assert_eq!(
+            RankedValues::from((0..10, 123)),
+            RankedValues::from((0..10, 123))
+        );
+        assert_eq!(
+            RankedValues::from((0..10, Status::Failed("foo".to_string()))),
+            RankedValues::from((0..10, Status::Failed("foo".to_string()))),
+        );
+    }
+
+    #[test]
+    fn test_default_through_merging() {
+        let values: RankedValues<usize> =
+            [(0..10, 1), (15..20, 1), (30..50, 1)].into_iter().collect();
+
+        let mut default = RankedValues::from((0..50, 0));
+        default.merge_from(values);
+
+        assert_eq!(
+            default.iter().cloned().collect::<Vec<_>>(),
+            vec![
+                (0..10, 1),
+                (10..15, 0),
+                (15..20, 1),
+                (20..30, 0),
+                (30..50, 1)
+            ]
+        );
     }
 }

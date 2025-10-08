@@ -17,10 +17,14 @@ pub mod testactor;
 pub mod testing;
 pub mod value_mesh;
 
+use std::collections::HashMap;
+use std::ops::Range;
 use std::str::FromStr;
+use std::time::Duration;
 
 pub use actor_mesh::ActorMesh;
 pub use actor_mesh::ActorMeshRef;
+use enum_as_inner::EnumAsInner;
 pub use host_mesh::HostMeshRef;
 use hyperactor::ActorId;
 use hyperactor::ActorRef;
@@ -33,12 +37,15 @@ use serde::Serialize;
 pub use value_mesh::ValueMesh;
 
 use crate::resource;
+use crate::resource::RankedValues;
+use crate::resource::Status;
+use crate::resource::ValuesByRank;
 use crate::shortuuid::ShortUuid;
 use crate::v1::host_mesh::HostMeshAgent;
 use crate::v1::host_mesh::HostMeshRefParseError;
 
 /// Errors that occur during mesh operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, EnumAsInner, thiserror::Error)]
 pub enum Error {
     #[error("invalid mesh ref: expected {expected} ranks, but contains {actual} ranks")]
     InvalidRankCardinality { expected: usize, actual: usize },
@@ -95,6 +102,18 @@ pub enum Error {
         host_rank: usize,
         status: resource::Status,
     },
+
+    #[error(
+        "error spawning proc mesh: statuses: {}",
+        RankedValues::invert(&*.statuses)
+    )]
+    ProcSpawnError { statuses: RankedValues<Status> },
+
+    #[error(
+        "error spawning actor mesh: statuses: {}",
+        RankedValues::invert(&*.statuses)
+    )]
+    ActorSpawnError { statuses: RankedValues<Status> },
 
     #[error("error: {0} does not exist")]
     NotExist(Name),
