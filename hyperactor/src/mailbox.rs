@@ -1244,12 +1244,29 @@ impl Mailbox {
         )
     }
 
+    /// Open a new port with an accumulator with default reduce options.
+    /// See [`open_accum_port_opts`] for more details.
+    pub fn open_accum_port<A>(&self, accum: A) -> (PortHandle<A::Update>, PortReceiver<A::State>)
+    where
+        A: Accumulator + Send + Sync + 'static,
+        A::Update: Message,
+        A::State: Message + Default + Clone,
+    {
+        self.open_accum_port_opts(accum, None)
+    }
+
     /// Open a new port with an accumulator. This port accepts A::Update type
     /// messages, accumulate them into A::State with the given accumulator.
     /// The latest changed state can be received from the returned receiver as
     /// a single A::State message. If there is no new update, the receiver will
     /// not receive any message.
-    pub fn open_accum_port<A>(&self, accum: A) -> (PortHandle<A::Update>, PortReceiver<A::State>)
+    ///
+    /// If provided, reducer options are applied to reduce operations.
+    pub fn open_accum_port_opts<A>(
+        &self,
+        accum: A,
+        reducer_opts: Option<ReducerOpts>,
+    ) -> (PortHandle<A::Update>, PortReceiver<A::State>)
     where
         A: Accumulator + Send + Sync + 'static,
         A::Update: Message,
@@ -1273,7 +1290,7 @@ impl Mailbox {
                 sender: UnboundedPortSender::Func(Arc::new(enqueue)),
                 bound: Arc::new(OnceLock::new()),
                 reducer_spec,
-                reducer_opts: None, // TODO: provide open_accum_port_opts
+                reducer_opts,
             },
             PortReceiver::new(receiver, port_id, /*coalesce=*/ true, self.clone()),
         )

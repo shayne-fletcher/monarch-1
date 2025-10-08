@@ -19,6 +19,7 @@ use hyperactor::ActorRef;
 use hyperactor::Named;
 use hyperactor::ProcId;
 use hyperactor::RemoteMessage;
+use hyperactor::accum::ReducerOpts;
 use hyperactor::actor::Referable;
 use hyperactor::actor::remote::Remote;
 use hyperactor::channel;
@@ -609,7 +610,12 @@ impl ProcMeshRef {
             },
         )?;
 
-        let (port, rx) = cx.mailbox().open_accum_port(RankedValues::default());
+        let (port, rx) = cx.mailbox().open_accum_port_opts(
+            RankedValues::default(),
+            Some(ReducerOpts {
+                max_update_interval: Some(Duration::from_millis(50)),
+            }),
+        );
 
         self.agent_mesh().cast(
             cx,

@@ -485,12 +485,10 @@ impl<T: Eq + Clone + Named> Accumulator for RankedValues<T> {
     }
 
     fn reducer_spec(&self) -> Option<ReducerSpec> {
-        None
-        // TODO: make this work. When it is enabled, the comm actor simply halts.
-        // Some(ReducerSpec {
-        //     typehash: <RankedValuesReducer<T> as Named>::typehash(),
-        //     builder_params: None,
-        // })
+        Some(ReducerSpec {
+            typehash: <RankedValuesReducer<T> as Named>::typehash(),
+            builder_params: None,
+        })
     }
 }
 

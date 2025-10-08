@@ -6,6 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use hyperactor::accum::ReducerOpts;
 use hyperactor::channel::ChannelTransport;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
@@ -534,7 +535,13 @@ impl HostMeshRef {
         let mesh_name = Name::new(name);
         let mut procs = Vec::new();
         let num_ranks = self.region().num_ranks() * per_host.num_ranks();
-        let (port, rx) = cx.mailbox().open_accum_port(RankedValues::default());
+        let (port, rx) = cx.mailbox().open_accum_port_opts(
+            RankedValues::default(),
+            Some(ReducerOpts {
+                max_update_interval: Some(Duration::from_millis(50)),
+            }),
+        );
+
         // We CreateOrUpdate each proc, and then fence on getting statuses back.
         // This is currently necessary because otherwise there is a race between
         // the procs being created, and subsequent messages becoming unroutable
