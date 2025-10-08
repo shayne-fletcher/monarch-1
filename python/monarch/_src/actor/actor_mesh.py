@@ -13,6 +13,7 @@ import functools
 import inspect
 import itertools
 import logging
+import threading
 from abc import abstractproperty
 
 from dataclasses import dataclass
@@ -49,6 +50,8 @@ from monarch._rust_bindings.monarch_hyperactor.actor import (
 )
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
 from monarch._rust_bindings.monarch_hyperactor.buffers import FrozenBuffer
+from monarch._rust_bindings.monarch_hyperactor.channel import ChannelTransport
+from monarch._rust_bindings.monarch_hyperactor.config import configure
 from monarch._rust_bindings.monarch_hyperactor.context import Instance as HyInstance
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
@@ -228,6 +231,39 @@ def context() -> Context:
 
         c.actor_instance.proc_mesh._host_mesh = create_local_host_mesh()  # type: ignore
     return c
+
+
+_transport: Optional[ChannelTransport] = None
+_transport_lock = threading.Lock()
+
+
+def enable_transport(transport: ChannelTransport) -> None:
+    """
+    Allow monarch to communicate with transport type 'transport'
+    This must be called before any other calls in the monarch API.
+    If it isn't called, we will implicitly call
+    `monarch.enable_transport(ChannelTransport.Unix)` on the first monarch call.
+
+    Currently only one transport type may be enabled at one time.
+    In the future we may allow multiple to be enabled.
+    """
+    if _context.get(None) is not None:
+        raise RuntimeError(
+            "`enable_transport()` must be called before any other calls in the monarch API. "
+            "If it isn't called, we will implicitly call `monarch.enable_transport(ChannelTransport.Unix)` "
+            "on the first monarch call."
+        )
+
+    global _transport
+    with _transport_lock:
+        if _transport is not None and _transport != transport:
+            raise RuntimeError(
+                f"Only one transport type may be enabled at one time. "
+                f"Currently enabled transport type is `{_transport}`. "
+                f"Attempted to enable transport type `{transport}`."
+            )
+        _transport = transport
+    configure(default_transport=transport)
 
 
 @dataclass

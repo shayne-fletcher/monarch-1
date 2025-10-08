@@ -63,7 +63,10 @@ from monarch._src.actor.v1.host_mesh import (
     this_host as this_host_v1,
     this_proc as this_proc_v1,
 )
-from monarch._src.actor.v1.proc_mesh import ProcMesh as ProcMeshV1
+from monarch._src.actor.v1.proc_mesh import (
+    get_or_spawn_controller as get_or_spawn_controller_v1,
+    ProcMesh as ProcMeshV1,
+)
 
 from monarch.actor import (
     Accumulator,
@@ -1697,15 +1700,18 @@ class SpawningActorFromEndpointActor(Actor):
         return self._root
 
     @endpoint
-    async def spawning_from_endpoint(self, name, root) -> None:
-        await get_or_spawn_controller(name, SpawningActorFromEndpointActor, root=root)
+    async def spawning_from_endpoint(self, name, root, get_or_spawn) -> None:
+        await get_or_spawn(name, SpawningActorFromEndpointActor, root=root)
 
 
+@pytest.mark.parametrize(
+    "get_or_spawn", [get_or_spawn_controller, get_or_spawn_controller_v1]
+)
 @pytest.mark.timeout(60)
-def test_get_or_spawn_controller_inside_actor_endpoint():
-    actor_1 = get_or_spawn_controller("actor_1", SpawningActorFromEndpointActor).get()
-    actor_1.spawning_from_endpoint.call_one("actor_2", root="actor_1").get()
-    actor_2 = get_or_spawn_controller("actor_2", SpawningActorFromEndpointActor).get()
+def test_get_or_spawn_controller_inside_actor_endpoint(get_or_spawn):
+    actor_1 = get_or_spawn("actor_1", SpawningActorFromEndpointActor).get()
+    actor_1.spawning_from_endpoint.call_one("actor_2", "actor_1", get_or_spawn).get()
+    actor_2 = get_or_spawn("actor_2", SpawningActorFromEndpointActor).get()
     # verify that actor_2 was spawned from actor_1 with the correct root
     assert actor_2.return_root.call_one().get() == "actor_1"
 

@@ -9,6 +9,7 @@
 Monarch Actor API - Public interface for actor functionality.
 """
 
+from monarch._rust_bindings.monarch_hyperactor.channel import ChannelTransport
 from monarch._rust_bindings.monarch_hyperactor.shape import Extent
 from monarch._src.actor.actor_mesh import (
     Accumulator,
@@ -20,6 +21,7 @@ from monarch._src.actor.actor_mesh import (
     current_actor_name,
     current_rank,
     current_size,
+    enable_transport,
     Endpoint,
     Point,
     Port,
@@ -77,4 +79,5 @@ __all__ = [
     "Extent",
     "run_worker_loop_forever",
     "attach_to_workers",
+    "enable_transport",
 ]
