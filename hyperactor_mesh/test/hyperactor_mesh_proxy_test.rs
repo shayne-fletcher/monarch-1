@@ -17,8 +17,10 @@ use clap::Parser;
 use hyperactor::Actor;
 use hyperactor::Context;
 use hyperactor::Handler;
+use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::PortRef;
+use hyperactor::Proc;
 use hyperactor::channel::ChannelTransport;
 use hyperactor_mesh::Mesh;
 use hyperactor_mesh::ProcMesh;
@@ -91,9 +93,8 @@ impl Handler<Echo> for TestActor {
     ],
 )]
 pub struct ProxyActor {
-    #[allow(dead_code)]
-    proc_mesh: Arc<ProcMesh>,
-    actor_mesh: RootActorMesh<'static, TestActor>,
+    proc_mesh: &'static Arc<ProcMesh>,
+    actor_mesh: Option<RootActorMesh<'static, TestActor>>,
 }
 
 impl fmt::Debug for ProxyActor {
@@ -126,19 +127,22 @@ impl Actor for ProxyActor {
             .unwrap();
         let proc_mesh = Arc::new(ProcMesh::allocate(alloc).await.unwrap());
         let leaked: &'static Arc<ProcMesh> = Box::leak(Box::new(proc_mesh));
-        let actor_mesh: RootActorMesh<'static, TestActor> =
-            leaked.spawn("echo", &()).await.unwrap();
         Ok(Self {
-            proc_mesh: Arc::clone(leaked),
-            actor_mesh,
+            proc_mesh: leaked,
+            actor_mesh: None,
         })
+    }
+
+    async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
+        self.actor_mesh = Some(self.proc_mesh.spawn(this, "echo", &()).await.unwrap());
+        Ok(())
     }
 }
 
 #[async_trait]
 impl Handler<Echo> for ProxyActor {
     async fn handle(&mut self, cx: &Context<Self>, message: Echo) -> Result<(), anyhow::Error> {
-        let actor = self.actor_mesh.get(0).unwrap();
+        let actor = self.actor_mesh.as_ref().unwrap().get(0).unwrap();
 
         let (tx, mut rx) = cx.open_port();
         actor.send(cx, Echo(message.0, tx.bind()))?;
@@ -163,9 +167,11 @@ async fn run_client(exe_path: PathBuf, keep_alive: bool) -> Result<(), anyhow::E
         .await
         .unwrap();
 
+    let (instance, _) = Proc::local().instance("client").unwrap();
+
     let mut proc_mesh = ProcMesh::allocate(alloc).await?;
     let actor_mesh: RootActorMesh<'_, ProxyActor> = proc_mesh
-        .spawn("proxy", &exe_path.to_str().unwrap().to_string())
+        .spawn(&instance, "proxy", &exe_path.to_str().unwrap().to_string())
         .await?;
     let proxy_actor = actor_mesh.get(0).unwrap();
     let (tx, mut rx) = actor_mesh.open_port::<String>();

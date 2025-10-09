@@ -51,6 +51,8 @@ use hyperactor::supervision::ActorSupervisionEvent;
 use ndslice::Range;
 use ndslice::Shape;
 use ndslice::ShapeError;
+use ndslice::View;
+use ndslice::ViewExt;
 use strum::AsRefStr;
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -76,6 +78,7 @@ use crate::proc_mesh::mesh_agent::update_event_actor_id;
 use crate::reference::ProcMeshId;
 use crate::router;
 use crate::shortuuid::ShortUuid;
+use crate::v1;
 
 pub mod mesh_agent;
 
@@ -205,25 +208,44 @@ pub fn global_root_client() -> &'static Instance<()> {
 }
 
 type ActorEventRouter = Arc<DashMap<ActorMeshName, mpsc::UnboundedSender<ActorSupervisionEvent>>>;
+
 /// A ProcMesh maintains a mesh of procs whose lifecycles are managed by
 /// an allocator.
 pub struct ProcMesh {
-    // The underlying set of events. It is None if it has been transferred to
-    // a proc event observer.
-    event_state: Option<EventState>,
-    actor_event_router: ActorEventRouter,
-    shape: Shape,
-    ranks: Vec<(ShortUuid, ProcId, ChannelAddr, ActorRef<ProcMeshAgent>)>,
-    #[allow(dead_code)] // will be used in subsequent diff
-    client_proc: Proc,
-    client: Instance<()>,
-    comm_actors: Vec<ActorRef<CommActor>>,
-    world_id: WorldId,
+    inner: ProcMeshKind,
+    shape: OnceLock<Shape>,
+}
+
+enum ProcMeshKind {
+    V0 {
+        // The underlying set of events. It is None if it has been transferred to
+        // a proc event observer.
+        event_state: Option<EventState>,
+        actor_event_router: ActorEventRouter,
+        shape: Shape,
+        ranks: Vec<(ShortUuid, ProcId, ChannelAddr, ActorRef<ProcMeshAgent>)>,
+        #[allow(dead_code)] // will be used in subsequent diff
+        client_proc: Proc,
+        client: Instance<()>,
+        comm_actors: Vec<ActorRef<CommActor>>,
+        world_id: WorldId,
+    },
+
+    V1(v1::ProcMeshRef),
 }
 
 struct EventState {
     alloc: Box<dyn Alloc + Send + Sync>,
     supervision_events: PortReceiver<ActorSupervisionEvent>,
+}
+
+impl From<v1::ProcMeshRef> for ProcMesh {
+    fn from(proc_mesh: v1::ProcMeshRef) -> Self {
+        ProcMesh {
+            inner: ProcMeshKind::V1(proc_mesh),
+            shape: OnceLock::new(),
+        }
+    }
 }
 
 impl ProcMesh {
@@ -440,27 +462,30 @@ impl ProcMesh {
         );
 
         Ok(Self {
-            event_state: Some(EventState {
-                alloc,
-                supervision_events,
-            }),
-            actor_event_router: Arc::new(DashMap::new()),
-            shape,
-            ranks: running
-                .into_iter()
-                .map(
-                    |AllocatedProc {
-                         create_key,
-                         proc_id,
-                         addr,
-                         mesh_agent,
-                     }| (create_key, proc_id, addr, mesh_agent),
-                )
-                .collect(),
-            client_proc,
-            client,
-            comm_actors,
-            world_id,
+            inner: ProcMeshKind::V0 {
+                event_state: Some(EventState {
+                    alloc,
+                    supervision_events,
+                }),
+                actor_event_router: Arc::new(DashMap::new()),
+                shape,
+                ranks: running
+                    .into_iter()
+                    .map(
+                        |AllocatedProc {
+                             create_key,
+                             proc_id,
+                             addr,
+                             mesh_agent,
+                         }| (create_key, proc_id, addr, mesh_agent),
+                    )
+                    .collect(),
+                client_proc,
+                client,
+                comm_actors,
+                world_id,
+            },
+            shape: OnceLock::new(),
         })
     }
 
@@ -533,13 +558,35 @@ impl ProcMesh {
             .collect())
     }
 
-    fn agents(&self) -> impl Iterator<Item = ActorRef<ProcMeshAgent>> + '_ {
-        self.ranks.iter().map(|(_, _, _, agent)| agent.clone())
+    fn agents(&self) -> Box<dyn Iterator<Item = ActorRef<ProcMeshAgent>> + '_ + Send> {
+        match &self.inner {
+            ProcMeshKind::V0 { ranks, .. } => {
+                Box::new(ranks.iter().map(|(_, _, _, agent)| agent.clone()))
+            }
+            ProcMeshKind::V1(proc_mesh) => Box::new(
+                proc_mesh
+                    .agent_mesh()
+                    .iter()
+                    .map(|(_point, agent)| agent.clone())
+                    // We need to collect here so that we can return an iterator
+                    // that fully owns the data and does not reference temporary
+                    // values.
+                    //
+                    // Because this is a shim that we expect to be short-lived,
+                    // we'll leave this hack as is; a proper solution here would
+                    // be to have implement an owning iterator (into_iter) for views.
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            ),
+        }
     }
 
     /// Return the comm actor to which casts should be forwarded.
     pub(crate) fn comm_actor(&self) -> &ActorRef<CommActor> {
-        &self.comm_actors[0]
+        match &self.inner {
+            ProcMeshKind::V0 { comm_actors, .. } => &comm_actors[0],
+            ProcMeshKind::V1(proc_mesh) => proc_mesh.root_comm_actor().unwrap(),
+        }
     }
 
     /// Spawn an `ActorMesh` by launching the same actor type on all
@@ -559,102 +606,145 @@ impl ProcMesh {
     ///   cross proc boundaries when launching each actor.
     pub async fn spawn<A: Actor + Referable>(
         &self,
+        cx: &impl context::Actor,
         actor_name: &str,
         params: &A::Params,
     ) -> Result<RootActorMesh<'_, A>, anyhow::Error>
     where
         A::Params: RemoteMessage,
     {
-        let (tx, rx) = mpsc::unbounded_channel::<ActorSupervisionEvent>();
-        {
-            // Instantiate supervision routing BEFORE spawning the actor mesh.
-            self.actor_event_router.insert(actor_name.to_string(), tx);
-            tracing::info!(
-                name = "router_insert",
-                actor_name = %actor_name,
-                "the length of the router is {}", self.actor_event_router.len(),
-            );
+        match &self.inner {
+            ProcMeshKind::V0 {
+                actor_event_router,
+                client,
+                ..
+            } => {
+                let (tx, rx) = mpsc::unbounded_channel::<ActorSupervisionEvent>();
+                {
+                    // Instantiate supervision routing BEFORE spawning the actor mesh.
+                    actor_event_router.insert(actor_name.to_string(), tx);
+                    tracing::info!(
+                        name = "router_insert",
+                        actor_name = %actor_name,
+                        "the length of the router is {}", actor_event_router.len(),
+                    );
+                }
+                let root_mesh = RootActorMesh::new(
+                    self,
+                    actor_name.to_string(),
+                    rx,
+                    Self::spawn_on_procs::<A>(client, self.agents(), actor_name, params).await?,
+                );
+                Ok(root_mesh)
+            }
+            ProcMeshKind::V1(proc_mesh) => {
+                let actor_mesh = proc_mesh.spawn(cx, actor_name, params).await?;
+                Ok(RootActorMesh::new_v1(actor_mesh.detach()))
+            }
         }
-        let root_mesh = RootActorMesh::new(
-            self,
-            actor_name.to_string(),
-            rx,
-            Self::spawn_on_procs::<A>(&self.client, self.agents(), actor_name, params).await?,
-        );
-        Ok(root_mesh)
     }
 
     /// A client actor used to communicate with any member of this mesh.
     pub fn client(&self) -> &Instance<()> {
-        &self.client
+        match &self.inner {
+            ProcMeshKind::V0 { client, .. } => client,
+            ProcMeshKind::V1(_proc_mesh) => unimplemented!("no client for v1::ProcMesh"),
+        }
     }
 
     pub fn client_proc(&self) -> &Proc {
-        &self.client_proc
+        match &self.inner {
+            ProcMeshKind::V0 { client_proc, .. } => client_proc,
+            ProcMeshKind::V1(_proc_mesh) => unimplemented!("no client proc for v1::ProcMesh"),
+        }
     }
 
     pub fn proc_id(&self) -> &ProcId {
-        self.client_proc.proc_id()
+        self.client_proc().proc_id()
     }
 
     pub fn world_id(&self) -> &WorldId {
-        &self.world_id
+        match &self.inner {
+            ProcMeshKind::V0 { world_id, .. } => world_id,
+            ProcMeshKind::V1(_proc_mesh) => unimplemented!("no world_id for v1::ProcMesh"),
+        }
     }
 
     /// An event stream of proc events. Each ProcMesh can produce only one such
     /// stream, returning None after the first call.
     pub fn events(&mut self) -> Option<ProcEvents> {
-        self.event_state.take().map(|event_state| ProcEvents {
-            event_state,
-            ranks: self
-                .ranks
-                .iter()
-                .enumerate()
-                .map(|(rank, (create_key, proc_id, _addr, _mesh_agent))| {
-                    (proc_id.clone(), (rank, create_key.clone()))
-                })
-                .collect(),
-            actor_event_router: self.actor_event_router.clone(),
-        })
+        match &mut self.inner {
+            ProcMeshKind::V0 {
+                event_state,
+                ranks,
+                actor_event_router,
+                ..
+            } => event_state.take().map(|event_state| ProcEvents {
+                event_state,
+                ranks: ranks
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, (create_key, proc_id, _addr, _mesh_agent))| {
+                        (proc_id.clone(), (rank, create_key.clone()))
+                    })
+                    .collect(),
+                actor_event_router: actor_event_router.clone(),
+            }),
+            ProcMeshKind::V1(_proc_mesh) => todo!(),
+        }
     }
 
     pub fn shape(&self) -> &Shape {
-        &self.shape
+        // We store the shape here, only because it isn't materialized in
+        // V1 meshes.
+        self.shape.get_or_init(|| match &self.inner {
+            ProcMeshKind::V0 { shape, .. } => shape.clone(),
+            ProcMeshKind::V1(proc_mesh) => proc_mesh.region().into(),
+        })
     }
 
     /// Send stop actors message to all mesh agents for a specific mesh name
     #[hyperactor::observe_result("ProcMesh")]
     pub async fn stop_actor_by_name(&self, mesh_name: &str) -> Result<(), anyhow::Error> {
-        let timeout = hyperactor::config::global::get(hyperactor::config::STOP_ACTOR_TIMEOUT);
-        let results = join_all(self.agents().map(|agent| async move {
-            let actor_id = ActorId(agent.actor_id().proc_id().clone(), mesh_name.to_string(), 0);
-            (
-                actor_id.clone(),
-                agent
-                    .clone()
-                    .stop_actor(&self.client, actor_id, timeout.as_millis() as u64)
-                    .await,
-            )
-        }))
-        .await;
+        match &self.inner {
+            ProcMeshKind::V0 { client, .. } => {
+                let timeout =
+                    hyperactor::config::global::get(hyperactor::config::STOP_ACTOR_TIMEOUT);
+                let results = join_all(self.agents().map(|agent| async move {
+                    let actor_id =
+                        ActorId(agent.actor_id().proc_id().clone(), mesh_name.to_string(), 0);
+                    (
+                        actor_id.clone(),
+                        agent
+                            .clone()
+                            .stop_actor(client, actor_id, timeout.as_millis() as u64)
+                            .await,
+                    )
+                }))
+                .await;
 
-        for (actor_id, result) in results {
-            match result {
-                Ok(StopActorResult::Timeout) => {
-                    tracing::warn!("timed out while stopping actor {}", actor_id);
+                for (actor_id, result) in results {
+                    match result {
+                        Ok(StopActorResult::Timeout) => {
+                            tracing::warn!("timed out while stopping actor {}", actor_id);
+                        }
+                        Ok(StopActorResult::NotFound) => {
+                            tracing::warn!("no actor {} on proc {}", actor_id, actor_id.proc_id());
+                        }
+                        Ok(StopActorResult::Success) => {
+                            tracing::info!("stopped actor {}", actor_id);
+                        }
+                        Err(e) => {
+                            tracing::warn!("error stopping actor {}: {}", actor_id, e);
+                        }
+                    }
                 }
-                Ok(StopActorResult::NotFound) => {
-                    tracing::warn!("no actor {} on proc {}", actor_id, actor_id.proc_id());
-                }
-                Ok(StopActorResult::Success) => {
-                    tracing::info!("stopped actor {}", actor_id);
-                }
-                Err(e) => {
-                    tracing::warn!("error stopping actor {}: {}", actor_id, e);
-                }
+                Ok(())
+            }
+            ProcMeshKind::V1(_proc_mesh) => {
+                anyhow::bail!("kill actor by name unsupported for v1::ProcMesh")
             }
         }
-        Ok(())
     }
 }
 
@@ -855,6 +945,7 @@ pub trait SharedSpawnable {
     // `Referable`: so we can hand back ActorRef<A> in RootActorMesh
     async fn spawn<A: Actor + Referable>(
         self,
+        cx: &impl context::Actor,
         actor_name: &str,
         params: &A::Params,
     ) -> Result<RootActorMesh<'static, A>, anyhow::Error>
@@ -868,30 +959,41 @@ impl<D: Deref<Target = ProcMesh> + Send + Sync + 'static> SharedSpawnable for D 
     // `Referable`: so we can hand back ActorRef<A> in RootActorMesh
     async fn spawn<A: Actor + Referable>(
         self,
+        cx: &impl context::Actor,
         actor_name: &str,
         params: &A::Params,
     ) -> Result<RootActorMesh<'static, A>, anyhow::Error>
     where
         A::Params: RemoteMessage,
     {
-        let (tx, rx) = mpsc::unbounded_channel::<ActorSupervisionEvent>();
-        {
-            // Instantiate supervision routing BEFORE spawning the actor mesh.
-            self.actor_event_router.insert(actor_name.to_string(), tx);
-            tracing::info!(
-                name = "router_insert",
-                actor_name = %actor_name,
-                "the length of the router is {}", self.actor_event_router.len(),
-            );
+        match &self.deref().inner {
+            ProcMeshKind::V0 {
+                actor_event_router,
+                client,
+                ..
+            } => {
+                let (tx, rx) = mpsc::unbounded_channel::<ActorSupervisionEvent>();
+                {
+                    // Instantiate supervision routing BEFORE spawning the actor mesh.
+                    actor_event_router.insert(actor_name.to_string(), tx);
+                    tracing::info!(
+                        name = "router_insert",
+                        actor_name = %actor_name,
+                        "the length of the router is {}", actor_event_router.len(),
+                    );
+                }
+                let ranks =
+                    ProcMesh::spawn_on_procs::<A>(client, self.agents(), actor_name, params)
+                        .await?;
+                Ok(RootActorMesh::new_shared(
+                    self,
+                    actor_name.to_string(),
+                    rx,
+                    ranks,
+                ))
+            }
+            ProcMeshKind::V1(proc_mesh) => todo!(),
         }
-        let ranks =
-            ProcMesh::spawn_on_procs::<A>(&self.client, self.agents(), actor_name, params).await?;
-        Ok(RootActorMesh::new_shared(
-            self,
-            actor_name.to_string(),
-            rx,
-            ranks,
-        ))
     }
 }
 
@@ -902,7 +1004,7 @@ impl Mesh for ProcMesh {
     type Sliced<'a> = SlicedProcMesh<'a>;
 
     fn shape(&self) -> &Shape {
-        &self.shape
+        ProcMesh::shape(self)
     }
 
     fn select<R: Into<Range>>(
@@ -914,11 +1016,17 @@ impl Mesh for ProcMesh {
     }
 
     fn get(&self, rank: usize) -> Option<ProcId> {
-        Some(self.ranks[rank].1.clone())
+        match &self.inner {
+            ProcMeshKind::V0 { ranks, .. } => Some(ranks[rank].1.clone()),
+            ProcMeshKind::V1(proc_mesh) => proc_mesh.get(rank).map(|proc| proc.proc_id().clone()),
+        }
     }
 
     fn id(&self) -> Self::Id {
-        ProcMeshId(self.world_id().name().to_string())
+        match &self.inner {
+            ProcMeshKind::V0 { world_id, .. } => ProcMeshId(world_id.name().to_string()),
+            ProcMeshKind::V1(proc_mesh) => ProcMeshId(proc_mesh.name().to_string()),
+        }
     }
 }
 
@@ -930,13 +1038,22 @@ impl fmt::Display for ProcMesh {
 
 impl fmt::Debug for ProcMesh {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ProcMesh")
-            .field("shape", &self.shape())
-            .field("ranks", &self.ranks)
-            .field("client_proc", &self.client_proc)
-            .field("client", &"<Instance>")
-            // Skip the alloc field since it doesn't implement Debug
-            .finish()
+        match &self.inner {
+            ProcMeshKind::V0 {
+                shape,
+                ranks,
+                client_proc,
+                ..
+            } => f
+                .debug_struct("ProcMesh::V0")
+                .field("shape", shape)
+                .field("ranks", ranks)
+                .field("client_proc", client_proc)
+                .field("client", &"<Instance>")
+                // Skip the alloc field since it doesn't implement Debug
+                .finish(),
+            ProcMeshKind::V1(proc_mesh) => fmt::Debug::fmt(proc_mesh, f),
+        }
     }
 }
 
@@ -1056,7 +1173,12 @@ mod tests {
         let mut mesh = ProcMesh::allocate(alloc).await.unwrap();
         let mut events = mesh.events().unwrap();
 
-        let mut actors = mesh.spawn::<TestActor>("failing", &()).await.unwrap();
+        let instance = crate::v1::testing::instance().await;
+
+        let mut actors = mesh
+            .spawn::<TestActor>(&instance, "failing", &())
+            .await
+            .unwrap();
         let mut actor_events = actors.events().unwrap();
 
         actors
@@ -1106,8 +1228,66 @@ mod tests {
             .unwrap();
         let mesh = ProcMesh::allocate(alloc).await.unwrap();
 
-        mesh.spawn::<TestActor>("dup", &()).await.unwrap();
-        let result = mesh.spawn::<TestActor>("dup", &()).await;
+        let instance = crate::v1::testing::instance().await;
+        mesh.spawn::<TestActor>(&instance, "dup", &())
+            .await
+            .unwrap();
+        let result = mesh.spawn::<TestActor>(&instance, "dup", &()).await;
         assert!(result.is_err());
+    }
+
+    mod shim {
+        use std::collections::HashSet;
+
+        use hyperactor::context::Mailbox;
+        use ndslice::Extent;
+        use ndslice::Selection;
+
+        use super::*;
+        use crate::sel;
+
+        #[tokio::test]
+        async fn test_basic() {
+            let instance = v1::testing::instance().await;
+            let ext = extent!(host = 4);
+            let host_mesh = v1::testing::host_mesh(ext.clone()).await;
+            let proc_mesh = host_mesh
+                .spawn(instance, "test", Extent::unity())
+                .await
+                .unwrap();
+            let proc_mesh_v0: ProcMesh = proc_mesh.detach().into();
+
+            let actor_mesh = proc_mesh_v0
+                .spawn::<v1::testactor::TestActor>(instance, "test", &())
+                .await
+                .unwrap();
+
+            let (cast_info, mut cast_info_rx) = instance.mailbox().open_port();
+            actor_mesh
+                .cast(
+                    instance,
+                    sel!(*),
+                    v1::testactor::GetCastInfo {
+                        cast_info: cast_info.bind(),
+                    },
+                )
+                .unwrap();
+
+            let mut point_to_actor: HashSet<_> = actor_mesh
+                .iter_actor_refs()
+                .enumerate()
+                .map(|(rank, actor_ref)| (ext.point_of_rank(rank).unwrap(), actor_ref))
+                .collect();
+            while !point_to_actor.is_empty() {
+                let (point, origin_actor_ref, sender_actor_id) = cast_info_rx.recv().await.unwrap();
+                let key = (point, origin_actor_ref);
+                assert!(
+                    point_to_actor.remove(&key),
+                    "key {:?} not present or removed twice",
+                    key
+                );
+                assert_eq!(&sender_actor_id, instance.self_id());
+            }
+        }
     }
 }

@@ -20,6 +20,7 @@ use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::PortRef;
+use hyperactor::Proc;
 use hyperactor::Unbind;
 use hyperactor::channel::ChannelTransport;
 use hyperactor_mesh::ProcMesh;
@@ -237,10 +238,12 @@ async fn main() -> Result<ExitCode> {
         })
         .await?;
 
+    let (instance, _) = Proc::local().instance("client").unwrap();
+
     let proc_mesh = ProcMesh::allocate(alloc).await?;
     let params = PhilosopherActorParams { size: group_size };
     let actor_mesh = proc_mesh
-        .spawn::<PhilosopherActor>("philosopher", &params)
+        .spawn::<PhilosopherActor>(&instance, "philosopher", &params)
         .await?;
     let (dining_message_handle, mut dining_message_rx) = proc_mesh.client().open_port();
     actor_mesh

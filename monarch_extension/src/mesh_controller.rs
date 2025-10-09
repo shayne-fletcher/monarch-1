@@ -760,7 +760,7 @@ impl Actor for MeshControllerActor {
         };
 
         let workers = proc_mesh
-            .spawn(&format!("tensor_engine_workers_{}", self.id), &param)
+            .spawn(this, &format!("tensor_engine_workers_{}", self.id), &param)
             .await?;
         workers.borrow().unwrap().cast(
             this,
@@ -770,7 +770,7 @@ impl Actor for MeshControllerActor {
 
         self.workers = Some(workers);
         let brokers = proc_mesh
-            .spawn(&format!("tensor_engine_brokers_{}", self.id), &())
+            .spawn(this, &format!("tensor_engine_brokers_{}", self.id), &())
             .await?;
         self.brokers = Some(brokers);
         Ok(())

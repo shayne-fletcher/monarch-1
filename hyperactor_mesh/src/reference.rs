@@ -336,9 +336,11 @@ mod tests {
             })
             .await
             .unwrap();
+        let instance = crate::v1::testing::instance().await;
         let ping_proc_mesh = ProcMesh::allocate(alloc_ping).await.unwrap();
         let ping_mesh: RootActorMesh<MeshPingPongActor> = ping_proc_mesh
             .spawn(
+                &instance,
                 "ping",
                 &MeshPingPongActorParams {
                     mesh_id: ActorMeshId::V0(
@@ -356,6 +358,7 @@ mod tests {
         let pong_proc_mesh = ProcMesh::allocate(alloc_pong).await.unwrap();
         let pong_mesh: RootActorMesh<MeshPingPongActor> = pong_proc_mesh
             .spawn(
+                &instance,
                 "pong",
                 &MeshPingPongActorParams {
                     mesh_id: ActorMeshId::V0(

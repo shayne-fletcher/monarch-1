@@ -74,6 +74,11 @@ impl<A: Referable> ActorMesh<A> {
     pub fn name(&self) -> &Name {
         &self.name
     }
+
+    /// Detach this mesh from the lifetime of `self`, and return its reference.
+    pub(crate) fn detach(self) -> ActorMeshRef<A> {
+        self.current_ref
+    }
 }
 
 impl<A: Referable> Deref for ActorMesh<A> {
@@ -139,7 +144,7 @@ pub struct ActorMeshRef<A: Referable> {
     _phantom: PhantomData<A>,
 }
 
-impl<A: Actor + Referable> ActorMeshRef<A> {
+impl<A: Referable> ActorMeshRef<A> {
     /// Cast a message to all actors in this mesh.
     pub fn cast<M>(&self, cx: &impl context::Actor, message: M) -> v1::Result<()>
     where
@@ -186,7 +191,7 @@ impl<A: Actor + Referable> ActorMeshRef<A> {
         root_comm_actor: &ActorRef<CommActor>,
     ) -> v1::Result<()>
     where
-        A: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
+        A: RemoteHandles<IndexedErasedUnbound<M>>,
         M: Castable + RemoteMessage + Clone, // Clone is required until we are fully onto comm actor
     {
         let cast_mesh_shape = view::Ranked::region(self).into();
@@ -231,6 +236,10 @@ impl<A: Referable> ActorMeshRef<A> {
         Self::with_page_size(name, proc_mesh, DEFAULT_PAGE)
     }
 
+    pub(crate) fn name(&self) -> &Name {
+        &self.name
+    }
+
     pub(crate) fn with_page_size(name: Name, proc_mesh: ProcMeshRef, page_size: usize) -> Self {
         Self {
             proc_mesh,
@@ -239,6 +248,10 @@ impl<A: Referable> ActorMeshRef<A> {
             page_size: page_size.max(1),
             _phantom: PhantomData,
         }
+    }
+
+    pub(crate) fn proc_mesh(&self) -> &ProcMeshRef {
+        &self.proc_mesh
     }
 
     #[inline]

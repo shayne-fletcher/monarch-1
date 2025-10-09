@@ -23,6 +23,8 @@ use monarch_hyperactor::code_sync::manager::CodeSyncMethod;
 use monarch_hyperactor::code_sync::manager::WorkspaceConfig;
 use monarch_hyperactor::code_sync::manager::WorkspaceShape;
 use monarch_hyperactor::code_sync::manager::code_sync_mesh;
+use monarch_hyperactor::context::PyInstance;
+use monarch_hyperactor::instance_dispatch;
 use monarch_hyperactor::proc_mesh::PyProcMesh;
 use monarch_hyperactor::runtime::signal_safe_block_on;
 use pyo3::Bound;
@@ -261,13 +263,15 @@ impl CodeSyncMeshClient {
 #[pymethods]
 impl CodeSyncMeshClient {
     #[staticmethod]
-    #[pyo3(signature = (*, proc_mesh))]
-    fn spawn_blocking(py: Python, proc_mesh: &PyProcMesh) -> PyResult<Self> {
+    #[pyo3(signature = (*, client, proc_mesh))]
+    fn spawn_blocking(py: Python, client: PyInstance, proc_mesh: &PyProcMesh) -> PyResult<Self> {
         let proc_mesh = proc_mesh.try_inner()?;
         signal_safe_block_on(py, async move {
-            let actor_mesh = proc_mesh
-                .spawn("code_sync_manager", &CodeSyncManagerParams {})
-                .await?;
+            let actor_mesh = instance_dispatch!(client, |cx| {
+                proc_mesh
+                    .spawn(cx, "code_sync_manager", &CodeSyncManagerParams {})
+                    .await?
+            });
             Ok(Self { actor_mesh })
         })?
     }

@@ -15,6 +15,7 @@ use hyperactor::Actor;
 use hyperactor::RemoteMessage;
 use hyperactor::WorldId;
 use hyperactor::actor::Referable;
+use hyperactor::context;
 use hyperactor::context::Mailbox as _;
 use hyperactor::proc::Instance;
 use hyperactor::proc::Proc;
@@ -24,6 +25,7 @@ use hyperactor_mesh::proc_mesh::ProcEvent;
 use hyperactor_mesh::proc_mesh::ProcEvents;
 use hyperactor_mesh::proc_mesh::ProcMesh;
 use hyperactor_mesh::proc_mesh::SharedSpawnable;
+use hyperactor_mesh::proc_mesh::global_root_client;
 use hyperactor_mesh::shared_cell::SharedCell;
 use hyperactor_mesh::shared_cell::SharedCellPool;
 use hyperactor_mesh::shared_cell::SharedCellRef;
@@ -89,6 +91,7 @@ impl From<ProcMesh> for TrackedProcMesh {
 impl TrackedProcMesh {
     pub async fn spawn<A: Actor + Referable>(
         &self,
+        cx: &impl context::Actor,
         actor_name: &str,
         params: &A::Params,
     ) -> Result<SharedCell<RootActorMesh<'static, A>>, anyhow::Error>
@@ -96,7 +99,7 @@ impl TrackedProcMesh {
         A::Params: RemoteMessage,
     {
         let mesh = self.cell.borrow()?;
-        let actor = mesh.spawn(actor_name, params).await?;
+        let actor = mesh.spawn(cx, actor_name, params).await?;
         Ok(self.children.insert(actor))
     }
 
@@ -313,13 +316,15 @@ impl PyProcMesh {
         actor: &Bound<'py, PyType>,
     ) -> PyResult<PyPythonTask> {
         let unhealthy_event = Arc::clone(&self.unhealthy_event);
-        let pickled_type = PickledPyObject::pickle(actor.as_any())?;
+        let pickled_type: PickledPyObject = PickledPyObject::pickle(actor.as_any())?;
         let proc_mesh = self.try_inner()?;
         let keepalive = self.keepalive.clone();
         let meshimpl = async move {
             ensure_mesh_healthy(&unhealthy_event).await?;
-            let instance = proc_mesh.client();
-            let actor_mesh = proc_mesh.spawn(&name, &pickled_type).await?;
+            // TODO: thread through context, or access the actual python context;
+            // for now this is basically equivalent (arguably better) to using the proc mesh client.
+            let instance = global_root_client();
+            let actor_mesh = proc_mesh.spawn(&instance, &name, &pickled_type).await?;
             let actor_events = actor_mesh.with_mut(|a| a.events()).await.unwrap().unwrap();
             let im = PythonActorMeshImpl::new(
                 actor_mesh,
@@ -354,8 +359,11 @@ impl PyProcMesh {
                     Ok((proc_mesh, pickled_type, unhealthy_event, keepalive))
                 })?;
             ensure_mesh_healthy(&unhealthy_event).await?;
-            let instance = proc_mesh.client();
-            let actor_mesh = proc_mesh.spawn(&name, &pickled_type).await?;
+            // TODO: thread through context, or access the actual python context;
+            // for now this is basically equivalent (arguably better) to using the proc mesh client.
+            let instance = global_root_client();
+
+            let actor_mesh = proc_mesh.spawn(&instance, &name, &pickled_type).await?;
             let actor_events = actor_mesh.with_mut(|a| a.events()).await.unwrap().unwrap();
             Ok::<_, PyErr>(Box::new(PythonActorMeshImpl::new(
                 actor_mesh,

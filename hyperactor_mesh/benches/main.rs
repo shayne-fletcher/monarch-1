@@ -13,6 +13,7 @@ use criterion::Criterion;
 use criterion::Throughput;
 use criterion::criterion_group;
 use criterion::criterion_main;
+use hyperactor::Proc;
 use hyperactor::channel::ChannelTransport;
 use hyperactor_mesh::ProcMesh;
 use hyperactor_mesh::actor_mesh::ActorMesh;
@@ -51,9 +52,10 @@ fn bench_actor_scaling(c: &mut Criterion) {
                     .await
                     .unwrap();
 
+                let (bootstrap_instance, _) = Proc::local().instance("bench").unwrap();
                 let mut proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
                 let actor_mesh: RootActorMesh<BenchActor> = proc_mesh
-                    .spawn("bench", &(Duration::from_millis(0)))
+                    .spawn(&bootstrap_instance, "bench", &(Duration::from_millis(0)))
                     .await
                     .unwrap();
                 let client = proc_mesh.client();
@@ -149,9 +151,10 @@ fn bench_actor_mesh_message_sizes(c: &mut Criterion) {
                             .await
                             .unwrap();
 
+                        let (bootstrap_instance, _) = Proc::local().instance("bench").unwrap();
                         let mut proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
                         let actor_mesh: RootActorMesh<BenchActor> = proc_mesh
-                            .spawn("bench", &(Duration::from_millis(0)))
+                            .spawn(&bootstrap_instance, "bench", &(Duration::from_millis(0)))
                             .await
                             .unwrap();
 

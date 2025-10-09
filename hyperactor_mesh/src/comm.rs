@@ -830,9 +830,9 @@ mod tests {
         let params = TestActorParams {
             forward_port: tx.bind(),
         };
-        let actor_mesh = proc_mesh
-            .clone()
-            .spawn::<TestActor>(dest_actor_name, &params)
+        let instance = crate::v1::testing::instance().await;
+        let actor_mesh = Arc::clone(&proc_mesh)
+            .spawn::<TestActor>(&instance, dest_actor_name, &params)
             .await
             .unwrap();
 
@@ -968,7 +968,7 @@ mod tests {
         } = setup_mesh::<NoneAccumulator>(None).await;
         let proc_mesh_client = actor_mesh.proc_mesh().client();
 
-        let ranks = actor_mesh.ranks.clone();
+        let ranks = actor_mesh.ranks().clone();
         execute_cast_and_reply(ranks, proc_mesh_client, reply1_rx, reply2_rx, reply_tos).await;
     }
 
@@ -1032,7 +1032,7 @@ mod tests {
             ..
         } = setup_mesh(Some(accum::sum::<u64>())).await;
         let proc_mesh_client = actor_mesh.proc_mesh().client();
-        let ranks = actor_mesh.ranks.clone();
+        let ranks = actor_mesh.ranks().clone();
         execute_cast_and_accum(ranks, proc_mesh_client, reply1_rx, reply_tos).await;
     }
 

@@ -8,6 +8,7 @@
 
 use anyhow::Result;
 use anyhow::anyhow;
+use hyperactor::Proc;
 use hyperactor::channel::ChannelTransport;
 use hyperactor_mesh::actor_mesh::ActorMesh;
 use hyperactor_mesh::alloc::AllocSpec;
@@ -53,10 +54,12 @@ CONSTANT = "initial_constant"
         })
         .await?;
 
+    let (instance, _) = Proc::local().instance("client").unwrap();
+
     let proc_mesh = ProcMesh::allocate(alloc).await?;
     let params = AutoReloadParams {};
     let actor_mesh = proc_mesh
-        .spawn::<AutoReloadActor>("auto_reload_test", &params)
+        .spawn::<AutoReloadActor>(&instance, "auto_reload_test", &params)
         .await?;
 
     // Get a reference to the single actor

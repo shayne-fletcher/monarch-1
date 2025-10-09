@@ -484,6 +484,7 @@ mod tests {
     use hyperactor_mesh::alloc::Allocator;
     use hyperactor_mesh::alloc::local::LocalAllocator;
     use hyperactor_mesh::proc_mesh::ProcMesh;
+    use hyperactor_mesh::proc_mesh::global_root_client;
     use ndslice::extent;
     use ndslice::shape;
     use tempfile::TempDir;
@@ -585,9 +586,13 @@ mod tests {
         // Create CodeSyncManagerParams
         let params = CodeSyncManagerParams {};
 
+        // TODO: thread through context, or access the actual python context;
+        // for now this is basically equivalent (arguably better) to using the proc mesh client.
+        let instance = global_root_client();
+
         // Spawn actor mesh with CodeSyncManager actors
         let actor_mesh = proc_mesh
-            .spawn::<CodeSyncManager>("code_sync_test", &params)
+            .spawn::<CodeSyncManager>(&instance, "code_sync_test", &params)
             .await?;
 
         // Create workspace configuration

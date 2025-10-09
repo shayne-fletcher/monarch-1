@@ -466,6 +466,7 @@ class ProcMesh(MeshTrait):
         """
         if self._code_sync_client is None:
             self._code_sync_client = CodeSyncMeshClient.spawn_blocking(
+                client=context().actor_instance,
                 proc_mesh=await self._proc_mesh_for_asyncio_fixme,
             )
 

@@ -22,6 +22,7 @@ use hyperactor::Context;
 use hyperactor::Handler;
 use hyperactor::Named;
 use hyperactor::PortRef;
+use hyperactor::Proc;
 use hyperactor::channel::ChannelTransport;
 use hyperactor_mesh::Mesh;
 use hyperactor_mesh::ProcMesh;
@@ -116,8 +117,12 @@ async fn main() -> Result<ExitCode> {
 
     let mesh = ProcMesh::allocate(alloc).await?;
 
+    let (instance, _) = Proc::local().instance("client").unwrap();
+
     let sieve_params = SieveParams { prime: 2 };
-    let sieve_mesh = mesh.spawn::<SieveActor>("sieve", &sieve_params).await?;
+    let sieve_mesh = mesh
+        .spawn::<SieveActor>(&instance, "sieve", &sieve_params)
+        .await?;
     let sieve_head = sieve_mesh.get(0).unwrap();
 
     let mut primes = vec![2];

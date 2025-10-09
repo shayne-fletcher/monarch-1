@@ -65,6 +65,7 @@ use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::OncePortRef;
 use hyperactor::PortRef;
+use hyperactor::Proc;
 use hyperactor::Unbind;
 use hyperactor::channel::ChannelTransport;
 use hyperactor::context::Mailbox as _;
@@ -467,6 +468,8 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
     // As normal, create a proc mesh for the parameter server.
     tracing::info!("creating parameter server proc mesh...");
 
+    let (instance, _) = Proc::local().instance("client").unwrap();
+
     let mut alloc = ProcessAllocator::new(Command::new(
         buck_resources::get("monarch/monarch_rdma/examples/parameter_server/bootstrap").unwrap(),
     ));
@@ -493,7 +496,7 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
     // We spin this up manually here, but in Python-land we assume this will
     // be spun up with the PyProcMesh.
     let ps_rdma_manager: RootActorMesh<'_, RdmaManagerActor> = ps_proc_mesh
-        .spawn("ps_rdma_manager", &Some(ps_ibv_config))
+        .spawn(&instance, "ps_rdma_manager", &Some(ps_ibv_config))
         .await
         .unwrap();
 
@@ -517,13 +520,14 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
     );
     // Similarly, create an RdmaManagerActor corresponding to each worker.
     let worker_rdma_manager_mesh: RootActorMesh<'_, RdmaManagerActor> = worker_proc_mesh
-        .spawn("ps_rdma_manager", &Some(worker_ibv_config))
+        .spawn(&instance, "ps_rdma_manager", &Some(worker_ibv_config))
         .await
         .unwrap();
 
     tracing::info!("spawning parameter server");
     let ps_actor_mesh: RootActorMesh<'_, ParameterServerActor> = ps_proc_mesh
         .spawn(
+            &instance,
             "parameter_server",
             &(ps_rdma_manager.iter().next().unwrap(), num_workers),
         )
@@ -534,8 +538,10 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
     let ps_actor = ps_actor_mesh.iter().next().unwrap();
 
     tracing::info!("spawning worker actors");
-    let worker_actor_mesh: RootActorMesh<'_, WorkerActor> =
-        worker_proc_mesh.spawn("worker_actors", &()).await.unwrap();
+    let worker_actor_mesh: RootActorMesh<'_, WorkerActor> = worker_proc_mesh
+        .spawn(&instance, "worker_actors", &())
+        .await
+        .unwrap();
 
     let worker_rdma_managers: Vec<ActorRef<RdmaManagerActor>> =
         worker_rdma_manager_mesh.iter().collect();

@@ -199,11 +199,13 @@ mod tests {
             })
             .await
             .unwrap();
+        let instance = crate::v1::testing::instance().await;
 
         let proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
 
         let handle = hyperactor::simnet::simnet_handle().unwrap();
-        let actor_mesh: RootActorMesh<TestActor> = proc_mesh.spawn("echo", &()).await.unwrap();
+        let actor_mesh: RootActorMesh<TestActor> =
+            proc_mesh.spawn(&instance, "echo", &()).await.unwrap();
         let actors = actor_mesh.iter_actor_refs().collect::<Vec<_>>();
         assert_eq!(
             handle.sample_latency(

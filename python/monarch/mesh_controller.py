@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from monarch.actor import ProcMesh
 
 from monarch._rust_bindings.monarch_hyperactor.shape import Point
-from monarch._src.actor.actor_mesh import context, Instance
+from monarch._src.actor.actor_mesh import context, Context, Instance
 from monarch._src.actor.device_utils import _local_device_count
 
 from monarch.common.client import Client

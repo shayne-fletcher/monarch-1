@@ -287,9 +287,10 @@ impl PyRdmaManager {
     /// Creates an RDMA manager actor on the given ProcMesh (async version).
     /// Returns the actor mesh if RDMA is supported, None otherwise.
     #[classmethod]
-    fn create_rdma_manager_nonblocking<'py>(
+    fn create_rdma_manager_nonblocking(
         _cls: &Bound<'_, PyType>,
         proc_mesh: &PyProcMesh,
+        client: PyInstance,
     ) -> PyResult<PyPythonTask> {
         tracing::debug!("spawning RDMA manager on target proc_mesh nodes");
 
@@ -298,12 +299,14 @@ impl PyRdmaManager {
         PyPythonTask::new(async move {
             // Spawns the `RdmaManagerActor` on the target proc_mesh.
             // This allows the `RdmaController` to run on any node while real RDMA operations occur on appropriate hardware.
-            let actor_mesh = tracked_proc_mesh
-                // Pass None to use default config - RdmaManagerActor will use default IbverbsConfig
-                // TODO - make IbverbsConfig configurable
-                .spawn::<RdmaManagerActor>("rdma_manager", &None)
-                .await
-                .map_err(|err| PyException::new_err(err.to_string()))?;
+            let actor_mesh = instance_dispatch!(client, |cx| {
+                tracked_proc_mesh
+                    // Pass None to use default config - RdmaManagerActor will use default IbverbsConfig
+                    // TODO - make IbverbsConfig configurable
+                    .spawn::<RdmaManagerActor>(cx, "rdma_manager", &None)
+                    .await
+                    .map_err(|err| PyException::new_err(err.to_string()))?
+            });
 
             // Use placeholder device name since actual device is determined on remote node
             Ok(Some(PyRdmaManager {

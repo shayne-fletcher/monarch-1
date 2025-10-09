@@ -7,7 +7,7 @@
 # pyre-unsafe
 
 from pathlib import Path
-from typing import Dict, final
+from typing import Any, Dict, final
 
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
 
@@ -83,6 +83,7 @@ class CodeSyncMeshClient:
     """
     @staticmethod
     def spawn_blocking(
+        client: Any,
         proc_mesh: ProcMesh,
     ) -> CodeSyncMeshClient: ...
     async def sync_workspace(

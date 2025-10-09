@@ -79,6 +79,7 @@ pub mod test_utils {
 
     use hyperactor::ActorRef;
     use hyperactor::Instance;
+    use hyperactor::Proc;
     use hyperactor::channel::ChannelTransport;
     use hyperactor::clock::Clock;
     use hyperactor::clock::RealClock;
@@ -326,9 +327,11 @@ pub mod test_utils {
                 .await
                 .unwrap();
 
+            let (instance, _) = Proc::local().instance("test").unwrap();
+
             let proc_mesh_1 = Box::leak(Box::new(ProcMesh::allocate(alloc_1).await.unwrap()));
             let actor_mesh_1: RootActorMesh<'_, RdmaManagerActor> = proc_mesh_1
-                .spawn("rdma_manager", &Some(config1))
+                .spawn(&instance, "rdma_manager", &Some(config1))
                 .await
                 .unwrap();
 
@@ -344,7 +347,7 @@ pub mod test_utils {
 
             let proc_mesh_2 = Box::leak(Box::new(ProcMesh::allocate(alloc_2).await.unwrap()));
             let actor_mesh_2: RootActorMesh<'_, RdmaManagerActor> = proc_mesh_2
-                .spawn("rdma_manager", &Some(config2))
+                .spawn(&instance, "rdma_manager", &Some(config2))
                 .await
                 .unwrap();
 
@@ -409,8 +412,8 @@ pub mod test_utils {
                         0,
                         0,
                     ));
-                    assert!(dptr as usize % granularity == 0);
-                    assert!(padded_size % granularity == 0);
+                    assert!((dptr as usize).is_multiple_of(granularity));
+                    assert!(padded_size.is_multiple_of(granularity));
 
                     // fails if a add cu_check macro; but passes if we don't
                     let err = cuda_sys::cuMemMap(

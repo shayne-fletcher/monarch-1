@@ -132,7 +132,9 @@ class RdmaController(Actor):
             async def create_manager() -> _RdmaManager:
                 proc_mesh_result = await Future(coro=proc_mesh._proc_mesh.task())
                 return none_throws(
-                    await _RdmaManager.create_rdma_manager_nonblocking(proc_mesh_result)
+                    await _RdmaManager.create_rdma_manager_nonblocking(
+                        proc_mesh_result, context().actor_instance
+                    )
                 )
 
             self._manager_futures[proc_mesh] = Future(coro=create_manager())

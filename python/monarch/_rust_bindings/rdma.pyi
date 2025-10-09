@@ -21,6 +21,7 @@ class _RdmaManager:
     def create_rdma_manager_nonblocking(
         self,
         proc_mesh: Any,
+        client: Any,
     ) -> PythonTask[_RdmaManager | None]: ...
 
 @final
