@@ -72,6 +72,9 @@ declare_attrs! {
     /// The maximum idle time between updates while spawning actor meshes.
     @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_ACTOR_SPAWN_MAX_IDLE".to_string())
     pub attr ACTOR_SPAWN_MAX_IDLE: Duration = Duration::from_secs(30);
+
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_GET_ACTOR_STATE_MAX_IDLE".to_string())
+    pub attr GET_ACTOR_STATE_MAX_IDLE: Duration = Duration::from_secs(30);
 }
 
 /// A reference to a single [`hyperactor::Proc`].
@@ -545,7 +548,9 @@ impl ProcMeshRef {
             // the agent will be unresponsive.
             // We handle this by setting a timeout on the recv, and if we don't get a
             // message we assume the agent is dead and return a failed state.
-            let state = RealClock.timeout(Duration::from_secs(1), rx.recv()).await;
+            let state = RealClock
+                .timeout(config::global::get(GET_ACTOR_STATE_MAX_IDLE), rx.recv())
+                .await;
             if let Ok(state) = state {
                 // Handle non-timeout receiver error.
                 let state = state?;

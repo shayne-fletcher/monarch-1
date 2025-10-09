@@ -778,7 +778,7 @@ async def test_supervision_with_proc_mesh_stopped(mesh, api_ver: ApiVersion) -> 
 # TODO - re-enable after resolving T232206970
 @pytest.mark.oss_skip
 @pytest.mark.parametrize("api_ver", [ApiVersion.V0, ApiVersion.V1])
-@pytest.mark.timeout(30)
+@pytest.mark.timeout(60)
 async def test_supervision_with_sending_error(api_ver: ApiVersion) -> None:
     # Messages of length > this will cause a send error and a returned
     # undeliverable.
