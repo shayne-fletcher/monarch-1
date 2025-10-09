@@ -18,6 +18,7 @@ use monarch_hyperactor::instance_dispatch;
 use monarch_hyperactor::proc_mesh::PyProcMesh;
 use monarch_hyperactor::pytokio::PyPythonTask;
 use monarch_hyperactor::runtime::signal_safe_block_on;
+use monarch_hyperactor::v1::proc_mesh::PyProcMesh as PyProcMeshV1;
 use monarch_rdma::RdmaBuffer;
 use monarch_rdma::RdmaManagerActor;
 use monarch_rdma::RdmaManagerMessageClient;
@@ -36,6 +37,7 @@ fn setup_rdma_context(
     local_proc_id: String,
 ) -> (ActorRef<RdmaManagerActor>, RdmaBuffer) {
     let proc_id: ProcId = local_proc_id.parse().unwrap();
+    // TODO: find some better way to look this up, or else formally define "service names"
     let local_owner_id = ActorId(proc_id, "rdma_manager".to_string(), 0);
     let local_owner_ref: ActorRef<RdmaManagerActor> = ActorRef::attest(local_owner_id);
     let buffer = rdma_buffer.buffer.clone();
@@ -56,6 +58,7 @@ async fn create_rdma_buffer(
     client: PyInstance,
 ) -> PyResult<PyRdmaBuffer> {
     // Get the owning RdmaManagerActor's ActorRef
+    // TODO: find some better way to look this up, or else formally define "service names"
     let owner_id = ActorId(proc_id, "rdma_manager".to_string(), 0);
     let owner_ref: ActorRef<RdmaManagerActor> = ActorRef::attest(owner_id);
 
@@ -289,31 +292,54 @@ impl PyRdmaManager {
     #[classmethod]
     fn create_rdma_manager_nonblocking(
         _cls: &Bound<'_, PyType>,
-        proc_mesh: &PyProcMesh,
+        proc_mesh: &Bound<'_, PyAny>,
         client: PyInstance,
     ) -> PyResult<PyPythonTask> {
         tracing::debug!("spawning RDMA manager on target proc_mesh nodes");
 
-        let tracked_proc_mesh = proc_mesh.try_inner()?;
+        if let Ok(v0) = proc_mesh.downcast::<PyProcMesh>() {
+            let tracked_proc_mesh = v0.borrow().try_inner()?;
+            PyPythonTask::new(async move {
+                // Spawns the `RdmaManagerActor` on the target proc_mesh.
+                // This allows the `RdmaController` to run on any node while real RDMA operations occur on appropriate hardware.
+                let actor_mesh = instance_dispatch!(client, |cx| {
+                    tracked_proc_mesh
+                        // Pass None to use default config - RdmaManagerActor will use default IbverbsConfig
+                        // TODO - make IbverbsConfig configurable
+                        .spawn::<RdmaManagerActor>(cx, "rdma_manager", &None)
+                        .await
+                        .map_err(|err| PyException::new_err(err.to_string()))?
+                });
 
-        PyPythonTask::new(async move {
-            // Spawns the `RdmaManagerActor` on the target proc_mesh.
-            // This allows the `RdmaController` to run on any node while real RDMA operations occur on appropriate hardware.
-            let actor_mesh = instance_dispatch!(client, |cx| {
-                tracked_proc_mesh
-                    // Pass None to use default config - RdmaManagerActor will use default IbverbsConfig
-                    // TODO - make IbverbsConfig configurable
-                    .spawn::<RdmaManagerActor>(cx, "rdma_manager", &None)
-                    .await
-                    .map_err(|err| PyException::new_err(err.to_string()))?
-            });
+                // Use placeholder device name since actual device is determined on remote node
+                Ok(Some(PyRdmaManager {
+                    inner: actor_mesh,
+                    device: "remote_rdma_device".to_string(),
+                }))
+            })
+        } else {
+            let proc_mesh = proc_mesh.downcast::<PyProcMeshV1>()?.borrow().mesh_ref()?;
+            PyPythonTask::new(async move {
+                let actor_mesh = instance_dispatch!(client, |cx| {
+                    proc_mesh
+                        // Pass None to use default config - RdmaManagerActor will use default IbverbsConfig
+                        // TODO - make IbverbsConfig configurable
+                        .spawn_service::<RdmaManagerActor>(cx, "rdma_manager", &None)
+                        .await
+                        .map_err(|err| PyException::new_err(err.to_string()))?
+                });
 
-            // Use placeholder device name since actual device is determined on remote node
-            Ok(Some(PyRdmaManager {
-                inner: actor_mesh,
-                device: "remote_rdma_device".to_string(),
-            }))
-        })
+                eprintln!("spawned rdma_manager: {:?}", actor_mesh);
+
+                let actor_mesh = RootActorMesh::from(actor_mesh);
+                let actor_mesh = SharedCell::from(actor_mesh);
+
+                Ok(Some(PyRdmaManager {
+                    inner: actor_mesh,
+                    device: "remote_rdma_device".to_string(),
+                }))
+            })
+        }
     }
 }
 

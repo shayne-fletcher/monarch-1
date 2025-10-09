@@ -550,7 +550,7 @@ impl HostMeshRef {
         for (host_rank, host) in self.ranks.iter().enumerate() {
             for per_host_rank in 0..per_host.num_ranks() {
                 let create_rank = per_host.num_ranks() * host_rank + per_host_rank;
-                let proc_name = Name::new(format!("{}-{}", name, per_host_rank));
+                let proc_name = Name::new(format!("{}_{}", name, per_host_rank));
                 host.mesh_agent()
                     .create_or_update(cx, proc_name.clone(), resource::Rank::new(create_rank), ())
                     .await

@@ -150,7 +150,7 @@ class HostMesh(MeshTrait):
             per_host = {}
 
         if not name:
-            name = ""
+            name = "anon"
 
         return self._spawn_nonblocking(
             name, Extent(list(per_host.keys()), list(per_host.values())), setup, True

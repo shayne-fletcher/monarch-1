@@ -635,6 +635,26 @@ impl ProcMeshRef {
         self.spawn_with_name(cx, Name::new(name), params).await
     }
 
+    /// Spawn a 'service' actor. Service actors are *singletons*, using
+    /// reserved names. The provided name is used verbatim as the actor's
+    /// name, and thus it may be persistently looked up by constructing
+    /// the appropriate name.
+    ///
+    /// Note: avoid using service actors if possible; the mechanism will
+    /// be replaced by an actor registry.
+    pub async fn spawn_service<A: Actor + Referable>(
+        &self,
+        cx: &impl context::Actor,
+        name: &str,
+        params: &A::Params,
+    ) -> v1::Result<ActorMesh<A>>
+    where
+        A::Params: RemoteMessage,
+    {
+        self.spawn_with_name(cx, Name::new_reserved(name), params)
+            .await
+    }
+
     /// Spawn an actor on all procs in this mesh under the given
     /// [`Name`], returning a new `ActorMesh`.
     ///

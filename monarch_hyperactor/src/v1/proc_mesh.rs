@@ -36,7 +36,7 @@ use crate::v1::actor_mesh::PythonActorMeshImpl;
     name = "ProcMesh",
     module = "monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh"
 )]
-pub(crate) enum PyProcMesh {
+pub enum PyProcMesh {
     Owned(PyProcMeshImpl),
     Ref(PyProcMeshRefImpl),
 }
@@ -50,7 +50,7 @@ impl PyProcMesh {
         Self::Ref(PyProcMeshRefImpl(inner))
     }
 
-    pub(crate) fn mesh_ref(&self) -> Result<ProcMeshRef, anyhow::Error> {
+    pub fn mesh_ref(&self) -> Result<ProcMeshRef, anyhow::Error> {
         match self {
             PyProcMesh::Owned(inner) => Ok(inner.0.borrow()?.clone()),
             PyProcMesh::Ref(inner) => Ok(inner.0.clone()),
@@ -195,7 +195,7 @@ impl PyProcMesh {
     name = "ProcMeshImpl",
     module = "monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh"
 )]
-pub(crate) struct PyProcMeshImpl(SharedCell<ProcMesh>);
+pub struct PyProcMeshImpl(SharedCell<ProcMesh>);
 
 impl PyProcMeshImpl {
     fn __repr__(&self) -> PyResult<String> {
@@ -211,7 +211,7 @@ impl PyProcMeshImpl {
     name = "ProcMeshRefImpl",
     module = "monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh"
 )]
-pub(crate) struct PyProcMeshRefImpl(ProcMeshRef);
+pub struct PyProcMeshRefImpl(ProcMeshRef);
 
 impl PyProcMeshRefImpl {
     fn __repr__(&self) -> PyResult<String> {
