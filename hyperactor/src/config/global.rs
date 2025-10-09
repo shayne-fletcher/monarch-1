@@ -14,16 +14,15 @@
 //!
 //! - Reads (`get`, `get_cloned`) consult layers in that order, falling
 //!   back to defaults if no explicit value is set.
-//! - `attrs()` returns a **complete snapshot** of the effective
-//!   configuration at call time: it materializes defaults for keys not
-//!   set in any layer, and omits meta-only keys (like `CONFIG_ENV_VAR`)
-//!   unless explicitly set.
+//! - `attrs()` returns a complete snapshot of all CONFIG-marked keys at
+//!   call time: it materializes defaults for keys not set in any layer.
+//!   Keys without @meta(CONFIG = …) are excluded.
 //! - In tests, `lock()` and `override_key` allow temporary overrides
 //!   that are removed automatically when the guard drops.
 //! - In normal operation, a parent process can capture its effective
 //!   config via `attrs()` and pass that snapshot to a child during
 //!   bootstrap. The child installs it as a `Runtime` layer so the
-//!   parent’s values take precedence over Env/File/Defaults.
+//!   parent's values take precedence over Env/File/Defaults.
 //!
 //! This design provides flexibility (easy test overrides, runtime
 //! updates, YAML/Env baselines) while ensuring type safety and
@@ -49,6 +48,7 @@ use std::marker::PhantomData;
 use super::*;
 use crate::attrs::AttrValue;
 use crate::attrs::Key;
+use crate::config::CONFIG;
 
 /// Configuration source layers in priority order.
 ///
@@ -174,19 +174,17 @@ pub fn lock() -> ConfigLock {
     }
 }
 
-/// Initialize the global configuration from environment
-/// variables.
+/// Initialize the global configuration from environment variables.
 ///
-/// Reads values from process environment variables, using the
-/// `CONFIG_ENV_VAR` meta-attribute declared on each key to find
-/// its mapping. The resulting values are installed as the
-/// [`Source::Env`] layer. Keys without a corresponding
-/// environment variable fall back to defaults or higher-priority
-/// sources.
+/// Reads values from process environment variables, using each key's
+/// `CONFIG.env_name` (from `@meta(CONFIG = ConfigAttr { … })`) to
+/// determine its mapping. The resulting values are installed as the
+/// [`Source::Env`] layer. Keys without a corresponding environment
+/// variable fall back to defaults or higher-priority sources.
 ///
-/// Typically invoked once at process startup to overlay config
-/// values from the environment. Repeated calls replace the
-/// existing Env layer.
+/// Typically invoked once at process startup to overlay config values
+/// from the environment. Repeated calls replace the existing Env
+/// layer.
 pub fn init_from_env() {
     set(Source::Env, super::from_env());
 }
@@ -278,13 +276,14 @@ pub fn set(source: Source, attrs: Attrs) {
 /// contribute to resolution in [`get`], [`get_cloned`], or
 /// [`attrs`]. Defaults and any remaining layers continue to apply
 /// in their normal priority order.
+#[allow(dead_code)]
 pub(crate) fn clear(source: Source) {
     let mut g = LAYERS.write().unwrap();
     g.ordered.retain(|l| l.source != source);
 }
 
-/// Return a complete, merged snapshot of the effective
-/// configuration.
+/// Return a complete, merged snapshot of the effective configuration
+/// **(only keys marked with `@meta(CONFIG = ...)`)**.
 ///
 /// Resolution per key:
 /// 1) First explicit value found in layers (TestOverride →
@@ -292,8 +291,9 @@ pub(crate) fn clear(source: Source) {
 /// 2) Otherwise, the key's default (if any).
 ///
 /// Notes:
-/// - This materializes defaults into the returned Attrs so it's
-///   self-contained.
+/// - This materializes defaults into the returned Attrs for all
+///   CONFIG-marked keys, so it's self-contained.
+/// - Keys without `CONFIG` meta are excluded.
 pub fn attrs() -> Attrs {
     let layers = LAYERS.read().unwrap();
     let mut merged = Attrs::new();
@@ -301,6 +301,11 @@ pub fn attrs() -> Attrs {
     // Iterate all declared keys (registered via `declare_attrs!`
     // + inventory).
     for info in inventory::iter::<AttrKeyInfo>() {
+        // Skip keys not marked as `CONFIG`.
+        if info.meta.get(CONFIG).is_none() {
+            continue;
+        }
+
         let name = info.name;
 
         // Try to resolve from highest -> lowest priority layer.
@@ -398,21 +403,17 @@ impl ConfigLock {
             // Set new override value.
             layer_attrs.set(key, value.clone());
             // Mirror env var.
-            let orig_env = if let Some(env_var) = key.attrs().get(CONFIG_ENV_VAR) {
-                let orig = std::env::var(env_var).ok();
-                // SAFETY: Mutating process-global environment
-                // variables is not thread-safe. This path is used
-                // only in tests while holding the global
-                // ConfigLock, which serializes config mutations
-                // across the process. Tests are single-threaded
-                // with respect to env changes, so there are no
-                // concurrent readers/writers. We also record the
-                // original value and restore it in
-                // ConfigValueGuard::drop.
-                unsafe {
-                    std::env::set_var(env_var, value.display());
+            let orig_env = if let Some(cfg) = key.attrs().get(crate::config::CONFIG) {
+                if let Some(env_var) = &cfg.env_name {
+                    let orig = std::env::var(env_var).ok();
+                    // SAFETY: this path is used only in tests under ConfigLock
+                    unsafe {
+                        std::env::set_var(env_var, value.display());
+                    }
+                    Some((env_var.clone(), orig))
+                } else {
+                    None
                 }
-                Some((env_var.clone(), orig))
             } else {
                 None
             };
@@ -468,17 +469,18 @@ pub struct ConfigValueGuard<'a, T: 'static> {
 ///
 /// - If there was a previous override for this key in the
 ///   [`Source::TestOverride`] layer, that value is reinserted.
-/// - If this guard was the only override for the key, the entry
-///   is removed from the layer entirely (leaving underlying layers
-///   or defaults to apply).
-/// - If the key declared a `CONFIG_ENV_VAR`, the corresponding
+/// - If this guard was the only override for the key, the entry is
+///   removed from the layer entirely (leaving underlying layers or
+///   defaults to apply).
+/// - If the key declared a `CONFIG.env_name` (via `@meta(CONFIG =
+///   ConfigAttr { env_name: Some(...), .. })`), the corresponding
 ///   process environment variable is restored to its original value
 ///   (or removed if it didn't exist).
 ///
 /// This ensures that overrides applied via
-/// [`ConfigLock::override_key`] are always reverted cleanly when
-/// the guard is dropped, without leaking state into subsequent
-/// tests or callers.
+/// [`ConfigLock::override_key`] are always reverted cleanly when the
+/// guard is dropped, without leaking state into subsequent tests or
+/// callers.
 impl<T: 'static> Drop for ConfigValueGuard<'_, T> {
     fn drop(&mut self) {
         let mut guard = LAYERS.write().unwrap();
@@ -645,12 +647,12 @@ mod tests {
         assert_eq!(snap[CODEC_MAX_FRAME_LENGTH], 10 * 1024 * 1024 * 1024);
         assert_eq!(snap[MESSAGE_DELIVERY_TIMEOUT], Duration::from_secs(30));
 
-        // CONFIG_ENV_VAR has no default and wasn't explicitly set:
-        // should be omitted.
+        // CONFIG has no default and wasn't explicitly set: should be
+        // omitted.
         let json = serde_json::to_string(&snap).unwrap();
         assert!(
-            !json.contains("config_env_var"),
-            "CONFIG_ENV_VAR must not appear in snapshot unless explicitly set"
+            !json.contains("hyperactor::config::config"),
+            "CONFIG must not appear in snapshot unless explicitly set"
         );
     }
 
@@ -760,5 +762,35 @@ mod tests {
 
         let snap = attrs();
         assert_eq!(snap[MESSAGE_TTL_DEFAULT], 20); // Env beats File
+    }
+
+    declare_attrs! {
+      @meta(CONFIG = ConfigAttr {
+          env_name: None,
+          py_name: None,
+      })
+      pub attr CONFIG_KEY: bool = true;
+
+      pub attr NON_CONFIG_KEY: bool = true;
+    }
+
+    #[test]
+    fn test_attrs_excludes_non_config_keys() {
+        let _lock = lock();
+        reset_to_defaults();
+
+        let snap = attrs();
+        let json = serde_json::to_string(&snap).unwrap();
+
+        // Expect our CONFIG_KEY to be present.
+        assert!(
+            json.contains("hyperactor::config::global::tests::config_key"),
+            "attrs() should include keys with @meta(CONFIG = ...)"
+        );
+        // Expect our NON_CONFIG_KEY to be omitted.
+        assert!(
+            !json.contains("hyperactor::config::global::tests::non_config_key"),
+            "attrs() should exclude keys without @meta(CONFIG = ...)"
+        );
     }
 }

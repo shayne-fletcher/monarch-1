@@ -31,8 +31,8 @@ use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::channel::ChannelTransport;
 use hyperactor::config;
-use hyperactor::config::CONFIG_ENV_VAR;
-use hyperactor::config::PYTHON_CONFIG_KEY;
+use hyperactor::config::CONFIG;
+use hyperactor::config::ConfigAttr;
 use hyperactor::context;
 use hyperactor::declare_attrs;
 use hyperactor::mailbox;
@@ -87,10 +87,10 @@ use std::sync::RwLock;
 
 declare_attrs! {
     /// Default transport type to use across the application.
-    @meta(
-        CONFIG_ENV_VAR = "HYPERACTOR_MESH_DEFAULT_TRANSPORT".to_string(),
-        PYTHON_CONFIG_KEY = "default_transport".to_string(),
-    )
+    @meta(CONFIG = ConfigAttr {
+        env_name: Some("HYPERACTOR_MESH_DEFAULT_TRANSPORT".to_string()),
+        py_name: Some("default_transport".to_string()),
+    })
     pub attr DEFAULT_TRANSPORT: ChannelTransport = ChannelTransport::Unix;
 }
 /// Get the default transport type to use across the application.
