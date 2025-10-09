@@ -8,7 +8,10 @@
 
 from typing import cast
 
+import cloudpickle
+
 import pytest
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Shape, Slice
 from monarch._src.actor.actor_mesh import Actor, ActorMesh, context, ValueMesh
 from monarch._src.actor.endpoint import endpoint
@@ -137,3 +140,20 @@ def test_nested_meshes() -> None:
         assert value == point.rank + 1
     for point, value in res_1:
         assert value == point.rank
+
+
+@pytest.mark.timeout(60)
+async def test_pickle_initialized_proc_mesh_in_tokio_thread() -> None:
+    host = create_local_host_mesh("host", Extent(["hosts"], [2]))
+    proc = host.spawn_procs(per_host={"gpus": 2})
+
+    async def task():
+        cloudpickle.dumps(proc)
+
+    await proc.initialized
+    PythonTask.from_coroutine(task()).block_on()
+
+    async def task():
+        cloudpickle.dumps(proc.slice(gpus=0, hosts=0))
+
+    PythonTask.from_coroutine(task()).block_on()

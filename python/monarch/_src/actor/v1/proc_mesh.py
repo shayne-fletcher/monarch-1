@@ -81,9 +81,20 @@ class ProcMesh(MeshTrait):
         host_mesh: "HostMesh",
         region: Region,
         root_region: Region,
+        _initialized_hy_proc_mesh: Optional[HyProcMesh],
         _device_mesh: Optional["DeviceMesh"] = None,
     ) -> None:
         _proc_mesh_registry.add(self)
+
+        self._initialized_proc_mesh = _initialized_hy_proc_mesh
+        if not self._initialized_proc_mesh:
+
+            async def task(hy_proc_mesh_task: Shared[HyProcMesh]) -> HyProcMesh:
+                self._initialized_proc_mesh = await hy_proc_mesh_task
+                return self._initialized_proc_mesh
+
+            hy_proc_mesh = PythonTask.from_coroutine(task(hy_proc_mesh)).spawn()
+
         self._proc_mesh = hy_proc_mesh
         self._host_mesh = host_mesh
         self._region = region
@@ -138,14 +149,25 @@ class ProcMesh(MeshTrait):
             else self._maybe_device_mesh._new_with_shape(shape)
         )
 
+        initialized_pm: Optional[HyProcMesh] = (
+            None
+            if self._initialized_proc_mesh is None
+            else self._initialized_proc_mesh.sliced(shape.region)
+        )
+
         async def task() -> HyProcMesh:
-            return (await self._proc_mesh).sliced(shape.region)
+            return (
+                initialized_pm
+                if initialized_pm
+                else (await self._proc_mesh).sliced(shape.region)
+            )
 
         return ProcMesh(
             PythonTask.from_coroutine(task()).spawn(),
             self._host_mesh,
             shape.region,
             self._root_region,
+            initialized_pm,
             _device_mesh=device_mesh,
         )
 
@@ -188,7 +210,7 @@ class ProcMesh(MeshTrait):
         setup: Callable[[], None] | None = None,
         _attach_controller_controller: bool = True,
     ) -> "ProcMesh":
-        pm = ProcMesh(hy_proc_mesh, host_mesh, region, region)
+        pm = ProcMesh(hy_proc_mesh, host_mesh, region, region, None)
 
         if _attach_controller_controller:
             instance = context().actor_instance
@@ -367,11 +389,14 @@ class ProcMesh(MeshTrait):
             host_mesh,
             region,
             root_region,
+            _initialized_hy_proc_mesh=hy_proc_mesh,
         )
 
     def __reduce_ex__(self, protocol: ...) -> Tuple[Any, Tuple[Any, ...]]:
         return ProcMesh._from_initialized_hy_proc_mesh, (
-            self._proc_mesh.block_on(),
+            self._initialized_proc_mesh
+            if self._initialized_proc_mesh
+            else self._proc_mesh.block_on(),
             self._host_mesh,
             self._region,
             self._root_region,

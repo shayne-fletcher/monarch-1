@@ -114,5 +114,9 @@ def attach_to_workers(
     host_mesh: PythonTask[HyHostMesh] = _attach_to_workers(workers_tasks, name=name)
     extent = Extent(["hosts"], [len(workers)])
     return HostMesh(
-        host_mesh.spawn(), extent.region, stream_logs=True, is_fake_in_process=False
+        host_mesh.spawn(),
+        extent.region,
+        stream_logs=True,
+        is_fake_in_process=False,
+        _initialized_hy_host_mesh=None,
     )
