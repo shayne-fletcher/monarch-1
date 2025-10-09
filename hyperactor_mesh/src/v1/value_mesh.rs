@@ -811,7 +811,10 @@ impl<T: Clone + Eq> ValueMesh<T> {
         // ValueOverlay).
         for (r, _) in overlay.runs() {
             if r.end > n {
-                return Err(BuildError::OutOfBounds { range: r.clone(), region_len: n });
+                return Err(BuildError::OutOfBounds {
+                    range: r.clone(),
+                    region_len: n,
+                });
             }
         }
 
@@ -1710,5 +1713,80 @@ mod tests {
         assert_eq!(mesh.get(0), Some(&1));
         assert_eq!(mesh.get(3), Some(&2));
         assert_eq!(mesh.get(5), Some(&3));
+    }
+
+    #[test]
+    fn merge_from_overlay_basic() {
+        // Base mesh with two contiguous runs.
+        let region: Region = extent!(n = 8).into();
+        let mut mesh = ValueMesh::from_dense(region.clone(), vec![1, 1, 1, 2, 2, 2, 3, 3]).unwrap();
+
+        // Overlay replaces middle segment [2..6) with 9s.
+        let overlay = ValueOverlay::try_from_runs(vec![(2..6, 9)]).unwrap();
+
+        mesh.merge_from_overlay(&region, &overlay).unwrap();
+
+        // Materialize back into ranges to inspect.
+        let out = mesh.materialized_runs();
+
+        // Expected: left prefix (0..2)=1, replaced middle (2..6)=9, tail (6..8)=3.
+        assert_eq!(out, vec![(0..2, 1), (2..6, 9), (6..8, 3)]);
+    }
+
+    #[test]
+    fn merge_from_overlay_multiple_spans() {
+        // Build mesh with alternating runs.
+        let region: Region = extent!(m = 12).into();
+        let mut mesh =
+            ValueMesh::from_dense(region.clone(), vec![1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4])
+                .unwrap();
+
+        // Overlay has a run that spans across the boundary of two
+        // left runs and another disjoint run later.
+        let overlay = ValueOverlay::try_from_runs(vec![(2..6, 9), (9..11, 8)]).unwrap();
+
+        mesh.merge_from_overlay(&region, &overlay).unwrap();
+        let out = mesh.materialized_runs();
+
+        // Expected after merge and re-compression:
+        // (0..2,1) untouched
+        // (2..6,9) overwrite of part of [1,2] runs
+        // (6..9,3) left tail survives
+        // (9..11,8) overwrite inside [4] run
+        // (11..12,4) leftover tail
+        assert_eq!(
+            out,
+            vec![(0..2, 1), (2..6, 9), (6..9, 3), (9..11, 8), (11..12, 4)]
+        );
+    }
+
+    #[test]
+    fn merge_from_overlay_crosses_row_boundary() {
+        // 2 x 5 region -> 10 linear ranks in row-major order.
+        let region: Region = extent!(rows = 2, cols = 5).into();
+
+        // Dense values laid out row-major:
+        // row 0: [1, 1, 1, 2, 2]
+        // row 1: [3, 3, 4, 4, 4]
+        let mut mesh =
+            ValueMesh::from_dense(region.clone(), vec![1, 1, 1, 2, 2, 3, 3, 4, 4, 4]).unwrap();
+
+        // Overlay that crosses the row boundary:
+        // linear ranks [3..7) -> 9
+        //   - tail of row 0: indices 3,4 (the two 2s)
+        //   - head of row 1: indices 5,6 (the two 3s)
+        let overlay = ValueOverlay::try_from_runs(vec![(3..7, 9)]).unwrap();
+
+        mesh.merge_from_overlay(&region, &overlay).unwrap();
+
+        // After merge, the dense view should be:
+        // [1,1,1, 9,9, 9,9, 4,4,4]
+        let flat: Vec<_> = mesh.values().collect();
+        assert_eq!(flat, vec![1, 1, 1, 9, 9, 9, 9, 4, 4, 4]);
+
+        // And the materialized runs should reflect that:
+        // (0..3,1) | (3..7,9) | (7..10,4)
+        let runs = mesh.materialized_runs();
+        assert_eq!(runs, vec![(0..3, 1), (3..7, 9), (7..10, 4)]);
     }
 }
