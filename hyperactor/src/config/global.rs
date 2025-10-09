@@ -43,6 +43,7 @@
 //!     // ... test logic here ...
 //! }
 //! ```
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use super::*;
@@ -87,20 +88,6 @@ fn priority(s: Source) -> u8 {
     }
 }
 
-/// A single configuration layer in the global store.
-///
-/// Each `Layer` wraps a [`Source`] and its associated [`Attrs`]
-/// values. Layers are kept in priority order and consulted during
-/// resolution.
-#[derive(Clone)]
-struct Layer {
-    /// The origin of this layer (File, Env, Runtime, or
-    /// TestOverride).
-    source: Source,
-    /// The set of attributes explicitly provided by this source.
-    attrs: Attrs,
-}
-
 /// The full set of configuration layers in priority order.
 ///
 /// `Layers` wraps a vector of [`Layer`]s, always kept sorted by
@@ -113,6 +100,209 @@ struct Layers {
     /// Kept sorted by `priority` (lowest number first = highest
     /// priority).
     ordered: Vec<Layer>,
+}
+
+/// A single configuration layer in the global configuration model.
+///
+/// Layers are consulted in priority order (`TestOverride → Runtime →
+/// Env → File → Default`) when resolving configuration values. Each
+/// variant holds an [`Attrs`] map of key/value pairs.
+///
+/// The `TestOverride` variant additionally maintains per-key override
+/// stacks to support nested and out-of-order test overrides. These
+/// stacks are currently placeholders for a future refactor; for now,
+/// only the `attrs` field is used.
+///
+/// Variants:
+/// - [`Layer::File`] — Values loaded from configuration files (lowest
+///   explicit priority).
+/// - [`Layer::Env`] — Values sourced from process environment
+///   variables.
+/// - [`Layer::Runtime`] — Programmatically set runtime overrides.
+/// - [`Layer::TestOverride`] — Temporary in-test overrides applied
+///   under [`ConfigLock`].
+///
+/// Layers are stored in [`Layers::ordered`], kept sorted by their
+/// effective [`Source`] priority (`TestOverride` first, `File` last).
+enum Layer {
+    /// Values loaded from configuration files. Lowest explicit
+    /// priority; only overridden by Env, Runtime, or TestOverride.
+    File(Attrs),
+
+    /// Values read from process environment variables. Typically
+    /// installed at startup via [`init_from_env`].
+    Env(Attrs),
+
+    /// Values set programmatically at runtime. Stable high-priority
+    /// layer used by parent/child bootstrap and dynamic updates.
+    Runtime(Attrs),
+
+    /// Ephemeral values inserted during tests via
+    /// [`ConfigLock::override_key`]. Always takes precedence over all
+    /// other layers. Currently holds both the active `attrs` map and
+    /// a per-key `stacks` table (used to support nested or
+    /// out-of-order test overrides in future refactors).
+    TestOverride {
+        attrs: Attrs,
+        stacks: HashMap<&'static str, OverrideStack>,
+    },
+}
+
+/// A per-key stack of test overrides used by the
+/// [`Layer::TestOverride`] layer.
+///
+/// Each stack tracks the sequence of active overrides applied to a
+/// single configuration key. The topmost frame represents the
+/// currently effective override; earlier frames represent older
+/// (still live) guards that may drop out of order.
+///
+/// Fields:
+/// - `env_var`: The associated process environment variable name, if
+///   any.
+/// - `saved_env`: The original environment variable value before the
+///   first override was applied (or `None` if it did not exist).
+/// - `frames`: The stack of active override frames, with the top
+///   being the last element in the vector.
+///
+/// The full stack mechanism is not yet active; it is introduced
+/// incrementally to prepare for robust out-of-order test override
+/// restoration.
+struct OverrideStack {
+    /// The name of the process environment variable associated with
+    /// this configuration key, if any.
+    ///
+    /// Used to mirror changes to the environment when overrides are
+    /// applied or removed. `None` if the key has no
+    /// `CONFIG.env_name`.
+    env_var: Option<String>,
+
+    /// The original value of the environment variable before the
+    /// first override was applied.
+    ///
+    /// Stored so it can be restored once the last frame is dropped.
+    /// `None` means the variable did not exist prior to overriding.
+    saved_env: Option<String>,
+
+    /// The sequence of active override frames for this key.
+    ///
+    /// Each frame represents one active test override; the last
+    /// element (`frames.last()`) is the current top-of-stack and
+    /// defines the effective value seen in the configuration and
+    /// environment.
+    frames: Vec<OverrideFrame>,
+}
+
+/// A single entry in a per-key override stack.
+///
+/// Each `OverrideFrame` represents one active test override applied
+/// via [`ConfigLock::override_key`]. Frames are uniquely identified
+/// by a monotonically increasing token and record both the value
+/// being overridden and its string form for environment mirroring.
+///
+/// When a guard drops, its frame is removed from the stack; if it was
+/// the top, the next frame (if any) becomes active, or the original
+/// environment is restored when the stack becomes empty.
+struct OverrideFrame {
+    /// A unique, monotonically increasing identifier for this
+    /// override frame.
+    ///
+    /// Used to associate a dropping [`ConfigValueGuard`] with its
+    /// corresponding entry in the stack, even if drops occur out of
+    /// order.
+    token: u64,
+
+    /// The serialized configuration value active while this frame is
+    /// on top of its stack.
+    ///
+    /// Stored as a boxed [`SerializableValue`] to match how values
+    /// are kept within [`Attrs`].
+    value: Box<dyn crate::attrs::SerializableValue>,
+
+    /// Pre-rendered string form of the value, used for environment
+    /// variable updates when this frame becomes active.
+    ///
+    /// Avoids recomputing `value.display()` on every push or pop.
+    env_str: String,
+}
+
+/// Return the [`Source`] corresponding to a given [`Layer`].
+///
+/// This provides a uniform way to retrieve a layer's logical source
+/// (File, Env, Runtime, or TestOverride) regardless of its internal
+/// representation. Used for sorting layers by priority and for
+/// source-based lookups or removals.
+fn layer_source(l: &Layer) -> Source {
+    match l {
+        Layer::File(_) => Source::File,
+        Layer::Env(_) => Source::Env,
+        Layer::Runtime(_) => Source::Runtime,
+        Layer::TestOverride { .. } => Source::TestOverride,
+    }
+}
+
+/// Return an immutable reference to the [`Attrs`] contained in a
+/// [`Layer`].
+///
+/// This abstracts over the specific layer variant so callers can read
+/// configuration values uniformly without needing to pattern-match on
+/// the layer type. For `TestOverride`, this returns the current
+/// top-level attributes reflecting the active overrides.
+fn layer_attrs(l: &Layer) -> &Attrs {
+    match l {
+        Layer::File(a) | Layer::Env(a) | Layer::Runtime(a) => a,
+        Layer::TestOverride { attrs, .. } => attrs,
+    }
+}
+
+/// Return a mutable reference to the [`Attrs`] contained in a
+/// [`Layer`].
+///
+/// This allows callers to modify configuration values within any
+/// layer without needing to pattern-match on its variant. For
+/// `TestOverride`, the returned [`Attrs`] always reflect the current
+/// top-of-stack overrides for each key.
+fn layer_attrs_mut(l: &mut Layer) -> &mut Attrs {
+    match l {
+        Layer::File(a) | Layer::Env(a) | Layer::Runtime(a) => a,
+        Layer::TestOverride { attrs, .. } => attrs,
+    }
+}
+
+/// Return the index of the [`Layer::TestOverride`] within the
+/// [`Layers`] vector.
+///
+/// If a TestOverride layer is present, its position in the ordered
+/// list is returned; otherwise, `None` is returned. This is used to
+/// locate the active test override layer for inserting or restoring
+/// temporary configuration values.
+fn test_override_index(layers: &Layers) -> Option<usize> {
+    layers
+        .ordered
+        .iter()
+        .position(|l| matches!(l, Layer::TestOverride { .. }))
+}
+
+/// Ensure a [`Layer::TestOverride`] exists and return a mutable
+/// reference to its [`Attrs`].
+///
+/// If the TestOverride layer already exists, a mutable reference to
+/// its attributes is returned directly. Otherwise, a new TestOverride
+/// layer (with empty `Attrs` and stacks) is created, inserted into
+/// the ordered layers according to priority, and then returned.
+///
+/// This helper is used by [`ConfigLock::override_key`] to guarantee
+/// that test overrides always have a dedicated writable layer.
+fn ensure_test_override_layer_mut<'a>(layers: &'a mut Layers) -> &'a mut Attrs {
+    if let Some(i) = test_override_index(layers) {
+        return layer_attrs_mut(&mut layers.ordered[i]);
+    }
+    layers.ordered.push(Layer::TestOverride {
+        attrs: Attrs::new(),
+        stacks: HashMap::new(),
+    });
+    layers.ordered.sort_by_key(|l| priority(layer_source(l)));
+    let i = test_override_index(layers).expect("just inserted TestOverride layer");
+    layer_attrs_mut(&mut layers.ordered[i])
 }
 
 /// Global layered configuration store.
@@ -138,10 +328,7 @@ struct Layers {
 static LAYERS: LazyLock<Arc<RwLock<Layers>>> = LazyLock::new(|| {
     let env = super::from_env();
     let layers = Layers {
-        ordered: vec![Layer {
-            source: Source::Env,
-            attrs: env,
-        }],
+        ordered: vec![Layer::Env(env)],
     };
     Arc::new(RwLock::new(layers))
 });
@@ -214,8 +401,9 @@ pub fn init_from_yaml<P: AsRef<Path>>(path: P) -> Result<(), anyhow::Error> {
 pub fn get<T: AttrValue + Copy>(key: Key<T>) -> T {
     let layers = LAYERS.read().unwrap();
     for layer in &layers.ordered {
-        if layer.attrs.contains_key(key) {
-            return *layer.attrs.get(key).unwrap();
+        let a = layer_attrs(layer);
+        if let Some(value) = a.get(key) {
+            return *value;
         }
     }
     *key.default().expect("key must have a default")
@@ -240,8 +428,9 @@ pub fn get_cloned<T: AttrValue>(key: Key<T>) -> T {
 pub fn try_get_cloned<T: AttrValue>(key: Key<T>) -> Option<T> {
     let layers = LAYERS.read().unwrap();
     for layer in &layers.ordered {
-        if layer.attrs.contains_key(key) {
-            return layer.attrs.get(key).cloned();
+        let a = layer_attrs(layer);
+        if a.contains_key(key) {
+            return a.get(key).cloned();
         }
     }
     key.default().cloned()
@@ -261,12 +450,20 @@ pub fn try_get_cloned<T: AttrValue>(key: Key<T>) -> Option<T> {
 /// overriding configuration values.
 pub fn set(source: Source, attrs: Attrs) {
     let mut g = LAYERS.write().unwrap();
-    if let Some(l) = g.ordered.iter_mut().find(|l| l.source == source) {
-        l.attrs = attrs;
+    if let Some(l) = g.ordered.iter_mut().find(|l| layer_source(l) == source) {
+        *layer_attrs_mut(l) = attrs;
     } else {
-        g.ordered.push(Layer { source, attrs });
+        g.ordered.push(match source {
+            Source::File => Layer::File(attrs),
+            Source::Env => Layer::Env(attrs),
+            Source::Runtime => Layer::Runtime(attrs),
+            Source::TestOverride => Layer::TestOverride {
+                attrs,
+                stacks: HashMap::new(),
+            },
+        });
     }
-    g.ordered.sort_by_key(|l| priority(l.source)); // TestOverride < Runtime < Env < File
+    g.ordered.sort_by_key(|l| priority(layer_source(l))); // TestOverride < Runtime < Env < File
 }
 
 /// Remove the configuration layer for the given [`Source`], if
@@ -279,7 +476,7 @@ pub fn set(source: Source, attrs: Attrs) {
 #[allow(dead_code)]
 pub(crate) fn clear(source: Source) {
     let mut g = LAYERS.write().unwrap();
-    g.ordered.retain(|l| l.source != source);
+    g.ordered.retain(|l| layer_source(l) != source);
 }
 
 /// Return a complete, merged snapshot of the effective configuration
@@ -311,7 +508,7 @@ pub fn attrs() -> Attrs {
         // Try to resolve from highest -> lowest priority layer.
         let mut chosen: Option<Box<dyn crate::attrs::SerializableValue>> = None;
         for layer in &layers.ordered {
-            if let Some(v) = layer.attrs.get_value_by_name(name) {
+            if let Some(v) = layer_attrs(layer).get_value_by_name(name) {
                 chosen = Some(v.cloned());
                 break;
             }
@@ -349,26 +546,6 @@ pub fn attrs() -> Attrs {
 pub fn reset_to_defaults() {
     let mut g = LAYERS.write().unwrap();
     g.ordered.clear();
-}
-
-fn test_override_index(layers: &Layers) -> Option<usize> {
-    layers
-        .ordered
-        .iter()
-        .position(|l| matches!(l.source, Source::TestOverride))
-}
-
-fn ensure_test_override_layer_mut(layers: &mut Layers) -> &mut Attrs {
-    if let Some(i) = test_override_index(layers) {
-        return &mut layers.ordered[i].attrs;
-    }
-    layers.ordered.push(Layer {
-        source: Source::TestOverride,
-        attrs: Attrs::new(),
-    });
-    layers.ordered.sort_by_key(|l| priority(l.source));
-    let i = test_override_index(layers).expect("just inserted TestOverride layer");
-    &mut layers.ordered[i].attrs
 }
 
 /// A guard that holds the global configuration lock and provides
@@ -443,15 +620,9 @@ impl ConfigLock {
 impl Drop for ConfigLock {
     fn drop(&mut self) {
         let mut guard = LAYERS.write().unwrap();
-        if let Some(pos) = guard
-            .ordered
-            .iter()
-            .position(|l| matches!(l.source, Source::TestOverride))
-        {
+        if let Some(pos) = test_override_index(&guard) {
             guard.ordered.remove(pos);
         }
-        // No need to restore anything else; underlying layers
-        // remain intact.
     }
 }
 
@@ -486,7 +657,7 @@ impl<T: 'static> Drop for ConfigValueGuard<'_, T> {
         let mut guard = LAYERS.write().unwrap();
 
         if let Some(i) = test_override_index(&guard) {
-            let layer_attrs = &mut guard.ordered[i].attrs;
+            let layer_attrs = &mut layer_attrs_mut(&mut guard.ordered[i]);
 
             if let Some(prev) = self.orig.take() {
                 layer_attrs.insert_value(self.key, prev);
@@ -497,11 +668,9 @@ impl<T: 'static> Drop for ConfigValueGuard<'_, T> {
         }
 
         if let Some((k, v)) = self.orig_env.take() {
-            // SAFETY: process-global environment variables are
-            // not thread-safe to mutate. This override/restore
-            // path is only ever used in single-threaded test
-            // code, and is serialized by the global ConfigLock to
-            // avoid races between tests.
+            // SAFETY: only ever used in single-threaded test code and
+            // serialized by the global ConfigLock to avoid races
+            // between tests.
             unsafe {
                 if let Some(v) = v {
                     std::env::set_var(k, v);
