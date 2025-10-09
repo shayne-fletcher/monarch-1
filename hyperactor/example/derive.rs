@@ -129,10 +129,10 @@ impl GetItemCountHandler<usize> for ShoppingListActor {
     }
 }
 
-// Define an alias actor `ShoppingApi`. Clients can use
+// Define a behavior `ShoppingApi`. Clients can use
 // `ActorRef<ShoppingApi>` instead of referencing the concrete
 // `ShoppingListActor` directly.
-hyperactor::alias!(ShoppingApi, ShoppingList, ClearList, GetItemCount<usize>,);
+hyperactor::behavior!(ShoppingApi, ShoppingList, ClearList, GetItemCount<usize>,);
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {

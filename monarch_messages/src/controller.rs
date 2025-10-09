@@ -237,4 +237,4 @@ pub enum ControllerMessage {
     },
 }
 
-hyperactor::alias!(ControllerActor, ControllerMessage);
+hyperactor::behavior!(ControllerActor, ControllerMessage);

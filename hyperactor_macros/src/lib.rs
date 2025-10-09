@@ -1603,31 +1603,31 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Represents the full input to [`fn alias`].
-struct AliasInput {
-    alias: Ident,
+/// Represents the full input to [`fn behavior`].
+struct BehaviorInput {
+    behavior: Ident,
     handlers: Vec<HandlerSpec>,
 }
 
-impl syn::parse::Parse for AliasInput {
+impl syn::parse::Parse for BehaviorInput {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let alias: Ident = input.parse()?;
+        let behavior: Ident = input.parse()?;
         let _: Token![,] = input.parse()?;
         let raw_handlers = input.parse_terminated(HandlerSpec::parse, Token![,])?;
         let handlers = raw_handlers.into_iter().collect();
-        Ok(AliasInput { alias, handlers })
+        Ok(BehaviorInput { behavior, handlers })
     }
 }
 
-/// Create a [`Referable`] handling a specific set of message types.
-/// This is used to create an [`ActorRef`] without having to depend on the
+/// Create a [`Referable`] definition, handling a specific set of message types.
+/// Behaviors are used to create an [`ActorRef`] without having to depend on the
 /// actor's implementation. If the message type need to be cast, add `castable`
-/// flag to those types. e.g. the following example creats an alias with 5
+/// flag to those types. e.g. the following example creates a behavior with 5
 /// message types, and 4 of which need to be cast.
 ///
 /// ```
-/// hyperactor::alias!(
-///     TestActorAlias,
+/// hyperactor::behavior!(
+///     TestActorBehavior,
 ///     TestMessage { castable = true },
 ///     () {castable = true },
 ///     MyGeneric<()> {castable = true },
@@ -1635,17 +1635,20 @@ impl syn::parse::Parse for AliasInput {
 /// );
 /// ```
 #[proc_macro]
-pub fn alias(input: TokenStream) -> TokenStream {
-    let AliasInput { alias, handlers } = parse_macro_input!(input as AliasInput);
+pub fn behavior(input: TokenStream) -> TokenStream {
+    let BehaviorInput {
+        behavior: behavior,
+        handlers,
+    } = parse_macro_input!(input as BehaviorInput);
     let tys = HandlerSpec::add_indexed(handlers);
 
     let expanded = quote! {
-        #[doc = "The generated alias struct."]
+        #[doc = "The generated behavior struct."]
         #[derive(Debug, hyperactor::Named, serde::Serialize, serde::Deserialize)]
-        pub struct #alias;
-        impl hyperactor::actor::Referable for #alias {}
+        pub struct #behavior;
+        impl hyperactor::actor::Referable for #behavior {}
 
-        impl<A> hyperactor::actor::Binds<A> for #alias
+        impl<A> hyperactor::actor::Binds<A> for #behavior
         where
             A: hyperactor::Actor #(+ hyperactor::Handler<#tys>)* {
             fn bind(ports: &hyperactor::proc::Ports<A>) {
@@ -1656,7 +1659,7 @@ pub fn alias(input: TokenStream) -> TokenStream {
         }
 
         #(
-            impl hyperactor::actor::RemoteHandles<#tys> for #alias {}
+            impl hyperactor::actor::RemoteHandles<#tys> for #behavior {}
         )*
     };
 

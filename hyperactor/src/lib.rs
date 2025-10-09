@@ -128,7 +128,7 @@ pub use hyperactor_macros::RefClient;
 #[doc(inline)]
 pub use hyperactor_macros::Unbind;
 #[doc(inline)]
-pub use hyperactor_macros::alias;
+pub use hyperactor_macros::behavior;
 #[doc(inline)]
 pub use hyperactor_macros::export;
 #[doc(inline)]

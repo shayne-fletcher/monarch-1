@@ -95,4 +95,4 @@ pub enum ClientMessage {
     },
 }
 
-hyperactor::alias!(ClientActor, ClientMessage);
+hyperactor::behavior!(ClientActor, ClientMessage);

@@ -133,6 +133,6 @@ impl ProcSupervisionState {
     }
 }
 
-hyperactor::alias!(ProcSupervisor, ProcSupervisionMessage); // For proc supervisor to implement (e.g. system actor)
-hyperactor::alias!(WorldSupervisor, WorldSupervisionMessage); // For world supervisor to implement (e.g. system actor)
-hyperactor::alias!(SupervisionClient, WorldSupervisionState); // For the end receiver of supervision events to implement (e.g. client)
+hyperactor::behavior!(ProcSupervisor, ProcSupervisionMessage); // For proc supervisor to implement (e.g. system actor)
+hyperactor::behavior!(WorldSupervisor, WorldSupervisionMessage); // For world supervisor to implement (e.g. system actor)
+hyperactor::behavior!(SupervisionClient, WorldSupervisionState); // For the end receiver of supervision events to implement (e.g. client)

@@ -55,7 +55,7 @@ pub enum DebuggerMessage {
     Action { action: DebuggerAction },
 }
 
-hyperactor::alias!(
+hyperactor::behavior!(
     DebuggerActor,
     DebuggerMessage { cast = true },
 );

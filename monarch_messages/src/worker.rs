@@ -941,7 +941,7 @@ pub struct WorkerParams {
     pub controller_actor: ActorRef<ControllerActor>,
 }
 
-hyperactor::alias!(
+hyperactor::behavior!(
     WorkerActor,
     WorkerMessage { cast = true },
 );

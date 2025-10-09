@@ -85,7 +85,7 @@ impl Handler<u64> for TestActor {
     }
 }
 
-hyperactor::alias!(
+hyperactor::behavior!(
     TestActorAlias,
     TestMessage { cast = true },
     () { cast = true },
