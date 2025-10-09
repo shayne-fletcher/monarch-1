@@ -21,7 +21,8 @@ use hyperactor::attrs::Attrs;
 use hyperactor::attrs::ErasedKey;
 use hyperactor::attrs::declare_attrs;
 use hyperactor::channel::ChannelTransport;
-use hyperactor::config::PYTHON_CONFIG_KEY;
+use hyperactor::config::CONFIG;
+use hyperactor::config::ConfigAttr;
 use hyperactor::config::global::Source;
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::PyTypeError;
@@ -46,16 +47,18 @@ pub fn reload_config_from_env() -> PyResult<()> {
     Ok(())
 }
 
-/// Map from name of the kwarg that will be passed to `monarch.configure(...)`
-/// to the `Key<T>`` associated with that kwarg. This contains all of the
-/// attribute keys with meta-attribute `PYTHON_CONFIG_KEY`.
+/// Map from the kwarg name passed to `monarch.configure(...)` to the
+/// `Key<T>` associated with that kwarg. This contains all attribute
+/// keys whose `@meta(CONFIG = ConfigAttr { py_name: Some(...), .. })`
+/// specifies a kwarg name.
 static KEY_BY_NAME: std::sync::LazyLock<HashMap<&'static str, &'static dyn ErasedKey>> =
     std::sync::LazyLock::new(|| {
         inventory::iter::<AttrKeyInfo>()
             .filter_map(|info| {
                 info.meta
-                    .get(PYTHON_CONFIG_KEY)
-                    .map(|py_name| (py_name.as_str(), info.erased))
+                    .get(CONFIG)
+                    .and_then(|cfg: &ConfigAttr| cfg.py_name.as_deref())
+                    .map(|py_name| (py_name, info.erased))
             })
             .collect()
     });
@@ -194,7 +197,7 @@ declare_py_config_type!(
 /// Iterate over each key-value pair. Attempt to retrieve the `Key<T>`
 /// associated with the key and convert the value to `T`, then set
 /// them on the global config. The association between kwarg and
-/// `Key<T>` is specified using the `PYTHON_CONFIG_KEY` meta-attribute.
+/// `Key<T>` is specified using the `CONFIG` meta-attribute.
 #[pyfunction]
 #[pyo3(signature = (**kwargs))]
 fn configure(py: Python<'_>, kwargs: Option<HashMap<String, PyObject>>) -> PyResult<()> {
@@ -208,9 +211,10 @@ fn configure(py: Python<'_>, kwargs: Option<HashMap<String, PyObject>>) -> PyRes
     Ok(())
 }
 
-/// For all attribute keys with meta-attribute `PYTHON_CONFIG_KEY` defined, return the
-/// current associated value in the global config. The key will not be present in the
-/// result of it has no value in the global config.
+/// For all attribute keys whose `@meta(CONFIG = ConfigAttr { py_name:
+/// Some(...), .. })` specifies a kwarg name, return the current
+/// associated value in the global config. Keys with no value in the
+/// global config are omitted from the result.
 #[pyfunction]
 fn get_configuration(py: Python<'_>) -> PyResult<HashMap<String, PyObject>> {
     KEY_BY_NAME

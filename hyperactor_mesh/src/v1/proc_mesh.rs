@@ -29,7 +29,8 @@ use hyperactor::channel::ChannelAddr;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
 use hyperactor::config;
-use hyperactor::config::CONFIG_ENV_VAR;
+use hyperactor::config::CONFIG;
+use hyperactor::config::ConfigAttr;
 use hyperactor::context;
 use hyperactor::declare_attrs;
 use hyperactor::mailbox::DialMailboxRouter;
@@ -69,8 +70,12 @@ use crate::v1::Name;
 use crate::v1::ValueMesh;
 
 declare_attrs! {
-    /// The maximum idle time between updates while spawning actor meshes.
-    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_ACTOR_SPAWN_MAX_IDLE".to_string())
+    /// The maximum idle time between updates while spawning actor
+    /// meshes.
+    @meta(CONFIG = ConfigAttr {
+        env_name: Some("HYPERACTOR_MESH_ACTOR_SPAWN_MAX_IDLE".to_string()),
+        py_name: None,
+    })
     pub attr ACTOR_SPAWN_MAX_IDLE: Duration = Duration::from_secs(30);
 }
 
