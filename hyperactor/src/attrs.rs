@@ -153,6 +153,13 @@ pub struct Key<T: 'static> {
     attrs: &'static LazyLock<Attrs>,
 }
 
+impl<T> Key<T> {
+    /// Returns the name of this key.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
 impl<T: Named + 'static> Key<T> {
     /// Creates a new key with the given name.
     pub const fn new(
@@ -165,11 +172,6 @@ impl<T: Named + 'static> Key<T> {
             default_value,
             attrs,
         }
-    }
-
-    /// Returns the name of this key.
-    pub fn name(&self) -> &'static str {
-        self.name
     }
 
     /// Returns a reference to the default value for this key, if one exists.

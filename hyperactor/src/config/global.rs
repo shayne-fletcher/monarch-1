@@ -45,6 +45,8 @@
 //! ```
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use super::*;
 use crate::attrs::AttrValue;
@@ -282,29 +284,6 @@ fn test_override_index(layers: &Layers) -> Option<usize> {
         .position(|l| matches!(l, Layer::TestOverride { .. }))
 }
 
-/// Ensure a [`Layer::TestOverride`] exists and return a mutable
-/// reference to its [`Attrs`].
-///
-/// If the TestOverride layer already exists, a mutable reference to
-/// its attributes is returned directly. Otherwise, a new TestOverride
-/// layer (with empty `Attrs` and stacks) is created, inserted into
-/// the ordered layers according to priority, and then returned.
-///
-/// This helper is used by [`ConfigLock::override_key`] to guarantee
-/// that test overrides always have a dedicated writable layer.
-fn ensure_test_override_layer_mut<'a>(layers: &'a mut Layers) -> &'a mut Attrs {
-    if let Some(i) = test_override_index(layers) {
-        return layer_attrs_mut(&mut layers.ordered[i]);
-    }
-    layers.ordered.push(Layer::TestOverride {
-        attrs: Attrs::new(),
-        stacks: HashMap::new(),
-    });
-    layers.ordered.sort_by_key(|l| priority(layer_source(l)));
-    let i = test_override_index(layers).expect("just inserted TestOverride layer");
-    layer_attrs_mut(&mut layers.ordered[i])
-}
-
 /// Global layered configuration store.
 ///
 /// This is the single authoritative store for configuration in
@@ -332,6 +311,16 @@ static LAYERS: LazyLock<Arc<RwLock<Layers>>> = LazyLock::new(|| {
     };
     Arc::new(RwLock::new(layers))
 });
+
+/// Monotonically increasing sequence used to assign unique tokens to
+/// each test override frame.
+///
+/// Tokens identify individual [`ConfigValueGuard`] instances within a
+/// key's override stack, allowing frames to be removed safely even
+/// when guards are dropped out of order. The counter starts at 1 and
+/// uses relaxed atomic ordering since exact sequencing across threads
+/// is not required—only uniqueness.
+static OVERRIDE_TOKEN_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Acquire the global configuration lock.
 ///
@@ -551,8 +540,8 @@ pub fn reset_to_defaults() {
 /// A guard that holds the global configuration lock and provides
 /// override functionality.
 ///
-/// This struct acts as both a lock guard (preventing other tests
-/// from modifying global config) and as the only way to create
+/// This struct acts as both a lock guard (preventing other tests from
+/// modifying global config) and as the only way to create
 /// configuration overrides. Override guards cannot outlive this
 /// ConfigLock, ensuring proper synchronization.
 pub struct ConfigLock {
@@ -560,47 +549,84 @@ pub struct ConfigLock {
 }
 
 impl ConfigLock {
-    /// Create a configuration override that will be restored when
-    /// the guard is dropped.
+    /// Create a configuration override that is active until the
+    /// returned guard is dropped.
     ///
-    /// The returned guard must not outlive this ConfigLock.
+    /// Each call pushes a new frame onto a per-key override stack
+    /// within the [`Source::TestOverride`] layer. The topmost frame
+    /// defines the effective value seen by `get()` and in the
+    /// mirrored environment variable (if any). When a guard is
+    /// dropped, its frame is removed: if it was the top, the previous
+    /// frame (if any) becomes active or the key and env var are
+    /// restored to their prior state.
+    ///
+    /// The returned guard must not outlive this [`ConfigLock`].
     pub fn override_key<'a, T: AttrValue>(
         &'a self,
         key: crate::attrs::Key<T>,
         value: T,
     ) -> ConfigValueGuard<'a, T> {
-        // Write into the single TestOverride layer (create if
-        // needed).
-        let (prev_in_layer, orig_env) = {
-            let mut guard = LAYERS.write().unwrap();
-            let layer_attrs = ensure_test_override_layer_mut(&mut guard);
-            // Save any previous override for this key in the the
-            // TestOverride layer.
-            let prev = layer_attrs.remove_value(key);
-            // Set new override value.
-            layer_attrs.set(key, value.clone());
-            // Mirror env var.
-            let orig_env = if let Some(cfg) = key.attrs().get(crate::config::CONFIG) {
-                if let Some(env_var) = &cfg.env_name {
-                    let orig = std::env::var(env_var).ok();
-                    // SAFETY: this path is used only in tests under ConfigLock
-                    unsafe {
-                        std::env::set_var(env_var, value.display());
-                    }
-                    Some((env_var.clone(), orig))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            (prev, orig_env)
+        let token = OVERRIDE_TOKEN_SEQ.fetch_add(1, Ordering::Relaxed);
+
+        let mut g = LAYERS.write().unwrap();
+
+        // Ensure TestOverride layer exists.
+        let idx = if let Some(i) = test_override_index(&g) {
+            i
+        } else {
+            g.ordered.push(Layer::TestOverride {
+                attrs: Attrs::new(),
+                stacks: HashMap::new(),
+            });
+            g.ordered.sort_by_key(|l| priority(layer_source(l)));
+            test_override_index(&g).expect("just inserted TestOverride layer")
         };
+
+        // Mutably access TestOverride's attrs + stacks.
+        let (attrs, stacks) = match &mut g.ordered[idx] {
+            Layer::TestOverride { attrs, stacks } => (attrs, stacks),
+            _ => unreachable!(),
+        };
+
+        // Compute env var (if any) for this key once.
+        let (env_var, env_str) = if let Some(cfg) = key.attrs().get(crate::config::CONFIG) {
+            if let Some(name) = &cfg.env_name {
+                (Some(name.clone()), value.display())
+            } else {
+                (None, String::new())
+            }
+        } else {
+            (None, String::new())
+        };
+
+        // Get per-key stack (by declared name).
+        let key_name = key.name();
+        let stack = stacks.entry(key_name).or_insert_with(|| OverrideStack {
+            env_var: env_var.clone(),
+            saved_env: env_var.as_ref().and_then(|n| std::env::var(n).ok()),
+            frames: Vec::new(),
+        });
+
+        // Push the new frame.
+        let boxed: Box<dyn crate::attrs::SerializableValue> = Box::new(value.clone());
+        stack.frames.push(OverrideFrame {
+            token,
+            value: boxed,
+            env_str,
+        });
+
+        // Make this frame the active value in TestOverride attrs.
+        attrs.set(key, value.clone());
+
+        // Update process env to reflect new top-of-stack.
+        if let (Some(var), Some(top)) = (stack.env_var.as_ref(), stack.frames.last()) {
+            // SAFETY: Under global ConfigLock during tests.
+            unsafe { std::env::set_var(var, &top.env_str) }
+        }
 
         ConfigValueGuard {
             key,
-            orig: prev_in_layer, // previous value for this key *inside* TestOverride layer
-            orig_env,
+            token,
             _phantom: PhantomData,
         }
     }
@@ -629,55 +655,110 @@ impl Drop for ConfigLock {
 /// A guard that restores a single configuration value when dropped
 pub struct ConfigValueGuard<'a, T: 'static> {
     key: crate::attrs::Key<T>,
-    orig: Option<Box<dyn crate::attrs::SerializableValue>>,
-    orig_env: Option<(String, Option<String>)>,
+    token: u64,
     // This is here so we can hold onto a 'a lifetime.
     _phantom: PhantomData<&'a ()>,
 }
 
-/// When a [`ConfigValueGuard`] is dropped, it restores the
-/// configuration state for the key it was guarding:
+/// When a [`ConfigValueGuard`] is dropped, it restores configuration
+/// state for the key it was guarding.
 ///
-/// - If there was a previous override for this key in the
-///   [`Source::TestOverride`] layer, that value is reinserted.
-/// - If this guard was the only override for the key, the entry is
-///   removed from the layer entirely (leaving underlying layers or
-///   defaults to apply).
-/// - If the key declared a `CONFIG.env_name` (via `@meta(CONFIG =
-///   ConfigAttr { env_name: Some(...), .. })`), the corresponding
-///   process environment variable is restored to its original value
-///   (or removed if it didn't exist).
+/// Behavior:
+/// - Each key maintains a stack of override frames. The most recent
+///   frame (top of stack) defines the effective value in
+///   [`Source::TestOverride`].
+/// - Dropping a guard removes its frame. If it was the top frame, the
+///   next frame (if any) becomes active and both the config and
+///   mirrored env var are updated accordingly.
+/// - If the dropped frame was not on top, no changes occur until the
+///   active frame is dropped.
+/// - When the last frame for a key is removed, the key is deleted
+///   from the TestOverride layer and its associated environment
+///   variable (if any) is restored to its original value or removed
+///   if it did not exist.
 ///
-/// This ensures that overrides applied via
-/// [`ConfigLock::override_key`] are always reverted cleanly when the
-/// guard is dropped, without leaking state into subsequent tests or
-/// callers.
+/// This guarantees that nested or out-of-order test overrides are
+/// restored deterministically and without leaking state into
+/// subsequent tests.
 impl<T: 'static> Drop for ConfigValueGuard<'_, T> {
     fn drop(&mut self) {
-        let mut guard = LAYERS.write().unwrap();
+        let mut g = LAYERS.write().unwrap();
+        let i = if let Some(i) = test_override_index(&g) {
+            i
+        } else {
+            return;
+        };
 
-        if let Some(i) = test_override_index(&guard) {
-            let layer_attrs = &mut layer_attrs_mut(&mut guard.ordered[i]);
+        // Access TestOverride internals
+        let (attrs, stacks) = match &mut g.ordered[i] {
+            Layer::TestOverride { attrs, stacks } => (attrs, stacks),
+            _ => unreachable!("TestOverride index points to non-TestOverride layer"),
+        };
 
-            if let Some(prev) = self.orig.take() {
-                layer_attrs.insert_value(self.key, prev);
-            } else {
-                // remove without needing T: AttrValue
-                let _ = layer_attrs.remove_value(self.key);
-            }
-        }
+        let key_name = self.key.name();
 
-        if let Some((k, v)) = self.orig_env.take() {
-            // SAFETY: only ever used in single-threaded test code and
-            // serialized by the global ConfigLock to avoid races
-            // between tests.
-            unsafe {
-                if let Some(v) = v {
-                    std::env::set_var(k, v);
+        // We need a tiny scope for the &mut borrow of the stack so we
+        // can call `stacks.remove(key_name)` afterward if it becomes
+        // empty.
+        let mut remove_empty_stack = false;
+        let mut restore_env_var: Option<String> = None;
+        let mut restore_env_to: Option<String> = None;
+
+        if let Some(stack) = stacks.get_mut(key_name) {
+            // Find this guard's frame by token.
+            if let Some(pos) = stack.frames.iter().position(|f| f.token == self.token) {
+                let is_top = pos + 1 == stack.frames.len();
+
+                if is_top {
+                    // Pop the active frame
+                    stack.frames.pop();
+
+                    if let Some(new_top) = stack.frames.last() {
+                        // New top becomes active: update attrs and env.
+                        attrs.insert_value(self.key, (*new_top.value).cloned());
+                        if let Some(var) = stack.env_var.as_ref() {
+                            // SAFETY: Under global ConfigLock during tests.
+                            unsafe { std::env::set_var(var, &new_top.env_str) }
+                        }
+                    } else {
+                        // Stack empty: remove the key now, then after
+                        // releasing the &mut borrow of the stack,
+                        // restore the env var and remove the stack
+                        // entry.
+                        let _ = attrs.remove_value(self.key);
+
+                        // Capture restoration details while we still
+                        // have access to the stack.
+                        if let Some(var) = stack.env_var.as_ref() {
+                            restore_env_var = Some(var.clone());
+                            restore_env_to = stack.saved_env.clone(); // None => unset
+                        }
+                        remove_empty_stack = true
+                    }
                 } else {
-                    std::env::remove_var(&k);
+                    // Out-of-order drop: remove only that frame:
+                    // active top stays
+                    stack.frames.remove(pos);
+                    // No changes to attrs or env here.
+                }
+            } // else: token already handled; nothing to do
+        } // &must stack borrow ends here
+
+        // If we emptied the stack for this key, restore env and drop
+        // the stack entry.
+        if remove_empty_stack {
+            if let Some(var) = restore_env_var.as_ref() {
+                // SAFETY: Under global ConfigLock during tests.
+                unsafe {
+                    if let Some(val) = restore_env_to.as_ref() {
+                        std::env::set_var(var, val);
+                    } else {
+                        std::env::remove_var(var);
+                    }
                 }
             }
+            // Now it's safe to remove the stack from the map.
+            let _ = stacks.remove(key_name);
         }
     }
 }
@@ -961,5 +1042,114 @@ mod tests {
             !json.contains("hyperactor::config::global::tests::non_config_key"),
             "attrs() should exclude keys without @meta(CONFIG = ...)"
         );
+    }
+
+    #[test]
+    fn test_testoverride_multiple_stacked_overrides_lifo() {
+        let lock = lock();
+        reset_to_defaults();
+
+        // Baseline sanity.
+        assert_eq!(get(MESSAGE_DELIVERY_TIMEOUT), Duration::from_secs(30));
+
+        // Start from a clean env so we can assert restoration to "unset".
+        // SAFETY: single-threaded tests.
+        unsafe {
+            std::env::remove_var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT");
+        }
+        assert!(std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").is_err());
+
+        // Stack A: 40s (becomes top)
+        let guard_a = lock.override_key(MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(40));
+        assert_eq!(get(MESSAGE_DELIVERY_TIMEOUT), Duration::from_secs(40));
+        {
+            let s = std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").unwrap();
+            assert_eq!(
+                humantime::parse_duration(&s).unwrap(),
+                Duration::from_secs(40)
+            );
+        }
+
+        // Stack B: 50s (new top)
+        let guard_b = lock.override_key(MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(50));
+        assert_eq!(get(MESSAGE_DELIVERY_TIMEOUT), Duration::from_secs(50));
+        {
+            let s = std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").unwrap();
+            assert_eq!(
+                humantime::parse_duration(&s).unwrap(),
+                Duration::from_secs(50)
+            );
+        }
+
+        // Drop B first → should reveal A (LIFO)
+        std::mem::drop(guard_b);
+        assert_eq!(get(MESSAGE_DELIVERY_TIMEOUT), Duration::from_secs(40));
+        {
+            let s = std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").unwrap();
+            assert_eq!(
+                humantime::parse_duration(&s).unwrap(),
+                Duration::from_secs(40)
+            );
+        }
+
+        // Drop A → should restore default and unset env.
+        std::mem::drop(guard_a);
+        assert_eq!(get(MESSAGE_DELIVERY_TIMEOUT), Duration::from_secs(30));
+        assert!(std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").is_err());
+    }
+
+    #[test]
+    fn test_testoverride_out_of_order_drop_keeps_top_stable() {
+        let lock = lock();
+        reset_to_defaults();
+
+        // Clean env baseline.
+        // SAFETY: single-threaded tests.
+        unsafe {
+            std::env::remove_var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT");
+        }
+        assert!(std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").is_err());
+
+        // Push three frames in order: A=40s, B=50s, C=70s (C is top).
+        let guard_a = lock.override_key(MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(40));
+        let guard_b = lock.override_key(MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(50));
+        let guard_c = lock.override_key(MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(70));
+
+        // Top is C.
+        assert_eq!(get(MESSAGE_DELIVERY_TIMEOUT), Duration::from_secs(70));
+        {
+            let s = std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").unwrap();
+            assert_eq!(
+                humantime::parse_duration(&s).unwrap(),
+                Duration::from_secs(70)
+            );
+        }
+
+        // Drop the *middle* frame (B) first → top must remain C, env unchanged.
+        std::mem::drop(guard_b);
+        assert_eq!(get(MESSAGE_DELIVERY_TIMEOUT), Duration::from_secs(70));
+        {
+            let s = std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").unwrap();
+            assert_eq!(
+                humantime::parse_duration(&s).unwrap(),
+                Duration::from_secs(70)
+            );
+        }
+
+        // Now drop C → A becomes top, env follows A.
+        std::mem::drop(guard_c);
+        assert_eq!(get(MESSAGE_DELIVERY_TIMEOUT), Duration::from_secs(40));
+        {
+            let s = std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").unwrap();
+            assert_eq!(
+                humantime::parse_duration(&s).unwrap(),
+                Duration::from_secs(40)
+            );
+        }
+
+        // Drop A → restore default and clear env.
+        std::mem::drop(guard_a);
+        assert_eq!(get(MESSAGE_DELIVERY_TIMEOUT), Duration::from_secs(30));
+        assert!(std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").is_err());
     }
 }
