@@ -9,9 +9,12 @@
 from pathlib import Path
 from typing import Any, Dict, final
 
-from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
+from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as ProcMeshV0
 
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape
+from monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh import (
+    ProcMesh as ProcMeshV1,
+)
 
 class WorkspaceLocation:
     """
@@ -84,7 +87,7 @@ class CodeSyncMeshClient:
     @staticmethod
     def spawn_blocking(
         client: Any,
-        proc_mesh: ProcMesh,
+        proc_mesh: ProcMeshV0 | ProcMeshV1,
     ) -> CodeSyncMeshClient: ...
     async def sync_workspace(
         self,
