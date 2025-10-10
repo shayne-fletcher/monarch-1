@@ -6,8 +6,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fmt;
 use std::ops::Range;
 
+use hyperactor::Named;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -37,6 +39,28 @@ pub enum BuildError {
     },
 }
 
+impl fmt::Display for BuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BuildError::EmptyRange => {
+                write!(f, "a run with an empty range (start == end) was provided")
+            }
+            BuildError::OverlappingRanges { prev, next } => write!(
+                f,
+                "overlapping or unsorted runs: prev={:?}, next={:?}",
+                prev, next
+            ),
+            BuildError::OutOfBounds { range, region_len } => write!(
+                f,
+                "range {:?} exceeds region bounds (len={})",
+                range, region_len
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BuildError {}
+
 /// A sparse overlay of rank ranges and values, used to assemble or
 /// patch a [`ValueMesh`] without materializing per-rank data.
 ///
@@ -57,7 +81,7 @@ pub enum BuildError {
 /// Note: serialization assumes identical pointer width between sender
 /// and receiver, as `Range<usize>` is not portable across
 /// architectures. TODO: introduce a wire‐stable run type.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Named, Default)]
 pub struct ValueOverlay<T> {
     runs: Vec<(Range<usize>, T)>,
 }
