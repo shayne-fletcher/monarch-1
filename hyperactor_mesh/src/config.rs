@@ -12,7 +12,8 @@
 //! the base hyperactor configuration system.
 
 use hyperactor::attrs::declare_attrs;
-use hyperactor::config::CONFIG_ENV_VAR;
+use hyperactor::config::CONFIG;
+use hyperactor::config::ConfigAttr;
 
 // Declare hyperactor_mesh-specific configuration keys
 declare_attrs! {
@@ -20,6 +21,9 @@ declare_attrs! {
     /// when reshaping during casting to limit fanout.
     /// usize::MAX means no reshaping as any shape will always be below
     /// the limit so no dimension needs to be folded.
-    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_MAX_CAST_DIMENSION_SIZE".to_string())
+    @meta(CONFIG = ConfigAttr {
+        env_name: Some("HYPERACTOR_MESH_MAX_CAST_DIMENSION_SIZE".to_string()),
+        py_name: None,
+    })
     pub attr MAX_CAST_DIMENSION_SIZE: usize = usize::MAX;
 }

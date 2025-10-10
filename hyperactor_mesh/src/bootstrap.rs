@@ -39,7 +39,8 @@ use hyperactor::channel::Rx;
 use hyperactor::channel::Tx;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
-use hyperactor::config::CONFIG_ENV_VAR;
+use hyperactor::config::CONFIG;
+use hyperactor::config::ConfigAttr;
 use hyperactor::config::global as config;
 use hyperactor::declare_attrs;
 use hyperactor::host;
@@ -71,26 +72,38 @@ declare_attrs! {
     /// against leaked children; tests usually disable it via
     /// `std::env::set_var("HYPERACTOR_MESH_BOOTSTRAP_ENABLE_PDEATHSIG",
     /// "false")`.
-    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_BOOTSTRAP_ENABLE_PDEATHSIG".to_string())
+    @meta(CONFIG = ConfigAttr {
+        env_name: Some("HYPERACTOR_MESH_BOOTSTRAP_ENABLE_PDEATHSIG".to_string()),
+        py_name: None,
+    })
     pub attr MESH_BOOTSTRAP_ENABLE_PDEATHSIG: bool = true;
 
     /// Maximum number of log lines retained in a proc's stderr/stdout
     /// tail buffer. Used by [`LogTailer::tee`] when wiring child
     /// pipes. Default: 100
-    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_TAIL_LOG_LINES".to_string())
+    @meta(CONFIG = ConfigAttr {
+        env_name: Some("HYPERACTOR_MESH_TAIL_LOG_LINES".to_string()),
+        py_name: None,
+    })
     pub attr MESH_TAIL_LOG_LINES: usize = 100;
 
     /// Maximum number of child terminations to run concurrently
     /// during bulk shutdown. Prevents unbounded spawning of
     /// termination tasks (which could otherwise spike CPU, I/O, or
     /// file descriptor load).
-    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_TERMINATE_CONCURRENCY".to_string())
+    @meta(CONFIG = ConfigAttr {
+        env_name: Some("HYPERACTOR_MESH_TERMINATE_CONCURRENCY".to_string()),
+        py_name: None,
+    })
     pub attr MESH_TERMINATE_CONCURRENCY: usize = 16;
 
     /// Per-child grace window for termination. When a shutdown is
     /// requested, the manager sends SIGTERM and waits this long for
     /// the child to exit before escalating to SIGKILL.
-    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_TERMINATE_TIMEOUT".to_string())
+    @meta(CONFIG = ConfigAttr {
+        env_name: Some("HYPERACTOR_MESH_TERMINATE_TIMEOUT".to_string()),
+        py_name: None,
+    })
     pub attr MESH_TERMINATE_TIMEOUT: Duration = Duration::from_secs(10);
 }
 

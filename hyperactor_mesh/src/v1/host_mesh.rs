@@ -11,7 +11,8 @@ use hyperactor::channel::ChannelTransport;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
 use hyperactor::config;
-use hyperactor::config::CONFIG_ENV_VAR;
+use hyperactor::config::CONFIG;
+use hyperactor::config::ConfigAttr;
 use hyperactor::declare_attrs;
 pub mod mesh_agent;
 
@@ -54,8 +55,12 @@ use crate::v1::host_mesh::mesh_agent::ShutdownHostClient;
 use crate::v1::proc_mesh::ProcRef;
 
 declare_attrs! {
-    /// The maximum idle time between updates while spawning proc meshes.
-    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_PROC_SPAWN_MAX_IDLE".to_string())
+    /// The maximum idle time between updates while spawning proc
+    /// meshes.
+    @meta(CONFIG = ConfigAttr {
+        env_name: Some("HYPERACTOR_MESH_PROC_SPAWN_MAX_IDLE".to_string()),
+        py_name: None,
+    })
     pub attr PROC_SPAWN_MAX_IDLE: Duration = Duration::from_secs(30);
 }
 
