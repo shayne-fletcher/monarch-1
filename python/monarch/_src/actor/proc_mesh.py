@@ -161,6 +161,13 @@ class ProcMeshRef:
     def _proc_mesh(self) -> Shared["HyProcMeshV0"]:
         return _deref_proc_mesh(self)._proc_mesh
 
+    @property
+    def initialized(self) -> Future[Literal[True]]:
+        async def task() -> Literal[True]:
+            return True
+
+        return Future(coro=task())
+
 
 _proc_mesh_lock: threading.Lock = threading.Lock()
 _proc_mesh_key: int = 0

@@ -72,8 +72,10 @@ pub enum Status {
     /// The resource is stopped.
     Stopped,
     /// The resource has failed, with an error message.
+    #[strum(to_string = "Failed({0})")]
     Failed(String),
     /// The resource has been declared failed after a timeout.
+    #[strum(to_string = "Timeout({0:?})")]
     Timeout(Duration),
 }
 
