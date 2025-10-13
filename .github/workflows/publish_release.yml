@@ -1,7 +1,11 @@
 name: Build and publish versioned monarch wheels
 
 on:
-  workflow_dispatch
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string (e.g. 0.1.0rc1 or 0.1.0)"
+        required: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
@@ -39,7 +43,7 @@ jobs:
         # Build wheel
         export MONARCH_PACKAGE_NAME="torchmonarch"
         export CUDA_LIB_DIR=/usr/lib64
-
+        export MONARCH_VERSION="${{ github.event.inputs.version }}"
         python setup.py bdist_wheel
 
         # hacky until the right distribution wheel can be made...
