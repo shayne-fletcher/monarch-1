@@ -144,14 +144,44 @@ pub struct ActorMeshRef<A: Referable> {
 }
 
 impl<A: Referable> ActorMeshRef<A> {
-    /// Cast a message to all actors in this mesh.
+    /// Cast a message to all the actors in this mesh
     pub fn cast<M>(&self, cx: &impl context::Actor, message: M) -> v1::Result<()>
     where
         A: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
         M: Castable + RemoteMessage + Clone, // Clone is required until we are fully onto comm actor
     {
+        self.cast_with_selection(cx, sel!(*), message)
+    }
+
+    /// Cast a message to the actors in this mesh according to the provided selection.
+    /// This should *only* be used for temporary support for selections in the tensor
+    /// engine. If you use this for anything else, you will be fired (you too, OSS
+    /// contributor).
+    pub(crate) fn cast_for_tensor_engine_only_do_not_use<M>(
+        &self,
+        cx: &impl context::Actor,
+        sel: Selection,
+        message: M,
+    ) -> v1::Result<()>
+    where
+        A: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
+        M: Castable + RemoteMessage + Clone, // Clone is required until we are fully onto comm actor
+    {
+        self.cast_with_selection(cx, sel, message)
+    }
+
+    fn cast_with_selection<M>(
+        &self,
+        cx: &impl context::Actor,
+        sel: Selection,
+        message: M,
+    ) -> v1::Result<()>
+    where
+        A: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
+        M: Castable + RemoteMessage + Clone, // Clone is required until we are fully onto comm actor
+    {
         if let Some(root_comm_actor) = self.proc_mesh.root_comm_actor() {
-            self.cast_v0(cx, message, root_comm_actor)
+            self.cast_v0(cx, message, sel, root_comm_actor)
         } else {
             for (point, actor) in self.iter() {
                 let create_rank = point.rank();
@@ -187,6 +217,7 @@ impl<A: Referable> ActorMeshRef<A> {
         &self,
         cx: &impl context::Actor,
         message: M,
+        sel: Selection,
         root_comm_actor: &ActorRef<CommActor>,
     ) -> v1::Result<()>
     where
@@ -202,7 +233,7 @@ impl<A: Referable> ActorMeshRef<A> {
                     cx,
                     actor_mesh_id,
                     root_comm_actor,
-                    &sel!(*),
+                    &sel,
                     message,
                     &cast_mesh_shape,
                     &root_mesh_shape,
@@ -213,7 +244,7 @@ impl<A: Referable> ActorMeshRef<A> {
                 cx,
                 actor_mesh_id,
                 root_comm_actor,
-                sel!(*),
+                sel,
                 &cast_mesh_shape,
                 &cast_mesh_shape,
                 message,

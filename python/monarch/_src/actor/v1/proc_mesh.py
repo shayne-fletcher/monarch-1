@@ -338,7 +338,7 @@ class ProcMesh(MeshTrait):
 
     # pyre-ignore
     def activate(self) -> AbstractContextManager:
-        return self._maybe_device_mesh.activate()
+        return self._device_mesh.activate()
 
     def rank_tensor(self, dim: str | Sequence[str]) -> "Tensor":
         return self._maybe_device_mesh.rank(dim)

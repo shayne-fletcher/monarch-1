@@ -29,22 +29,31 @@ use hyperactor::HandleClient;
 use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::PortRef;
+use hyperactor::ProcId;
+use hyperactor::actor::ActorStatus;
 use hyperactor::context;
 use hyperactor::mailbox::MailboxSenderError;
 use hyperactor_mesh::Mesh;
+use hyperactor_mesh::ProcMesh;
 use hyperactor_mesh::actor_mesh::ActorMesh;
 use hyperactor_mesh::actor_mesh::RootActorMesh;
+use hyperactor_mesh::selection::Selection;
 use hyperactor_mesh::shared_cell::SharedCell;
 use hyperactor_mesh::shared_cell::SharedCellRef;
+use hyperactor_mesh::v1::Name;
+use hyperactor_mesh_macros::sel;
 use monarch_hyperactor::actor::PythonMessage;
 use monarch_hyperactor::actor::PythonMessageKind;
 use monarch_hyperactor::buffers::FrozenBuffer;
+use monarch_hyperactor::context::PyInstance;
+use monarch_hyperactor::instance_dispatch;
 use monarch_hyperactor::local_state_broker::LocalStateBrokerActor;
 use monarch_hyperactor::mailbox::PyPortId;
 use monarch_hyperactor::ndslice::PySlice;
 use monarch_hyperactor::proc_mesh::PyProcMesh;
 use monarch_hyperactor::proc_mesh::TrackedProcMesh;
 use monarch_hyperactor::runtime::signal_safe_block_on;
+use monarch_hyperactor::v1::proc_mesh::PyProcMesh as PyProcMeshV1;
 use monarch_messages::controller::ControllerActor;
 use monarch_messages::controller::ControllerMessage;
 use monarch_messages::controller::Seq;
@@ -58,8 +67,9 @@ use monarch_messages::worker::WorkerParams;
 use monarch_tensor_worker::AssignRankMessage;
 use monarch_tensor_worker::WorkerActor;
 use ndslice::Slice;
-use ndslice::selection;
+use ndslice::ViewExt;
 use ndslice::selection::ReifySlice;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use tokio::sync::Mutex;
@@ -95,8 +105,30 @@ where
 #[pymethods]
 impl _Controller {
     #[new]
-    fn new(py: Python, py_proc_mesh: &PyProcMesh) -> PyResult<Self> {
-        let proc_mesh: SharedCell<TrackedProcMesh> = py_proc_mesh.inner.clone();
+    fn new(py: Python, client: PyInstance, py_proc_mesh: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let (proc_mesh, rank_map) = if let Ok(v0) = py_proc_mesh.downcast::<PyProcMesh>() {
+            (v0.borrow().inner.clone(), None)
+        } else {
+            // Here, also extract a rank map. We have to look
+            // up which ids correspond with which ranks.
+            //
+            // This should be fixed up for the true v1 support,
+            // possibly by having the workers send back their ranks
+            // directly.
+            let proc_mesh = py_proc_mesh
+                .downcast::<PyProcMeshV1>()?
+                .borrow()
+                .mesh_ref()?;
+            let rank_map = proc_mesh
+                .iter()
+                .map(|(point, proc)| (proc.proc_id().clone(), point.rank()))
+                .collect();
+            (
+                SharedCell::from(TrackedProcMesh::from(ProcMesh::from(proc_mesh))),
+                Some(rank_map),
+            )
+        };
+
         let proc_mesh_ref = proc_mesh.borrow().unwrap();
         let shape = proc_mesh_ref.shape();
         let slice = shape.slice();
@@ -106,21 +138,24 @@ impl _Controller {
                 "NYI: proc mesh for workers must be contiguous and start at offset 0",
             ));
         }
+
         let id = NEXT_ID.fetch_add(1, atomic::Ordering::Relaxed);
         let controller_handle: Arc<Mutex<ActorHandle<MeshControllerActor>>> =
             signal_safe_block_on(py, async move {
-                let controller_handle = proc_mesh
-                    .borrow()
-                    .unwrap()
-                    .client_proc()
-                    .spawn(
-                        &format!("tensor_engine_controller_{}", id),
-                        MeshControllerActorParams { proc_mesh, id },
-                    )
-                    .await?;
-                let r: Result<Arc<Mutex<ActorHandle<MeshControllerActor>>>, anyhow::Error> =
-                    Ok(Arc::new(Mutex::new(controller_handle)));
-                r
+                let controller_handle = instance_dispatch!(client, |instance| {
+                    instance
+                        .proc()
+                        .spawn(
+                            &Name::new("mesh_controller").to_string(),
+                            MeshControllerActorParams {
+                                proc_mesh,
+                                id,
+                                rank_map,
+                            },
+                        )
+                        .await?
+                });
+                Ok::<_, anyhow::Error>(Arc::new(Mutex::new(controller_handle)))
             })??;
 
         Ok(Self {
@@ -128,6 +163,7 @@ impl _Controller {
             all_ranks,
             // note that 0 is the _pid_ of the broker, which will be 0 for
             // top-level spawned actors.
+            // todo: plumb these through as proper actor mesh refs
             broker_id: (format!("tensor_engine_brokers_{}", id), 0),
         })
     }
@@ -198,6 +234,7 @@ impl _Controller {
             .send(ClientToControllerMessage::Send { slices, message })
             .map_err(to_py_error)
     }
+
     fn _drain_and_stop(&mut self) -> PyResult<()> {
         self.controller_handle
             .blocking_lock()
@@ -506,10 +543,9 @@ impl History {
         sender: &impl context::Actor,
         seq: Seq,
         exception: WorkerError,
+        rank: usize,
     ) -> Result<(), MailboxSenderError> {
         // TODO: supplement PythonMessage with the stack trace we have in invocation
-        let rank = exception.worker_actor_id.rank();
-
         let invocation = self.inflight_invocations.get(&seq).unwrap().clone();
 
         let python_message = Arc::new(Python::with_gil(|py| {
@@ -639,6 +675,7 @@ struct MeshControllerActor {
     id: usize,
     debugger_active: Option<ActorRef<DebuggerActor>>,
     debugger_paused: VecDeque<ActorRef<DebuggerActor>>,
+    rank_map: Option<HashMap<ProcId, usize>>,
 }
 
 impl MeshControllerActor {
@@ -727,30 +764,36 @@ impl Debug for MeshControllerActor {
 struct MeshControllerActorParams {
     proc_mesh: SharedCell<TrackedProcMesh>,
     id: usize,
+    rank_map: Option<HashMap<ProcId, usize>>,
 }
 
 #[async_trait]
 impl Actor for MeshControllerActor {
     type Params = MeshControllerActorParams;
     async fn new(
-        MeshControllerActorParams { proc_mesh, id }: Self::Params,
+        MeshControllerActorParams {
+            proc_mesh,
+            id,
+            rank_map,
+        }: Self::Params,
     ) -> Result<Self, anyhow::Error> {
         let world_size = proc_mesh.borrow().unwrap().shape().slice().len();
         Ok(MeshControllerActor {
-            proc_mesh: proc_mesh.clone(),
+            proc_mesh,
             workers: None,
             brokers: None,
             history: History::new(world_size),
             id,
             debugger_active: None,
             debugger_paused: VecDeque::new(),
+            rank_map,
         })
     }
+
     async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
         let controller_actor_ref: ActorRef<ControllerActor> = this.bind();
         let proc_mesh = self.proc_mesh.borrow().unwrap();
-        let slice = proc_mesh.shape().slice();
-        let world_size = slice.len();
+        let world_size = proc_mesh.shape().slice().len();
         let param = WorkerParams {
             world_size,
             // Rank assignment is consistent with proc indices.
@@ -762,11 +805,10 @@ impl Actor for MeshControllerActor {
         let workers = proc_mesh
             .spawn(this, &format!("tensor_engine_workers_{}", self.id), &param)
             .await?;
-        workers.borrow().unwrap().cast(
-            this,
-            selection::dsl::true_(),
-            AssignRankMessage::AssignRank(),
-        )?;
+        workers
+            .borrow()
+            .unwrap()
+            .cast(this, sel!(*), AssignRankMessage::AssignRank())?;
 
         self.workers = Some(workers);
         let brokers = proc_mesh
@@ -774,6 +816,21 @@ impl Actor for MeshControllerActor {
             .await?;
         self.brokers = Some(brokers);
         Ok(())
+    }
+}
+
+impl MeshControllerActor {
+    fn rank_of_worker(&self, actor_id: &ActorId) -> usize {
+        if actor_id.proc_id().is_ranked() {
+            actor_id.rank()
+        } else {
+            self.rank_map
+                .as_ref()
+                .expect("direct-addressed workers should have a rank map")
+                .get(actor_id.proc_id())
+                .expect("rank map should contain worker")
+                .clone()
+        }
     }
 }
 
@@ -796,8 +853,8 @@ impl Handler<ControllerMessage> for MeshControllerActor {
                 worker_actor_id,
                 controller: false,
             } => {
-                let rank = worker_actor_id.rank();
-                self.history.rank_completed(this, rank, seq)?;
+                self.history
+                    .rank_completed(this, self.rank_of_worker(&worker_actor_id), seq)?;
             }
             ControllerMessage::FetchResult {
                 seq,
@@ -807,7 +864,8 @@ impl Handler<ControllerMessage> for MeshControllerActor {
                 self.history.set_result(seq, msg);
             }
             ControllerMessage::RemoteFunctionFailed { seq, error } => {
-                self.history.propagate_exception(this, seq, error)?;
+                let rank = self.rank_of_worker(&error.worker_actor_id);
+                self.history.propagate_exception(this, seq, error, rank)?;
             }
             message => {
                 panic!("unexpected message: {:?}", message);
@@ -826,8 +884,9 @@ impl Handler<ClientToControllerMessage> for MeshControllerActor {
     ) -> anyhow::Result<()> {
         match message {
             ClientToControllerMessage::Send { slices, message } => {
-                let sel = self.workers().shape().slice().reify_slices(slices)?;
-                self.workers().cast(this, sel, message)?;
+                let workers = self.workers();
+                let sel = workers.shape().slice().reify_slices(slices)?;
+                workers.cast(this, sel, message)?;
             }
             ClientToControllerMessage::Node {
                 seq,
@@ -845,7 +904,7 @@ impl Handler<ClientToControllerMessage> for MeshControllerActor {
             ClientToControllerMessage::SyncAtExit { port } => {
                 self.workers().cast(
                     this,
-                    selection::dsl::true_(),
+                    sel!(*),
                     WorkerMessage::RequestStatus {
                         seq: self.history.seq_lower_bound,
                         controller: false,

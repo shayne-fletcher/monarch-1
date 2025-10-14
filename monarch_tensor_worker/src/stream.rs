@@ -96,7 +96,7 @@ thread_local! {
 fn pickle_python_result(
     py: Python<'_>,
     result: Bound<'_, PyAny>,
-    worker_actor_id: ActorId,
+    worker_rank: usize,
 ) -> Result<PythonMessage, anyhow::Error> {
     let pickle = py
         .import("monarch._src.actor.actor_mesh")
@@ -110,7 +110,7 @@ fn pickle_python_result(
         .unwrap();
     Ok(PythonMessage::new_from_buf(
         PythonMessageKind::Result {
-            rank: Some(worker_actor_id.rank()),
+            rank: Some(worker_rank),
         },
         data.inner,
     ))
@@ -266,7 +266,7 @@ pub enum StreamMessage {
 
     GetTensorRefUnitTestsOnly(Ref, #[reply] OncePortHandle<Option<TensorCellResult>>),
 
-    SendResultOfActorCall(ActorId, ActorCallParams),
+    SendResultOfActorCall(ActorCallParams),
     CallActorMethod(ActorMethodParams),
 }
 
@@ -1024,13 +1024,13 @@ impl StreamActor {
         &mut self,
         cx: &hyperactor::Context<'_, Self>,
         seq: Seq,
-        worker_actor_id: ActorId,
         mutates: Vec<Ref>,
         function: Option<ResolvableFunction>,
         args: Vec<WireValue>,
         kwargs: HashMap<String, WireValue>,
         device_meshes: HashMap<Ref, DeviceMesh>,
     ) -> Result<()> {
+        let rank = self.rank;
         self.try_define(cx, seq, vec![], &vec![], async |self_| {
             let python_message =
                 Python::with_gil(|py| -> Result<PythonMessage, CallFunctionError> {
@@ -1046,8 +1046,7 @@ impl StreamActor {
                             HashMap::new(),
                         )
                     })?;
-                    pickle_python_result(py, python_result, worker_actor_id)
-                        .map_err(CallFunctionError::Error)
+                    pickle_python_result(py, python_result, rank).map_err(CallFunctionError::Error)
                 })?;
             let ser = Serialized::serialize(&python_message).unwrap();
             self_
@@ -1575,16 +1574,7 @@ impl StreamMessageHandler for StreamActor {
     ) -> Result<()> {
         if self.respond_with_python_message && pipe.is_none() {
             return self
-                .send_value_python_message(
-                    cx,
-                    seq,
-                    worker_actor_id,
-                    mutates,
-                    function,
-                    args,
-                    kwargs,
-                    device_meshes,
-                )
+                .send_value_python_message(cx, seq, mutates, function, args, kwargs, device_meshes)
                 .await;
         }
         let result = if let Some(function) = function {
@@ -1708,16 +1698,14 @@ impl StreamMessageHandler for StreamActor {
     async fn send_result_of_actor_call(
         &mut self,
         cx: &Context<Self>,
-        worker_actor_id: ActorId,
         params: ActorCallParams,
     ) -> anyhow::Result<()> {
         let seq = params.seq;
         let mutates = params.mutates.clone();
         self.try_define(cx, seq, vec![], &mutates, async |self| {
             let value = self.call_actor(cx, params).await?;
-            let result = Python::with_gil(|py| {
-                pickle_python_result(py, value.into_bound(py), worker_actor_id)
-            })?;
+            let result =
+                Python::with_gil(|py| pickle_python_result(py, value.into_bound(py), self.rank))?;
             let result = Serialized::serialize(&result).unwrap();
             self.controller_actor
                 .fetch_result(cx, seq, Ok(result))

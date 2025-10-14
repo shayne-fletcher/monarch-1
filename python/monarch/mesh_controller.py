@@ -28,7 +28,7 @@ from typing import (
 )
 
 import torch.utils._python_dispatch
-from monarch._rust_bindings.monarch_extension import client
+from monarch._rust_bindings.monarch_extension import client, tensor_worker
 from monarch._rust_bindings.monarch_extension.client import (  # @manual=//monarch/monarch_extension:monarch_extension
     WorldState,
 )
@@ -47,26 +47,22 @@ from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarc
 )
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._src.actor.actor_mesh import ActorEndpoint, Channel, Port
-from monarch._src.actor.endpoint import Selection
 from monarch._src.actor.shape import NDSlice
 from monarch.common import device_mesh, messages, stream
 from monarch.common.controller_api import TController
 from monarch.common.function import ResolvableFunction
 from monarch.common.invocation import Seq
-from monarch.common.messages import Referenceable, SendResultOfActorCall
+from monarch.common.messages import SendResultOfActorCall
 from monarch.common.stream import Stream, StreamRef
 from monarch.common.tensor import dtensor_check, InputChecker, Tensor
 from monarch.common.tree import flatten
 from monarch.tensor_worker_main import _set_trace
 
 if TYPE_CHECKING:
-    from monarch._rust_bindings.monarch_hyperactor.proc_mesh import (
-        ProcMesh as HyProcMesh,
-    )
-    from monarch.actor import ProcMesh
+    from monarch._src.actor.proc_mesh import HyProcMesh, ProcMesh
 
 from monarch._rust_bindings.monarch_hyperactor.shape import Point
-from monarch._src.actor.actor_mesh import context, Context, Instance
+from monarch._src.actor.actor_mesh import context, Instance
 from monarch._src.actor.device_utils import _local_device_count
 
 from monarch.common.client import Client
@@ -80,9 +76,9 @@ logger: Logger = logging.getLogger(__name__)
 
 
 class Controller(_Controller):
-    def __init__(self, workers: "HyProcMesh") -> None:
+    def __init__(self, instance: Instance, workers: "HyProcMesh") -> None:
         super().__init__()
-        self._mailbox: Mailbox = Instance._as_py(workers.client)._mailbox
+        self._mailbox: Mailbox = Instance._mailbox
         # Buffer for messages unrelated to debugging that are received while a
         # debugger session is active.
         self._non_debugger_pending_messages: deque[
@@ -153,6 +149,17 @@ def _initialize_env(worker_point: Point, proc_id: str) -> None:
         # workaround for set_manual_seed somehow not working if cuda is not initialized\
         if torch.cuda.is_available():
             torch.cuda.init()
+
+        def check_set_device(device):
+            import os
+
+            if str(device) not in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(","):
+                raise ValueError(
+                    f"Only devices {os.environ.get('CUDA_VISIBLE_DEVICES', 'None')} are available to monarch worker, "
+                    f"but torch.cuda.set_device({device}) was called"
+                )
+
+        torch.cuda.set_device = check_set_device
     except Exception:
         traceback.print_exc()
         raise
@@ -234,6 +241,10 @@ class MeshClient(Client):
         tracebacks: List[List[traceback.FrameSummary]],
     ) -> Seq:
         seq = self._next_seq()
+        # .ref can be None if the tensor is an intermediate result
+        # inside a recording
+        defs = cast(Sequence["Tensor"], [t for t in defs if t.ref is not None])
+        uses = cast(Sequence["Tensor"], [t for t in uses if t.ref is not None])
         for d in defs:
             d._seq = seq
         response_port = None
@@ -259,7 +270,7 @@ def spawn_tensor_engine(proc_mesh: "ProcMesh") -> DeviceMesh:
     gpus = proc_mesh.sizes.get("gpus", 1)
 
     # we currently block on the creation of the proc mesh, but conceivably we could init concurrently here.
-    backend_ctrl = Controller(proc_mesh._proc_mesh.block_on())
+    backend_ctrl = Controller(context().actor_instance, proc_mesh._proc_mesh.block_on())
     client = MeshClient(cast("TController", backend_ctrl), proc_mesh.size(), gpus)
     dm = DeviceMesh(
         client,

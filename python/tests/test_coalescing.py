@@ -63,13 +63,16 @@ def testing_context():
 class BackendType(Enum):
     PY = "py"
     RS = "rs"
+    MESH = "mesh"
 
 
 @pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
 )
-@pytest.mark.parametrize("backend_type", [BackendType.PY, BackendType.RS])
+@pytest.mark.parametrize(
+    "backend_type", [BackendType.PY, BackendType.RS, BackendType.MESH]
+)
 class TestCoalescing:
     @classmethod
     def local_device_mesh(

@@ -27,7 +27,6 @@ from monarch import (
     Stream,
     Tensor,
 )
-from monarch._src.actor.v1 import enabled as v1_enabled
 
 from monarch._testing import BackendType, TestingContext
 from monarch.common.controller_api import LogMessage
@@ -43,12 +42,6 @@ from monarch.rust_local_mesh import (
     SupervisionParams,
 )
 from monarch_supervisor.logging import fix_exception_lines
-
-
-# FIXME(slurye)
-pytestmark = pytest.mark.skipif(
-    v1_enabled, reason="ENABLE ME ASAP ONCE V1 TENSOR ENGINE LANDS"
-)
 
 
 def custom_excepthook(exc_type, exc_value, exc_traceback):

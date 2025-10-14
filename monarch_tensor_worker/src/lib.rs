@@ -852,9 +852,7 @@ impl WorkerMessageHandler for WorkerActor {
         params: ActorCallParams,
     ) -> Result<()> {
         let stream = self.try_get_stream(params.stream)?;
-        stream
-            .send_result_of_actor_call(cx, cx.self_id().clone(), params)
-            .await?;
+        stream.send_result_of_actor_call(cx, params).await?;
         Ok(())
     }
     async fn call_actor_method(

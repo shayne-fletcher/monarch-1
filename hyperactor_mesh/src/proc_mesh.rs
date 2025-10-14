@@ -93,6 +93,7 @@ declare_attrs! {
     })
     pub attr DEFAULT_TRANSPORT: ChannelTransport = ChannelTransport::Unix;
 }
+
 /// Get the default transport type to use across the application.
 pub fn default_transport() -> ChannelTransport {
     config::global::get_cloned(DEFAULT_TRANSPORT)
@@ -992,7 +993,9 @@ impl<D: Deref<Target = ProcMesh> + Send + Sync + 'static> SharedSpawnable for D 
                     ranks,
                 ))
             }
-            ProcMeshKind::V1(_proc_mesh) => todo!(),
+            ProcMeshKind::V1(proc_mesh) => Ok(RootActorMesh::from(
+                proc_mesh.spawn_service(cx, actor_name, params).await?,
+            )),
         }
     }
 }

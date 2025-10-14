@@ -167,7 +167,7 @@ impl ProcRef {
         }
     }
 
-    pub(crate) fn proc_id(&self) -> &ProcId {
+    pub fn proc_id(&self) -> &ProcId {
         &self.proc_id
     }
 

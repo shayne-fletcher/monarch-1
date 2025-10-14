@@ -10,14 +10,9 @@ import monarch
 import pytest
 import torch
 from monarch import remote
-from monarch._src.actor.v1 import enabled as v1_enabled
-from monarch.actor import Actor, as_endpoint, endpoint, proc_mesh, this_host
+from monarch._src.actor.host_mesh import this_host
+from monarch.actor import Actor, as_endpoint, endpoint
 from monarch.mesh_controller import spawn_tensor_engine
-
-
-pytestmark = pytest.mark.skipif(
-    v1_enabled, reason="ENABLE ASAP ONCE V1 TENSOR ENGINE LANDS"
-)
 
 
 two_gpu = pytest.mark.skipif(
@@ -28,7 +23,7 @@ two_gpu = pytest.mark.skipif(
 
 @two_gpu
 def test_tensor_engine() -> None:
-    pm = proc_mesh(gpus=2)
+    pm = this_host().spawn_procs(per_host={"gpus": 2})
 
     dm = spawn_tensor_engine(pm)
     with dm.activate():
@@ -54,11 +49,11 @@ def test_tensor_engine() -> None:
 
 @two_gpu
 def test_proc_mesh_tensor_engine() -> None:
-    pm = proc_mesh(gpus=2)
+    pm = this_host().spawn_procs(per_host={"gpus": 2})
     with pm.activate():
         f = 10 * pm.rank_tensor("gpus").cuda()
-        a = monarch.inspect(f, hosts=0, gpus=0)
-        b = monarch.inspect(f, hosts=0, gpus=1)
+        a = monarch.inspect(f, gpus=0)
+        b = monarch.inspect(f, gpus=1)
 
     one = pm.slice(gpus=1)
     with one.activate():
@@ -81,11 +76,11 @@ class AddWithState(Actor):
 
 @two_gpu
 def test_actor_with_tensors() -> None:
-    pm = proc_mesh(gpus=1)
+    pm = this_host().spawn_procs(per_host={"gpus": 1})
     with pm.activate():
         x = pm.spawn("adder", AddWithState, torch.ones(()))
         y = torch.ones(())
-        assert x.forward.call(y).get(timeout=5).item(hosts=0, gpus=0).item() == 2
+        assert x.forward.call(y).get(timeout=5).item(gpus=0).item() == 2
 
 
 class Counter(Actor):
@@ -101,7 +96,7 @@ class Counter(Actor):
 
 @two_gpu
 def test_actor_tensor_ordering() -> None:
-    pm = proc_mesh(gpus=1)
+    pm = this_host().spawn_procs(per_host={"gpus": 1})
     with pm.activate():
         counter = pm.spawn("a", Counter)
         results = []
@@ -111,7 +106,7 @@ def test_actor_tensor_ordering() -> None:
             # non-tensor engine call
             results.append(counter.incr.call(1))
 
-        assert list(range(10)) == [r.get().item(hosts=0, gpus=0) for r in results]
+        assert list(range(10)) == [r.get().item(gpus=0) for r in results]
 
 
 class Linear(Actor):
@@ -128,7 +123,7 @@ class Linear(Actor):
 
 @two_gpu
 def test_rref_actor() -> None:
-    pm = proc_mesh(gpus=1)
+    pm = this_host().spawn_procs(per_host={"gpus": 1})
     with pm.activate():
         x = pm.spawn("linear", Linear, 3, 4)
 

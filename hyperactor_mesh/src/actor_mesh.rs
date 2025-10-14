@@ -207,14 +207,8 @@ pub trait ActorMesh: Mesh<Id = ActorMeshId> {
         M: Castable + RemoteMessage + Clone,
     {
         if let Some(v1) = self.v1() {
-            if !selection::structurally_equal(&selection, &sel!(*)) {
-                return Err(CastError::SelectionNotSupported(format!(
-                    "ActorMesh::cast: selection {} not supported; for v1 meshes supports only universal selection",
-                    selection
-                )));
-            }
             return v1
-                .cast(cx, message)
+                .cast_for_tensor_engine_only_do_not_use(cx, selection, message)
                 .map_err(anyhow::Error::from)
                 .map_err(CastError::from);
         }
@@ -358,7 +352,7 @@ impl<'a, A: Referable> RootActorMesh<'a, A> {
         }
     }
 
-    pub(crate) fn new_v1(actor_mesh: v1::ActorMeshRef<A>) -> Self {
+    pub fn new_v1(actor_mesh: v1::ActorMeshRef<A>) -> Self {
         Self {
             inner: ActorMeshKind::V1(actor_mesh),
             shape: OnceLock::new(),
@@ -831,7 +825,7 @@ pub(crate) mod test_util {
                 use tokio::time::Duration;
                 use tokio::time::timeout;
                 #[allow(clippy::disallowed_methods)]
-                if let Ok(_) = timeout(Duration::from_secs(1), rx.recv()).await {
+                if timeout(Duration::from_secs(1), rx.recv()).await.is_ok() {
                     message
                         .1
                         .send(cx, "the impossible happened".to_owned())
