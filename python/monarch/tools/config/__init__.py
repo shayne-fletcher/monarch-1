@@ -11,23 +11,16 @@ from typing import TYPE_CHECKING
 
 from monarch.tools.config.workspace import Workspace
 
-# Gracefully handle cases where torchx might not be installed
-# NOTE: this can be removed once torchx.specs moves to monarch.session
-try:
-    from torchx import specs
-except ImportError:
-    pass
-
 if TYPE_CHECKING:
-    from torchx.specs import CfgVal
+    from torchx.specs import AppDef, CfgVal
 
 NOT_SET: str = "__NOT_SET__"
 
 
-def _empty_appdef() -> "specs.AppDef":
-    from torchx import specs
+def _empty_appdef() -> "AppDef":
+    from torchx.specs import AppDef
 
-    return specs.AppDef(name=NOT_SET)
+    return AppDef(name=NOT_SET)
 
 
 @dataclass
@@ -53,7 +46,7 @@ class Config:
     scheduler_args: dict[str, "CfgVal"] = field(default_factory=dict)
     workspace: Workspace = field(default_factory=Workspace.null)
     dryrun: bool = False
-    appdef: "specs.AppDef" = field(default_factory=_empty_appdef)
+    appdef: "AppDef" = field(default_factory=_empty_appdef)
 
     def __post_init__(self) -> None:
         # workspace used to be Optional[str]
