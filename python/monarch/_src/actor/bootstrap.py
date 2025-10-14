@@ -113,10 +113,13 @@ def attach_to_workers(
     workers_tasks = [_as_python_task(w) for w in workers]
     host_mesh: PythonTask[HyHostMesh] = _attach_to_workers(workers_tasks, name=name)
     extent = Extent(["hosts"], [len(workers)])
-    return HostMesh(
+    hm = HostMesh(
         host_mesh.spawn(),
         extent.region,
         stream_logs=True,
         is_fake_in_process=False,
         _initialized_hy_host_mesh=None,
+        _code_sync_proc_mesh=None,
     )
+    hm._code_sync_proc_mesh = hm.spawn_procs()
+    return hm

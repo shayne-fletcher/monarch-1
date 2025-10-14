@@ -1353,22 +1353,27 @@ class LsActor(Actor):
         return os.listdir(self.workspace)
 
 
-@v0_only
 async def test_sync_workspace() -> None:
     # create two workspaces: one for local and one for remote
     with tempfile.TemporaryDirectory() as workspace_src, tempfile.TemporaryDirectory() as workspace_dst:
+        if v1_enabled:
+            host = create_local_host_mesh(env={"WORKSPACE_DIR": workspace_dst})
+            pm = host.spawn_procs(per_host={"gpus": 1})
+            code_sync_mesh = host
+        else:
 
-        def bootstrap_WORKSPACE_DIR() -> None:
-            import os
+            def bootstrap_WORKSPACE_DIR():
+                os.environ["WORKSPACE_DIR"] = workspace_dst
 
-            os.environ["WORKSPACE_DIR"] = workspace_dst
-
-        pm = this_host().spawn_procs(
-            per_host={"gpus": 1}, bootstrap=bootstrap_WORKSPACE_DIR
-        )
+            pm = this_host().spawn_procs(
+                per_host={"gpus": 1}, bootstrap=bootstrap_WORKSPACE_DIR
+            )
+            code_sync_mesh = pm
 
         config = defaults.config("slurm", workspace_src)
-        await pm.sync_workspace(workspace=config.workspace, auto_reload=True)
+        await code_sync_mesh.sync_workspace(
+            workspace=config.workspace, auto_reload=True
+        )
 
         # no file in remote workspace initially
         am = pm.spawn("ls", LsActor, workspace_dst)
@@ -1382,7 +1387,7 @@ async def test_sync_workspace() -> None:
             f.flush()
 
         # force a sync and it should populate on the dst workspace
-        await pm.sync_workspace(config.workspace, auto_reload=True)
+        await code_sync_mesh.sync_workspace(config.workspace, auto_reload=True)
         for item in list(am.ls.call().get()):
             assert len(item[1]) == 1
             assert item[1][0] == "new_file"

@@ -592,6 +592,7 @@ class ProcMeshV0(MeshTrait):
 
         assert self._code_sync_client is not None
         await self._code_sync_client.sync_workspaces(
+            instance=context().actor_instance._as_rust(),
             workspaces=list(workspaces.values()),
             auto_reload=auto_reload,
         )

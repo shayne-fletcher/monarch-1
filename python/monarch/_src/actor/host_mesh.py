@@ -32,6 +32,7 @@ from monarch._src.actor.v1.host_mesh import (
     this_host as this_host_v1,
     this_proc as this_proc_v1,
 )
+from monarch.tools.config.workspace import Workspace
 
 
 def this_host_v0() -> "HostMeshV0":
@@ -147,6 +148,22 @@ class HostMeshV0(MeshTrait):
             Shape(self._labels, NDSlice.new_row_major(self._ndslice.sizes)),
             self._allocator,
         )
+
+    async def sync_workspace(
+        self,
+        workspace: Workspace,
+        conda: bool = False,
+        auto_reload: bool = False,
+    ) -> None:
+        """
+        Sync local code changes to the remote hosts.
+
+        Args:
+            workspace: The workspace to sync.
+            conda: If True, also sync the currently activated conda env.
+            auto_reload: If True, automatically reload the workspace on changes.
+        """
+        raise NotImplementedError("sync_workspace is not implemented for v0 HostMesh")
 
 
 def fake_in_process_host_v0() -> "HostMeshV0":

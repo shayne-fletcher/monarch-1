@@ -31,6 +31,7 @@ use hyperactor::Handler;
 use hyperactor::Named;
 use hyperactor::PortRef;
 use hyperactor::Unbind;
+use hyperactor::context;
 use hyperactor::forward;
 use hyperactor_mesh::RootActorMesh;
 use hyperactor_mesh::SlicedActorMesh;
@@ -41,12 +42,16 @@ use hyperactor_mesh::reference::ActorMeshId;
 use hyperactor_mesh::reference::ActorMeshRef;
 use hyperactor_mesh::reference::ProcMeshId;
 use hyperactor_mesh::sel;
+use hyperactor_mesh::v1;
 use lazy_errors::ErrorStash;
 use lazy_errors::TryCollectOrStash;
 use monarch_conda::sync::sender;
 use ndslice::Selection;
 use ndslice::Shape;
 use ndslice::ShapeError;
+use ndslice::View;
+use ndslice::view::RankedSliceable;
+use ndslice::view::ViewExt;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
@@ -138,7 +143,7 @@ impl WorkspaceShape {
         )?)
     }
 
-    fn downstream_mesh(&self, actor_id: &ActorId) -> Result<ActorMeshRef<CodeSyncManager>> {
+    fn downstream_mesh_v0(&self, actor_id: &ActorId) -> Result<ActorMeshRef<CodeSyncManager>> {
         let shape = self.downstream(actor_id.rank())?;
         Ok(ActorMeshRef::attest(
             ActorMeshId::V0(
@@ -148,6 +153,15 @@ impl WorkspaceShape {
             shape,
             ActorRef::attest(actor_id.proc_id().actor_id("comm", 0)),
         ))
+    }
+
+    fn downstream_mesh(
+        &self,
+        mesh: &v1::actor_mesh::ActorMeshRef<CodeSyncManager>,
+        rank: usize,
+    ) -> Result<v1::actor_mesh::ActorMeshRef<CodeSyncManager>> {
+        let shape = self.downstream(rank)?;
+        Ok(mesh.sliced(shape.region()))
     }
 }
 
@@ -169,8 +183,14 @@ pub enum CodeSyncMessage {
         result: PortRef<Result<(), String>>,
     },
     Reload {
+        sender_rank: Option<usize>,
         result: PortRef<Result<(), String>>,
     },
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, Named, Bind, Unbind)]
+pub struct SetActorMeshMessage {
+    pub actor_mesh: v1::actor_mesh::ActorMeshRef<CodeSyncManager>,
 }
 
 #[derive(Debug, Named, Serialize, Deserialize)]
@@ -179,12 +199,17 @@ pub struct CodeSyncManagerParams {}
 #[derive(Debug)]
 #[hyperactor::export(
     spawn = true,
-    handlers = [CodeSyncMessage { cast = true }],
+    handlers = [
+        CodeSyncMessage { cast = true },
+        SetActorMeshMessage { cast = true }
+    ],
 )]
 pub struct CodeSyncManager {
     rsync: OnceCell<ActorHandle<RsyncActor>>,
     auto_reload: OnceCell<ActorHandle<AutoReloadActor>>,
     conda_sync: OnceCell<ActorHandle<CondaSyncActor>>,
+    self_mesh: once_cell::sync::OnceCell<v1::actor_mesh::ActorMeshRef<CodeSyncManager>>,
+    rank: once_cell::sync::OnceCell<usize>,
 }
 
 #[async_trait]
@@ -196,6 +221,8 @@ impl Actor for CodeSyncManager {
             rsync: OnceCell::new(),
             auto_reload: OnceCell::new(),
             conda_sync: OnceCell::new(),
+            self_mesh: once_cell::sync::OnceCell::new(),
+            rank: once_cell::sync::OnceCell::new(),
         })
     }
 }
@@ -276,21 +303,44 @@ impl CodeSyncMessageHandler for CodeSyncManager {
 
             // Trigger hot reload on all ranks that use/share this workspace.
             if let Some(workspace_shape) = reload {
-                let mesh = workspace_shape.downstream_mesh(cx.self_id())?;
                 let (tx, rx) = cx.open_port::<Result<(), String>>();
                 let tx = tx.bind();
-                mesh.cast(
-                    cx,
-                    // We make sure to exclude the current rank from the sync, as this actor will
-                    // be blocked here waiting for results.  We just manually call `reload` to run
-                    // concurrently below.
-                    sel!(*).without(mesh.shape().slice(), &HashSet::from([cx.self_id().rank()]))?,
-                    CodeSyncMessage::Reload { result: tx.clone() },
-                )?;
+                let len;
+                if let Some(rank) = self.rank.get() {
+                    let mesh = self
+                        .self_mesh
+                        .get()
+                        .ok_or_else(|| anyhow::anyhow!("missing self mesh"))?;
+                    let mesh = workspace_shape.downstream_mesh(mesh, *rank)?;
+                    mesh.cast(
+                        cx,
+                        CodeSyncMessage::Reload {
+                            sender_rank: Some(*rank),
+                            result: tx.clone(),
+                        },
+                    )?;
+                    // Exclude self from the sync.
+                    len = mesh.region().slice().len() - 1;
+                } else {
+                    let mesh = workspace_shape.downstream_mesh_v0(cx.self_id())?;
+                    mesh.cast(
+                        cx,
+                        // We make sure to exclude the current rank from the sync, as this actor will
+                        // be blocked here waiting for results.  We just manually call `reload` to run
+                        // concurrently below.
+                        sel!(*)
+                            .without(mesh.shape().slice(), &HashSet::from([cx.self_id().rank()]))?,
+                        CodeSyncMessage::Reload {
+                            sender_rank: None,
+                            result: tx.clone(),
+                        },
+                    )?;
+                    len = mesh.shape().slice().len();
+                }
                 let _: ((), Vec<()>) = try_join!(
                     // Run reload for this rank.
-                    self.reload(cx, tx),
-                    rx.take(mesh.shape().slice().len())
+                    self.reload(cx, self.rank.get().cloned(), tx),
+                    rx.take(len)
                         .map(|res| res?.map_err(anyhow::Error::msg))
                         .try_collect(),
                 )?;
@@ -316,8 +366,16 @@ impl CodeSyncMessageHandler for CodeSyncManager {
     async fn reload(
         &mut self,
         cx: &Context<Self>,
+        sender_rank: Option<usize>,
         result: PortRef<Result<(), String>>,
     ) -> Result<()> {
+        if self
+            .rank
+            .get()
+            .is_some_and(|rank| sender_rank.is_some_and(|sender_rank| *rank == sender_rank))
+        {
+            return Ok(());
+        }
         let res = async move {
             let (tx, mut rx) = cx.open_port();
             self.get_auto_reload_actor(cx)
@@ -342,6 +400,21 @@ impl CodeSyncMessageHandler for CodeSyncManager {
     }
 }
 
+#[async_trait]
+impl Handler<SetActorMeshMessage> for CodeSyncManager {
+    async fn handle(&mut self, cx: &Context<Self>, msg: SetActorMeshMessage) -> Result<()> {
+        let mesh = self.self_mesh.get_or_init(|| msg.actor_mesh);
+        self.rank.get_or_init(|| {
+            mesh.iter()
+                .find(|(_, actor)| actor.actor_id() == cx.self_id())
+                .unwrap()
+                .0
+                .rank()
+        });
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CodeSyncMethod {
     Rsync,
@@ -351,13 +424,14 @@ pub enum CodeSyncMethod {
 }
 
 pub async fn code_sync_mesh(
+    cx: &impl context::Actor,
     actor_mesh: &RootActorMesh<'_, CodeSyncManager>,
     local_workspace: PathBuf,
     remote_workspace: WorkspaceConfig,
     method: CodeSyncMethod,
     auto_reload: bool,
 ) -> Result<()> {
-    let instance = actor_mesh.proc_mesh().client();
+    let instance = cx.instance();
 
     // Create a slice of the actor mesh that only includes workspace "owners" (e.g. on multi-GPU hosts,
     // only one of the ranks on that host will participate in the code sync).
@@ -607,6 +681,7 @@ mod tests {
         // Test code_sync_mesh function - this coordinates sync operations across the mesh
         // Test without auto-reload first
         code_sync_mesh(
+            instance,
             &actor_mesh,
             source_workspace.path().to_path_buf(),
             remote_workspace_config.clone(),

@@ -9,6 +9,8 @@
 from pathlib import Path
 from typing import Any, Dict, final
 
+from monarch._rust_bindings.monarch_hyperactor.context import Instance
+
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as ProcMeshV0
 
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape
@@ -92,6 +94,7 @@ class CodeSyncMeshClient:
     async def sync_workspace(
         self,
         *,
+        instance: Instance,
         local: str,
         remote: RemoteWorkspace,
         auto_reload: bool = False,
@@ -99,6 +102,7 @@ class CodeSyncMeshClient:
     async def sync_workspaces(
         self,
         *,
+        instance: Instance,
         workspaces: list[WorkspaceConfig],
         auto_reload: bool = False,
     ) -> None: ...

@@ -56,6 +56,12 @@ macro_rules! instance_dispatch {
             $crate::context::ContextInstance::PythonActor($cx) => $code,
         }
     };
+    ($ins:expr, |$cx:ident| $code:block) => {
+        match $ins.into_context_instance() {
+            $crate::context::ContextInstance::Client($cx) => $code,
+            $crate::context::ContextInstance::PythonActor($cx) => $code,
+        }
+    };
     ($ins:expr, async |$cx:ident| $code:block) => {
         match $ins.context_instance() {
             $crate::context::ContextInstance::Client($cx) => async $code.await,
@@ -64,6 +70,28 @@ macro_rules! instance_dispatch {
     };
     ($ins:expr, async move |$cx:ident| $code:block) => {
         match $ins.context_instance() {
+            $crate::context::ContextInstance::Client($cx) => async move $code.await,
+            $crate::context::ContextInstance::PythonActor($cx) => async move $code.await,
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! instance_into_dispatch {
+    ($ins:expr, |$cx:ident| $code:block) => {
+        match $ins.into_context_instance() {
+            $crate::context::ContextInstance::Client($cx) => $code,
+            $crate::context::ContextInstance::PythonActor($cx) => $code,
+        }
+    };
+    ($ins:expr, async |$cx:ident| $code:block) => {
+        match $ins.into_context_instance() {
+            $crate::context::ContextInstance::Client($cx) => async $code.await,
+            $crate::context::ContextInstance::PythonActor($cx) => async $code.await,
+        }
+    };
+    ($ins:expr, async move |$cx:ident| $code:block) => {
+        match $ins.into_context_instance() {
             $crate::context::ContextInstance::Client($cx) => async move $code.await,
             $crate::context::ContextInstance::PythonActor($cx) => async move $code.await,
         }
@@ -104,7 +132,7 @@ impl PyInstance {
         &self.inner
     }
 
-    pub(crate) fn into_context_instance(self) -> ContextInstance {
+    pub fn into_context_instance(self) -> ContextInstance {
         self.inner
     }
 }
