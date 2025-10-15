@@ -36,6 +36,10 @@ except ImportError:
 
 if TYPE_CHECKING:
     from monarch import timer
+    from monarch._rust_bindings.monarch_hyperactor.alloc import (
+        AllocConstraints,
+        AllocSpec,
+    )
     from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
     from monarch._src.actor.shape import NDSlice, Shape
     from monarch.common._coalescing import coalescing
@@ -76,6 +80,11 @@ if TYPE_CHECKING:
 
 
 _public_api = {
+    "AllocConstraints": (
+        "monarch._rust_bindings.monarch_hyperactor.alloc",
+        "AllocConstraints",
+    ),
+    "AllocSpec": ("monarch._rust_bindings.monarch_hyperactor.alloc", "AllocSpec"),
     "coalescing": ("monarch.common._coalescing", "coalescing"),
     "remote": ("monarch.common.remote", "remote"),
     "DeviceMesh": ("monarch.common.device_mesh", "DeviceMesh"),
@@ -146,6 +155,8 @@ except ImportError:
 # we have to explicitly list this rather than just take the keys of the _public_api
 # otherwise tools think the imports are unused
 __all__ = [
+    "AllocConstraints",
+    "AllocSpec",
     "coalescing",
     "DeviceMesh",
     "get_active_mesh",
