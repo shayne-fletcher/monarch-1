@@ -41,7 +41,7 @@ if TYPE_CHECKING:
         AllocSpec,
     )
     from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
-    from monarch._src.actor.shape import NDSlice, Shape
+    from monarch._src.actor.shape import Extent, NDSlice, Shape
     from monarch.common._coalescing import coalescing
 
     from monarch.common.device_mesh import (
@@ -92,6 +92,7 @@ _public_api = {
     "no_mesh": ("monarch.common.device_mesh", "no_mesh"),
     "RemoteProcessGroup": ("monarch.common.device_mesh", "RemoteProcessGroup"),
     "function_resolvers": ("monarch.common.function", "resolvers"),
+    "Extent": ("monarch._src.actor.shape", "Extent"),
     "Future": ("monarch.common.future", "Future"),
     "RemoteException": ("monarch.common.invocation", "RemoteException"),
     "Shape": ("monarch._src.actor.shape", "Shape"),
@@ -164,6 +165,7 @@ __all__ = [
     "remote",
     "RemoteProcessGroup",
     "function_resolvers",
+    "Extent",
     "Future",
     "RemoteException",
     "Shape",
