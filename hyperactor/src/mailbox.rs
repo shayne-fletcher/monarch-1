@@ -3349,6 +3349,8 @@ mod tests {
     }
 
     #[async_timed_test(timeout_secs = 30)]
+    // TODO: OSS: this test is flaky in OSS. Need to repo and fix it.
+    #[cfg_attr(not(feature = "fb"), ignore)]
     async fn test_split_port_id_no_reducer() {
         let Setup {
             mut receiver,
