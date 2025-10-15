@@ -25,7 +25,7 @@ a generic interface for distributed computing. We'll cover:
 
 import asyncio
 
-from monarch.actor import Actor, current_rank, endpoint, proc_mesh
+from monarch.actor import Actor, current_rank, endpoint, this_host
 
 NUM_ACTORS = 4
 
@@ -41,7 +41,7 @@ class ToyActor(Actor):
 
 # Note: Meshes can be also be created on different nodes, but we're ignoring that in this example
 async def create_toy_actors():
-    local_proc_mesh = proc_mesh(gpus=NUM_ACTORS)
+    local_proc_mesh = this_host().spawn_procs(per_host={"gpus": NUM_ACTORS})
     # This spawns 4 instances of 'ToyActor'
     toy_actor = local_proc_mesh.spawn("toy_actor", ToyActor)
     return toy_actor, local_proc_mesh
@@ -99,14 +99,14 @@ class ExampleActor(Actor):
 
 async def create_ping_pong_actors():
     # Spawn two different Actors in different meshes, with two instances each
-    local_mesh_0 = proc_mesh(gpus=2)
+    local_mesh_0 = this_host().spawn_procs(per_host={"gpus": 2})
     actor_0 = local_mesh_0.spawn(
         "actor_0",
         ExampleActor,
         "actor_0",  # this arg is passed to ExampleActor.__init__
     )
 
-    local_mesh_1 = proc_mesh(gpus=2)
+    local_mesh_1 = this_host().spawn_procs(per_host={"gpus": 2})
     actor_1 = local_mesh_1.spawn(
         "actor_1",
         ExampleActor,

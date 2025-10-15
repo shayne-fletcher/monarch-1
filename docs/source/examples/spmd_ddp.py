@@ -21,12 +21,14 @@ This example shows:
 # %%
 # First, we'll import the necessary libraries and define our model and actor classes
 
+import os
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 
-from monarch.actor import Actor, current_rank, endpoint, proc_mesh
+from monarch.actor import Actor, current_rank, endpoint, this_host
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -68,6 +70,8 @@ class DDPActor(Actor):
     async def setup(self):
         """Initialize the PyTorch distributed process group."""
         self._rprint("Initializing torch distributed")
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "12355"
 
         # initialize the process group
         dist.init_process_group("gloo", rank=self.rank, world_size=WORLD_SIZE)
@@ -107,13 +111,7 @@ class DDPActor(Actor):
 async def create_ddp_actors():
     """Create the process mesh and spawn DDP actors."""
     # Spawn a process mesh
-    local_proc_mesh = proc_mesh(
-        gpus=WORLD_SIZE,
-        env={
-            "MASTER_ADDR": "localhost",
-            "MASTER_PORT": "12355",
-        },
-    )
+    local_proc_mesh = this_host().spawn_procs(per_host={"gpus": WORLD_SIZE})
     # Spawn our actor mesh on top of the process mesh
     ddp_actor = local_proc_mesh.spawn("ddp_actor", DDPActor)
     return ddp_actor, local_proc_mesh
