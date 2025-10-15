@@ -541,6 +541,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             ):
                 await proc_mesh_from_alloc(allocator, spec).initialized
 
+    @pytest.mark.oss_skip  # pyre-ignore[56]: Pyre cannot infer the type of this pytest marker
     async def test_stacked_1d_meshes(self) -> None:
         # create two stacked actor meshes on the same host
         # each actor mesh running on separate process-allocators
