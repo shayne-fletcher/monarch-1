@@ -1587,9 +1587,17 @@ impl BootstrapProcManager {
     }
 }
 
+/// The configuration used for bootstrapped procs.
+pub struct BootstrapProcConfig {
+    /// The proc's create rank.
+    pub create_rank: usize,
+}
+
 #[async_trait]
 impl ProcManager for BootstrapProcManager {
     type Handle = BootstrapProcHandle;
+
+    type Config = BootstrapProcConfig;
 
     /// Return the [`ChannelTransport`] used by this proc manager.
     ///
@@ -1631,7 +1639,7 @@ impl ProcManager for BootstrapProcManager {
         &self,
         proc_id: ProcId,
         backend_addr: ChannelAddr,
-        rank: Option<usize>,
+        config: BootstrapProcConfig,
     ) -> Result<Self::Handle, HostError> {
         let (callback_addr, mut callback_rx) =
             channel::serve(ChannelAddr::any(ChannelTransport::Unix))?;
@@ -1681,9 +1689,8 @@ impl ProcManager for BootstrapProcManager {
 
         // Writers: tee to local (stdout/stderr or file) + send over
         // channel
-        // TODO(pablorfb) replace with new API
         let (out_writer, err_writer) =
-            create_log_writers(rank.unwrap_or(0), log_channel.clone(), pid)
+            create_log_writers(config.create_rank, log_channel.clone(), pid)
                 .unwrap_or_else(|_| (Box::new(tokio::io::stdout()), Box::new(tokio::io::stderr())));
 
         let mut stdout_tailer: Option<LogTailer> = None;
@@ -3146,7 +3153,11 @@ mod tests {
         let mgr = BootstrapProcManager::new(BootstrapCommand::test());
         let (proc_id, backend_addr) = make_proc_id_and_backend_addr(&instance, "t_term").await;
         let handle = mgr
-            .spawn(proc_id.clone(), backend_addr.clone(), None)
+            .spawn(
+                proc_id.clone(),
+                backend_addr.clone(),
+                BootstrapProcConfig { create_rank: 0 },
+            )
             .await
             .expect("spawn bootstrap child");
 
@@ -3206,7 +3217,11 @@ mod tests {
 
         // Launch the child bootstrap process.
         let handle = mgr
-            .spawn(proc_id.clone(), backend_addr.clone(), None)
+            .spawn(
+                proc_id.clone(),
+                backend_addr.clone(),
+                BootstrapProcConfig { create_rank: 0 },
+            )
             .await
             .expect("spawn bootstrap child");
 

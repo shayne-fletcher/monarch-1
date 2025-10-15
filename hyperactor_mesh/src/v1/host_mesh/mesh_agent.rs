@@ -34,6 +34,7 @@ use serde::Serialize;
 
 use crate::bootstrap;
 use crate::bootstrap::BootstrapCommand;
+use crate::bootstrap::BootstrapProcConfig;
 use crate::bootstrap::BootstrapProcManager;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
@@ -123,16 +124,15 @@ impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
             HostAgentMode::Process(host) => {
                 host.spawn(
                     create_or_update.name.clone().to_string(),
-                    create_or_update.rank.0,
+                    BootstrapProcConfig {
+                        create_rank: create_or_update.rank.unwrap(),
+                    },
                 )
                 .await
             }
             HostAgentMode::Local(host) => {
-                host.spawn(
-                    create_or_update.name.clone().to_string(),
-                    create_or_update.rank.0,
-                )
-                .await
+                host.spawn(create_or_update.name.clone().to_string(), ())
+                    .await
             }
         };
 
