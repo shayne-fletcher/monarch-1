@@ -181,6 +181,16 @@ pub struct State<S> {
     pub state: Option<S>,
 }
 
+impl<S: Serialize> fmt::Display for State<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Use serde_json to serialize the struct to a compact JSON string
+        match serde_json::to_string(self) {
+            Ok(json) => write!(f, "{}", json),
+            Err(e) => write!(f, "<state: serde_json error: {}>", e),
+        }
+    }
+}
+
 /// Create or update a resource according to a spec.
 #[derive(
     Debug,

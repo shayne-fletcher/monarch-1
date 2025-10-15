@@ -39,6 +39,7 @@ use crate::resource::Status;
 use crate::shortuuid::ShortUuid;
 use crate::v1::host_mesh::HostMeshAgent;
 use crate::v1::host_mesh::HostMeshRefParseError;
+use crate::v1::host_mesh::mesh_agent::ProcState;
 
 /// Errors that occur during mesh operations.
 #[derive(Debug, EnumAsInner, thiserror::Error)]
@@ -91,12 +92,13 @@ pub enum Error {
     #[error("error configuring host mesh agent {0}: {1}")]
     HostMeshAgentConfigurationError(ActorId, String),
 
-    #[error("error creating {proc_name} (host rank {host_rank}) on host mesh agent {mesh_agent}")]
+    #[error(
+        "error creating proc (host rank {host_rank}) on host mesh agent {mesh_agent}, state: {state}"
+    )]
     ProcCreationError {
-        proc_name: Name,
-        mesh_agent: ActorRef<HostMeshAgent>,
+        state: resource::State<ProcState>,
         host_rank: usize,
-        status: resource::Status,
+        mesh_agent: ActorRef<HostMeshAgent>,
     },
 
     #[error(

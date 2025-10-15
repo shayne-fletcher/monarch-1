@@ -14,6 +14,7 @@ use hyperactor::config;
 use hyperactor::config::CONFIG;
 use hyperactor::config::ConfigAttr;
 use hyperactor::declare_attrs;
+use tokio::time::timeout;
 pub mod mesh_agent;
 
 use std::collections::HashSet;
@@ -43,6 +44,7 @@ use crate::resource;
 use crate::resource::CreateOrUpdateClient;
 use crate::resource::GetRankStatus;
 use crate::resource::GetRankStatusClient;
+use crate::resource::GetStateClient;
 use crate::resource::RankedValues;
 use crate::resource::Status;
 use crate::v1;
@@ -552,10 +554,12 @@ impl HostMeshRef {
         // the procs being created, and subsequent messages becoming unroutable
         // (the agent actor manages the local muxer). We can solve this by allowing
         // buffering in the host-level muxer.
+        let mut proc_names = Vec::new();
         for (host_rank, host) in self.ranks.iter().enumerate() {
             for per_host_rank in 0..per_host.num_ranks() {
                 let create_rank = per_host.num_ranks() * host_rank + per_host_rank;
                 let proc_name = Name::new(format!("{}_{}", name, per_host_rank));
+                proc_names.push(proc_name.clone());
                 host.mesh_agent()
                     .create_or_update(cx, proc_name.clone(), resource::Rank::new(create_rank), ())
                     .await
@@ -588,12 +592,28 @@ impl HostMeshRef {
         match GetRankStatus::wait(rx, num_ranks, config::global::get(PROC_SPAWN_MAX_IDLE)).await {
             Ok(statuses) => {
                 if let Some((rank, status)) = statuses.first_terminating() {
+                    let proc_name = &proc_names[rank];
+                    let host_rank = rank / per_host.num_ranks();
+                    let mesh_agent = self.ranks[host_rank].mesh_agent();
+                    let state = match timeout(
+                        config::global::get(PROC_SPAWN_MAX_IDLE),
+                        mesh_agent.get_state(cx, proc_name.clone()),
+                    )
+                    .await
+                    {
+                        Ok(Ok(state)) => state,
+                        _ => resource::State {
+                            name: proc_name.clone(),
+                            status,
+                            state: None,
+                        },
+                    };
+
                     let proc_name = Name::new(format!("{}-{}", name, rank % per_host.num_ranks()));
                     return Err(v1::Error::ProcCreationError {
-                        proc_name,
-                        mesh_agent: self.ranks[rank].mesh_agent(),
-                        host_rank: rank / per_host.num_ranks(),
-                        status: status.clone(),
+                        state,
+                        mesh_agent,
+                        host_rank,
                     });
                 }
             }
@@ -915,7 +935,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_matches!(
-            err, v1::Error::ProcCreationError { status: resource::Status::Failed(msg), .. }
+            err, v1::Error::ProcCreationError { state: resource::State { status: resource::Status::Failed(msg), ..}, .. }
             if msg.contains("failed to configure process: Terminal(Stopped { exit_code: 1")
         );
     }
