@@ -135,12 +135,17 @@ class HostMesh(MeshTrait):
         spec = AllocSpec(alloc_constraints or AllocConstraints(), **extent)
         alloc: AllocHandle = allocator.allocate(spec)
 
+        # Local runs that use ProcessAllocator need to use the precomputed
+        # bootstrap command.
+        if bootstrap_cmd is None and isinstance(allocator, ProcessAllocator):
+            bootstrap_cmd = _bootstrap_cmd()
+
         async def task() -> HyHostMesh:
             return await HyHostMesh.allocate_nonblocking(
                 context().actor_instance._as_rust(),
                 await alloc._hy_alloc,
                 name,
-                bootstrap_cmd if bootstrap_cmd else _bootstrap_cmd(),
+                bootstrap_cmd,
             )
 
         hm = cls(
