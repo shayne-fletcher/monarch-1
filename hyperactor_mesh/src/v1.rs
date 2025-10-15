@@ -113,6 +113,12 @@ pub enum Error {
     )]
     ActorSpawnError { statuses: RankedValues<Status> },
 
+    #[error(
+        "error stopping actor mesh: statuses: {}",
+        RankedValues::invert(statuses)
+    )]
+    ActorStopError { statuses: RankedValues<Status> },
+
     #[error("error: {0} does not exist")]
     NotExist(Name),
 }
