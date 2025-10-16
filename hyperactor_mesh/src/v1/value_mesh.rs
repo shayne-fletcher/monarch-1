@@ -24,6 +24,7 @@ use ndslice::view::Region;
 use serde::Deserialize;
 use serde::Serialize;
 
+mod rle;
 mod value_overlay;
 pub use value_overlay::BuildError;
 pub use value_overlay::ValueOverlay;
@@ -773,6 +774,93 @@ impl<T: PartialEq> ValueMesh<T> {
     }
 }
 
+impl<T: Clone + PartialEq> ValueMesh<T> {
+    /// Materializes this mesh into a vector of `(Range<usize>, T)`
+    /// runs.
+    ///
+    /// For a dense representation, this walks the value vector and
+    /// groups adjacent equal values into contiguous runs. The result
+    /// is equivalent to what would be stored in a compressed
+    /// representation, but the mesh itself is not mutated or
+    /// re-encoded. This is purely a read-only view.
+    ///
+    /// For a compressed representation, the stored runs are simply
+    /// cloned.
+    ///
+    /// This method is intended for inspection, testing, and
+    /// diff/merge operations that need a uniform view of value runs
+    /// without changing the underlying representation.
+    fn materialized_runs(&self) -> Vec<(Range<usize>, T)> {
+        match &self.rep {
+            Rep::Dense { values } => {
+                // Coalesce adjacent equals into runs.
+                let mut out = Vec::new();
+                if values.is_empty() {
+                    return out;
+                }
+                let mut start = 0usize;
+                for i in 1..values.len() {
+                    if values[i] != values[i - 1] {
+                        out.push((start..i, values[i - 1].clone()));
+                        start = i;
+                    }
+                }
+                out.push((start..values.len(), values.last().unwrap().clone()));
+                out
+            }
+            Rep::Compressed { table, runs } => runs
+                .iter()
+                .map(|r| {
+                    let id = r.id as usize;
+                    ((r.start as usize..r.end as usize), table[id].clone())
+                })
+                .collect(),
+        }
+    }
+}
+
+impl<T: Clone + Eq> ValueMesh<T> {
+    /// Merge a sparse overlay into this mesh.
+    ///
+    /// Overlay segments are applied with **last-writer-wins**
+    /// precedence on overlap (identical to `RankedValues::merge_from`
+    /// behavior). The result is stored compressed.
+    pub fn merge_from_overlay(&mut self, overlay: ValueOverlay<T>) -> Result<(), BuildError> {
+        let n = self.region.num_ranks();
+
+        // Bounds validation (structure already validated by
+        // ValueOverlay).
+        for (r, _) in overlay.runs() {
+            if r.end > n {
+                return Err(BuildError::OutOfBounds {
+                    range: r.clone(),
+                    region_len: n,
+                });
+            }
+        }
+
+        // Left: current mesh as normalized value-bearing runs.
+        let left = self.materialized_runs();
+        // Right: overlay runs (already sorted, non-overlapping,
+        // coalesced).
+        let right: Vec<(std::ops::Range<usize>, T)> = overlay.runs().cloned().collect();
+
+        // Merge with overlay precedence, reusing the same splitting
+        // strategy as RankedValues::merge_from.
+        let merged = rle::merge_value_runs(left, right);
+
+        // Re-encode to compressed representation:
+        let (table, raw_runs) = rle::rle_from_value_runs(merged);
+        let runs = raw_runs
+            .into_iter()
+            .map(|(r, id)| Run::new(r.start, r.end, id))
+            .collect();
+        self.rep = Rep::Compressed { table, runs };
+
+        Ok(())
+    }
+}
+
 impl<T> ValueMesh<T> {
     /// Compresses the mesh in place using a custom equivalence
     /// predicate.
@@ -803,77 +891,13 @@ impl<T> ValueMesh<T> {
             Rep::Dense { values } => std::mem::take(values),
             Rep::Compressed { .. } => return,
         };
-        let (table, runs) = compress_adjacent_with(values, same);
+        let (table, raw_runs) = rle::rle_from_dense(values, same);
+        let runs = raw_runs
+            .into_iter()
+            .map(|(r, id)| Run::new(r.start, r.end, id))
+            .collect();
         self.rep = Rep::Compressed { table, runs };
     }
-}
-
-/// Performs simple run-length encoding (RLE) compression over a dense
-/// sequence of values.
-///
-/// Adjacent "equal" elements are coalesced into contiguous runs,
-/// producing:
-///
-/// - a **table** of unique values (in first-occurrence order)
-/// - a **run list** of `(range, id)` pairs, where `range` is the
-///   half-open index range `[start, end)` in the original dense
-///   array, and `id` indexes into `table`.
-///
-/// # Example
-/// ```
-/// // Input: [A, A, B, B, B, A]
-/// // Output:
-/// // table = [A, B, A]
-/// // runs  = [(0..2, 0), (2..5, 1), (5..6, 2)]
-/// ```
-///
-/// # Returns
-/// A tuple `(table, runs)` that together form the compressed
-/// representation. Expanding the runs reproduces the original data.
-///
-/// # Returns
-/// A tuple `(table, runs)` that together form the compressed
-/// representation. Expanding the runs reproduces the original data.
-fn compress_adjacent_with<T, F>(values: Vec<T>, mut same: F) -> (Vec<T>, Vec<Run>)
-where
-    F: FnMut(&T, &T) -> bool,
-{
-    // Empty input; trivial empty compression.
-    if values.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-
-    let mut iter = values.into_iter();
-    let first = iter.next().unwrap();
-
-    let mut table = Vec::new(); // unique values
-    let mut runs = Vec::new(); // (range, table_id) pairs
-
-    let mut start = 0usize;
-    table.push(first);
-    let mut cur_id: u32 = 0;
-    let mut len = 1usize;
-
-    // Walk through all subsequent elements, closing and opening runs
-    // whenever the value changes.
-    for (i, v) in iter.enumerate() {
-        let idx = i + 1;
-        if !same(&v, &table[cur_id as usize]) {
-            // Close current run [start, idx)
-            runs.push(Run::new(start, idx, cur_id));
-
-            // Start a new run
-            start = idx;
-            table.push(v);
-            cur_id = (table.len() - 1) as u32;
-        }
-        len = idx + 1;
-    }
-
-    // Close the final run
-    runs.push(Run::new(start, len, cur_id));
-
-    (table, runs)
 }
 
 #[cfg(test)]
@@ -1708,5 +1732,80 @@ mod tests {
         assert_eq!(mesh.get(0), Some(&1));
         assert_eq!(mesh.get(3), Some(&2));
         assert_eq!(mesh.get(5), Some(&3));
+    }
+
+    #[test]
+    fn merge_from_overlay_basic() {
+        // Base mesh with two contiguous runs.
+        let region: Region = extent!(n = 8).into();
+        let mut mesh = ValueMesh::from_dense(region.clone(), vec![1, 1, 1, 2, 2, 2, 3, 3]).unwrap();
+
+        // Overlay replaces middle segment [2..6) with 9s.
+        let overlay = ValueOverlay::try_from_runs(vec![(2..6, 9)]).unwrap();
+
+        mesh.merge_from_overlay(overlay).unwrap();
+
+        // Materialize back into ranges to inspect.
+        let out = mesh.materialized_runs();
+
+        // Expected: left prefix (0..2)=1, replaced middle (2..6)=9, tail (6..8)=3.
+        assert_eq!(out, vec![(0..2, 1), (2..6, 9), (6..8, 3)]);
+    }
+
+    #[test]
+    fn merge_from_overlay_multiple_spans() {
+        // Build mesh with alternating runs.
+        let region: Region = extent!(m = 12).into();
+        let mut mesh =
+            ValueMesh::from_dense(region.clone(), vec![1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4])
+                .unwrap();
+
+        // Overlay has a run that spans across the boundary of two
+        // left runs and another disjoint run later.
+        let overlay = ValueOverlay::try_from_runs(vec![(2..6, 9), (9..11, 8)]).unwrap();
+
+        mesh.merge_from_overlay(overlay).unwrap();
+        let out = mesh.materialized_runs();
+
+        // Expected after merge and re-compression:
+        // (0..2,1) untouched
+        // (2..6,9) overwrite of part of [1,2] runs
+        // (6..9,3) left tail survives
+        // (9..11,8) overwrite inside [4] run
+        // (11..12,4) leftover tail
+        assert_eq!(
+            out,
+            vec![(0..2, 1), (2..6, 9), (6..9, 3), (9..11, 8), (11..12, 4)]
+        );
+    }
+
+    #[test]
+    fn merge_from_overlay_crosses_row_boundary() {
+        // 2 x 5 region -> 10 linear ranks in row-major order.
+        let region: Region = extent!(rows = 2, cols = 5).into();
+
+        // Dense values laid out row-major:
+        // row 0: [1, 1, 1, 2, 2]
+        // row 1: [3, 3, 4, 4, 4]
+        let mut mesh =
+            ValueMesh::from_dense(region.clone(), vec![1, 1, 1, 2, 2, 3, 3, 4, 4, 4]).unwrap();
+
+        // Overlay that crosses the row boundary:
+        // linear ranks [3..7) -> 9
+        //   - tail of row 0: indices 3,4 (the two 2s)
+        //   - head of row 1: indices 5,6 (the two 3s)
+        let overlay = ValueOverlay::try_from_runs(vec![(3..7, 9)]).unwrap();
+
+        mesh.merge_from_overlay(overlay).unwrap();
+
+        // After merge, the dense view should be:
+        // [1,1,1, 9,9, 9,9, 4,4,4]
+        let flat: Vec<_> = mesh.values().collect();
+        assert_eq!(flat, vec![1, 1, 1, 9, 9, 9, 9, 4, 4, 4]);
+
+        // And the materialized runs should reflect that:
+        // (0..3,1) | (3..7,9) | (7..10,4)
+        let runs = mesh.materialized_runs();
+        assert_eq!(runs, vec![(0..3, 1), (3..7, 9), (7..10, 4)]);
     }
 }
