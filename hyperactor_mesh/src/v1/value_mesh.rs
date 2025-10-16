@@ -7,6 +7,10 @@
  */
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::mem;
 use std::mem::MaybeUninit;
 use std::ops::Range;
@@ -185,6 +189,197 @@ impl<T> ValueMesh<T> {
             region,
             rep: Rep::Dense { values: ranks },
         }
+    }
+}
+
+impl<T: Clone> ValueMesh<T> {
+    /// Builds a `ValueMesh` that assigns the single value `s` to
+    /// every rank in `region`, without materializing a dense
+    /// `Vec<T>`. The result is stored in compressed (RLE) form as a
+    /// single run `[0..N)`.
+    ///
+    /// If `region.num_ranks() == 0`, the mesh contains no runs (and
+    /// an empty table), regardless of `s`.
+    pub fn from_single(region: Region, s: T) -> Self {
+        let n = region.num_ranks();
+        if n == 0 {
+            return Self {
+                region,
+                rep: Rep::Compressed {
+                    table: Vec::new(),
+                    runs: Vec::new(),
+                },
+            };
+        }
+
+        let table = vec![s];
+        let runs = vec![Run::new(0, n, 0)];
+        Self {
+            region,
+            rep: Rep::Compressed { table, runs },
+        }
+    }
+}
+
+impl<T: Clone + Default> ValueMesh<T> {
+    /// Builds a [`ValueMesh`] covering the region, filled with
+    /// `T::default()`.
+    ///
+    /// Equivalent to [`ValueMesh::from_single(region,
+    /// T::default())`].
+    pub fn from_default(region: Region) -> Self {
+        ValueMesh::<T>::from_single(region, T::default())
+    }
+}
+
+impl<T: Eq + Hash> ValueMesh<T> {
+    /// Builds a compressed mesh from a default value and a set of
+    /// disjoint ranges that override the default.
+    ///
+    /// - `ranges` may be in any order; they must be non-empty,
+    ///   in-bounds, and non-overlapping.
+    /// - Unspecified ranks are filled with `default`.
+    /// - Result is stored in RLE form; no dense `Vec<T>` is
+    ///   materialized.
+    pub fn from_ranges_with_default(
+        region: Region,
+        default: T,
+        mut ranges: Vec<(Range<usize>, T)>,
+    ) -> crate::v1::Result<Self> {
+        let n = region.num_ranks();
+
+        if n == 0 {
+            return Ok(Self {
+                region,
+                rep: Rep::Compressed {
+                    table: Vec::new(),
+                    runs: Vec::new(),
+                },
+            });
+        }
+
+        // Validate: non-empty, in-bounds; then sort.
+        for (r, _) in &ranges {
+            if r.is_empty() {
+                return Err(crate::v1::Error::InvalidRankCardinality {
+                    expected: n,
+                    actual: 0,
+                }); // TODO: this surfaces the error but its not a great fit
+            }
+            if r.end > n {
+                return Err(crate::v1::Error::InvalidRankCardinality {
+                    expected: n,
+                    actual: r.end,
+                });
+            }
+        }
+        ranges.sort_by_key(|(r, _)| (r.start, r.end));
+
+        // Validate: non-overlapping.
+        for w in ranges.windows(2) {
+            let (a, _) = &w[0];
+            let (b, _) = &w[1];
+            if a.end > b.start {
+                // Overlap
+                return Err(crate::v1::Error::InvalidRankCardinality {
+                    expected: n,
+                    actual: b.start, // TODO: this surfaces the error but is a bad fit
+                });
+            }
+        }
+
+        // Internal index: value -> table id (assigned once).
+        let mut index: HashMap<T, u32> = HashMap::with_capacity(1 + ranges.len());
+        let mut next_id: u32 = 0;
+
+        // Helper: assign or reuse an id by value, taking ownership of
+        // v.
+        let id_of = |v: T, index: &mut HashMap<T, u32>, next_id: &mut u32| -> u32 {
+            match index.entry(v) {
+                Entry::Occupied(o) => *o.get(),
+                Entry::Vacant(vac) => {
+                    let id = *next_id;
+                    *next_id += 1;
+                    vac.insert(id);
+                    id
+                }
+            }
+        };
+
+        let default_id = id_of(default, &mut index, &mut next_id);
+
+        let mut runs: Vec<Run> = Vec::with_capacity(1 + 2 * ranges.len());
+        let mut cursor = 0usize;
+
+        for (r, v) in ranges.into_iter() {
+            // Fill default gap if any.
+            if cursor < r.start {
+                runs.push(Run::new(cursor, r.start, default_id));
+            }
+            // Override block.
+            let id = id_of(v, &mut index, &mut next_id);
+            runs.push(Run::new(r.start, r.end, id));
+            cursor = r.end;
+        }
+
+        // Trailing default tail.
+        if cursor < n {
+            runs.push(Run::new(cursor, n, default_id));
+        }
+
+        // Materialize table in id order without cloning: move keys
+        // out of the map.
+        let mut table_slots: Vec<Option<T>> = Vec::new();
+        table_slots.resize_with(next_id as usize, || None);
+
+        for (t, id) in index.into_iter() {
+            table_slots[id as usize] = Some(t);
+        }
+
+        let table: Vec<T> = table_slots
+            .into_iter()
+            .map(|o| o.expect("every id must be assigned"))
+            .collect();
+
+        Ok(Self {
+            region,
+            rep: Rep::Compressed { table, runs },
+        })
+    }
+
+    /// Builds a [`ValueMesh`] from a fully materialized dense vector
+    /// of per-rank values, then compresses it into run-length–encoded
+    /// form if possible.
+    ///
+    /// This constructor is intended for callers that already have one
+    /// value per rank (e.g. computed or received data) but wish to
+    /// store it efficiently.
+    ///
+    /// # Parameters
+    /// - `region`: The logical region describing the mesh’s shape and
+    ///   rank order.
+    /// - `values`: A dense vector of values, one per rank in
+    ///   `region`.
+    ///
+    /// # Returns
+    /// A [`ValueMesh`] whose internal representation is `Compressed`
+    /// if any adjacent elements are equal, or `Dense` if no
+    /// compression was possible.
+    ///
+    /// # Errors
+    /// Returns an error if the number of provided `values` does not
+    /// match the number of ranks in `region`.
+    ///
+    /// # Examples
+    /// ```ignore
+    /// let region: Region = extent!(n = 5).into();
+    /// let mesh = ValueMesh::from_dense(region, vec![1, 1, 2, 2, 3]).unwrap();
+    /// // Internally compressed to three runs: [1, 1], [2, 2], [3]
+    /// ```
+    pub fn from_dense(region: Region, values: Vec<T>) -> crate::v1::Result<Self> {
+        let mut vm = Self::new(region, values)?;
+        vm.compress_adjacent_in_place();
+        Ok(vm)
     }
 }
 
@@ -1416,5 +1611,98 @@ mod tests {
         let (range, id): (Range<usize>, u32) = run.try_into().unwrap();
         assert_eq!(range, 0..10);
         assert_eq!(id, 42);
+    }
+
+    #[test]
+    fn from_single_builds_single_run() {
+        let region: Region = extent!(n = 6).into();
+        let vm = ValueMesh::from_single(region.clone(), 7);
+
+        assert_eq!(vm.region(), &region);
+        assert_eq!(vm.values().collect::<Vec<_>>(), vec![7, 7, 7, 7, 7, 7]);
+        assert_eq!(vm.get(0), Some(&7));
+        assert_eq!(vm.get(5), Some(&7));
+        assert_eq!(vm.get(6), None);
+    }
+
+    #[test]
+    fn from_default_builds_with_default_value() {
+        let region: Region = extent!(n = 6).into();
+        let vm = ValueMesh::<i32>::from_default(region.clone());
+
+        assert_eq!(vm.region(), &region);
+        // i32::default() == 0
+        assert_eq!(vm.values().collect::<Vec<_>>(), vec![0, 0, 0, 0, 0, 0]);
+        assert_eq!(vm.get(0), Some(&0));
+        assert_eq!(vm.get(5), Some(&0));
+    }
+
+    #[test]
+    fn test_default_vs_single_equivalence() {
+        let region: Region = extent!(x = 4).into();
+        let d1 = ValueMesh::<i32>::from_default(region.clone());
+        let d2 = ValueMesh::from_single(region.clone(), 0);
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn build_from_ranges_with_default_basic() {
+        let region: Region = extent!(n = 10).into();
+        let vm = ValueMesh::from_ranges_with_default(
+            region.clone(),
+            0, // default
+            vec![(2..4, 1), (6..9, 2)],
+        )
+        .unwrap();
+
+        assert_eq!(vm.region(), &region);
+        assert_eq!(
+            vm.values().collect::<Vec<_>>(),
+            vec![0, 0, 1, 1, 0, 0, 2, 2, 2, 0]
+        );
+
+        // Internal shape: [0..2)->0, [2..4)->1, [4..6)->0, [6..9)->2,
+        // [9..10)->0
+        if let Rep::Compressed { table, runs } = &vm.rep {
+            // Table is small and de-duplicated.
+            assert!(table.len() <= 3);
+            assert_eq!(runs.len(), 5);
+        } else {
+            panic!("expected compressed");
+        }
+    }
+
+    #[test]
+    fn build_from_ranges_with_default_edge_cases() {
+        let region: Region = extent!(n = 5).into();
+
+        // Full override covers entire region.
+        let vm = ValueMesh::from_ranges_with_default(region.clone(), 9, vec![(0..5, 3)]).unwrap();
+        assert_eq!(vm.values().collect::<Vec<_>>(), vec![3, 3, 3, 3, 3]);
+
+        // Adjacent overrides and default gaps.
+        let vm = ValueMesh::from_ranges_with_default(region.clone(), 0, vec![(1..2, 7), (2..4, 7)])
+            .unwrap();
+        assert_eq!(vm.values().collect::<Vec<_>>(), vec![0, 7, 7, 7, 0]);
+
+        // Empty region.
+        let empty_region: Region = extent!(n = 0).into();
+        let vm = ValueMesh::from_ranges_with_default(empty_region.clone(), 42, vec![]).unwrap();
+        assert_eq!(vm.values().collect::<Vec<_>>(), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn from_dense_builds_and_compresses() {
+        let region: Region = extent!(n = 6).into();
+        let mesh = ValueMesh::from_dense(region.clone(), vec![1, 1, 2, 2, 3, 3]).unwrap();
+
+        assert_eq!(mesh.region(), &region);
+        assert!(matches!(mesh.rep, Rep::Compressed { .. }));
+        assert_eq!(mesh.values().collect::<Vec<_>>(), vec![1, 1, 2, 2, 3, 3]);
+
+        // Spot-check indexing.
+        assert_eq!(mesh.get(0), Some(&1));
+        assert_eq!(mesh.get(3), Some(&2));
+        assert_eq!(mesh.get(5), Some(&3));
     }
 }
