@@ -24,6 +24,10 @@ use ndslice::view::Region;
 use serde::Deserialize;
 use serde::Serialize;
 
+mod value_overlay;
+pub use value_overlay::BuildError;
+pub use value_overlay::ValueOverlay;
+
 /// A mesh of values, one per rank in `region`.
 ///
 /// The internal representation (`rep`) may be dense or compressed,
@@ -96,7 +100,7 @@ impl TryFrom<Run> for (Range<usize>, u32) {
     ///
     /// Performs checked conversion of the 64-bit wire fields back
     /// into `usize` indices, returning an error if either bound
-    /// exceeds the platform’s addressable range. This ensures safe
+    /// exceeds the platform's addressable range. This ensures safe
     /// round-tripping between the serialized wire format and native
     /// representation.
     fn try_from(r: Run) -> Result<Self, Self::Error> {
@@ -356,7 +360,7 @@ impl<T: Eq + Hash> ValueMesh<T> {
     /// store it efficiently.
     ///
     /// # Parameters
-    /// - `region`: The logical region describing the mesh’s shape and
+    /// - `region`: The logical region describing the mesh's shape and
     ///   rank order.
     /// - `values`: A dense vector of values, one per rank in
     ///   `region`.
