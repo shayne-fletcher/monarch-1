@@ -550,6 +550,8 @@ impl Handler<resource::CreateOrUpdate<ActorSpec>> for ProcMeshAgent {
 #[async_trait]
 impl Handler<resource::Stop> for ProcMeshAgent {
     async fn handle(&mut self, cx: &Context<Self>, message: resource::Stop) -> anyhow::Result<()> {
+        use crate::v1::StatusOverlay;
+
         // We don't remove the actor from the state map, instead we just store
         // its state as Stopped.
         let actor = self.actor_states.get_mut(&message.name);
@@ -599,7 +601,17 @@ impl Handler<resource::Stop> for ProcMeshAgent {
                 }
             }
         };
-        message.reply.send(cx, (rank, status).into())?;
+
+        // Send a sparse overlay update. If rank is unknown, emit an
+        // empty overlay.
+        let overlay = if rank == usize::MAX {
+            StatusOverlay::new()
+        } else {
+            StatusOverlay::try_from_runs(vec![(rank..(rank + 1), status)])
+                .expect("valid single-run overlay")
+        };
+        message.reply.send(cx, overlay)?;
+
         Ok(())
     }
 }
@@ -611,6 +623,9 @@ impl Handler<resource::GetRankStatus> for ProcMeshAgent {
         cx: &Context<Self>,
         get_rank_status: resource::GetRankStatus,
     ) -> anyhow::Result<()> {
+        use crate::resource::Status;
+        use crate::v1::StatusOverlay;
+
         let (rank, status) = match self.actor_states.get(&get_rank_status.name) {
             Some(ActorInstanceState {
                 spawn: Ok(actor_id),
@@ -641,12 +656,21 @@ impl Handler<resource::GetRankStatus> for ProcMeshAgent {
                 spawn: Err(e),
                 create_rank,
                 ..
-            }) => (*create_rank, resource::Status::Failed(e.to_string())),
+            }) => (*create_rank, Status::Failed(e.to_string())),
             // TODO: represent unknown rank
-            None => (usize::MAX, resource::Status::NotExist),
+            None => (usize::MAX, Status::NotExist),
         };
 
-        get_rank_status.reply.send(cx, (rank, status).into())?;
+        // Send a sparse overlay update. If rank is unknown, emit an
+        // empty overlay.
+        let overlay = if rank == usize::MAX {
+            StatusOverlay::new()
+        } else {
+            StatusOverlay::try_from_runs(vec![(rank..(rank + 1), status)])
+                .expect("valid single-run overlay")
+        };
+        get_rank_status.reply.send(cx, overlay)?;
+
         Ok(())
     }
 }

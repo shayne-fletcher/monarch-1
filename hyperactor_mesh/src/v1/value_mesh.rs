@@ -24,6 +24,7 @@ use hyperactor::accum::Accumulator;
 use hyperactor::accum::CommReducer;
 use hyperactor::accum::ReducerFactory;
 use hyperactor::accum::ReducerSpec;
+use ndslice::extent;
 use ndslice::view;
 use ndslice::view::Ranked;
 use ndslice::view::Region;
@@ -166,7 +167,29 @@ enum Rep<T> {
     },
 }
 
+// At this time, Default is used primarily to satisfy the mailbox
+// Accumulator bound. It constructs an empty (zero-rank) mesh. Other
+// contexts may also use this as a generic "empty mesh" initializer
+// when a concrete region is not yet known.
+impl<T> Default for ValueMesh<T> {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 impl<T> ValueMesh<T> {
+    /// Returns an *empty* mesh: a 1-dimensional region of length 0.
+    ///
+    /// This differs from a *dimensionless* (0-D) region, which
+    /// represents a single scalar element. A zero-length 1-D region
+    /// has **no elements at all**, making it the natural `Default`
+    /// placeholder for accumulator state initialization.
+    pub fn empty() -> Self {
+        // zero-rank region; no constraints on T
+        let region = extent!(r = 0).into();
+        Self::new_unchecked(region, Vec::<T>::new())
+    }
+
     /// Creates a new `ValueMesh` for `region` with exactly one value
     /// per rank.
     ///
@@ -908,6 +931,15 @@ impl<T> ValueMesh<T> {
 
 /// Accumulates sparse overlay updates into an authoritative mesh.
 ///
+/// Lifecycle:
+/// - Mailbox initializes `State` via `Default` (empty mesh).
+/// - On the first update, the accumulator clones `self` (the template
+///   passed to `open_accum_port_opts`) into `state`. Callers pass a
+///   template such as `StatusMesh::from_single(region, NotExist)`.
+/// - Each overlay update is merged with right-wins semantics via
+///   `merge_from_overlay`, and the accumulator emits a *full*
+///   ValueMesh.
+///
 /// The accumulator's state is a [`ValueMesh<T>`] and its updates are
 /// [`ValueOverlay<T>`] instances. On each update, the overlay’s
 /// normalized runs are merged into the mesh using
@@ -915,14 +947,22 @@ impl<T> ValueMesh<T> {
 ///
 /// This enables incremental reduction of sparse updates across
 /// distributed reducers without materializing dense data.
-impl<T> Accumulator for ValueOverlay<T>
+impl<T> Accumulator for ValueMesh<T>
 where
     T: Eq + Clone + Named,
 {
-    type State = ValueMesh<T>;
-    type Update = Self;
+    type State = Self;
+    type Update = ValueOverlay<T>;
 
     fn accumulate(&self, state: &mut Self::State, update: Self::Update) -> anyhow::Result<()> {
+        // Mailbox starts with A::State::default() (empty). On the
+        // first update, re-initialize to our template (self), which
+        // the caller constructed as "full NotExist over the target
+        // region".
+        if state.region().num_ranks() == 0 {
+            *state = self.clone();
+        }
+
         // Apply sparse delta into the authoritative mesh
         // (right-wins).
         state.merge_from_overlay(update)?;
@@ -931,8 +971,6 @@ where
 
     fn reducer_spec(&self) -> Option<ReducerSpec> {
         Some(ReducerSpec {
-            // Tie this accumulator to the overlay reducer below
-            // (generic over T).
             typehash: <ValueOverlayReducer<T> as Named>::typehash(),
             builder_params: None,
         })
