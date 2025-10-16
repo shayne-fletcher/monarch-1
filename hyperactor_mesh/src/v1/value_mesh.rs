@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::marker::PhantomData;
 use std::mem;
 use std::mem::MaybeUninit;
 use std::ops::Range;
@@ -18,6 +19,11 @@ use std::ptr;
 use std::ptr::NonNull;
 
 use futures::Future;
+use hyperactor::Named;
+use hyperactor::accum::Accumulator;
+use hyperactor::accum::CommReducer;
+use hyperactor::accum::ReducerFactory;
+use hyperactor::accum::ReducerSpec;
 use ndslice::view;
 use ndslice::view::Ranked;
 use ndslice::view::Region;
@@ -897,6 +903,84 @@ impl<T> ValueMesh<T> {
             .map(|(r, id)| Run::new(r.start, r.end, id))
             .collect();
         self.rep = Rep::Compressed { table, runs };
+    }
+}
+
+/// Accumulates sparse overlay updates into an authoritative mesh.
+///
+/// The accumulator's state is a [`ValueMesh<T>`] and its updates are
+/// [`ValueOverlay<T>`] instances. On each update, the overlay’s
+/// normalized runs are merged into the mesh using
+/// [`ValueMesh::merge_from_overlay`] with right-wins semantics.
+///
+/// This enables incremental reduction of sparse updates across
+/// distributed reducers without materializing dense data.
+impl<T> Accumulator for ValueOverlay<T>
+where
+    T: Eq + Clone + Named,
+{
+    type State = ValueMesh<T>;
+    type Update = Self;
+
+    fn accumulate(&self, state: &mut Self::State, update: Self::Update) -> anyhow::Result<()> {
+        // Apply sparse delta into the authoritative mesh
+        // (right-wins).
+        state.merge_from_overlay(update)?;
+        Ok(())
+    }
+
+    fn reducer_spec(&self) -> Option<ReducerSpec> {
+        Some(ReducerSpec {
+            // Tie this accumulator to the overlay reducer below
+            // (generic over T).
+            typehash: <ValueOverlayReducer<T> as Named>::typehash(),
+            builder_params: None,
+        })
+    }
+}
+
+/// Marker reducer type for [`ValueOverlay<T>`].
+///
+/// This reducer carries no state; it exists only to bind a concrete
+/// type parameter `T` to the [`CommReducer`] implementation below.
+/// Reduction is purely functional and uses right-wins merge semantics
+/// defined in [`merge_value_runs`].
+#[derive(Named)]
+struct ValueOverlayReducer<T>(std::marker::PhantomData<T>);
+
+/// Reducer for sparse overlay updates.
+///
+/// Combines two [`ValueOverlay<T>`] updates using right-wins
+/// semantics: overlapping runs from `right` overwrite those in
+/// `left`. The merged runs are then normalized and validated via
+/// [`ValueOverlay::try_from_runs`].
+///
+/// Used by the corresponding [`Accumulator`] to perform distributed
+/// reduction of incremental mesh updates.
+impl<T> CommReducer for ValueOverlayReducer<T>
+where
+    T: Eq + Clone + Named,
+{
+    type Update = ValueOverlay<T>;
+
+    // Last-writer-wins merge of two sparse overlays.
+    fn reduce(&self, left: Self::Update, right: Self::Update) -> anyhow::Result<Self::Update> {
+        // 1) Merge runs with right precedence.
+        let merged = crate::v1::value_mesh::rle::merge_value_runs(
+            left.runs().cloned().collect(),
+            right.runs().cloned().collect(),
+        );
+        // 2) Re-normalize to an overlay (validates, coalesces).
+        Ok(ValueOverlay::try_from_runs(merged)?)
+    }
+}
+
+// register for concrete types:
+
+hyperactor::submit! {
+    ReducerFactory {
+        typehash_f: <ValueOverlayReducer<crate::resource::Status> as Named>::typehash,
+        builder_f: |_| Ok(Box::new(ValueOverlayReducer::<crate::resource::Status>(PhantomData))),
     }
 }
 
