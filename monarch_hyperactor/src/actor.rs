@@ -908,8 +908,15 @@ mod tests {
     use hyperactor::message::ErasedUnbound;
     use hyperactor::message::Unbound;
     use hyperactor::reference::UnboundPort;
+    use hyperactor_mesh::resource::Status;
+    use hyperactor_mesh::resource::{self};
+    use hyperactor_mesh::v1::Error as MeshError;
+    use hyperactor_mesh::v1::Name;
+    use hyperactor_mesh::v1::host_mesh::mesh_agent::ProcState;
+    use pyo3::PyTypeInfo;
 
     use super::*;
+    use crate::actor::to_py_error;
 
     #[test]
     fn test_python_message_bind_unbind() {
@@ -966,5 +973,40 @@ mod tests {
             let unbound = Unbound::try_from_message(no_port_message.clone()).unwrap();
             assert_eq!(no_port_message, unbound.bind().unwrap());
         }
+    }
+
+    #[test]
+    fn to_py_error_preserves_proc_creation_message() {
+        // State<ProcState> w/ `state.is_none()`
+        let state: resource::State<ProcState> = resource::State {
+            name: Name::new("my_proc"),
+            status: Status::Failed("boom".into()),
+            state: None,
+        };
+
+        // A ProcCreationError
+        let err = MeshError::ProcCreationError {
+            host_rank: 0,
+            mesh_agent: hyperactor::ActorRef::attest(id!(hello[0].actor[0])),
+            state,
+        };
+
+        let rust_msg = err.to_string();
+        let pyerr = to_py_error(err);
+
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert!(pyerr.get_type(py).is(&PyValueError::type_object(py)));
+            let py_msg = pyerr.value(py).to_string();
+
+            // 1) Bridge preserves the exact message
+            assert_eq!(py_msg, rust_msg);
+            // 2) Contains the structured state and failure status
+            assert!(py_msg.contains(", state: "));
+            assert!(py_msg.contains("\"status\":{\"Failed\":\"boom\"}"));
+            // 3) Starts with the expected prefix
+            let expected_prefix = "error creating proc (host rank 0) on host mesh agent hello[0].actor[0]<hyperactor_mesh::v1::host_mesh::mesh_agent::HostMeshAgent>";
+            assert!(py_msg.starts_with(expected_prefix));
+        });
     }
 }
