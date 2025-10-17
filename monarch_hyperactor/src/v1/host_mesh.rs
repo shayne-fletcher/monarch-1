@@ -82,6 +82,15 @@ impl PyBootstrapCommand {
             env: self.env.clone(),
         }
     }
+
+    pub fn default<'py>(py: Python<'py>) -> PyResult<Bound<'py, Self>> {
+        py.import("monarch._src.actor.v1.host_mesh")?
+            .getattr("_bootstrap_cmd")?
+            .call0()?
+            .downcast::<PyBootstrapCommand>()
+            .cloned()
+            .map_err(to_py_error)
+    }
 }
 
 #[pyclass(
@@ -120,6 +129,8 @@ impl PyHostMesh {
         name: String,
         bootstrap_params: Option<PyBootstrapCommand>,
     ) -> PyResult<PyPythonTask> {
+        let bootstrap_params =
+            bootstrap_params.map_or_else(|| alloc.bootstrap_command.clone(), |b| Some(b.to_rust()));
         let alloc = match alloc.take() {
             Some(alloc) => alloc,
             None => {
@@ -131,13 +142,7 @@ impl PyHostMesh {
         let instance = instance.clone();
         PyPythonTask::new(async move {
             let mesh = instance_dispatch!(instance, async move |cx_instance| {
-                HostMesh::allocate(
-                    cx_instance,
-                    alloc,
-                    &name,
-                    bootstrap_params.map(|p| p.to_rust()),
-                )
-                .await
+                HostMesh::allocate(cx_instance, alloc, &name, bootstrap_params).await
             })
             .map_err(|err| PyException::new_err(err.to_string()))?;
             Ok(Self::new_owned(mesh))
