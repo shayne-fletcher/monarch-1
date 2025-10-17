@@ -228,7 +228,9 @@ def context() -> Context:
             c.actor_instance.proc_mesh._host_mesh = create_local_host_mesh()  # type: ignore
         else:
             c.actor_instance._controller_controller = _get_controller_controller()[1]
-            c.actor_instance.proc_mesh = create_local_host_mesh().spawn_procs()
+            c.actor_instance.proc_mesh = create_local_host_mesh().spawn_procs(
+                name="controller_controller"
+            )
     return c
 
 

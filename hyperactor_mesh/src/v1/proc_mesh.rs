@@ -393,6 +393,12 @@ impl ProcMesh {
     }
 }
 
+impl fmt::Display for ProcMesh {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.current_ref)
+    }
+}
+
 impl Deref for ProcMesh {
     type Target = ProcMeshRef;
 
@@ -463,7 +469,7 @@ impl fmt::Debug for ProcMeshAllocation {
 }
 
 /// A reference to a ProcMesh, consisting of a set of ranked [`ProcRef`]s,
-/// arranged into a region. ProcMeshes named, uniquely identifying the
+/// arranged into a region. ProcMeshes are named, uniquely identifying the
 /// ProcMesh from which the reference was derived.
 ///
 /// ProcMeshes can be sliced to create new ProcMeshes with a subset of the
@@ -572,7 +578,7 @@ impl ProcMeshRef {
                 }
             } else {
                 tracing::error!(
-                    "Timeout waiting for a message from proc mesh agent in mesh: {:?}",
+                    "timeout waiting for a message from proc mesh agent in mesh: {}",
                     agent_mesh
                 );
                 // Timeout error, stop reading from the receiver and send back what we have so far,
@@ -891,6 +897,12 @@ impl ProcMeshRef {
                 Err(Error::ActorStopError { statuses: legacy })
             }
         }
+    }
+}
+
+impl fmt::Display for ProcMeshRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{{{}}}", self.name, self.region)
     }
 }
 

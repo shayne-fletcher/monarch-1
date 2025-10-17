@@ -288,14 +288,14 @@ impl HostMesh {
 
         let proc_mesh_ref = proc_mesh.clone();
         Ok(Self {
-            name,
+            name: name.clone(),
             extent: extent.clone(),
             allocation: HostMeshAllocation::ProcMesh {
                 proc_mesh,
                 proc_mesh_ref,
                 hosts: hosts.clone(),
             },
-            current_ref: HostMeshRef::new(extent.into(), hosts).unwrap(),
+            current_ref: HostMeshRef::new(name, extent.into(), hosts).unwrap(),
         })
     }
 
@@ -305,16 +305,15 @@ impl HostMesh {
     /// returns an owned `HostMesh` that assumes lifecycle
     /// responsibility for those hosts (i.e., will shut them down on
     /// Drop).
-    pub fn take(name: impl Into<Name>, mesh: HostMeshRef) -> Self {
-        let name = name.into();
+    pub fn take(mesh: HostMeshRef) -> Self {
         let region = mesh.region().clone();
         let hosts: Vec<HostRef> = mesh.values().collect();
 
-        let current_ref = HostMeshRef::new(region.clone(), hosts.clone())
+        let current_ref = HostMeshRef::new(mesh.name.clone(), region.clone(), hosts.clone())
             .expect("region/hosts cardinality must match");
 
         Self {
-            name,
+            name: mesh.name,
             extent: region.extent().clone(),
             allocation: HostMeshAllocation::Owned { hosts },
             current_ref,
@@ -482,6 +481,7 @@ impl Drop for HostMesh {
 /// `HostMeshRef` may fail because the hosts are no longer running.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Named, Serialize, Deserialize)]
 pub struct HostMeshRef {
+    name: Name,
     region: Region,
     ranks: Arc<Vec<HostRef>>,
 }
@@ -489,7 +489,7 @@ pub struct HostMeshRef {
 impl HostMeshRef {
     /// Create a new (raw) HostMeshRef from the provided region and associated
     /// ranks, which must match in cardinality.
-    fn new(region: Region, ranks: Vec<HostRef>) -> v1::Result<Self> {
+    fn new(name: Name, region: Region, ranks: Vec<HostRef>) -> v1::Result<Self> {
         if region.num_ranks() != ranks.len() {
             return Err(v1::Error::InvalidRankCardinality {
                 expected: region.num_ranks(),
@@ -497,6 +497,7 @@ impl HostMeshRef {
             });
         }
         Ok(Self {
+            name,
             region,
             ranks: Arc::new(ranks),
         })
@@ -504,8 +505,9 @@ impl HostMeshRef {
 
     /// Create a new HostMeshRef from an arbitrary set of hosts. This is meant to
     /// enable extrinsic bootstrapping.
-    pub fn from_hosts(hosts: Vec<ChannelAddr>) -> Self {
+    pub fn from_hosts(name: Name, hosts: Vec<ChannelAddr>) -> Self {
         Self {
+            name,
             region: extent!(hosts = hosts.len()).into(),
             ranks: Arc::new(hosts.into_iter().map(HostRef).collect()),
         }
@@ -671,6 +673,11 @@ impl HostMeshRef {
 
         ProcMesh::create_owned_unchecked(cx, mesh_name, extent, self.clone(), procs).await
     }
+
+    /// The name of the referenced host mesh.
+    pub fn name(&self) -> &Name {
+        &self.name
+    }
 }
 
 impl view::Ranked for HostMeshRef {
@@ -692,12 +699,13 @@ impl view::RankedSliceable for HostMeshRef {
             .remap(&region)
             .unwrap()
             .map(|index| self.get(index).unwrap().clone());
-        Self::new(region, ranks.collect()).unwrap()
+        Self::new(self.name.clone(), region, ranks.collect()).unwrap()
     }
 }
 
 impl std::fmt::Display for HostMeshRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:", self.name)?;
         for (rank, host) in self.ranks.iter().enumerate() {
             if rank > 0 {
                 write!(f, ",")?;
@@ -717,6 +725,12 @@ pub enum HostMeshRefParseError {
     #[error("invalid host mesh ref: missing region")]
     MissingRegion,
 
+    #[error("invalid host mesh ref: missing name")]
+    MissingName,
+
+    #[error(transparent)]
+    InvalidName(#[from] v1::NameParseError),
+
     #[error(transparent)]
     InvalidHostMeshRef(#[from] Box<v1::Error>),
 
@@ -734,7 +748,13 @@ impl FromStr for HostMeshRef {
     type Err = HostMeshRefParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (hosts, region) = s
+        let (name, rest) = s
+            .split_once(':')
+            .ok_or(HostMeshRefParseError::MissingName)?;
+
+        let name = Name::from_str(name)?;
+
+        let (hosts, region) = rest
             .split_once('@')
             .ok_or(HostMeshRefParseError::MissingRegion)?;
         let hosts = hosts
@@ -743,7 +763,7 @@ impl FromStr for HostMeshRef {
             .map(|host| host.parse::<HostRef>())
             .collect::<Result<Vec<_>, _>>()?;
         let region = region.parse()?;
-        Ok(HostMeshRef::new(region, hosts)?)
+        Ok(HostMeshRef::new(name, region, hosts)?)
     }
 }
 
@@ -768,18 +788,19 @@ mod tests {
 
     #[test]
     fn test_host_mesh_subset() {
-        let hosts: HostMeshRef = "local:1,local:2,local:3,local:4@replica=2/2,host=2/1"
+        let hosts: HostMeshRef = "test:local:1,local:2,local:3,local:4@replica=2/2,host=2/1"
             .parse()
             .unwrap();
         assert_eq!(
             hosts.range("replica", 1).unwrap().to_string(),
-            "local:3,local:4@2+replica=1/2,host=2/1"
+            "test:local:3,local:4@2+replica=1/2,host=2/1"
         );
     }
 
     #[test]
     fn test_host_mesh_ref_parse_roundtrip() {
         let host_mesh_ref = HostMeshRef::new(
+            Name::new("test"),
             extent!(replica = 2, host = 2).into(),
             vec![
                 "tcp:127.0.0.1:123".parse().unwrap(),
@@ -929,7 +950,7 @@ mod tests {
         }
 
         let instance = testing::instance().await;
-        let host_mesh = HostMeshRef::from_hosts(hosts);
+        let host_mesh = HostMeshRef::from_hosts(Name::new("test"), hosts);
 
         let proc_mesh = host_mesh
             .spawn(&testing::instance().await, "test", Extent::unity())
@@ -943,7 +964,7 @@ mod tests {
 
         testactor::assert_mesh_shape(actor_mesh).await;
 
-        HostMesh::take(Name::new("extrinsic"), host_mesh)
+        HostMesh::take(host_mesh)
             .shutdown(&instance)
             .await
             .expect("hosts shutdown");
@@ -968,7 +989,7 @@ mod tests {
             cmd.kill_on_drop(true);
             children.push(cmd.spawn().unwrap());
         }
-        let host_mesh = HostMeshRef::from_hosts(hosts);
+        let host_mesh = HostMeshRef::from_hosts(Name::new("test"), hosts);
 
         let instance = testing::instance().await;
 
@@ -1011,7 +1032,7 @@ mod tests {
             cmd.kill_on_drop(true);
             children.push(cmd.spawn().unwrap());
         }
-        let host_mesh = HostMeshRef::from_hosts(hosts);
+        let host_mesh = HostMeshRef::from_hosts(Name::new("test"), hosts);
 
         let instance = testing::instance().await;
 

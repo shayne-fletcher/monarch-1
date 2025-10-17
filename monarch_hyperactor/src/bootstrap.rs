@@ -129,7 +129,7 @@ pub fn attach_to_workers<'py>(
         });
         let addresses = addresses?;
 
-        let host_mesh = HostMesh::take(name, HostMeshRef::from_hosts(addresses));
+        let host_mesh = HostMesh::take(HostMeshRef::from_hosts(name, addresses));
         Ok(PyHostMesh::new_owned(host_mesh))
     })
 }
