@@ -120,11 +120,8 @@ with open("README.md", encoding="utf8") as f:
     readme = f.read()
 
 python_lib_dir = sysconfig.get_config_var("LIBDIR")  # path to libpython3.10.so.1.0
-
-rust_binding_args = ["--"]
-if not USE_TENSOR_ENGINE:
-    rust_binding_args.append("--no-default-features")
-rust_binding_args += [f"-C", f"link-args=-Wl,-rpath,{python_lib_dir}"]
+rpath_flag = f"-C link-args=-Wl,-rpath,{python_lib_dir}"
+os.environ["RUSTFLAGS"] = (os.environ.get("RUSTFLAGS", "") + " " + rpath_flag).strip()
 
 rust_extensions = [
     RustBin(
@@ -138,7 +135,7 @@ rust_extensions = [
         path="monarch_extension/Cargo.toml",
         debug=False,
         features=["tensor_engine"] if USE_TENSOR_ENGINE else [],
-        args=rust_binding_args,
+        args=[] if USE_TENSOR_ENGINE else ["--no-default-features"],
     ),
 ]
 
