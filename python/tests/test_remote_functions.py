@@ -24,9 +24,9 @@ from monarch.builtins.random import set_manual_seed_remote
 from monarch.cached_remote_function import remote_autograd_function
 from monarch.common import remote as remote_module
 from monarch.common.device_mesh import DeviceMesh, no_mesh
-from monarch.common.invocation import RemoteException
 from monarch.common.pipe import Pipe, remote_generator
 from monarch.common.remote import call_on_shard_and_fetch, Remote
+from monarch.mesh_controller import RemoteException
 
 from monarch.opaque_module import OpaqueModule
 from monarch.opaque_object import opaque_method, OpaqueObject
