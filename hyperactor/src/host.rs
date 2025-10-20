@@ -64,6 +64,7 @@ use crate::Proc;
 use crate::ProcId;
 use crate::actor::Binds;
 use crate::actor::Referable;
+use crate::attrs::Attrs;
 use crate::channel;
 use crate::channel::ChannelAddr;
 use crate::channel::ChannelError;
@@ -1472,6 +1473,7 @@ mod tests {
         fn transport(&self) -> ChannelTransport {
             self.transport.clone()
         }
+
         async fn spawn(
             &self,
             proc_id: ProcId,

@@ -41,6 +41,7 @@ use crate::bootstrap::BootstrapProcConfig;
 use crate::bootstrap::BootstrapProcManager;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
+use crate::resource::ProcSpec;
 use crate::v1::Name;
 
 type ProcManagerSpawnFuture =
@@ -96,7 +97,7 @@ struct ProcCreationState {
 /// through the resource behaviors defined in [`crate::resource`].
 #[hyperactor::export(
     handlers=[
-        resource::CreateOrUpdate<()>,
+        resource::CreateOrUpdate<ProcSpec>,
         resource::Stop,
         resource::GetState<ProcState>,
         resource::GetRankStatus,
@@ -130,12 +131,12 @@ impl Actor for HostMeshAgent {
 }
 
 #[async_trait]
-impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
+impl Handler<resource::CreateOrUpdate<ProcSpec>> for HostMeshAgent {
     #[tracing::instrument("HostMeshAgent::CreateOrUpdate", level = "info", skip_all, fields(name=%create_or_update.name))]
     async fn handle(
         &mut self,
         _cx: &Context<Self>,
-        create_or_update: resource::CreateOrUpdate<()>,
+        create_or_update: resource::CreateOrUpdate<ProcSpec>,
     ) -> anyhow::Result<()> {
         if self.created.contains_key(&create_or_update.name) {
             // Already created: there is no update.
@@ -149,6 +150,10 @@ impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
                     create_or_update.name.clone().to_string(),
                     BootstrapProcConfig {
                         create_rank: create_or_update.rank.unwrap(),
+                        client_config_override: create_or_update
+                            .spec
+                            .client_config_override
+                            .clone(),
                     },
                 )
                 .await
@@ -519,7 +524,12 @@ mod tests {
         // First, create the proc, then query its state:
 
         host_agent
-            .create_or_update(&client, name.clone(), resource::Rank::new(0), ())
+            .create_or_update(
+                &client,
+                name.clone(),
+                resource::Rank::new(0),
+                ProcSpec::default(),
+            )
             .await
             .unwrap();
         assert_matches!(

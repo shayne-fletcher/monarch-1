@@ -30,6 +30,7 @@ use hyperactor::PortRef;
 use hyperactor::RefClient;
 use hyperactor::RemoteMessage;
 use hyperactor::Unbind;
+use hyperactor::attrs::Attrs;
 use hyperactor::mailbox::PortReceiver;
 use hyperactor::message::Bind;
 use hyperactor::message::Bindings;
@@ -547,6 +548,22 @@ impl<T> FromIterator<(Range<usize>, T)> for RankedValues<T> {
     fn from_iter<I: IntoIterator<Item = (Range<usize>, T)>>(iter: I) -> Self {
         Self {
             intervals: iter.into_iter().collect(),
+        }
+    }
+}
+
+/// Spec for a host mesh agent to use when spawning a new proc.
+#[derive(Clone, Debug, Serialize, Deserialize, Named, Default)]
+pub(crate) struct ProcSpec {
+    /// Config values to set on the spawned proc's global config,
+    /// at the `ClientOverride` layer.
+    pub(crate) client_config_override: Attrs,
+}
+
+impl ProcSpec {
+    pub(crate) fn new(client_config_override: Attrs) -> Self {
+        Self {
+            client_config_override,
         }
     }
 }

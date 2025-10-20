@@ -343,8 +343,8 @@ impl Bootstrap {
                 config,
             } => {
                 if let Some(attrs) = config {
-                    config::set(config::Source::Runtime, attrs);
-                    tracing::debug!("bootstrap: installed Runtime config snapshot (Proc)");
+                    config::set(config::Source::ClientOverride, attrs);
+                    tracing::debug!("bootstrap: installed ClientOverride config snapshot (Proc)");
                 } else {
                     tracing::debug!("bootstrap: no config snapshot provided (Proc)");
                 }
@@ -1609,6 +1609,10 @@ impl BootstrapProcManager {
 pub struct BootstrapProcConfig {
     /// The proc's create rank.
     pub create_rank: usize,
+
+    /// Config values to set on the spawned proc's global config,
+    /// at the `ClientOverride` layer.
+    pub client_config_override: Attrs,
 }
 
 #[async_trait]
@@ -1662,13 +1666,11 @@ impl ProcManager for BootstrapProcManager {
         let (callback_addr, mut callback_rx) =
             channel::serve(ChannelAddr::any(ChannelTransport::Unix))?;
 
-        let cfg = hyperactor::config::global::attrs();
-
         let mode = Bootstrap::Proc {
             proc_id: proc_id.clone(),
             backend_addr,
             callback_addr,
-            config: Some(cfg),
+            config: Some(config.client_config_override),
         };
         let mut cmd = Command::new(&self.command.program);
         if let Some(arg0) = &self.command.arg0 {
@@ -3214,7 +3216,10 @@ mod tests {
             .spawn(
                 proc_id.clone(),
                 backend_addr.clone(),
-                BootstrapProcConfig { create_rank: 0 },
+                BootstrapProcConfig {
+                    create_rank: 0,
+                    client_config_override: Attrs::new(),
+                },
             )
             .await
             .expect("spawn bootstrap child");
@@ -3278,7 +3283,10 @@ mod tests {
             .spawn(
                 proc_id.clone(),
                 backend_addr.clone(),
-                BootstrapProcConfig { create_rank: 0 },
+                BootstrapProcConfig {
+                    create_rank: 0,
+                    client_config_override: Attrs::new(),
+                },
             )
             .await
             .expect("spawn bootstrap child");

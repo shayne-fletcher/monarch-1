@@ -15,7 +15,6 @@ use hyperactor::config::CONFIG;
 use hyperactor::config::ConfigAttr;
 use hyperactor::declare_attrs;
 use ndslice::view::CollectMeshExt;
-use tokio::time::timeout;
 
 pub mod mesh_agent;
 
@@ -47,6 +46,7 @@ use crate::resource::CreateOrUpdateClient;
 use crate::resource::GetRankStatus;
 use crate::resource::GetRankStatusClient;
 use crate::resource::GetStateClient;
+use crate::resource::ProcSpec;
 use crate::resource::RankedValues;
 use crate::resource::Status;
 use crate::v1;
@@ -600,13 +600,19 @@ impl HostMeshRef {
         // would allow buffering in the host-level muxer to eliminate
         // the need for this synchronization step.
         let mut proc_names = Vec::new();
+        let client_config_override = config::global::attrs();
         for (host_rank, host) in self.ranks.iter().enumerate() {
             for per_host_rank in 0..per_host.num_ranks() {
                 let create_rank = per_host.num_ranks() * host_rank + per_host_rank;
                 let proc_name = Name::new(format!("{}_{}", name, per_host_rank));
                 proc_names.push(proc_name.clone());
                 host.mesh_agent()
-                    .create_or_update(cx, proc_name.clone(), resource::Rank::new(create_rank), ())
+                    .create_or_update(
+                        cx,
+                        proc_name.clone(),
+                        resource::Rank::new(create_rank),
+                        ProcSpec::new(client_config_override.clone()),
+                    )
                     .await
                     .map_err(|e| {
                         v1::Error::HostMeshAgentConfigurationError(
@@ -655,11 +661,12 @@ impl HostMeshRef {
                     let proc_name = &proc_names[rank];
                     let host_rank = rank / per_host.num_ranks();
                     let mesh_agent = self.ranks[host_rank].mesh_agent();
-                    let state = match timeout(
-                        config::global::get(PROC_SPAWN_MAX_IDLE),
-                        mesh_agent.get_state(cx, proc_name.clone()),
-                    )
-                    .await
+                    let state = match RealClock
+                        .timeout(
+                            config::global::get(PROC_SPAWN_MAX_IDLE),
+                            mesh_agent.get_state(cx, proc_name.clone()),
+                        )
+                        .await
                     {
                         Ok(Ok(state)) => state,
                         _ => resource::State {
@@ -974,6 +981,7 @@ mod tests {
     use std::collections::HashSet;
     use std::collections::VecDeque;
 
+    use hyperactor::attrs::Attrs;
     use hyperactor::context::Mailbox as _;
     use itertools::Itertools;
     use ndslice::ViewExt;
@@ -985,6 +993,8 @@ mod tests {
     use crate::resource::Status;
     use crate::v1::ActorMesh;
     use crate::v1::testactor;
+    use crate::v1::testactor::GetConfigAttrs;
+    use crate::v1::testactor::SetConfigAttrs;
     use crate::v1::testing;
 
     #[test]
@@ -1245,6 +1255,49 @@ mod tests {
         assert_matches!(
             &statuses.materialized_iter(2).cloned().collect::<Vec<_>>()[..],
             &[Status::Timeout(_), Status::Running]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_client_config_override() {
+        let config = hyperactor::config::global::lock();
+        let _guard1 = config.override_key(crate::bootstrap::MESH_BOOTSTRAP_ENABLE_PDEATHSIG, false);
+        let _guard2 =
+            config.override_key(config::HOST_SPAWN_READY_TIMEOUT, Duration::from_secs(120));
+        let _guard3 =
+            config.override_key(config::MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(60));
+
+        let instance = testing::instance().await;
+
+        let proc_meshes = testing::proc_meshes(instance, extent!(replicas = 2)).await;
+        let proc_mesh = proc_meshes.get(1).unwrap();
+
+        let actor_mesh: ActorMesh<testactor::TestActor> =
+            proc_mesh.spawn(instance, "test", &()).await.unwrap();
+
+        let mut attrs_override = Attrs::new();
+        attrs_override.set(config::HOST_SPAWN_READY_TIMEOUT, Duration::from_secs(180));
+        actor_mesh
+            .cast(
+                instance,
+                SetConfigAttrs(bincode::serialize(&attrs_override).unwrap()),
+            )
+            .unwrap();
+
+        let (tx, mut rx) = instance.open_port();
+        actor_mesh
+            .cast(instance, GetConfigAttrs(tx.bind()))
+            .unwrap();
+        let actual_attrs = rx.recv().await.unwrap();
+        let actual_attrs = bincode::deserialize::<Attrs>(&actual_attrs).unwrap();
+
+        assert_eq!(
+            *actual_attrs.get(config::HOST_SPAWN_READY_TIMEOUT).unwrap(),
+            Duration::from_secs(180)
+        );
+        assert_eq!(
+            *actual_attrs.get(config::MESSAGE_DELIVERY_TIMEOUT).unwrap(),
+            Duration::from_secs(60)
         );
     }
 }

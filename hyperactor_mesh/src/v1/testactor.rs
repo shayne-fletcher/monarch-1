@@ -29,10 +29,13 @@ use hyperactor::Named;
 use hyperactor::PortRef;
 use hyperactor::RefClient;
 use hyperactor::Unbind;
+use hyperactor::attrs::Attrs;
 #[cfg(test)]
 use hyperactor::clock::Clock as _;
 #[cfg(test)]
 use hyperactor::clock::RealClock;
+use hyperactor::config;
+use hyperactor::config::global::Source;
 #[cfg(test)]
 use hyperactor::mailbox;
 use hyperactor::supervision::ActorSupervisionEvent;
@@ -59,6 +62,8 @@ use crate::v1::testing;
         GetCastInfo { cast = true },
         CauseSupervisionEvent { cast = true },
         Forward,
+        GetConfigAttrs { cast = true },
+        SetConfigAttrs { cast = true },
     ]
 )]
 pub struct TestActor;
@@ -225,6 +230,38 @@ impl Actor for FailingCreateTestActor {
 
     async fn new(_params: Self::Params) -> Result<Self, hyperactor::anyhow::Error> {
         Err(anyhow::anyhow!("test failure"))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Named, Bind, Unbind)]
+pub struct SetConfigAttrs(pub Vec<u8>);
+
+#[async_trait]
+impl Handler<SetConfigAttrs> for TestActor {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        SetConfigAttrs(attrs): SetConfigAttrs,
+    ) -> Result<(), anyhow::Error> {
+        let attrs = bincode::deserialize(&attrs)?;
+        config::global::set(Source::Runtime, attrs);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Named, Bind, Unbind)]
+pub struct GetConfigAttrs(pub PortRef<Vec<u8>>);
+
+#[async_trait]
+impl Handler<GetConfigAttrs> for TestActor {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        GetConfigAttrs(reply): GetConfigAttrs,
+    ) -> Result<(), anyhow::Error> {
+        let attrs = bincode::serialize(&config::global::attrs())?;
+        reply.send(cx, attrs)?;
+        Ok(())
     }
 }
 
