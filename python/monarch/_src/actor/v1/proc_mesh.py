@@ -292,7 +292,7 @@ class ProcMesh(MeshTrait):
         return self._spawn_nonblocking_on(self._proc_mesh, name, Class, *args, **kwargs)
 
     def to_table(self) -> str:
-        return self._maybe_device_mesh.to_table()
+        return self._device_mesh.to_table()
 
     def _spawn_nonblocking_on(
         self,

@@ -124,6 +124,7 @@ if sys.platform.startswith("linux"):
     # Always include the active env's lib (Conda-safe)
     conda_lib = os.path.join(sys.prefix, "lib")
 
+    # Only use LIBDIR if it actually contains the current libpython
     ldlib = sysconfig.get_config_var("LDLIBRARY") or ""
     libdir = sysconfig.get_config_var("LIBDIR") or ""
     py_lib = ""

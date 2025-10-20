@@ -103,14 +103,14 @@ pub fn get_env_var_with_rerun(name: &str) -> Result<String, std::env::VarError> 
 ///
 /// This function attempts to locate CUDA installation through:
 /// 1. CUDA_HOME environment variable
-/// 2. CUDA_PATH environment variable  
+/// 2. CUDA_PATH environment variable
 /// 3. Finding nvcc in PATH and deriving cuda home
 /// 4. Platform-specific default locations
 pub fn find_cuda_home() -> Option<String> {
     // Guess #1: Environment variables
-    let mut cuda_home = env::var("CUDA_HOME")
+    let mut cuda_home = get_env_var_with_rerun("CUDA_HOME")
         .ok()
-        .or_else(|| env::var("CUDA_PATH").ok());
+        .or_else(|| get_env_var_with_rerun("CUDA_PATH").ok());
 
     if cuda_home.is_none() {
         // Guess #2: Find nvcc in PATH
@@ -151,14 +151,18 @@ pub fn discover_cuda_config() -> Result<CudaConfig, BuildError> {
         lib_dirs: Vec::new(),
     };
 
-    // Add standard include directory
-    let include_dir = cuda_home_path.join("include");
-    if include_dir.exists() {
-        config.include_dirs.push(include_dir);
+    // Add standard include directories
+    // Check both old-style (include) and new-style (targets/x86_64-linux/include) CUDA installations
+    for include_subdir in &["include", "targets/x86_64-linux/include"] {
+        let include_dir = cuda_home_path.join(include_subdir);
+        if include_dir.exists() {
+            config.include_dirs.push(include_dir);
+        }
     }
 
     // Add standard library directories
-    for lib_subdir in &["lib64", "lib", "lib/x64"] {
+    // Check both old-style (lib64, lib) and new-style (targets/x86_64-linux/lib) CUDA installations
+    for lib_subdir in &["lib64", "lib", "lib/x64", "targets/x86_64-linux/lib"] {
         let lib_dir = cuda_home_path.join(lib_subdir);
         if lib_dir.exists() {
             config.lib_dirs.push(lib_dir);
@@ -197,13 +201,12 @@ pub fn get_cuda_lib_dir() -> Result<String, BuildError> {
     // Try to deduce from CUDA configuration
     let cuda_config = discover_cuda_config()?;
     if let Some(cuda_home) = cuda_config.cuda_home {
-        let lib64_path = cuda_home.join("lib64");
-        if lib64_path.exists() {
-            return Ok(lib64_path.to_string_lossy().to_string());
-        }
-        let lib_path = cuda_home.join("lib");
-        if lib_path.exists() {
-            return Ok(lib_path.to_string_lossy().to_string());
+        // Check both old-style and new-style CUDA library paths
+        for lib_subdir in &["lib64", "lib", "targets/x86_64-linux/lib"] {
+            let lib_path = cuda_home.join(lib_subdir);
+            if lib_path.exists() {
+                return Ok(lib_path.to_string_lossy().to_string());
+            }
         }
     }
 

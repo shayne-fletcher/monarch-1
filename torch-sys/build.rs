@@ -26,7 +26,9 @@ fn main() {
     let mut libtorch_include_dirs: Vec<PathBuf> = vec![];
     let mut libtorch_lib_dir: Option<PathBuf> = None;
     let mut cxx11_abi = None;
-    let python_interpreter = PathBuf::from("python");
+    let python_interpreter = std::env::var("PYO3_PYTHON")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("python"));
 
     let use_pytorch_apis = build_utils::get_env_var_with_rerun("TORCH_SYS_USE_PYTORCH_APIS")
         .unwrap_or_else(|_| "1".to_owned());
