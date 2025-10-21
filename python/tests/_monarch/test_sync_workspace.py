@@ -27,7 +27,7 @@ from monarch._src.actor.allocator import (
     RemoteAllocator,
     StaticRemoteAllocInitializer,
 )
-from monarch._src.actor.host_mesh import HostMesh
+from monarch._src.actor.host_mesh import _bootstrap_cmd, HostMesh
 
 from monarch._src.actor.proc_mesh import ProcMesh
 from monarch.tools.config.workspace import Workspace
@@ -108,6 +108,7 @@ class TestSyncWorkspace(unittest.IsolatedAsyncioTestCase):
                 Extent(["hosts", "gpus"], [1, 1]),
                 allocator,
                 AllocConstraints(),
+                _bootstrap_cmd(),
             )
 
             # local workspace dir is empty & remote workspace dir hasn't been primed yet

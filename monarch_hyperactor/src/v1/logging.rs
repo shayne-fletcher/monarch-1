@@ -98,8 +98,6 @@ impl LoggingMeshClient {
             })
             .map_err(anyhow::Error::from)?;
 
-            // FIXME: Flush on proc mesh stop.
-
             Ok(Self {
                 forwarder_mesh,
                 logger_mesh,

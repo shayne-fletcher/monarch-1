@@ -392,6 +392,7 @@ class ProcMesh(MeshTrait):
         instance = context().actor_instance._as_rust()
 
         async def _stop_nonblocking(instance: HyInstance) -> None:
+            await PythonTask.spawn_blocking(lambda: self._logging_manager.flush())
             await (await self._proc_mesh).stop_nonblocking(instance)
             self._stopped = True
 
