@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="800" height="600" viewBox="0 0 800 600" xmlns="http://www.w3.org/2000/svg">
+  <!-- Definitions for gradients and patterns -->
+  <defs>
+    <!-- Host mesh gradient -->
+    <linearGradient id="hostGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#e3f2fd;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#bbdefb;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Proc mesh gradient -->
+    <linearGradient id="procGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f3e5f5;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#e1bee7;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Actor mesh gradient -->
+    <linearGradient id="actorGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#e8f5e8;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#c8e6c9;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Drop shadow filter -->
+    <filter id="dropshadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="3" dy="3" stdDeviation="2" flood-color="rgba(0,0,0,0.3)"/>
+    </filter>
+  </defs>
+
+  <!-- Title -->
+  <!-- Host dimension axis labels -->
+  <text x="400" y="555" font-family="Arial, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="#666">
+    host dimension →
+  </text>
+
+  <!-- Vertical axis label for gpu dimension -->
+  <text x="25" y="320" font-family="Arial, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="#666" transform="rotate(-90 25 320)">
+    gpu dimension →
+  </text>
+
+  <!-- Host 0 -->
+  <rect x="80" y="140" width="170" height="300"
+        fill="url(#hostGradient)"
+        stroke="#1976d2"
+        stroke-width="2"
+        rx="8"
+        filter="url(#dropshadow)"/>
+
+  <text x="90" y="160" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#1976d2">
+    Host 0
+  </text>
+  <text x="165" y="130" font-family="Arial, sans-serif" font-size="10" text-anchor="middle" fill="#333">host=0</text>
+
+  <!-- Proc Meshes in Host 0 -->
+  <rect x="100" y="180" width="130" height="100"
+        fill="url(#procGradient)"
+        stroke="#7b1fa2"
+        stroke-width="2"
+        rx="5"/>
+  <rect x="100" y="300" width="130" height="100"
+        fill="url(#procGradient)"
+        stroke="#7b1fa2"
+        stroke-width="2"
+        rx="5"/>
+
+  <!-- Host 1 -->
+  <rect x="270" y="140" width="170" height="300"
+        fill="url(#hostGradient)"
+        stroke="#1976d2"
+        stroke-width="2"
+        rx="8"
+        filter="url(#dropshadow)"/>
+
+  <text x="280" y="160" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#1976d2">
+    Host 1
+  </text>
+  <text x="355" y="130" font-family="Arial, sans-serif" font-size="10" text-anchor="middle" fill="#333">host=1</text>
+
+  <!-- Proc Meshes in Host 1 -->
+  <rect x="290" y="180" width="130" height="100"
+        fill="url(#procGradient)"
+        stroke="#7b1fa2"
+        stroke-width="2"
+        rx="5"/>
+  <rect x="290" y="300" width="130" height="100"
+        fill="url(#procGradient)"
+        stroke="#7b1fa2"
+        stroke-width="2"
+        rx="5"/>
+
+  <!-- Host 2 -->
+  <rect x="460" y="140" width="170" height="300"
+        fill="url(#hostGradient)"
+        stroke="#1976d2"
+        stroke-width="2"
+        rx="8"
+        filter="url(#dropshadow)"/>
+
+  <text x="470" y="160" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#1976d2">
+    Host 2
+  </text>
+  <text x="545" y="130" font-family="Arial, sans-serif" font-size="10" text-anchor="middle" fill="#333">host=2</text>
+
+  <!-- Proc Meshes in Host 2 -->
+  <rect x="480" y="180" width="130" height="100"
+        fill="url(#procGradient)"
+        stroke="#7b1fa2"
+        stroke-width="2"
+        rx="5"/>
+  <rect x="480" y="300" width="130" height="100"
+        fill="url(#procGradient)"
+        stroke="#7b1fa2"
+        stroke-width="2"
+        rx="5"/>
+
+  <!-- Host 3 -->
+  <rect x="650" y="140" width="120" height="300"
+        fill="url(#hostGradient)"
+        stroke="#1976d2"
+        stroke-width="2"
+        rx="8"
+        filter="url(#dropshadow)"/>
+
+  <text x="660" y="160" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#1976d2">
+    Host 3
+  </text>
+  <text x="710" y="130" font-family="Arial, sans-serif" font-size="10" text-anchor="middle" fill="#333">host=3</text>
+
+  <!-- Proc Meshes in Host 3 -->
+  <rect x="670" y="180" width="80" height="100"
+        fill="url(#procGradient)"
+        stroke="#7b1fa2"
+        stroke-width="2"
+        rx="5"/>
+  <rect x="670" y="300" width="80" height="100"
+        fill="url(#procGradient)"
+        stroke="#7b1fa2"
+        stroke-width="2"
+        rx="5"/>
+
+  <!-- Proc Mesh Labels -->
+  <text x="110" y="200" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#7b1fa2">
+    Proc Mesh
+  </text>
+  <text x="110" y="212" font-family="Arial, sans-serif" font-size="8" fill="#7b1fa2">
+    Process on host
+  </text>
+
+  <!-- GPU coordinates -->
+  <text x="60" y="235" font-family="Arial, sans-serif" font-size="10" text-anchor="middle" fill="#333">gpu=0</text>
+  <text x="60" y="355" font-family="Arial, sans-serif" font-size="10" text-anchor="middle" fill="#333">gpu=1</text>
+
+  <!-- Actores (Learner actors) - showing some examples -->
+  <!-- Actor mesh in first proc -->
+  <ellipse cx="195" cy="230" rx="40" ry="30"
+           fill="url(#actorGradient)"
+           stroke="#388e3c"
+           stroke-width="2"/>
+  <text x="195" y="225" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#388e3c">
+    Learner
+  </text>
+  <text x="195" y="237" font-family="Arial, sans-serif" font-size="8" text-anchor="middle" fill="#388e3c">
+    Actor
+  </text>
+
+  <!-- Actor mesh in second proc -->
+  <ellipse cx="365" cy="230" rx="40" ry="30"
+           fill="url(#actorGradient)"
+           stroke="#388e3c"
+           stroke-width="2"/>
+  <text x="365" y="225" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#388e3c">
+    Learner
+  </text>
+  <text x="365" y="237" font-family="Arial, sans-serif" font-size="8" text-anchor="middle" fill="#388e3c">
+    Actor
+  </text>
+
+  <!-- Actor mesh in third proc -->
+  <ellipse cx="535" cy="230" rx="40" ry="30"
+           fill="url(#actorGradient)"
+           stroke="#388e3c"
+           stroke-width="2"/>
+  <text x="535" y="225" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#388e3c">
+    Learner
+  </text>
+  <text x="535" y="237" font-family="Arial, sans-serif" font-size="8" text-anchor="middle" fill="#388e3c">
+    Actor
+  </text>
+
+  <!-- Actor mesh in fourth proc (smaller) -->
+  <ellipse cx="680" cy="230" rx="30" ry="25"
+           fill="url(#actorGradient)"
+           stroke="#388e3c"
+           stroke-width="2"/>
+  <text x="680" y="225" font-family="Arial, sans-serif" font-size="9" font-weight="bold" text-anchor="middle" fill="#388e3c">
+    Learner
+  </text>
+  <text x="680" y="235" font-family="Arial, sans-serif" font-size="7" text-anchor="middle" fill="#388e3c">
+    Actor
+  </text>
+
+  <!-- More actor meshes in bottom row -->
+  <ellipse cx="195" cy="370" rx="40" ry="30"
+           fill="url(#actorGradient)"
+           stroke="#388e3c"
+           stroke-width="2"/>
+  <text x="195" y="365" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#388e3c">
+    Learner
+  </text>
+  <text x="195" y="377" font-family="Arial, sans-serif" font-size="8" text-anchor="middle" fill="#388e3c">
+    Actor
+  </text>
+
+  <ellipse cx="365" cy="370" rx="40" ry="30"
+           fill="url(#actorGradient)"
+           stroke="#388e3c"
+           stroke-width="2"/>
+  <text x="365" y="365" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#388e3c">
+    Learner
+  </text>
+  <text x="365" y="377" font-family="Arial, sans-serif" font-size="8" text-anchor="middle" fill="#388e3c">
+    Actor
+  </text>
+
+  <ellipse cx="535" cy="370" rx="40" ry="30"
+           fill="url(#actorGradient)"
+           stroke="#388e3c"
+           stroke-width="2"/>
+  <text x="535" y="365" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#388e3c">
+    Learner
+  </text>
+  <text x="535" y="377" font-family="Arial, sans-serif" font-size="8" text-anchor="middle" fill="#388e3c">
+    Actor
+  </text>
+
+  <ellipse cx="680" cy="370" rx="30" ry="25"
+           fill="url(#actorGradient)"
+           stroke="#388e3c"
+           stroke-width="2"/>
+  <text x="680" y="365" font-family="Arial, sans-serif" font-size="9" font-weight="bold" text-anchor="middle" fill="#388e3c">
+    Learner
+  </text>
+  <text x="680" y="375" font-family="Arial, sans-serif" font-size="7" text-anchor="middle" fill="#388e3c">
+    Actor
+  </text>
+
+  <!-- Legend Box -->
+  <rect x="460" y="450" width="270" height="110"
+        fill="white"
+        stroke="#666"
+        stroke-width="1"
+        rx="5"
+        opacity="0.95"/>
+
+  <text x="475" y="470" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#333">
+    Mesh Hierarchy
+  </text>
+
+  <!-- Legend items -->
+  <rect x="475" y="480" width="15" height="10" fill="url(#hostGradient)" stroke="#1976d2"/>
+  <text x="495" y="489" font-family="Arial, sans-serif" font-size="11" fill="#333">
+    Host Mesh: Collection of hosts (machines)
+  </text>
+
+  <rect x="475" y="500" width="15" height="10" fill="url(#procGradient)" stroke="#7b1fa2"/>
+  <text x="495" y="509" font-family="Arial, sans-serif" font-size="11" fill="#333">
+    Proc Mesh: Processes spawned on hosts
+  </text>
+
+  <ellipse cx="482" cy="525" rx="8" ry="6" fill="url(#actorGradient)" stroke="#388e3c"/>
+  <text x="495" y="529" font-family="Arial, sans-serif" font-size="11" fill="#333">
+    Actor: Actor instances (e.g., "Learner")
+  </text>
+
+  <text x="475" y="548" font-family="Arial, sans-serif" font-size="10" fill="#666">
+    • Actors can broadcast messages across the mesh
+  </text>
+  <text x="475" y="560" font-family="Arial, sans-serif" font-size="10" fill="#666">
+    • 2D mesh: host × gpu dimensions
+  </text>
+
+</svg>

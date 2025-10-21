@@ -1,0 +1,318 @@
+<svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Define styles -->
+    <style>
+      .client { fill: #4CAF50; stroke: #2E7D32; stroke-width: 2; }
+      .host-tier1 { fill: #2196F3; stroke: #1565C0; stroke-width: 2; }
+      .host-tier2 { fill: #FF9800; stroke: #E65100; stroke-width: 2; }
+      .connection { stroke: #666; stroke-width: 1; opacity: 0.3; }
+      .response { fill: #9C27B0; stroke: #6A1B9A; stroke-width: 1; }
+      .compressed-response { fill: #FF5722; stroke: #D84315; stroke-width: 1; }
+      .node-text { font-family: Arial, sans-serif; font-size: 10px; text-anchor: middle; fill: white; font-weight: bold; }
+      .title-text { font-family: Arial, sans-serif; font-size: 16px; text-anchor: middle; fill: #333; font-weight: bold; }
+      .rle-label { font-family: Arial, sans-serif; font-size: 8px; text-anchor: middle; fill: #FF5722; font-weight: bold; }
+    </style>
+  </defs>
+
+  <!-- Title -->
+  <text x="400" y="25" class="title-text">Actor response aggregation with RLE compression</text>
+
+  <!-- Connection lines from client to tier 1 -->
+  <line x1="400" y1="80" x2="200" y2="200" class="connection"/>
+  <line x1="400" y1="80" x2="350" y2="200" class="connection"/>
+  <line x1="400" y1="80" x2="450" y2="200" class="connection"/>
+  <line x1="400" y1="80" x2="600" y2="200" class="connection"/>
+
+  <!-- Connection lines from tier 1 to tier 2 -->
+  <!-- From host 1 -->
+  <line x1="200" y1="220" x2="80" y2="360" class="connection"/>
+  <line x1="200" y1="220" x2="140" y2="360" class="connection"/>
+  <line x1="200" y1="220" x2="200" y2="360" class="connection"/>
+  <line x1="200" y1="220" x2="260" y2="360" class="connection"/>
+
+  <!-- From host 2 -->
+  <line x1="350" y1="220" x2="290" y2="360" class="connection"/>
+  <line x1="350" y1="220" x2="330" y2="360" class="connection"/>
+  <line x1="350" y1="220" x2="370" y2="360" class="connection"/>
+  <line x1="350" y1="220" x2="410" y2="360" class="connection"/>
+
+  <!-- From host 3 -->
+  <line x1="450" y1="220" x2="440" y2="360" class="connection"/>
+  <line x1="450" y1="220" x2="480" y2="360" class="connection"/>
+  <line x1="450" y1="220" x2="520" y2="360" class="connection"/>
+  <line x1="450" y1="220" x2="560" y2="360" class="connection"/>
+
+  <!-- From host 4 -->
+  <line x1="600" y1="220" x2="590" y2="360" class="connection"/>
+  <line x1="600" y1="220" x2="630" y2="360" class="connection"/>
+  <line x1="600" y1="220" x2="670" y2="360" class="connection"/>
+  <line x1="600" y1="220" x2="710" y2="360" class="connection"/>
+
+  <!-- Client node -->
+  <circle cx="400" cy="60" r="20" class="client"/>
+  <text x="400" y="65" class="node-text">Client</text>
+
+  <!-- Tier 1 hosts -->
+  <circle cx="200" cy="200" r="15" class="host-tier1"/>
+  <text x="200" y="205" class="node-text">H1</text>
+
+  <circle cx="350" cy="200" r="15" class="host-tier1"/>
+  <text x="350" y="205" class="node-text">H2</text>
+
+  <circle cx="450" cy="200" r="15" class="host-tier1"/>
+  <text x="450" y="205" class="node-text">H3</text>
+
+  <circle cx="600" cy="200" r="15" class="host-tier1"/>
+  <text x="600" y="205" class="node-text">H4</text>
+
+  <!-- Tier 2 hosts -->
+  <!-- H1's children -->
+  <circle cx="80" cy="340" r="12" class="host-tier2"/>
+  <text x="80" y="345" class="node-text">H1.1</text>
+
+  <circle cx="140" cy="340" r="12" class="host-tier2"/>
+  <text x="140" y="345" class="node-text">H1.2</text>
+
+  <circle cx="200" cy="340" r="12" class="host-tier2"/>
+  <text x="200" y="345" class="node-text">H1.3</text>
+
+  <circle cx="260" cy="340" r="12" class="host-tier2"/>
+  <text x="260" y="345" class="node-text">H1.4</text>
+
+  <!-- H2's children -->
+  <circle cx="290" cy="340" r="12" class="host-tier2"/>
+  <text x="290" y="345" class="node-text">H2.1</text>
+
+  <circle cx="330" cy="340" r="12" class="host-tier2"/>
+  <text x="330" y="345" class="node-text">H2.2</text>
+
+  <circle cx="370" cy="340" r="12" class="host-tier2"/>
+  <text x="370" y="345" class="node-text">H2.3</text>
+
+  <circle cx="410" cy="340" r="12" class="host-tier2"/>
+  <text x="410" y="345" class="node-text">H2.4</text>
+
+  <!-- H3's children -->
+  <circle cx="440" cy="340" r="12" class="host-tier2"/>
+  <text x="440" y="345" class="node-text">H3.1</text>
+
+  <circle cx="480" cy="340" r="12" class="host-tier2"/>
+  <text x="480" y="345" class="node-text">H3.2</text>
+
+  <circle cx="520" cy="340" r="12" class="host-tier2"/>
+  <text x="520" y="345" class="node-text">H3.3</text>
+
+  <circle cx="560" cy="340" r="12" class="host-tier2"/>
+  <text x="560" y="345" class="node-text">H3.4</text>
+
+  <!-- H4's children -->
+  <circle cx="590" cy="340" r="12" class="host-tier2"/>
+  <text x="590" y="345" class="node-text">H4.1</text>
+
+  <circle cx="630" cy="340" r="12" class="host-tier2"/>
+  <text x="630" y="345" class="node-text">H4.2</text>
+
+  <circle cx="670" cy="340" r="12" class="host-tier2"/>
+  <text x="670" y="345" class="node-text">H4.3</text>
+
+  <circle cx="710" cy="340" r="12" class="host-tier2"/>
+  <text x="710" y="345" class="node-text">H4.4</text>
+
+  <!-- Animated responses from tier 2 to tier 1 -->
+  <!-- From H1 children - showing multiple similar responses that will be compressed -->
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0s">
+      <mpath href="#response-h11-h1"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.1s">
+      <mpath href="#response-h12-h1"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.2s">
+      <mpath href="#response-h13-h1"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.3s">
+      <mpath href="#response-h14-h1"/>
+    </animateMotion>
+  </circle>
+
+  <!-- From H2 children -->
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.1s">
+      <mpath href="#response-h21-h2"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.2s">
+      <mpath href="#response-h22-h2"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.3s">
+      <mpath href="#response-h23-h2"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.4s">
+      <mpath href="#response-h24-h2"/>
+    </animateMotion>
+  </circle>
+
+  <!-- From H3 children -->
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.2s">
+      <mpath href="#response-h31-h3"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.3s">
+      <mpath href="#response-h32-h3"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.4s">
+      <mpath href="#response-h33-h3"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.5s">
+      <mpath href="#response-h34-h3"/>
+    </animateMotion>
+  </circle>
+
+  <!-- From H4 children -->
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.3s">
+      <mpath href="#response-h41-h4"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.4s">
+      <mpath href="#response-h42-h4"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.5s">
+      <mpath href="#response-h43-h4"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="response">
+    <animateMotion dur="1.0s" repeatCount="indefinite" begin="0.6s">
+      <mpath href="#response-h44-h4"/>
+    </animateMotion>
+  </circle>
+
+  <!-- Compressed responses from tier 1 to client -->
+  <!-- H1 to client - RLE compressed response -->
+  <circle r="5" class="compressed-response">
+    <animateMotion dur="1.2s" repeatCount="indefinite" begin="1.5s">
+      <mpath href="#compressed-h1-client"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="5" class="compressed-response">
+    <animateMotion dur="1.2s" repeatCount="indefinite" begin="1.7s">
+      <mpath href="#compressed-h2-client"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="5" class="compressed-response">
+    <animateMotion dur="1.2s" repeatCount="indefinite" begin="1.9s">
+      <mpath href="#compressed-h3-client"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="5" class="compressed-response">
+    <animateMotion dur="1.2s" repeatCount="indefinite" begin="2.1s">
+      <mpath href="#compressed-h4-client"/>
+    </animateMotion>
+  </circle>
+
+  <!-- RLE compression indicators -->
+  <text x="170" y="130" class="rle-label">RLE: 4×OK</text>
+  <text x="320" y="130" class="rle-label">RLE: 3×OK,1×ERR</text>
+  <text x="480" y="130" class="rle-label">RLE: 4×OK</text>
+  <text x="630" y="130" class="rle-label">RLE: 4×OK</text>
+
+  <!-- Hidden paths for response animation -->
+  <defs>
+    <!-- Tier 2 to tier 1 response paths -->
+    <!-- H1 children to H1 -->
+    <path id="response-h11-h1" d="M 80,340 L 200,220" stroke="none" fill="none"/>
+    <path id="response-h12-h1" d="M 140,340 L 200,220" stroke="none" fill="none"/>
+    <path id="response-h13-h1" d="M 200,340 L 200,220" stroke="none" fill="none"/>
+    <path id="response-h14-h1" d="M 260,340 L 200,220" stroke="none" fill="none"/>
+
+    <!-- H2 children to H2 -->
+    <path id="response-h21-h2" d="M 290,340 L 350,220" stroke="none" fill="none"/>
+    <path id="response-h22-h2" d="M 330,340 L 350,220" stroke="none" fill="none"/>
+    <path id="response-h23-h2" d="M 370,340 L 350,220" stroke="none" fill="none"/>
+    <path id="response-h24-h2" d="M 410,340 L 350,220" stroke="none" fill="none"/>
+
+    <!-- H3 children to H3 -->
+    <path id="response-h31-h3" d="M 440,340 L 450,220" stroke="none" fill="none"/>
+    <path id="response-h32-h3" d="M 480,340 L 450,220" stroke="none" fill="none"/>
+    <path id="response-h33-h3" d="M 520,340 L 450,220" stroke="none" fill="none"/>
+    <path id="response-h34-h3" d="M 560,340 L 450,220" stroke="none" fill="none"/>
+
+    <!-- H4 children to H4 -->
+    <path id="response-h41-h4" d="M 590,340 L 600,220" stroke="none" fill="none"/>
+    <path id="response-h42-h4" d="M 630,340 L 600,220" stroke="none" fill="none"/>
+    <path id="response-h43-h4" d="M 670,340 L 600,220" stroke="none" fill="none"/>
+    <path id="response-h44-h4" d="M 710,340 L 600,220" stroke="none" fill="none"/>
+
+    <!-- Tier 1 to client compressed response paths -->
+    <path id="compressed-h1-client" d="M 200,200 L 400,80" stroke="none" fill="none"/>
+    <path id="compressed-h2-client" d="M 350,200 L 400,80" stroke="none" fill="none"/>
+    <path id="compressed-h3-client" d="M 450,200 L 400,80" stroke="none" fill="none"/>
+    <path id="compressed-h4-client" d="M 600,200 L 400,80" stroke="none" fill="none"/>
+  </defs>
+
+  <!-- Data aggregation visualization -->
+  <rect x="50" y="380" width="700" height="120" fill="#f5f5f5" stroke="#ccc" stroke-width="1" rx="5"/>
+  <text x="400" y="400" class="title-text" style="font-size: 14px;">Response Aggregation Process</text>
+
+  <!-- Step indicators -->
+  <text x="70" y="425" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">1. Leaf nodes send individual responses</text>
+  <text x="70" y="445" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">2. Intermediate nodes aggregate and compress using RLE</text>
+  <text x="70" y="465" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">3. Compressed responses sent to client</text>
+  <text x="70" y="485" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">Example: ["OK","OK","OK","OK"] → RLE: "4×OK"</text>
+
+  <!-- Legend -->
+  <text x="50" y="520" class="node-text" style="fill: #333; font-size: 12px; text-anchor: start;">Legend:</text>
+
+  <circle cx="70" cy="540" r="8" class="client"/>
+  <text x="85" y="545" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">Client</text>
+
+  <circle cx="140" cy="540" r="8" class="host-tier1"/>
+  <text x="155" y="545" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">Tier 1 Hosts</text>
+
+  <circle cx="240" cy="540" r="8" class="host-tier2"/>
+  <text x="255" y="545" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">Tier 2 Hosts</text>
+
+  <circle cx="350" cy="540" r="3" class="response"/>
+  <text x="365" y="545" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">Raw Responses</text>
+
+  <circle cx="470" cy="540" r="5" class="compressed-response"/>
+  <text x="485" y="545" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">RLE Compressed</text>
+
+  <!-- Status indicator -->
+  <text x="50" y="575" class="node-text" style="fill: #333; font-size: 12px; text-anchor: start;">Compression ratio: 16→4 responses (4:1 reduction)</text>
+</svg>

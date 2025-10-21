@@ -1,0 +1,233 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 800" width="1000" height="800">
+  <!-- Title -->
+  <text x="500" y="35" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="bold" fill="#1f2937">
+    Point-to-Point RDMA Weight Transfer
+  </text>
+
+  <defs>
+    <!-- Background gradient -->
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#f9fafb;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#f3f4f6;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Drop shadow -->
+    <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="2" dy="2" stdDeviation="3" flood-opacity="0.25"/>
+    </filter>
+
+    <!-- Arrow markers -->
+    <marker id="arrowhead-blue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 10 3, 0 6" fill="#3b82f6" />
+    </marker>
+
+    <marker id="arrowhead-purple" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 10 3, 0 6" fill="#8b5cf6" />
+    </marker>
+
+    <marker id="arrowhead-purple-back" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 10 3, 0 6" fill="#8b5cf6" />
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1000" height="800" fill="url(#bgGradient)"/>
+
+  <!-- Actor Headers -->
+  <g id="actors">
+    <!-- Learner -->
+    <rect x="150" y="70" width="180" height="70" rx="8" fill="#3b82f6" filter="url(#shadow)"/>
+    <text x="240" y="95" text-anchor="middle" font-family="monospace" font-size="16" font-weight="bold" fill="white">
+      Learner
+    </text>
+    <text x="240" y="115" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#dbeafe">
+      (Training Service)
+    </text>
+    <text x="240" y="130" text-anchor="middle" font-family="monospace" font-size="11" fill="#bfdbfe">
+      Model Weights
+    </text>
+
+    <!-- Learner lifeline -->
+    <line x1="240" y1="140" x2="240" y2="760" stroke="#3b82f6" stroke-width="3" stroke-dasharray="8,4"/>
+
+    <!-- Inference Engine -->
+    <rect x="620" y="70" width="230" height="70" rx="8" fill="#10b981" filter="url(#shadow)"/>
+    <text x="735" y="95" text-anchor="middle" font-family="monospace" font-size="16" font-weight="bold" fill="white">
+      Inference Engine
+    </text>
+    <text x="735" y="115" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#d1fae5">
+      (Inference Service)
+    </text>
+    <text x="735" y="130" text-anchor="middle" font-family="monospace" font-size="11" fill="#a7f3d0">
+      Local Weights (empty)
+    </text>
+
+    <!-- Inference Engine lifeline -->
+    <line x1="735" y1="140" x2="735" y2="760" stroke="#10b981" stroke-width="3" stroke-dasharray="8,4"/>
+  </g>
+
+  <!-- Step 1: Create RDMABuffer -->
+  <g id="step1">
+    <!-- Self-action box on Learner -->
+    <rect x="160" y="165" width="160" height="55" rx="6" fill="#93c5fd" stroke="#1e40af" stroke-width="2" filter="url(#shadow)"/>
+    <text x="240" y="185" text-anchor="middle" font-family="monospace" font-size="12" fill="#1e3a8a" font-weight="bold">
+      RDMABuffer(weights)
+    </text>
+    <text x="240" y="202" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#1e40af">
+      Create handle
+    </text>
+    <text x="240" y="215" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#3730a3" font-style="italic">
+      (zero-copy, lightweight)
+    </text>
+  </g>
+
+  <!-- Step 2: Send Handle via weights_handle() -->
+  <g id="step2">
+    <!-- Arrow: Learner to Inference Engine -->
+    <line x1="240" y1="270" x2="720" y2="270" stroke="#3b82f6" stroke-width="3" marker-end="url(#arrowhead-blue)" stroke-dasharray="5,3"/>
+
+    <!-- Message label -->
+    <rect x="405" y="245" width="170" height="20" rx="4" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/>
+    <text x="490" y="259" text-anchor="middle" font-family="monospace" font-size="11" fill="#1e40af" font-weight="bold">
+      weights_handle()
+    </text>
+
+    <!-- Message detail -->
+    <text x="490" y="240" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#6b7280">
+      Buffer Handle (small message)
+    </text>
+  </g>
+
+  <!-- Step 3: Actor message to trigger sync -->
+  <g id="step3">
+    <!-- Arrow: Learner to Inference Engine -->
+    <line x1="240" y1="330" x2="720" y2="330" stroke="#3b82f6" stroke-width="3" marker-end="url(#arrowhead-blue)" stroke-dasharray="5,3"/>
+
+    <!-- Message label -->
+    <rect x="420" y="305" width="150" height="20" rx="4" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/>
+    <text x="495" y="319" text-anchor="middle" font-family="monospace" font-size="11" fill="#1e40af" font-weight="bold">
+      update(version)
+    </text>
+
+    <!-- Message detail -->
+    <text x="495" y="300" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#6b7280">
+      Trigger weight sync
+    </text>
+
+    <!-- Inference Engine action box -->
+    <rect x="655" y="350" width="160" height="45" rx="6" fill="#c4b5fd" stroke="#6d28d9" stroke-width="2" filter="url(#shadow)"/>
+    <text x="735" y="368" text-anchor="middle" font-family="monospace" font-size="11" fill="#4c1d95" font-weight="bold">
+      sync_weights()
+    </text>
+    <text x="735" y="385" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#5b21b6">
+      Call handle.read_into()
+    </text>
+
+    <!-- RDMA data transfer arrow (from Learner's memory to Inference Engine) -->
+    <line x1="245" y1="410" x2="720" y2="410" stroke="#8b5cf6" stroke-width="5" marker-end="url(#arrowhead-purple)"/>
+
+    <!-- RDMA label -->
+    <rect x="420" y="415" width="140" height="35" rx="4" fill="#ddd6fe" stroke="#8b5cf6" stroke-width="2"/>
+    <text x="490" y="429" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#5b21b6" font-weight="bold">
+      RDMA READ
+    </text>
+    <text x="490" y="443" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#6d28d9">
+      Bulk data transfer
+    </text>
+
+    <!-- Data transfer details -->
+    <text x="490" y="400" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#7c3aed">
+      Zero-copy over InfiniBand/RoCE
+    </text>
+  </g>
+
+  <!-- Step 4: Learner takes training step -->
+  <g id="step4">
+    <!-- Self-action box on Learner -->
+    <rect x="160" y="460" width="160" height="40" rx="6" fill="#93c5fd" stroke="#1e40af" stroke-width="2" filter="url(#shadow)"/>
+    <text x="240" y="480" text-anchor="middle" font-family="monospace" font-size="12" fill="#1e3a8a" font-weight="bold">
+      step()
+    </text>
+    <text x="240" y="495" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#1e40af">
+      Train model
+    </text>
+  </g>
+
+  <!-- Step 5: Another step without resending buffer -->
+  <g id="step5">
+    <!-- Self-action box on Learner -->
+    <rect x="160" y="520" width="160" height="40" rx="6" fill="#93c5fd" stroke="#1e40af" stroke-width="2" filter="url(#shadow)"/>
+    <text x="240" y="540" text-anchor="middle" font-family="monospace" font-size="12" fill="#1e3a8a" font-weight="bold">
+      step()
+    </text>
+    <text x="240" y="555" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#1e40af">
+      Train model
+    </text>
+
+    <!-- Annotation showing no resend -->
+    <text x="400" y="540" text-anchor="start" font-family="Arial, sans-serif" font-size="11" fill="#6b7280" font-style="italic">
+      (no need to resend buffer)
+    </text>
+  </g>
+
+  <!-- Step 6: Another actor message to sync again -->
+  <g id="step6">
+    <!-- Arrow: Learner to Inference Engine -->
+    <line x1="240" y1="610" x2="720" y2="610" stroke="#3b82f6" stroke-width="3" marker-end="url(#arrowhead-blue)" stroke-dasharray="5,3"/>
+
+    <!-- Message label -->
+    <rect x="420" y="585" width="150" height="20" rx="4" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/>
+    <text x="495" y="599" text-anchor="middle" font-family="monospace" font-size="11" fill="#1e40af" font-weight="bold">
+      update(version)
+    </text>
+
+    <!-- Message detail -->
+    <text x="495" y="580" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#6b7280">
+      Sync updated weights
+    </text>
+
+    <!-- Inference Engine action box -->
+    <rect x="655" y="630" width="160" height="45" rx="6" fill="#c4b5fd" stroke="#6d28d9" stroke-width="2" filter="url(#shadow)"/>
+    <text x="735" y="648" text-anchor="middle" font-family="monospace" font-size="11" fill="#4c1d95" font-weight="bold">
+      sync_weights()
+    </text>
+    <text x="735" y="665" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#5b21b6">
+      Read updated weights
+    </text>
+
+    <!-- RDMA data transfer arrow -->
+    <line x1="245" y1="690" x2="720" y2="690" stroke="#8b5cf6" stroke-width="5" marker-end="url(#arrowhead-purple)"/>
+
+    <!-- RDMA label -->
+    <rect x="420" y="695" width="140" height="20" rx="4" fill="#ddd6fe" stroke="#8b5cf6" stroke-width="2"/>
+    <text x="490" y="709" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#5b21b6" font-weight="bold">
+      RDMA READ
+    </text>
+  </g>
+
+  <!-- Step 7: RDMA Write (Optional) -->
+  <g id="step7">
+    <!-- Optional label -->
+    <text x="490" y="720" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#9ca3af" font-style="italic">
+      (Optional: send gradients/updates back)
+    </text>
+
+    <!-- Inference Engine action box -->
+    <rect x="655" y="705" width="160" height="45" rx="6" fill="#c4b5fd" stroke="#6d28d9" stroke-width="2" filter="url(#shadow)"/>
+    <text x="735" y="723" text-anchor="middle" font-family="monospace" font-size="11" fill="#4c1d95" font-weight="bold">
+      handle.write_from()
+    </text>
+    <text x="735" y="740" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#5b21b6">
+      Initiate RDMA write
+    </text>
+
+    <!-- RDMA write arrow (from Inference Engine to Learner's memory) -->
+    <line x1="720" y1="760" x2="245" y2="760" stroke="#8b5cf6" stroke-width="5" marker-end="url(#arrowhead-purple-back)" stroke-dasharray="8,4"/>
+
+    <!-- RDMA write label -->
+    <rect x="420" y="740" width="140" height="20" rx="4" fill="#ddd6fe" stroke="#8b5cf6" stroke-width="2"/>
+    <text x="490" y="754" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#5b21b6" font-weight="bold">
+      RDMA WRITE
+    </text>
+  </g>
+</svg>

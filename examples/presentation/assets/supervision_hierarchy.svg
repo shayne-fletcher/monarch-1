@@ -1,0 +1,211 @@
+<svg width="900" height="700" xmlns="http://www.w3.org/2000/svg">
+  <!-- Definitions for patterns, gradients and arrows -->
+  <defs>
+    <!-- Arrow marker -->
+    <marker id="arrowhead" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#333" />
+    </marker>
+
+    <!-- Supervision arrow marker -->
+    <marker id="supervisionArrow" markerWidth="12" markerHeight="8"
+            refX="10" refY="4" orient="auto">
+      <polygon points="0 0, 12 4, 0 8" fill="#e74c3c" />
+    </marker>
+
+    <!-- Error bubble pattern -->
+    <pattern id="errorPattern" patternUnits="userSpaceOnUse" width="20" height="20">
+      <rect width="20" height="20" fill="#ffcccc"/>
+      <circle cx="5" cy="5" r="2" fill="#e74c3c"/>
+      <circle cx="15" cy="15" r="2" fill="#e74c3c"/>
+    </pattern>
+
+    <!-- Process gradient -->
+    <linearGradient id="processGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3498db;stop-opacity:0.8" />
+      <stop offset="100%" style="stop-color:#2980b9;stop-opacity:0.8" />
+    </linearGradient>
+
+    <!-- Actor gradient -->
+    <linearGradient id="actorGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#2ecc71;stop-opacity:0.8" />
+      <stop offset="100%" style="stop-color:#27ae60;stop-opacity:0.8" />
+    </linearGradient>
+
+    <!-- Custom supervisor gradient -->
+    <linearGradient id="supervisorGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f39c12;stop-opacity:0.8" />
+      <stop offset="100%" style="stop-color:#e67e22;stop-opacity:0.8" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="700" fill="#f8f9fa" stroke="#ddd" stroke-width="1"/>
+
+  <!-- Title -->
+  <text x="450" y="30" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#2c3e50">
+    Monarch Actor Supervision Hierarchy
+  </text>
+
+  <!-- Legend -->
+  <g id="legend">
+    <rect x="20" y="50" width="280" height="140" fill="white" stroke="#ddd" stroke-width="1" rx="5"/>
+    <text x="30" y="70" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#2c3e50">Legend:</text>
+
+    <!-- Actor legend -->
+    <rect x="30" y="80" width="20" height="15" fill="url(#actorGradient)" rx="2"/>
+    <text x="55" y="92" font-family="Arial, sans-serif" font-size="12" fill="#333">Actor (supervisor)</text>
+
+    <!-- Process legend -->
+    <rect x="30" y="100" width="20" height="15" fill="url(#processGradient)" rx="2"/>
+    <text x="55" y="112" font-family="Arial, sans-serif" font-size="12" fill="#333">Process (supervised)</text>
+
+    <!-- Custom supervisor legend -->
+    <rect x="30" y="120" width="20" height="15" fill="url(#supervisorGradient)" rx="2"/>
+    <text x="55" y="132" font-family="Arial, sans-serif" font-size="12" fill="#333">Actor with __supervise__ policy</text>
+
+    <!-- Supervision arrow legend -->
+    <line x1="30" y1="150" x2="50" y2="150" stroke="#e74c3c" stroke-width="2" marker-end="url(#supervisionArrow)"/>
+    <text x="55" y="154" font-family="Arial, sans-serif" font-size="12" fill="#333">Supervision relationship</text>
+
+    <text x="30" y="175" font-family="Arial, sans-serif" font-size="11" font-style="italic" fill="#666">
+      Key: Actors supervise processes and other actors
+    </text>
+  </g>
+
+  <!-- Level 1: Root Actor -->
+  <g id="rootActor">
+    <rect x="375" y="210" width="150" height="50" fill="url(#actorGradient)" stroke="#27ae60" stroke-width="3" rx="5"/>
+    <text x="450" y="230" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="white">Root Actor</text>
+    <text x="450" y="245" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="white">job killed</text>
+  </g>
+
+  <!-- Level 2: Sub-actors supervised by Root Actor -->
+  <g id="managerActor">
+    <rect x="200" y="320" width="160" height="50" fill="url(#supervisorGradient)" stroke="#e67e22" stroke-width="2" rx="5"/>
+    <text x="280" y="340" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">RLHF Manager</text>
+    <text x="280" y="355" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="white">__supervise__: checkpoint restart</text>
+  </g>
+
+  <g id="scorerManager">
+    <rect x="460" y="320" width="170" height="50" fill="url(#supervisorGradient)" stroke="#e67e22" stroke-width="2" rx="5"/>
+    <text x="545" y="340" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">ScorerManager</text>
+    <text x="545" y="355" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="white">__supervise__: individual restart</text>
+  </g>
+
+  <!-- Supervision arrows from Root to Level 2 -->
+  <line x1="430" y1="260" x2="300" y2="315" stroke="#e74c3c" stroke-width="2" marker-end="url(#supervisionArrow)"/>
+  <line x1="470" y1="260" x2="525" y2="315" stroke="#e74c3c" stroke-width="2" marker-end="url(#supervisionArrow)"/>
+
+  <!-- Level 3: Processes supervised by RLHF Manager Actor -->
+  <g id="learnerProcess">
+    <rect x="150" y="440" width="100" height="50" fill="url(#processGradient)" stroke="#2980b9" stroke-width="2" rx="5"/>
+    <text x="200" y="460" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">Learner Proc</text>
+    <text x="200" y="475" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="white">PID: 1235</text>
+  </g>
+
+  <g id="generatorProcess">
+    <rect x="290" y="440" width="100" height="50" fill="url(#processGradient)" stroke="#2980b9" stroke-width="2" rx="5"/>
+    <text x="340" y="460" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">Generator Proc</text>
+    <text x="340" y="475" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="white">PID: 1236</text>
+  </g>
+
+  <!-- Multiple Scorer actors supervised by ScorerManager -->
+  <g id="scorer1">
+    <rect x="430" y="440" width="80" height="40" fill="url(#actorGradient)" stroke="#27ae60" stroke-width="2" rx="3"/>
+    <text x="470" y="458" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="white">Scorer-1</text>
+    <text x="470" y="470" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">Actor</text>
+  </g>
+
+  <g id="scorer2">
+    <rect x="520" y="440" width="80" height="40" fill="url(#errorPattern)" stroke="#e74c3c" stroke-width="2" stroke-dasharray="3,3" rx="3"/>
+    <text x="560" y="458" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#333">Scorer-2</text>
+    <text x="560" y="470" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#333">FAILED</text>
+  </g>
+
+  <g id="scorer3">
+    <rect x="610" y="440" width="80" height="40" fill="url(#actorGradient)" stroke="#27ae60" stroke-width="2" rx="3"/>
+    <text x="650" y="458" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="white">Scorer-3</text>
+    <text x="650" y="470" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">Actor</text>
+  </g>
+
+  <!-- Supervision arrows from RLHF Manager to processes -->
+  <line x1="260" y1="370" x2="220" y2="435" stroke="#e74c3c" stroke-width="2" marker-end="url(#supervisionArrow)"/>
+  <line x1="280" y1="370" x2="340" y2="435" stroke="#e74c3c" stroke-width="2" marker-end="url(#supervisionArrow)"/>
+
+  <!-- Level 4: Actors within processes (supervised by the processes' spawning actor) -->
+  <g id="learnerActor">
+    <rect x="110" y="560" width="80" height="40" fill="url(#actorGradient)" stroke="#27ae60" stroke-width="2" rx="3"/>
+    <text x="150" y="578" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="white">Learner</text>
+    <text x="150" y="590" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">Actor</text>
+  </g>
+
+  <g id="replayBuffer">
+    <rect x="200" y="560" width="80" height="40" fill="url(#actorGradient)" stroke="#27ae60" stroke-width="2" rx="3"/>
+    <text x="240" y="578" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="white">Replay</text>
+    <text x="240" y="590" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">Buffer</text>
+  </g>
+
+  <!-- Supervision arrows from ScorerManager to scorer actors -->
+  <line x1="525" y1="370" x2="460" y2="435" stroke="#e74c3c" stroke-width="2" marker-end="url(#supervisionArrow)"/>
+  <line x1="545" y1="370" x2="560" y2="435" stroke="#e74c3c" stroke-width="2" marker-end="url(#supervisionArrow)"/>
+  <line x1="565" y1="370" x2="640" y2="435" stroke="#e74c3c" stroke-width="2" marker-end="url(#supervisionArrow)"/>
+
+  <!-- Recovery: New scorer restarted by ScorerManager -->
+  <g id="newScorer">
+    <rect x="700" y="440" width="80" height="40"  fill="url(#actorGradient)" stroke="#27ae60"  stroke-width="2" rx="3"/>
+    <text x="740" y="455" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="white">New Scorer</text>
+    <text x="740" y="467" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="white">Restarted by</text>
+    <text x="740" y="477" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="white">ScorerManager</text>
+  </g>
+
+  <!-- Multiple Generator Actors -->
+  <g id="generator1">
+    <rect x="270" y="560" width="70" height="40" fill="url(#actorGradient)" stroke="#27ae60" stroke-width="2" rx="3"/>
+    <text x="305" y="578" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="white">Gen-1</text>
+    <text x="305" y="590" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">Actor</text>
+  </g>
+
+  <g id="generator2">
+    <rect x="350" y="560" width="70" height="40" fill="url(#actorGradient)" stroke="#27ae60" stroke-width="2" rx="3"/>
+    <text x="385" y="578" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="white">Gen-2</text>
+    <text x="385" y="590" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">Actor</text>
+  </g>
+
+
+  <!-- Supervision arrows from RLHF Manager to actors in processes -->
+  <line x1="260" y1="370" x2="160" y2="555" stroke="#e74c3c" stroke-width="2" marker-end="url(#supervisionArrow)"/>
+  <line x1="260" y1="370" x2="250" y2="555" stroke="#e74c3c" stroke-width="2" marker-end="url(#supervisionArrow)"/>
+  <line x1="280" y1="370" x2="305" y2="555" stroke="#e74c3c" stroke-width="2" marker-end="url(#supervisionArrow)"/>
+  <line x1="280" y1="370" x2="385" y2="555" stroke="#e74c3c" stroke-width="2" marker-end="url(#supervisionArrow)"/>
+
+
+  <!-- Custom supervise recovery arrow showing restart -->
+  <path d="M 545 370 Q 620 400 730 435" stroke="#f39c12" stroke-width="3" fill="none" marker-end="url(#supervisionArrow)"/>
+  <text x="620" y="390" font-family="Arial, sans-serif" font-size="11" font-style="italic" fill="#f39c12">ScorerManager restarts</text>
+  <text x="620" y="404" font-family="Arial, sans-serif" font-size="11" font-style="italic" fill="#f39c12">failed scorer independently</text>
+
+  <!-- Error bubble and propagation -->
+  <g id="errorBubble">
+    <circle cx="560" cy="420" r="15" fill="#e74c3c" opacity="0.7"/>
+    <text x="560" y="425" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">!</text>
+  </g>
+
+  <!-- Annotations -->
+  <g id="annotations">
+    <!-- Default behavior annotation -->
+    <text x="50" y="240" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#2c3e50">Default Behavior:</text>
+    <text x="50" y="255" font-family="Arial, sans-serif" font-size="11" fill="#333">• Actors supervise processes and other actors</text>
+    <text x="50" y="268" font-family="Arial, sans-serif" font-size="11" fill="#333">• Errors bubble up supervision tree</text>
+    <text x="50" y="281" font-family="Arial, sans-serif" font-size="11" fill="#333">• Parent actor fails if child fails</text>
+    <text x="50" y="294" font-family="Arial, sans-serif" font-size="11" fill="#333">• Propagates until handled</text>
+
+    <!-- Custom supervision annotation -->
+    <text x="550" y="520" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#f39c12">ScorerManager __supervise__:</text>
+    <text x="550" y="535" font-family="Arial, sans-serif" font-size="11" fill="#333">• Monitors independent scorer actors</text>
+    <text x="550" y="548" font-family="Arial, sans-serif" font-size="11" fill="#333">• Restarts failed scorers individually</text>
+    <text x="550" y="561" font-family="Arial, sans-serif" font-size="11" fill="#333">• Enables independent fault tolerance</text>
+
+  </g>
+
+</svg>

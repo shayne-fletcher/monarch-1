@@ -1,0 +1,234 @@
+<svg width="900" height="700" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Define styles -->
+    <style>
+      .client { fill: #4CAF50; stroke: #2E7D32; stroke-width: 2; }
+      .host { fill: #9E9E9E; stroke: #616161; stroke-width: 2; }
+      .host-active { fill: #2196F3; stroke: #1565C0; stroke-width: 2; }
+      .coordinator-actor { fill: #FF9800; stroke: #E65100; stroke-width: 2; }
+      .worker-process { fill: #9C27B0; stroke: #6A1B9A; stroke-width: 2; }
+      .actor-mesh { fill: #E91E63; stroke: #AD1457; stroke-width: 2; }
+      .connection { stroke: #666; stroke-width: 1; opacity: 0.4; }
+      .mesh-connection { stroke: #E91E63; stroke-width: 2; opacity: 0.6; }
+      .handle-message { fill: #FFC107; stroke: #F57F17; stroke-width: 1; }
+      .launch-message { fill: #00BCD4; stroke: #006064; stroke-width: 1; }
+      .node-text { font-family: Arial, sans-serif; font-size: 9px; text-anchor: middle; fill: white; font-weight: bold; }
+      .title-text { font-family: Arial, sans-serif; font-size: 16px; text-anchor: middle; fill: #333; font-weight: bold; }
+      .phase-text { font-family: Arial, sans-serif; font-size: 14px; text-anchor: start; fill: #333; font-weight: bold; }
+      .step-text { font-family: Arial, sans-serif; font-size: 11px; text-anchor: start; fill: #555; }
+    </style>
+
+    <!-- Animation paths -->
+    <!-- Phase 1: Launch coordinator -->
+    <path id="launch-coordinator-path" d="M 150,140 L 250,180" stroke="none" fill="none"/>
+
+    <!-- Phase 2: Pass handles -->
+    <path id="pass-handles-path" d="M 150,140 L 250,180" stroke="none" fill="none"/>
+
+    <!-- Phase 3: Launch workers -->
+    <path id="launch-worker1-path" d="M 250,180 L 400,180" stroke="none" fill="none"/>
+    <path id="launch-worker2-path" d="M 250,180 L 550,180" stroke="none" fill="none"/>
+    <path id="launch-worker3-path" d="M 250,180 L 700,180" stroke="none" fill="none"/>
+    <path id="launch-worker4-path" d="M 250,180 L 850,180" stroke="none" fill="none"/>
+  </defs>
+
+  <!-- Title -->
+  <text x="450" y="25" class="title-text">Monarch Composable Actor System - vLLM Deployment</text>
+
+  <!-- Phase indicators with animated opacity -->
+  <g id="phase1" opacity="0">
+    <rect x="20" y="50" width="200" height="30" fill="#E8F5E8" stroke="#4CAF50" rx="5"/>
+    <text x="30" y="70" class="phase-text" style="fill: #2E7D32;">Phase 1: Launch Coordinator</text>
+    <animate attributeName="opacity" values="0;1;1;0" dur="12s" repeatCount="indefinite" begin="0s"/>
+  </g>
+
+  <g id="phase2" opacity="0">
+    <rect x="240" y="50" width="200" height="30" fill="#FFF3E0" stroke="#FF9800" rx="5"/>
+    <text x="250" y="70" class="phase-text" style="fill: #E65100;">Phase 2: Pass Host Handles</text>
+    <animate attributeName="opacity" values="0;0;1;1;0" dur="12s" repeatCount="indefinite" begin="0s"/>
+  </g>
+
+  <g id="phase3" opacity="0">
+    <rect x="460" y="50" width="200" height="30" fill="#F3E5F5" stroke="#9C27B0" rx="5"/>
+    <text x="470" y="70" class="phase-text" style="fill: #6A1B9A;">Phase 3: Deploy Workers</text>
+    <animate attributeName="opacity" values="0;0;0;1;1" dur="12s" repeatCount="indefinite" begin="0s"/>
+  </g>
+
+  <!-- Connection lines (static) -->
+  <line x1="150" y1="140" x2="250" y2="200" class="connection"/>
+  <line x1="150" y1="140" x2="400" y2="200" class="connection"/>
+  <line x1="150" y1="140" x2="550" y2="200" class="connection"/>
+  <line x1="150" y1="140" x2="700" y2="200" class="connection"/>
+  <line x1="150" y1="140" x2="850" y2="200" class="connection"/>
+
+  <!-- Dynamic mesh connections (appear in phase 3) -->
+  <g id="mesh-connections" opacity="0">
+    <line x1="400" y1="200" x2="550" y2="200" class="mesh-connection"/>
+    <line x1="550" y1="200" x2="700" y2="200" class="mesh-connection"/>
+    <line x1="700" y1="200" x2="850" y2="200" class="mesh-connection"/>
+    <line x1="400" y1="200" x2="700" y2="200" class="mesh-connection"/>
+    <line x1="550" y1="200" x2="850" y2="200" class="mesh-connection"/>
+    <animate attributeName="opacity" values="0;0;0;0;1" dur="12s" repeatCount="indefinite" begin="0s"/>
+  </g>
+
+  <!-- Client/Controller -->
+  <circle cx="150" cy="120" r="20" class="client"/>
+  <text x="150" y="125" class="node-text">Controller</text>
+
+  <!-- Hosts -->
+  <!-- Coordinator Host -->
+  <g id="coordinator-host">
+    <circle cx="250" cy="180" r="18" class="host"/>
+    <text x="250" y="185" class="node-text">Host-1</text>
+    <!-- Coordinator Actor (appears in phase 1) -->
+    <circle cx="250" cy="180" r="12" class="coordinator-actor" opacity="0">
+      <animate attributeName="opacity" values="0;1;1;1;1" dur="12s" repeatCount="indefinite" begin="0s"/>
+    </circle>
+    <text x="250" y="185" class="node-text" opacity="0">
+      Coord
+      <animate attributeName="opacity" values="0;1;1;1;1" dur="12s" repeatCount="indefinite" begin="0s"/>
+    </text>
+  </g>
+
+  <!-- Worker Hosts -->
+  <circle cx="400" cy="180" r="18" class="host"/>
+  <text x="400" y="185" class="node-text">Host-2</text>
+
+  <circle cx="550" cy="180" r="18" class="host"/>
+  <text x="550" y="185" class="node-text">Host-3</text>
+
+  <circle cx="700" cy="180" r="18" class="host"/>
+  <text x="700" y="185" class="node-text">Host-4</text>
+
+  <circle cx="850" cy="180" r="18" class="host"/>
+  <text x="850" y="185" class="node-text">Host-5</text>
+
+  <!-- Worker processes (appear in phase 3) -->
+  <g id="workers" opacity="0">
+    <circle cx="400" cy="180" r="12" class="worker-process"/>
+    <text x="400" y="185" class="node-text">vLLM-1</text>
+
+    <circle cx="550" cy="180" r="12" class="worker-process"/>
+    <text x="550" y="185" class="node-text">vLLM-2</text>
+
+    <circle cx="700" cy="180" r="12" class="worker-process"/>
+    <text x="700" y="185" class="node-text">vLLM-3</text>
+
+    <circle cx="850" cy="180" r="12" class="worker-process"/>
+    <text x="850" y="185" class="node-text">vLLM-4</text>
+
+    <animate attributeName="opacity" values="0;0;0;0;1" dur="12s" repeatCount="indefinite" begin="0s"/>
+  </g>
+
+  <!-- Animated Messages -->
+
+  <!-- Phase 1: Launch Coordinator Actor -->
+  <circle r="4" class="launch-message">
+    <animateMotion dur="2s" repeatCount="indefinite" begin="1s">
+      <mpath href="#launch-coordinator-path"/>
+    </animateMotion>
+  </circle>
+
+  <!-- Phase 2: Pass Host Handles to Coordinator -->
+  <circle r="4" class="handle-message">
+    <animateMotion dur="2s" repeatCount="indefinite" begin="4s">
+      <mpath href="#pass-handles-path"/>
+    </animateMotion>
+  </circle>
+
+  <!-- Phase 3: Coordinator launches workers -->
+  <circle r="3" class="launch-message">
+    <animateMotion dur="1.5s" repeatCount="indefinite" begin="8s">
+      <mpath href="#launch-worker1-path"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="launch-message">
+    <animateMotion dur="1.5s" repeatCount="indefinite" begin="8.3s">
+      <mpath href="#launch-worker2-path"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="launch-message">
+    <animateMotion dur="1.5s" repeatCount="indefinite" begin="8.6s">
+      <mpath href="#launch-worker3-path"/>
+    </animateMotion>
+  </circle>
+
+  <circle r="3" class="launch-message">
+    <animateMotion dur="1.5s" repeatCount="indefinite" begin="8.9s">
+      <mpath href="#launch-worker4-path"/>
+    </animateMotion>
+  </circle>
+
+
+  <!-- Handle visualization -->
+  <g id="handle-representation">
+    <rect x="50" y="300" width="800" height="150" fill="#f9f9f9" stroke="#ddd" stroke-width="1" rx="10"/>
+    <text x="450" y="325" class="title-text" style="font-size: 14px;">Handle Passing &amp; Dynamic Composition</text>
+
+    <!-- Step descriptions -->
+    <text x="70" y="350" class="step-text">1. Controller has handles to all hosts in the cluster</text>
+    <text x="70" y="370" class="step-text">2. Controller launches a Coordinator Actor on Host-1</text>
+    <text x="70" y="390" class="step-text">3. Controller passes handles [Host-2, Host-3, Host-4, Host-5] to Coordinator</text>
+    <text x="70" y="410" class="step-text">4. Coordinator uses handles to deploy vLLM workers across the worker hosts</text>
+    <text x="70" y="430" class="step-text">5. Workers form a mesh for distributed LLM inference</text>
+  </g>
+
+  <!-- Code examples -->
+  <g id="code-examples">
+    <rect x="50" y="470" width="800" height="180" fill="#f5f5f5" stroke="#ccc" stroke-width="1" rx="10"/>
+    <text x="450" y="495" class="title-text" style="font-size: 14px;">Monarch Code Example</text>
+
+    <text x="70" y="520" class="step-text" style="font-family: 'Courier New', monospace; font-size: 10px; fill: #333;">
+      # Controller launches coordinator actor
+    </text>
+    <text x="70" y="535" class="step-text" style="font-family: 'Courier New', monospace; font-size: 10px; fill: #006400;">
+      coordinator = hosts[0].launch_actor(CoordinatorActor)
+    </text>
+
+    <text x="70" y="555" class="step-text" style="font-family: 'Courier New', monospace; font-size: 10px; fill: #333;">
+      # Pass worker host handles to coordinator
+    </text>
+    <text x="70" y="570" class="step-text" style="font-family: 'Courier New', monospace; font-size: 10px; fill: #006400;">
+      coordinator.deploy_workers(worker_hosts=hosts[1:])
+    </text>
+
+    <text x="70" y="590" class="step-text" style="font-family: 'Courier New', monospace; font-size: 10px; fill: #333;">
+      # Coordinator deploys vLLM across worker hosts
+    </text>
+    <text x="70" y="605" class="step-text" style="font-family: 'Courier New', monospace; font-size: 10px; fill: #006400;">
+      for host in worker_hosts:
+    </text>
+    <text x="90" y="620" class="step-text" style="font-family: 'Courier New', monospace; font-size: 10px; fill: #006400;">
+      worker = host.launch_process(vLLMWorker, model_config)
+    </text>
+    <text x="90" y="635" class="step-text" style="font-family: 'Courier New', monospace; font-size: 10px; fill: #006400;">
+      self.workers.append(worker)
+    </text>
+  </g>
+
+  <!-- Legend -->
+  <text x="50" y="670" class="node-text" style="fill: #333; font-size: 12px; text-anchor: start;">Legend:</text>
+
+  <circle cx="120" cy="680" r="8" class="client"/>
+  <text x="135" y="685" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">Controller</text>
+
+  <circle cx="220" cy="680" r="8" class="host"/>
+  <text x="235" y="685" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">Host</text>
+
+  <circle cx="290" cy="680" r="8" class="coordinator-actor"/>
+  <text x="305" y="685" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">Coordinator Actor</text>
+
+  <circle cx="430" cy="680" r="8" class="worker-process"/>
+  <text x="445" y="685" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">vLLM Worker</text>
+
+  <circle cx="540" cy="680" r="4" class="handle-message"/>
+  <text x="555" y="685" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">Handle Message</text>
+
+  <circle cx="660" cy="680" r="4" class="launch-message"/>
+  <text x="675" y="685" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">Launch Message</text>
+
+  <line x1="770" y1="680" x2="790" y2="680" class="mesh-connection"/>
+  <text x="800" y="685" class="node-text" style="fill: #333; font-size: 11px; text-anchor: start;">Actor Mesh</text>
+</svg>
