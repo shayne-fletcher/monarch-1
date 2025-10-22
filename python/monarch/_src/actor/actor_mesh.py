@@ -1122,6 +1122,8 @@ class ActorMesh(MeshTrait, Generic[T]):
         # can be collected even without any endpoints being awaited.
         self._inner.start_supervision(context().actor_instance._as_rust())
 
+        async_endpoints = []
+        sync_endpoints = []
         for attr_name in dir(self._class):
             attr_value = getattr(self._class, attr_name, None)
             if isinstance(attr_value, EndpointProperty):
@@ -1141,6 +1143,17 @@ class ActorMesh(MeshTrait, Generic[T]):
                         attr_value._explicit_response_port,
                     ),
                 )
+                if inspect.iscoroutinefunction(attr_value._method):
+                    async_endpoints.append(attr_name)
+                else:
+                    sync_endpoints.append(attr_name)
+
+        if sync_endpoints and async_endpoints:
+            raise ValueError(
+                f"{self._class} mixes both async and sync endpoints."
+                "Synchronous endpoints cannot be mixed with async endpoints because they can cause the asyncio loop to deadlock if they wait."
+                f"sync: {sync_endpoints} async: {async_endpoints}"
+            )
 
     def __getattr__(self, attr: str) -> NotAnEndpoint:
         if attr in dir(self._class):

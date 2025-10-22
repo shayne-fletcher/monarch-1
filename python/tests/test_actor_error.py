@@ -421,13 +421,23 @@ class ActorFailureError(BaseException):
     pass
 
 
-class ErrorActor(Actor):
+class SyncErrorActor(Actor):
     @endpoint
     def fail_with_supervision_error(self) -> None:
         raise ActorFailureError("Simulated actor failure for supervision testing")
 
     @endpoint
-    async def fail_with_supervision_error_async(self) -> None:
+    def check(self) -> str:
+        return "this is a healthy check"
+
+    @endpoint
+    def check_with_exception(self) -> None:
+        raise RuntimeError("failed the check with app error")
+
+
+class ErrorActor(Actor):
+    @endpoint
+    async def fail_with_supervision_error(self) -> None:
         raise ActorFailureError("Simulated actor failure for supervision testing")
 
     @endpoint
@@ -579,10 +589,10 @@ async def test_actor_mesh_supervision_handling_chained_error() -> None:
     ids=["local_proc_mesh", "proc_mesh"],
 )
 @pytest.mark.parametrize(
-    "method_name",
-    ["fail_with_supervision_error", "fail_with_supervision_error_async"],
+    "error_actor_cls",
+    [ErrorActor, SyncErrorActor],
 )
-async def test_base_exception_handling(mesh, method_name) -> None:
+async def test_base_exception_handling(mesh, error_actor_cls) -> None:
     """Test that BaseException subclasses trigger supervision errors.
 
     This test verifies that both synchronous and asynchronous methods
@@ -593,10 +603,10 @@ async def test_base_exception_handling(mesh, method_name) -> None:
     # This test doesn't want the client process to crash during testing.
     monarch.actor.unhandled_fault_hook = lambda failure: None
     proc = mesh({"gpus": 1})
-    error_actor = proc.spawn("error", ErrorActor)
+    error_actor = proc.spawn("error", error_actor_cls)
 
     # Get the method to call based on the parameter
-    method = getattr(error_actor, method_name)
+    method = error_actor.fail_with_supervision_error
 
     # The call should raise a SupervisionError
     with pytest.raises(

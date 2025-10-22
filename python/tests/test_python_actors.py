@@ -87,9 +87,14 @@ class Counter(Actor):
     async def value(self) -> int:
         return self.v
 
+
+class SyncCounter(Actor):
+    def __init__(self, c):
+        self.c = c
+
     @endpoint
     def value_sync_endpoint(self) -> int:
-        return self.v
+        return self.c.value.choose().get()
 
 
 class Indirect(Actor):
@@ -112,7 +117,8 @@ async def test_choose():
 
     assert result == result2
 
-    result3 = await v.value_sync_endpoint.choose()
+    v2 = proc.spawn("sync_counter", SyncCounter, v)
+    result3 = v2.value_sync_endpoint.choose().get()
     assert_type(result, int)
     assert result2 == result3
 
@@ -335,7 +341,7 @@ class TLSActor(Actor):
         self.local.value = 0
 
     @endpoint
-    def increment(self):
+    async def increment(self):
         self.local.value += 1
 
     @endpoint
@@ -343,7 +349,7 @@ class TLSActor(Actor):
         self.local.value += 1
 
     @endpoint
-    def get_value(self):
+    async def get_value(self):
         return self.local.value
 
     @endpoint
@@ -406,18 +412,6 @@ class AsyncActor(Actor):
     @endpoint
     async def no_more(self) -> None:
         self.should_exit = True
-
-
-@pytest.mark.timeout(60)
-async def test_async_concurrency():
-    """Test that async endpoints will be processed concurrently."""
-    pm = this_host().spawn_procs(per_host={})
-    am = pm.spawn("async", AsyncActor)
-    fut = am.sleep.call()
-    # This call should go through and exit the sleep loop, as long as we are
-    # actually concurrently processing messages.
-    await am.no_more.call()
-    await fut
 
 
 async def awaitit(f):
@@ -1548,7 +1542,7 @@ class SpawningActorFromEndpointActor(Actor):
         self._root = root
 
     @endpoint
-    def return_root(self):
+    async def return_root(self):
         return self._root
 
     @endpoint

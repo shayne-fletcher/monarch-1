@@ -1151,7 +1151,7 @@ class ClosureDebugeeActor(Actor):
         return func(class_closure)
 
     @endpoint
-    async def name(self) -> str:
+    def name(self) -> str:
         return context().actor_instance.actor_id.actor_name
 
 
