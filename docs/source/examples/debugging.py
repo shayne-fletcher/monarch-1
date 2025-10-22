@@ -27,9 +27,9 @@ step-through debugging, and interactive debugging sessions. It includes:
 # To debug an actor, simply define your python actor and insert typical breakpoints
 # in the relevant endpoint that you want to debug using Python's built-in ``breakpoint()``.
 #
-# **Note: There is a known bug where breakpoints will not work if they are defined inside actors
-# spawned on a proc mesh that was allocated from inside a different proc mesh. This will be
-# resolved in the near future.**
+# **Note: Currently, debug sessions are indexed by actor name + rank. This means that
+# concurrently debugging two actor endpoints in the same actor instance is not supported
+# at the moment.**
 
 from monarch.actor import Actor, current_rank, endpoint, this_host
 
