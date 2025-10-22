@@ -358,8 +358,7 @@ def actor_send(
 
     client = cast(MeshClient, checker.mesh.client)
 
-    rest = partial(
-        _actor_send,
+    _actor_send(
         endpoint,
         args_kwargs_tuple,
         refs,
@@ -370,12 +369,6 @@ def actor_send(
         tensors,
         chosen_stream,
     )
-    if isinstance(endpoint._name, MethodSpecifier.Init):
-        # Init runs within the tokio loop, but creating a node blocks the loop sending actor messages, so
-        # we offload to a blocking thread
-        PythonTask.spawn_blocking(rest)
-    else:
-        rest()
 
 
 def _actor_send(
