@@ -200,7 +200,7 @@ int bind_mrs(
     return RDMAXCEL_WR_COMPLETE_FAILED;
   }
 
-  struct ibv_wc wc {};
+  struct ibv_wc wc{};
   while (ibv_poll_cq(qp->send_cq, 1, &wc) == 0) {
     // Continue polling until completion arrives
   }
