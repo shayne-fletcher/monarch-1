@@ -1051,6 +1051,7 @@ impl<M: RemoteMessage> PortRef<M> {
         message: Serialized,
     ) {
         crate::mailbox::headers::set_send_timestamp(&mut headers);
+        crate::mailbox::headers::set_rust_message_type::<M>(&mut headers);
         cx.post(self.port_id.clone(), headers, message);
     }
 

@@ -202,7 +202,9 @@ impl Actor for CommActor {
                         err,
                     ));
                     message_envelope.set_error(error);
-                    UndeliverableMessageError::return_failure(&message_envelope)
+                    UndeliverableMessageError::ReturnFailure {
+                        envelope: message_envelope,
+                    }
                 })?;
             return Ok(());
         }
@@ -226,7 +228,9 @@ impl Actor for CommActor {
                         err,
                     ));
                     message_envelope.set_error(error);
-                    UndeliverableMessageError::return_failure(&message_envelope)
+                    UndeliverableMessageError::ReturnFailure {
+                        envelope: message_envelope,
+                    }
                 })?;
             return Ok(());
         }

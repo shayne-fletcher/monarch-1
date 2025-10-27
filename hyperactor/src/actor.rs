@@ -142,7 +142,7 @@ pub fn handle_undeliverable_message<A: Actor>(
 ) -> Result<(), anyhow::Error> {
     assert_eq!(envelope.sender(), cx.self_id());
 
-    anyhow::bail!(UndeliverableMessageError::delivery_failure(&envelope));
+    anyhow::bail!(UndeliverableMessageError::DeliveryFailure { envelope });
 }
 
 /// An actor that does nothing. It is used to represent "client only" actors,

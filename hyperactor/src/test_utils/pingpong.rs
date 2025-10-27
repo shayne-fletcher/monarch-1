@@ -90,8 +90,8 @@ impl Actor for PingPongActor {
         match &self.params.undeliverable_port_ref {
             Some(port) => port.send(cx, undelivered).unwrap(),
             None => {
-                let Undeliverable(envelope) = &undelivered;
-                anyhow::bail!(UndeliverableMessageError::delivery_failure(envelope));
+                let Undeliverable(envelope) = undelivered;
+                anyhow::bail!(UndeliverableMessageError::DeliveryFailure { envelope });
             }
         }
 

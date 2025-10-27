@@ -428,11 +428,15 @@ impl MessageEnvelope {
 impl fmt::Display for MessageEnvelope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.error_msg() {
-            None => write!(f, "{} > {}: {}", self.sender, self.dest, self.data),
+            None => write!(
+                f,
+                "{} > {}: {} {{{}}}",
+                self.sender, self.dest, self.data, self.headers
+            ),
             Some(err) => write!(
                 f,
-                "{} > {}: {}: delivery error: {}",
-                self.sender, self.dest, self.data, err
+                "{} > {}: {} {{{}}}: delivery error: {}",
+                self.sender, self.dest, self.data, self.headers, err
             ),
         }
     }
@@ -1623,6 +1627,7 @@ impl<M: Message> PortHandle<M> {
         let mut headers = Attrs::new();
 
         crate::mailbox::headers::set_send_timestamp(&mut headers);
+        crate::mailbox::headers::set_rust_message_type::<M>(&mut headers);
 
         self.sender.send(headers, message).map_err(|err| {
             MailboxSenderError::new_unbound::<M>(
@@ -3074,7 +3079,7 @@ mod tests {
 
         assert_eq!(
             format!("{}", envelope),
-            r#"source[0].actor[0] > dest[1].actor[0][123]: MyTest{"a":123,"b":"hello"}"#
+            r#"source[0].actor[0] > dest[1].actor[0][123]: MyTest{"a":123,"b":"hello"} {}"#
         );
     }
 

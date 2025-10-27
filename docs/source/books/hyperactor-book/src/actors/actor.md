@@ -49,7 +49,7 @@ pub trait Actor: Sized + Send + Debug + 'static {
     ) -> Result<(), anyhow::Error> {
         assert_eq!(envelope.sender(), this.self_id());
 
-        anyhow::bail!(UndeliverableMessageError::delivery_failure(&envelope));
+        anyhow::bail!(UndeliverableMessageError::DeliveryFailure { envelope });
     }
 }
 ```
@@ -159,7 +159,7 @@ async fn handle_undeliverable_message(
 ) -> Result<(), anyhow::Error> {
     assert_eq!(envelope.sender(), this.self_id());
 
-    anyhow::bail!(UndeliverableMessageError::delivery_failure(&envelope));
+    anyhow::bail!(UndeliverableMessageError::DeliveryFailure { envelope });
 }
 ```
 This method is called when a message sent by this actor fails to be delivered.

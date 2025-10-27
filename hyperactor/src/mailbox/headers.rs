@@ -11,6 +11,7 @@
 //! This module provides header attributes and utilities for message metadata,
 //! including latency tracking timestamps used to measure message processing times.
 
+use std::any::type_name;
 use std::time::SystemTime;
 
 use crate::attrs::Attrs;
@@ -23,6 +24,9 @@ use crate::metrics::MESSAGE_LATENCY_MICROS;
 declare_attrs! {
     /// Send timestamp for message latency tracking
     pub attr SEND_TIMESTAMP: SystemTime;
+
+    /// The rust type of the message.
+    pub attr RUST_MESSAGE_TYPE: String;
 }
 
 /// Set the send timestamp for latency tracking if timestamp not already set.
@@ -31,6 +35,11 @@ pub fn set_send_timestamp(headers: &mut Attrs) {
         let time = RealClock.system_time_now();
         headers.set(SEND_TIMESTAMP, time);
     }
+}
+
+/// Set the send timestamp for latency tracking if timestamp not already set.
+pub fn set_rust_message_type<M>(headers: &mut Attrs) {
+    headers.set(RUST_MESSAGE_TYPE, type_name::<M>().to_string());
 }
 
 /// This function checks the configured sampling rate and, if the random sample passes,
