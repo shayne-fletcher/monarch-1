@@ -149,6 +149,9 @@ async def test_mesh_passed_to_mesh():
     proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     f = proc.spawn("from", From)
     t = proc.spawn("to", To)
+    # Make sure t is initialized before sending to f. Otherwise
+    # f might call t.whoami before t.__init__.
+    await t.whoami.call()
     all = [y for x in f.fetch.stream(t) for y in await x]
     assert len(all) == 4
     assert all[0] != all[1]
@@ -160,6 +163,9 @@ async def test_mesh_passed_to_mesh_on_different_proc_mesh():
     proc2 = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     f = proc.spawn("from", From)
     t = proc2.spawn("to", To)
+    # Make sure t is initialized before sending to f. Otherwise
+    # f might call t.whoami before t.__init__.
+    await t.whoami.call()
     all = [y for x in f.fetch.stream(t) for y in await x]
     assert len(all) == 4
     assert all[0] != all[1]
