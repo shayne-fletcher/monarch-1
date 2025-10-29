@@ -138,12 +138,20 @@ class Future(Generic[R]):
                     fut = loop.create_future()
                     self._status = _Asyncio(fut)
 
+                    def set_result(fut, value):
+                        if not fut.cancelled():
+                            fut.set_result(value)
+
+                    def set_exception(fut, e):
+                        if not fut.cancelled():
+                            fut.set_exception(e)
+
                     async def mark_complete():
                         try:
-                            func, value = fut.set_result, await coro
+                            func, value = set_result, await coro
                         except Exception as e:
-                            func, value = fut.set_exception, e
-                        loop.call_soon_threadsafe(func, value)
+                            func, value = set_exception, e
+                        loop.call_soon_threadsafe(func, fut, value)
 
                     PythonTask.from_coroutine(mark_complete()).spawn()
                     return fut.__await__()
