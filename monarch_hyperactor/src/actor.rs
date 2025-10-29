@@ -738,7 +738,7 @@ impl Handler<PythonMessage> for PythonActor {
             handle_async_endpoint_panic(
                 cx.port(),
                 // self.panic_sender.clone(),
-                PythonTask::new(future),
+                PythonTask::new(future)?,
                 receiver,
             )
             .instrument(

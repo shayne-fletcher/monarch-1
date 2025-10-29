@@ -336,9 +336,9 @@ async fn recv_async(
 
 #[pymethods]
 impl PythonPortReceiver {
-    fn recv_task(&mut self) -> PyPythonTask {
+    fn recv_task(&mut self) -> PyResult<PyPythonTask> {
         let receiver = self.inner.clone();
-        PythonTask::new(recv_async(receiver)).into()
+        Ok(PythonTask::new(recv_async(receiver))?.into())
     }
 }
 
@@ -516,7 +516,7 @@ impl PythonOncePortReceiver {
                 .map_err(|err| PyErr::new::<PyEOFError, _>(format!("Port closed: {}", err)))
                 .and_then(|message| Python::with_gil(|py| message.into_py_any(py)))
         };
-        Ok(PythonTask::new(fut).into())
+        Ok(PythonTask::new(fut)?.into())
     }
 }
 

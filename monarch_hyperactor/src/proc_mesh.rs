@@ -429,7 +429,7 @@ impl PyProcMesh {
         Ok(PythonTask::new(async move {
             Self::stop_mesh(inner, proc_events).await?;
             Python::with_gil(|py| Ok(py.None()))
-        })
+        })?
         .into())
     }
 }
