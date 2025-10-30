@@ -47,7 +47,6 @@ use hyperactor::data::Serialized;
 use hyperactor::declare_attrs;
 use hyperactor_telemetry::env;
 use hyperactor_telemetry::log_file_path;
-use notify::Watcher;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io;
@@ -1657,12 +1656,14 @@ mod tests {
             "Expected deserialization to fail with invalid UTF-8 bytes"
         );
     }
+    #[allow(dead_code)]
     struct MockLogSender {
         log_sender: mpsc::UnboundedSender<(OutputTarget, String)>, // (output_target, content)
         flush_called: Arc<Mutex<bool>>,                            // Track if flush was called
     }
 
     impl MockLogSender {
+        #[allow(dead_code)]
         fn new(log_sender: mpsc::UnboundedSender<(OutputTarget, String)>) -> Self {
             Self {
                 log_sender,
