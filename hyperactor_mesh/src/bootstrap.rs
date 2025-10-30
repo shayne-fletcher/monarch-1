@@ -257,11 +257,13 @@ pub enum Bootstrap {
 impl Bootstrap {
     /// Serialize the mode into a environment-variable-safe string by
     /// base64-encoding its JSON representation.
+    #[allow(clippy::result_large_err)]
     fn to_env_safe_string(&self) -> v1::Result<String> {
         Ok(BASE64_STANDARD.encode(serde_json::to_string(&self)?))
     }
 
     /// Deserialize the mode from the representation returned by [`to_env_safe_string`].
+    #[allow(clippy::result_large_err)]
     fn from_env_safe_string(str: &str) -> v1::Result<Self> {
         let data = BASE64_STANDARD.decode(str)?;
         let data = std::str::from_utf8(&data)?;
