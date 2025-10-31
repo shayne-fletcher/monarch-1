@@ -629,7 +629,7 @@ impl<'de> Visitor<'de> for AttrsVisitor {
 
         let exe_name = std::env::current_exe()
             .ok()
-            .and_then(|p| p.file_name().map(|os| os.to_string_lossy().to_string()))
+            .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<unknown-exe>".to_string());
 
         let mut attrs = Attrs::new();
@@ -1263,8 +1263,14 @@ mod tests {
         let err = bincode::deserialize::<Attrs>(&wire_bytes)
             .expect_err("should error on unknown attr key");
 
+        let exe_str = std::env::current_exe()
+            .ok()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<unknown-exe>".to_string());
         let msg = format!("{err}");
+
         assert!(msg.contains("unknown attr key"), "got: {msg}");
         assert!(msg.contains(bad_key), "got: {msg}");
+        assert!(msg.contains(&exe_str), "got: {msg}");
     }
 }
