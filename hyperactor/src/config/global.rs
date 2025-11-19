@@ -413,6 +413,16 @@ pub fn get<T: AttrValue + Copy>(key: Key<T>) -> T {
     *key.default().expect("key must have a default")
 }
 
+/// Return the override value for `key` if it is explicitly present in
+/// `overrides`, otherwise fall back to the global value for that key.
+pub fn override_or_global<T: AttrValue + Copy>(overrides: &Attrs, key: Key<T>) -> T {
+    if overrides.contains_key(key) {
+        *overrides.get(key).unwrap()
+    } else {
+        get(key)
+    }
+}
+
 /// Get a key by cloning the value.
 ///
 /// Resolution order: TestOverride -> Runtime -> Env -> File ->

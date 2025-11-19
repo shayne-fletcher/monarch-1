@@ -45,6 +45,7 @@ use hyperactor::clock::RealClock;
 use hyperactor::config::CONFIG;
 use hyperactor::config::ConfigAttr;
 use hyperactor::config::global as config;
+use hyperactor::config::global::override_or_global;
 use hyperactor::context;
 use hyperactor::declare_attrs;
 use hyperactor::host::Host;
@@ -1840,6 +1841,13 @@ impl ProcManager for BootstrapProcManager {
         let (callback_addr, mut callback_rx) =
             channel::serve(ChannelAddr::any(ChannelTransport::Unix))?;
 
+        // Decide whether we need to capture stdio.
+        let overrides = &config.client_config_override;
+        let enable_forwarding = override_or_global(overrides, MESH_ENABLE_LOG_FORWARDING);
+        let enable_file_capture = override_or_global(overrides, MESH_ENABLE_FILE_CAPTURE);
+        let tail_size = override_or_global(overrides, MESH_TAIL_LOG_LINES);
+        let need_stdio = enable_forwarding || enable_file_capture || tail_size > 0;
+
         let mode = Bootstrap::Proc {
             proc_id: proc_id.clone(),
             backend_addr,
@@ -1853,12 +1861,6 @@ impl ProcManager for BootstrapProcManager {
             mode.to_env_safe_string()
                 .map_err(|e| HostError::ProcessConfigurationFailure(proc_id.clone(), e.into()))?,
         );
-
-        // Decide whether we need to capture stdio.
-        let enable_forwarding = hyperactor::config::global::get(MESH_ENABLE_LOG_FORWARDING);
-        let enable_file_capture = hyperactor::config::global::get(MESH_ENABLE_FILE_CAPTURE);
-        let tail_size = hyperactor::config::global::get(MESH_TAIL_LOG_LINES);
-        let need_stdio = enable_forwarding || enable_file_capture || tail_size > 0;
 
         if need_stdio {
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
