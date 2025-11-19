@@ -96,7 +96,7 @@ declare_attrs! {
     /// piping) or via [`StreamFwder`] when piping is active.
     @meta(CONFIG = ConfigAttr {
         env_name: Some("HYPERACTOR_MESH_ENABLE_LOG_FORWARDING".to_string()),
-        py_name: None,
+        py_name: Some("enable_log_forwarding".to_string()),
     })
     pub attr MESH_ENABLE_LOG_FORWARDING: bool = false;
 
@@ -121,7 +121,7 @@ declare_attrs! {
     ///   buffer used for peeking—independent of file capture.
     @meta(CONFIG = ConfigAttr {
         env_name: Some("HYPERACTOR_MESH_ENABLE_FILE_CAPTURE".to_string()),
-        py_name: None,
+        py_name: Some("enable_file_capture".to_string()),
     })
     pub attr MESH_ENABLE_FILE_CAPTURE: bool = false;
 
@@ -130,7 +130,7 @@ declare_attrs! {
     /// pipes. Default: 100
     @meta(CONFIG = ConfigAttr {
         env_name: Some("HYPERACTOR_MESH_TAIL_LOG_LINES".to_string()),
-        py_name: None,
+        py_name: Some("tail_log_lines".to_string()),
     })
     pub attr MESH_TAIL_LOG_LINES: usize = 0;
 
