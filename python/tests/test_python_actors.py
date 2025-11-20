@@ -458,8 +458,8 @@ class Printer(Actor):
         return True
 
 
-# oss_skip: pytest keeps complaining about mocking get_ipython module
-@pytest.mark.oss_skip
+@pytest.mark.forked_only
+@pytest.mark.timeout(180)
 async def test_actor_log_streaming() -> None:
     config = get_configuration()
     enable_log_forwarding = config["enable_log_forwarding"]
@@ -621,9 +621,8 @@ async def test_actor_log_streaming() -> None:
             pass
 
 
-# oss_skip: pytest keeps complaining about mocking get_ipython module
-# oss_skip: (SF) broken in GitHub by D86994420. Passes internally.
-@pytest.mark.oss_skip
+@pytest.mark.forked_only
+@pytest.mark.timeout(180)
 async def test_alloc_based_log_streaming() -> None:
     """Test both AllocHandle.stream_logs = False and True cases."""
 
@@ -732,8 +731,8 @@ async def test_alloc_based_log_streaming() -> None:
     await test_stream_logs_case(True, "stream_logs_true")
 
 
-# oss_skip: (SF) broken in GitHub by D86994420. Passes internally.
-@pytest.mark.oss_skip
+@pytest.mark.forked_only
+@pytest.mark.timeout(180)
 async def test_logging_option_defaults() -> None:
     config = get_configuration()
     enable_log_forwarding = config["enable_log_forwarding"]
@@ -857,8 +856,8 @@ class MockIPython:
         self.events = MockEvents()
 
 
-# oss_skip: pytest keeps complaining about mocking get_ipython module
-@pytest.mark.oss_skip
+@pytest.mark.forked_only
+@pytest.mark.timeout(180)
 async def test_flush_called_only_once() -> None:
     """Test that flush is called only once when ending an ipython cell"""
     config = get_configuration()
@@ -895,8 +894,7 @@ async def test_flush_called_only_once() -> None:
         )
 
 
-# oss_skip: pytest keeps complaining about mocking get_ipython module
-@pytest.mark.oss_skip
+@pytest.mark.forked_only
 @pytest.mark.timeout(180)
 async def test_flush_logs_ipython() -> None:
     """Test that logs are flushed when get_ipython is available and post_run_cell event is triggered."""
@@ -1000,7 +998,8 @@ async def test_flush_logs_ipython() -> None:
             pass
 
 
-# oss_skip: importlib not pulling resource correctly in git CI, needs to be revisited
+# oss_skip: importlib not pulling resource correctly in git CI, needs
+# to be revisited
 @pytest.mark.oss_skip
 async def test_flush_logs_fast_exit() -> None:
     config = get_configuration()
@@ -1041,8 +1040,8 @@ async def test_flush_logs_fast_exit() -> None:
     )
 
 
-# oss_skip: (SF) broken in GitHub by D86994420. Passes internally.
-@pytest.mark.oss_skip
+@pytest.mark.forked_only
+@pytest.mark.timeout(180)
 async def test_flush_on_disable_aggregation() -> None:
     """Test that logs are flushed when disabling aggregation.
 
@@ -1188,8 +1187,8 @@ async def test_multiple_ongoing_flushes_no_deadlock() -> None:
     )
 
 
-# oss_skip: (SF) broken in GitHub by D86994420. Passes internally.
-@pytest.mark.oss_skip
+@pytest.mark.forked_only
+@pytest.mark.timeout(180)
 async def test_adjust_aggregation_window() -> None:
     """Test that the flush deadline is updated when the aggregation window is adjusted.
 
