@@ -554,8 +554,7 @@ def redirected_stdio(capture_stderr: bool = True) -> Iterator[RedirectedPaths]:
             pass
 
 
-# oss_skip: pytest keeps complaining about mocking get_ipython module
-@pytest.mark.oss_skip
+@pytest.mark.timeout(180)
 async def test_actor_log_streaming() -> None:
     with configured(
         enable_log_forwarding=True, enable_file_capture=True, tail_log_lines=100
@@ -662,9 +661,7 @@ async def test_actor_log_streaming() -> None:
             ), stderr_content
 
 
-# oss_skip: pytest keeps complaining about mocking get_ipython module
-# oss_skip: (SF) broken in GitHub by D86994420. Passes internally.
-@pytest.mark.oss_skip
+@pytest.mark.timeout(180)
 async def test_alloc_based_log_streaming() -> None:
     """Test both AllocHandle.stream_logs = False and True cases."""
 
@@ -735,8 +732,7 @@ async def test_alloc_based_log_streaming() -> None:
     await test_stream_logs_case(True, "stream_logs_true")
 
 
-# oss_skip: (SF) broken in GitHub by D86994420. Passes internally.
-@pytest.mark.oss_skip
+@pytest.mark.timeout(180)
 async def test_logging_option_defaults() -> None:
     with configured(
         enable_log_forwarding=True, enable_file_capture=True, tail_log_lines=100
@@ -802,8 +798,7 @@ class MockIPython:
         self.events = MockEvents()
 
 
-# oss_skip: pytest keeps complaining about mocking get_ipython module
-@pytest.mark.oss_skip
+@pytest.mark.timeout(180)
 async def test_flush_called_only_once() -> None:
     """Test that flush is called only once when ending an ipython cell"""
     with configured(
@@ -833,8 +828,6 @@ async def test_flush_called_only_once() -> None:
             assert mock_flush.call_count == 1
 
 
-# oss_skip: pytest keeps complaining about mocking get_ipython module
-@pytest.mark.oss_skip
 @pytest.mark.timeout(180)
 async def test_flush_logs_ipython() -> None:
     """Test that logs are flushed when get_ipython is available and post_run_cell event is triggered."""
@@ -895,7 +888,8 @@ async def test_flush_logs_ipython() -> None:
             assert len(re.findall(pattern2, stdout_content)) >= 3, stdout_content
 
 
-# oss_skip: importlib not pulling resource correctly in git CI, needs to be revisited
+# oss_skip: importlib not pulling resource correctly in git CI, needs
+# to be revisited
 @pytest.mark.oss_skip
 async def test_flush_logs_fast_exit() -> None:
     with configured(
@@ -928,8 +922,7 @@ async def test_flush_logs_fast_exit() -> None:
         ), process.stdout
 
 
-# oss_skip: (SF) broken in GitHub by D86994420. Passes internally.
-@pytest.mark.oss_skip
+@pytest.mark.timeout(180)
 async def test_flush_on_disable_aggregation() -> None:
     """Test that logs are flushed when disabling aggregation.
 
@@ -1026,8 +1019,7 @@ async def test_multiple_ongoing_flushes_no_deadlock() -> None:
         futures[-1].get()
 
 
-# oss_skip: (SF) broken in GitHub by D86994420. Passes internally.
-@pytest.mark.oss_skip
+@pytest.mark.timeout(180)
 async def test_adjust_aggregation_window() -> None:
     """Test that the flush deadline is updated when the aggregation window is adjusted.
 
