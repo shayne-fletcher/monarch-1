@@ -24,7 +24,7 @@ import unittest
 import unittest.mock
 from tempfile import TemporaryDirectory
 from types import ModuleType
-from typing import Any, cast, Tuple
+from typing import Any, cast, Iterator, NamedTuple, Tuple
 
 import monarch.actor
 import pytest
@@ -459,6 +459,11 @@ class Printer(Actor):
         return True
 
 
+class RedirectedPaths(NamedTuple):
+    stdout: str
+    stderr: str | None
+
+
 @contextlib.contextmanager
 def configured(**overrides):
     prev = get_configuration().copy()
@@ -469,109 +474,148 @@ def configured(**overrides):
         configure(**prev)
 
 
+@contextlib.contextmanager
+def redirected_stdio(capture_stderr: bool = True) -> Iterator[RedirectedPaths]:
+    # Save original OS-level FDs
+    original_stdout_fd = os.dup(1)
+    original_stderr_fd = os.dup(2) if capture_stderr else None
+
+    # Create temp files
+    stdout_file = tempfile.NamedTemporaryFile(mode="w+", delete=False)
+    stdout_path = stdout_file.name
+
+    stderr_file = None
+    stderr_path = None
+    if capture_stderr:
+        stderr_file = tempfile.NamedTemporaryFile(mode="w+", delete=False)
+        stderr_path = stderr_file.name
+
+    # Save Python-level streams
+    original_sys_stdout = sys.stdout
+    original_sys_stderr = sys.stderr
+
+    try:
+        # Redirect OS-level stdout
+        os.dup2(stdout_file.fileno(), 1)
+        sys.stdout = stdout_file
+
+        if capture_stderr and stderr_file is not None:
+            os.dup2(stderr_file.fileno(), 2)
+            sys.stderr = stderr_file
+
+        # Let the caller run with redirected IO
+        yield RedirectedPaths(stdout_path, stderr_path)
+
+    finally:
+        # Flush and fsync temp files so contents are visible on disk
+        try:
+            stdout_file.flush()
+            os.fsync(stdout_file.fileno())
+        except OSError:
+            pass
+
+        if capture_stderr and stderr_file is not None:
+            try:
+                stderr_file.flush()
+                os.fsync(stderr_file.fileno())
+            except OSError:
+                pass
+
+        # Restore Python-level streams
+        sys.stdout = original_sys_stdout
+        if capture_stderr:
+            sys.stderr = original_sys_stderr
+
+        # Restore OS-level FDs
+        try:
+            os.dup2(original_stdout_fd, 1)
+            os.close(original_stdout_fd)
+        except OSError:
+            pass
+
+        if capture_stderr and original_stderr_fd is not None:
+            try:
+                os.dup2(original_stderr_fd, 2)
+                os.close(original_stderr_fd)
+            except OSError:
+                pass
+
+        # Close the temp files
+        stdout_file.close()
+        if capture_stderr and stderr_file is not None:
+            stderr_file.close()
+
+        # Clean up temp files
+        try:
+            os.unlink(stdout_path)
+            if stderr_path:
+                os.unlink(stderr_path)
+        except OSError:
+            pass
+
+
 # oss_skip: pytest keeps complaining about mocking get_ipython module
 @pytest.mark.oss_skip
 async def test_actor_log_streaming() -> None:
-    # Save original file descriptors
-    original_stdout_fd = os.dup(1)  # stdout
-    original_stderr_fd = os.dup(2)  # stderr
+    with configured(
+        enable_log_forwarding=True, enable_file_capture=True, tail_log_lines=100
+    ):
+        with redirected_stdio(capture_stderr=True) as paths:
+            pm = this_host().spawn_procs(per_host={"gpus": 2})
+            am = pm.spawn("printer", Printer)
 
-    try:
-        with configured(
-            enable_log_forwarding=True, enable_file_capture=True, tail_log_lines=100
-        ):
-            # Create temporary files to capture output
-            with tempfile.NamedTemporaryFile(
-                mode="w+", delete=False
-            ) as stdout_file, tempfile.NamedTemporaryFile(
-                mode="w+", delete=False
-            ) as stderr_file:
-                stdout_path = stdout_file.name
-                stderr_path = stderr_file.name
+            # Disable streaming logs to client
+            await pm.logging_option(stream_to_client=False, aggregate_window_sec=None)
+            await asyncio.sleep(1)
 
-                # Redirect file descriptors to our temp files
-                # This will capture both Python and Rust output
-                os.dup2(stdout_file.fileno(), 1)
-                os.dup2(stderr_file.fileno(), 2)
+            # These should not be streamed to client initially
+            for _ in range(5):
+                await am.print.call("no print streaming")
+                await am.log.call("no log streaming")
+            await asyncio.sleep(1)
 
-                # Also redirect Python's sys.stdout/stderr for completeness
-                original_sys_stdout = sys.stdout
-                original_sys_stderr = sys.stderr
-                sys.stdout = stdout_file
-                sys.stderr = stderr_file
+            # Enable streaming logs to client
+            await pm.logging_option(
+                stream_to_client=True,
+                aggregate_window_sec=1,
+                level=logging.FATAL,
+            )
+            # Give it some time to reflect
+            await asyncio.sleep(1)
 
-                try:
-                    pm = this_host().spawn_procs(per_host={"gpus": 2})
-                    am = pm.spawn("printer", Printer)
+            # These should be streamed to client
+            for _ in range(5):
+                await am.print.call("has print streaming")
+                await am.log.call("no log streaming due to level mismatch")
+            await asyncio.sleep(1)
 
-                    # Disable streaming logs to client
-                    await pm.logging_option(
-                        stream_to_client=False, aggregate_window_sec=None
-                    )
-                    await asyncio.sleep(1)
+            # Enable streaming logs to client
+            await pm.logging_option(
+                stream_to_client=True,
+                aggregate_window_sec=1,
+                level=logging.ERROR,
+            )
+            # Give it some time to reflect
+            await asyncio.sleep(1)
 
-                    # These should not be streamed to client initially
-                    for _ in range(5):
-                        await am.print.call("no print streaming")
-                        await am.log.call("no log streaming")
-                    await asyncio.sleep(1)
+            # These should be streamed to client
+            for _ in range(5):
+                await am.print.call("has print streaming too")
+                await am.log.call("has log streaming as level matched")
 
-                    # Enable streaming logs to client
-                    await pm.logging_option(
-                        stream_to_client=True,
-                        aggregate_window_sec=1,
-                        level=logging.FATAL,
-                    )
-                    # Give it some time to reflect
-                    await asyncio.sleep(1)
+            await asyncio.sleep(1)
 
-                    # These should be streamed to client
-                    for _ in range(5):
-                        await am.print.call("has print streaming")
-                        await am.log.call("no log streaming due to level mismatch")
-                    await asyncio.sleep(1)
-
-                    # Enable streaming logs to client
-                    await pm.logging_option(
-                        stream_to_client=True,
-                        aggregate_window_sec=1,
-                        level=logging.ERROR,
-                    )
-                    # Give it some time to reflect
-                    await asyncio.sleep(1)
-
-                    # These should be streamed to client
-                    for _ in range(5):
-                        await am.print.call("has print streaming too")
-                        await am.log.call("has log streaming as level matched")
-
-                    await asyncio.sleep(1)
-
-                    # Flush all outputs
-                    stdout_file.flush()
-                    stderr_file.flush()
-                    os.fsync(stdout_file.fileno())
-                    os.fsync(stderr_file.fileno())
-
-                finally:
-                    # Restore Python's sys.stdout/stderr
-                    sys.stdout = original_sys_stdout
-                    sys.stderr = original_sys_stderr
-
-            # Restore original file descriptors
-            os.dup2(original_stdout_fd, 1)
-            os.dup2(original_stderr_fd, 2)
+            # Flush to ensure all output is written before reading
+            sys.stdout.flush()
+            sys.stderr.flush()
 
             # Read the captured output
-            with open(stdout_path, "r") as f:
+            with open(paths.stdout, "r") as f:
                 stdout_content = f.read()
 
-            with open(stderr_path, "r") as f:
+            assert paths.stderr is not None
+            with open(paths.stderr, "r") as f:
                 stderr_content = f.read()
-
-            # Clean up temp files
-            os.unlink(stdout_path)
-            os.unlink(stderr_path)
 
             # Assertions on the captured output
             # Has a leading context so we can distinguish between streamed log and
@@ -617,16 +661,6 @@ async def test_actor_log_streaming() -> None:
                 stderr_content,
             ), stderr_content
 
-    finally:
-        # Ensure file descriptors are restored even if something goes wrong
-        try:
-            os.dup2(original_stdout_fd, 1)
-            os.dup2(original_stderr_fd, 2)
-            os.close(original_stdout_fd)
-            os.close(original_stderr_fd)
-        except OSError:
-            pass
-
 
 # oss_skip: pytest keeps complaining about mocking get_ipython module
 # oss_skip: (SF) broken in GitHub by D86994420. Passes internally.
@@ -635,71 +669,47 @@ async def test_alloc_based_log_streaming() -> None:
     """Test both AllocHandle.stream_logs = False and True cases."""
 
     async def test_stream_logs_case(stream_logs: bool, test_name: str) -> None:
-        # Save original file descriptors
-        original_stdout_fd = os.dup(1)  # stdout
+        with configured(
+            enable_log_forwarding=True, enable_file_capture=True, tail_log_lines=100
+        ):
+            with redirected_stdio(capture_stderr=False) as paths:
+                # Create proc mesh with custom stream_logs setting
+                class ProcessAllocatorStreamLogs(ProcessAllocator):
+                    def allocate_nonblocking(
+                        self, spec: AllocSpec
+                    ) -> PythonTask[Alloc]:
+                        return super().allocate_nonblocking(spec)
 
-        try:
-            with configured(
-                enable_log_forwarding=True, enable_file_capture=True, tail_log_lines=100
-            ):
-                # Create temporary files to capture output
-                with tempfile.NamedTemporaryFile(
-                    mode="w+", delete=False
-                ) as stdout_file:
-                    stdout_path = stdout_file.name
-                    os.dup2(stdout_file.fileno(), 1)
-                    original_sys_stdout = sys.stdout
-                    sys.stdout = stdout_file
+                    def _stream_logs(self) -> bool:
+                        return stream_logs
 
-                    try:
-                        # Create proc mesh with custom stream_logs setting
-                        class ProcessAllocatorStreamLogs(ProcessAllocator):
-                            def allocate_nonblocking(
-                                self, spec: AllocSpec
-                            ) -> PythonTask[Alloc]:
-                                return super().allocate_nonblocking(spec)
+                alloc = ProcessAllocatorStreamLogs(*_get_bootstrap_args())
 
-                            def _stream_logs(self) -> bool:
-                                return stream_logs
+                host_mesh = HostMesh.allocate_nonblocking(
+                    "host",
+                    Extent(["hosts"], [1]),
+                    alloc,
+                    bootstrap_cmd=_bootstrap_cmd(),
+                )
 
-                        alloc = ProcessAllocatorStreamLogs(*_get_bootstrap_args())
+                pm = host_mesh.spawn_procs(name="proc", per_host={"gpus": 2})
 
-                        host_mesh = HostMesh.allocate_nonblocking(
-                            "host",
-                            Extent(["hosts"], [1]),
-                            alloc,
-                            bootstrap_cmd=_bootstrap_cmd(),
-                        )
+                am = pm.spawn("printer", Printer)
 
-                        pm = host_mesh.spawn_procs(name="proc", per_host={"gpus": 2})
+                await pm.initialized
 
-                        am = pm.spawn("printer", Printer)
+                for _ in range(5):
+                    await am.print.call(f"{test_name} print streaming")
 
-                        await pm.initialized
+                # Wait for at least the aggregation window (3 seconds)
+                await asyncio.sleep(5)
 
-                        for _ in range(5):
-                            await am.print.call(f"{test_name} print streaming")
-
-                        # Wait for at least the aggregation window (3 seconds)
-                        await asyncio.sleep(5)
-
-                        # Flush all outputs
-                        stdout_file.flush()
-                        os.fsync(stdout_file.fileno())
-
-                    finally:
-                        # Restore Python's sys.stdout
-                        sys.stdout = original_sys_stdout
-
-                # Restore original file descriptors
-                os.dup2(original_stdout_fd, 1)
+                # Flush to ensure all output is written before reading
+                sys.stdout.flush()
 
                 # Read the captured output
-                with open(stdout_path, "r") as f:
+                with open(paths.stdout, "r") as f:
                     stdout_content = f.read()
-
-                # Clean up temp files
-                os.unlink(stdout_path)
 
                 if not stream_logs:
                     # When stream_logs=False, logs should not be streamed to client
@@ -720,14 +730,6 @@ async def test_alloc_based_log_streaming() -> None:
                         rf"\[[0-9]\]{test_name} print streaming", stdout_content
                     ), f"stream_logs=True case: {stdout_content}"
 
-        finally:
-            # Ensure file descriptors are restored even if something goes wrong
-            try:
-                os.dup2(original_stdout_fd, 1)
-                os.close(original_stdout_fd)
-            except OSError:
-                pass
-
     # Test both cases
     await test_stream_logs_case(False, "stream_logs_false")
     await test_stream_logs_case(True, "stream_logs_true")
@@ -736,70 +738,31 @@ async def test_alloc_based_log_streaming() -> None:
 # oss_skip: (SF) broken in GitHub by D86994420. Passes internally.
 @pytest.mark.oss_skip
 async def test_logging_option_defaults() -> None:
-    # Save original file descriptors
-    original_stdout_fd = os.dup(1)  # stdout
-    original_stderr_fd = os.dup(2)  # stderr
+    with configured(
+        enable_log_forwarding=True, enable_file_capture=True, tail_log_lines=100
+    ):
+        with redirected_stdio(capture_stderr=True) as paths:
+            pm = this_host().spawn_procs(per_host={"gpus": 2})
+            am = pm.spawn("printer", Printer)
 
-    try:
-        with configured(
-            enable_log_forwarding=True, enable_file_capture=True, tail_log_lines=100
-        ):
-            # Create temporary files to capture output
-            with tempfile.NamedTemporaryFile(
-                mode="w+", delete=False
-            ) as stdout_file, tempfile.NamedTemporaryFile(
-                mode="w+", delete=False
-            ) as stderr_file:
-                stdout_path = stdout_file.name
-                stderr_path = stderr_file.name
+            for _ in range(5):
+                await am.print.call("print streaming")
+                await am.log.call("log streaming")
 
-                # Redirect file descriptors to our temp files
-                # This will capture both Python and Rust output
-                os.dup2(stdout_file.fileno(), 1)
-                os.dup2(stderr_file.fileno(), 2)
+            # Wait for > default aggregation window (3 seconds)
+            await asyncio.sleep(5)
 
-                # Also redirect Python's sys.stdout/stderr for completeness
-                original_sys_stdout = sys.stdout
-                original_sys_stderr = sys.stderr
-                sys.stdout = stdout_file
-                sys.stderr = stderr_file
-
-                try:
-                    pm = this_host().spawn_procs(per_host={"gpus": 2})
-                    am = pm.spawn("printer", Printer)
-
-                    for _ in range(5):
-                        await am.print.call("print streaming")
-                        await am.log.call("log streaming")
-
-                    # Wait for > default aggregation window (3 seconds)
-                    await asyncio.sleep(5)
-
-                    # Flush all outputs
-                    stdout_file.flush()
-                    stderr_file.flush()
-                    os.fsync(stdout_file.fileno())
-                    os.fsync(stderr_file.fileno())
-
-                finally:
-                    # Restore Python's sys.stdout/stderr
-                    sys.stdout = original_sys_stdout
-                    sys.stderr = original_sys_stderr
-
-            # Restore original file descriptors
-            os.dup2(original_stdout_fd, 1)
-            os.dup2(original_stderr_fd, 2)
+            # Flush to ensure all output is written before reading
+            sys.stdout.flush()
+            sys.stderr.flush()
 
             # Read the captured output
-            with open(stdout_path, "r") as f:
+            with open(paths.stdout, "r") as f:
                 stdout_content = f.read()
 
-            with open(stderr_path, "r") as f:
+            assert paths.stderr is not None
+            with open(paths.stderr, "r") as f:
                 stderr_content = f.read()
-
-            # Clean up temp files
-            os.unlink(stdout_path)
-            os.unlink(stderr_path)
 
             # Assertions on the captured output
             assert not re.search(
@@ -815,16 +778,6 @@ async def test_logging_option_defaults() -> None:
             assert not re.search(
                 r"similar log lines.*log streaming", stderr_content
             ), stderr_content
-
-    finally:
-        # Ensure file descriptors are restored even if something goes wrong
-        try:
-            os.dup2(original_stdout_fd, 1)
-            os.dup2(original_stderr_fd, 2)
-            os.close(original_stdout_fd)
-            os.close(original_stderr_fd)
-        except OSError:
-            pass
 
 
 class MockEvents:
@@ -888,77 +841,48 @@ async def test_flush_logs_ipython() -> None:
     with configured(
         enable_log_forwarding=True, enable_file_capture=True, tail_log_lines=100
     ):
-        # Save original file descriptors
-        original_stdout_fd = os.dup(1)  # stdout
+        with redirected_stdio(capture_stderr=False) as paths:
+            mock_ipython = MockIPython()
 
-        try:
-            # Create temporary files to capture output
-            with tempfile.NamedTemporaryFile(mode="w+", delete=False) as stdout_file:
-                stdout_path = stdout_file.name
+            with unittest.mock.patch(
+                "monarch._src.actor.logging.get_ipython",
+                lambda: mock_ipython,
+            ), unittest.mock.patch("monarch._src.actor.logging.IN_IPYTHON", True):
+                # Make sure we can register and unregister callbacks
+                for _ in range(3):
+                    pm1 = this_host().spawn_procs(per_host={"gpus": 2})
+                    pm2 = this_host().spawn_procs(per_host={"gpus": 2})
+                    am1 = pm1.spawn("printer", Printer)
+                    am2 = pm2.spawn("printer", Printer)
 
-                # Redirect file descriptors to our temp files
-                os.dup2(stdout_file.fileno(), 1)
+                    # Set aggregation window to ensure logs are buffered
+                    await pm1.logging_option(
+                        stream_to_client=True, aggregate_window_sec=600
+                    )
+                    await pm2.logging_option(
+                        stream_to_client=True, aggregate_window_sec=600
+                    )
 
-                # Also redirect Python's sys.stdout
-                original_sys_stdout = sys.stdout
-                sys.stdout = stdout_file
+                    # Generate some logs that will be aggregated
+                    for _ in range(5):
+                        await am1.print.call("ipython1 test log")
+                        await am2.print.call("ipython2 test log")
 
-                try:
-                    mock_ipython = MockIPython()
+                    # Trigger the post_run_cell event which should flush logs
+                    mock_ipython.events.trigger(
+                        "post_run_cell", unittest.mock.MagicMock()
+                    )
 
-                    with unittest.mock.patch(
-                        "monarch._src.actor.logging.get_ipython",
-                        lambda: mock_ipython,
-                    ), unittest.mock.patch(
-                        "monarch._src.actor.logging.IN_IPYTHON", True
-                    ):
-                        # Make sure we can register and unregister callbacks
-                        for _ in range(3):
-                            pm1 = this_host().spawn_procs(per_host={"gpus": 2})
-                            pm2 = this_host().spawn_procs(per_host={"gpus": 2})
-                            am1 = pm1.spawn("printer", Printer)
-                            am2 = pm2.spawn("printer", Printer)
+            # We expect to register post_run_cell hook only once per notebook/ipython session
+            assert mock_ipython.events.registers == 1
+            assert len(mock_ipython.events.callbacks["post_run_cell"]) == 1
 
-                            # Set aggregation window to ensure logs are buffered
-                            await pm1.logging_option(
-                                stream_to_client=True, aggregate_window_sec=600
-                            )
-                            await pm2.logging_option(
-                                stream_to_client=True, aggregate_window_sec=600
-                            )
-
-                            # Generate some logs that will be aggregated
-                            for _ in range(5):
-                                await am1.print.call("ipython1 test log")
-                                await am2.print.call("ipython2 test log")
-
-                            # Trigger the post_run_cell event which should flush logs
-                            mock_ipython.events.trigger(
-                                "post_run_cell", unittest.mock.MagicMock()
-                            )
-
-                        # Flush all outputs
-                        stdout_file.flush()
-                        os.fsync(stdout_file.fileno())
-
-                    # We expect to register post_run_cell hook only once per notebook/ipython session
-                    assert mock_ipython.events.registers == 1
-                    assert len(mock_ipython.events.callbacks["post_run_cell"]) == 1
-                finally:
-                    # Restore Python's sys.stdout
-                    sys.stdout = original_sys_stdout
-
-            # Restore original file descriptors
-            os.dup2(original_stdout_fd, 1)
+            # Flush to ensure all output is written before reading
+            sys.stdout.flush()
 
             # Read the captured output
-            with open(stdout_path, "r") as f:
+            with open(paths.stdout, "r") as f:
                 stdout_content = f.read()
-
-            # TODO: there are quite a lot of code dups and boilerplate; make them contextmanager utils
-
-            # Clean up temp files
-            os.unlink(stdout_path)
 
             # We triggered post_run_cell three times; in the current
             # implementation that yields three aggregated groups per
@@ -969,14 +893,6 @@ async def test_flush_logs_ipython() -> None:
 
             assert len(re.findall(pattern1, stdout_content)) >= 3, stdout_content
             assert len(re.findall(pattern2, stdout_content)) >= 3, stdout_content
-
-        finally:
-            # Ensure file descriptors are restored even if something goes wrong
-            try:
-                os.dup2(original_stdout_fd, 1)
-                os.close(original_stdout_fd)
-            except OSError:
-                pass
 
 
 # oss_skip: importlib not pulling resource correctly in git CI, needs to be revisited
@@ -1022,65 +938,35 @@ async def test_flush_on_disable_aggregation() -> None:
     with configured(
         enable_log_forwarding=True, enable_file_capture=True, tail_log_lines=100
     ):
-        # Save original file descriptors
-        original_stdout_fd = os.dup(1)  # stdout
+        with redirected_stdio(capture_stderr=False) as paths:
+            pm = this_host().spawn_procs(per_host={"gpus": 2})
+            am = pm.spawn("printer", Printer)
 
-        try:
-            # Create temporary files to capture output
-            with tempfile.NamedTemporaryFile(mode="w+", delete=False) as stdout_file:
-                stdout_path = stdout_file.name
+            # Set a long aggregation window to ensure logs aren't flushed immediately
+            await pm.logging_option(stream_to_client=True, aggregate_window_sec=60)
 
-                # Redirect file descriptors to our temp files
-                os.dup2(stdout_file.fileno(), 1)
+            # Generate some logs that will be aggregated but not flushed immediately
+            for _ in range(5):
+                await am.print.call("aggregated log line")
+            await asyncio.sleep(1)
 
-                # Also redirect Python's sys.stdout
-                original_sys_stdout = sys.stdout
-                sys.stdout = stdout_file
+            # Now disable aggregation - this should trigger an immediate flush
+            await pm.logging_option(stream_to_client=True, aggregate_window_sec=None)
 
-                try:
-                    pm = this_host().spawn_procs(per_host={"gpus": 2})
-                    am = pm.spawn("printer", Printer)
+            # Wait a bit to ensure logs are collected
+            await asyncio.sleep(1)
+            for _ in range(5):
+                await am.print.call("single log line")
 
-                    # Set a long aggregation window to ensure logs aren't flushed immediately
-                    await pm.logging_option(
-                        stream_to_client=True, aggregate_window_sec=60
-                    )
+            # Wait for > default aggregation window (3 secs)
+            await asyncio.sleep(5)
 
-                    # Generate some logs that will be aggregated but not flushed immediately
-                    for _ in range(5):
-                        await am.print.call("aggregated log line")
-                    await asyncio.sleep(1)
-
-                    # Now disable aggregation - this should trigger an immediate flush
-                    await pm.logging_option(
-                        stream_to_client=True, aggregate_window_sec=None
-                    )
-
-                    # Wait a bit to ensure logs are collected
-                    await asyncio.sleep(1)
-                    for _ in range(5):
-                        await am.print.call("single log line")
-
-                    # Wait for > default aggregation window (3 secs)
-                    await asyncio.sleep(5)
-
-                    # Flush all outputs
-                    stdout_file.flush()
-                    os.fsync(stdout_file.fileno())
-
-                finally:
-                    # Restore Python's sys.stdout
-                    sys.stdout = original_sys_stdout
-
-            # Restore original file descriptors
-            os.dup2(original_stdout_fd, 1)
+            # Flush to ensure all output is written before reading
+            sys.stdout.flush()
 
             # Read the captured output
-            with open(stdout_path, "r") as f:
+            with open(paths.stdout, "r") as f:
                 stdout_content = f.read()
-
-            # Clean up temp files
-            os.unlink(stdout_path)
 
             # Verify that logs were flushed when aggregation was disabled
             # We should see the aggregated logs in the output
@@ -1103,14 +989,6 @@ async def test_flush_on_disable_aggregation() -> None:
             assert (
                 total_single == 10
             ), f"Expected 10 single log lines, got {total_single} from {stdout_content}"
-
-        finally:
-            # Ensure file descriptors are restored even if something goes wrong
-            try:
-                os.dup2(original_stdout_fd, 1)
-                os.close(original_stdout_fd)
-            except OSError:
-                pass
 
 
 @pytest.mark.timeout(120)
@@ -1158,64 +1036,34 @@ async def test_adjust_aggregation_window() -> None:
     with configured(
         enable_log_forwarding=True, enable_file_capture=True, tail_log_lines=100
     ):
-        # Save original file descriptors
-        original_stdout_fd = os.dup(1)  # stdout
+        with redirected_stdio(capture_stderr=False) as paths:
+            pm = this_host().spawn_procs(per_host={"gpus": 2})
+            am = pm.spawn("printer", Printer)
 
-        try:
-            # Create temporary files to capture output
-            with tempfile.NamedTemporaryFile(mode="w+", delete=False) as stdout_file:
-                stdout_path = stdout_file.name
+            # Set a long aggregation window initially
+            await pm.logging_option(stream_to_client=True, aggregate_window_sec=100)
 
-                # Redirect file descriptors to our temp files
-                os.dup2(stdout_file.fileno(), 1)
+            # Generate some logs that will be aggregated
+            for _ in range(3):
+                await am.print.call("first batch of logs")
+            await asyncio.sleep(1)
 
-                # Also redirect Python's sys.stdout
-                original_sys_stdout = sys.stdout
-                sys.stdout = stdout_file
+            # Now adjust to a shorter window - this should update the flush deadline
+            await pm.logging_option(stream_to_client=True, aggregate_window_sec=2)
 
-                try:
-                    pm = this_host().spawn_procs(per_host={"gpus": 2})
-                    am = pm.spawn("printer", Printer)
+            # Generate more logs
+            for _ in range(3):
+                await am.print.call("second batch of logs")
 
-                    # Set a long aggregation window initially
-                    await pm.logging_option(
-                        stream_to_client=True, aggregate_window_sec=100
-                    )
+            # Wait for > aggregation window (2 secs)
+            await asyncio.sleep(4)
 
-                    # Generate some logs that will be aggregated
-                    for _ in range(3):
-                        await am.print.call("first batch of logs")
-                    await asyncio.sleep(1)
-
-                    # Now adjust to a shorter window - this should update the flush deadline
-                    await pm.logging_option(
-                        stream_to_client=True, aggregate_window_sec=2
-                    )
-
-                    # Generate more logs
-                    for _ in range(3):
-                        await am.print.call("second batch of logs")
-
-                    # Wait for > aggregation window (2 secs)
-                    await asyncio.sleep(4)
-
-                    # Flush all outputs
-                    stdout_file.flush()
-                    os.fsync(stdout_file.fileno())
-
-                finally:
-                    # Restore Python's sys.stdout/stderr
-                    sys.stdout = original_sys_stdout
-
-            # Restore original file descriptors
-            os.dup2(original_stdout_fd, 1)
+            # Flush to ensure all output is written before reading
+            sys.stdout.flush()
 
             # Read the captured output
-            with open(stdout_path, "r") as f:
+            with open(paths.stdout, "r") as f:
                 stdout_content = f.read()
-
-            # Clean up temp files
-            os.unlink(stdout_path)
 
             # Verify that logs were flushed when the aggregation window was adjusted
             # We should see both batches of logs in the output
@@ -1226,14 +1074,6 @@ async def test_adjust_aggregation_window() -> None:
             assert re.search(
                 r"similar log lines.*second batch of logs", stdout_content
             ), stdout_content
-
-        finally:
-            # Ensure file descriptors are restored even if something goes wrong
-            try:
-                os.dup2(original_stdout_fd, 1)
-                os.close(original_stdout_fd)
-            except OSError:
-                pass
 
 
 class SendAlot(Actor):
