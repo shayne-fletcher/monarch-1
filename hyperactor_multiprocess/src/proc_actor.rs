@@ -1063,16 +1063,14 @@ mod tests {
         }
     }
 
-    // V0 test - V1 needs equivalent coverage. Tests that actors not
+    // V0 test - V1 has equivalent coverage. Tests that actors not
     // responding within stop timeout are forcibly aborted
     // (JoinHandle::abort). Spawns SleepActors that block for 5
     // seconds, calls stop() with 1-second timeout, verifies abort
-    // counts and "aborting JoinHandle" logs. V1 uses the same
-    // underlying mechanism (Proc::destroy_and_wait) but lacks test
-    // coverage. V1's ActorMesh::stop() uses global config timeout
-    // (ACTOR_SPAWN_MAX_IDLE) and doesn't expose stopped/aborted
-    // counts, but equivalent tests should verify timeout and abort
-    // behavior work correctly.
+    // counts and "aborting JoinHandle" logs. V1 equivalent:
+    // hyperactor_mesh/src/v1/actor_mesh.rs::test_actor_mesh_stop_timeout.
+    // Both use the same underlying mechanism (Proc::destroy_and_wait),
+    // but V1 returns Err(Timeout) instead of Ok with abort counts.
     #[tracing_test::traced_test]
     #[tokio::test]
     #[cfg_attr(not(fbcode_build), ignore)]
