@@ -27,12 +27,11 @@ use hyperactor::Named;
 use hyperactor::OncePortRef;
 use hyperactor::PortRef;
 use hyperactor::RefClient;
-use hyperactor::RemoteMessage;
+use hyperactor::RemoteSpawn;
 use hyperactor::WorldId;
 use hyperactor::actor::ActorErrorKind;
 use hyperactor::actor::ActorHandle;
 use hyperactor::actor::ActorStatus;
-use hyperactor::actor::Referable;
 use hyperactor::actor::remote::Remote;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
@@ -425,9 +424,9 @@ impl ProcActor {
 
         let handle = match proc
             .clone()
-            .spawn::<Self>(
+            .spawn(
                 "proc",
-                ProcActorParams {
+                ProcActor::new(ProcActorParams {
                     proc: proc.clone(),
                     world_id: world_id.clone(),
                     system_actor_ref: SYSTEM_ACTOR_REF.clone(),
@@ -438,7 +437,7 @@ impl ProcActor {
                     supervision_update_interval,
                     labels,
                     lifecycle_mode,
-                },
+                }),
             )
             .await
         {
@@ -449,11 +448,7 @@ impl ProcActor {
             }
         };
 
-        let comm_actor = match proc
-            .clone()
-            .spawn::<CommActor>("comm", Default::default())
-            .await
-        {
+        let comm_actor = match proc.clone().spawn("comm", CommActor::default()).await {
             Ok(handle) => handle,
             Err(e) => {
                 Self::failed_proc_bootstrap_cleanup(mailbox_handle).await;
@@ -502,18 +497,6 @@ impl ProcActor {
 
 #[async_trait]
 impl Actor for ProcActor {
-    type Params = ProcActorParams;
-
-    async fn new(params: ProcActorParams) -> Result<Self, anyhow::Error> {
-        let last_successful_supervision_update = params.proc.clock().system_time_now();
-        Ok(Self {
-            params,
-            state: ProcState::AwaitingJoin,
-            remote: Remote::collect(),
-            last_successful_supervision_update,
-        })
-    }
-
     async fn init(&mut self, this: &Instance<Self>) -> anyhow::Result<()> {
         // Bind ports early so that when the proc actor joins, it can serve.
         this.bind::<Self>();
@@ -550,6 +533,16 @@ impl Actor for ProcActor {
 }
 
 impl ProcActor {
+    fn new(params: ProcActorParams) -> Self {
+        let last_successful_supervision_update = params.proc.clock().system_time_now();
+        Self {
+            params,
+            state: ProcState::AwaitingJoin,
+            remote: Remote::collect(),
+            last_successful_supervision_update,
+        }
+    }
+
     /// This proc's rank in the world.
     fn rank(&self) -> Index {
         self.params
@@ -837,15 +830,12 @@ impl Handler<ActorSupervisionEvent> for ProcActor {
 
 /// Convenience utility to spawn an actor on a proc. Spawn returns
 /// with the new ActorRef on success.
-pub async fn spawn<A: Actor + Referable>(
+pub async fn spawn<A: RemoteSpawn>(
     cx: &impl context::Actor,
     proc_actor: &ActorRef<ProcActor>,
     actor_name: &str,
     params: &A::Params,
-) -> Result<ActorRef<A>, anyhow::Error>
-where
-    A::Params: RemoteMessage,
-{
+) -> Result<ActorRef<A>, anyhow::Error> {
     let remote = Remote::collect();
     let (spawned_port, mut spawned_receiver) = open_port(cx);
     let ActorId(proc_id, _, _) = (*proc_actor).clone().into();
@@ -880,6 +870,7 @@ mod tests {
     use std::collections::HashSet;
     use std::time::Duration;
 
+    use hyperactor::RemoteSpawn;
     use hyperactor::actor::ActorStatus;
     use hyperactor::channel;
     use hyperactor::channel::ChannelAddr;
@@ -891,7 +882,6 @@ mod tests {
     use hyperactor::id;
     use hyperactor::reference::ActorRef;
     use hyperactor::test_utils::pingpong::PingPongActor;
-    use hyperactor::test_utils::pingpong::PingPongActorParams;
     use hyperactor::test_utils::pingpong::PingPongMessage;
     use maplit::hashset;
     use rand::Rng;
@@ -975,7 +965,7 @@ mod tests {
         server_handle.await;
     }
 
-    #[derive(Debug, Default, Actor)]
+    #[derive(Debug, Default)]
     #[hyperactor::export(
         spawn = true,
         handlers = [
@@ -983,6 +973,8 @@ mod tests {
         ],
     )]
     struct TestActor;
+
+    impl Actor for TestActor {}
 
     #[derive(Handler, HandleClient, RefClient, Serialize, Deserialize, Debug, Named)]
     enum TestActorMessage {
@@ -1045,7 +1037,7 @@ mod tests {
     // Helper actor for test_stop_timeout() below.
 
     // Sleep
-    #[derive(Debug, Default, Actor)]
+    #[derive(Debug, Default)]
     #[hyperactor::export(
         spawn = true,
         handlers = [
@@ -1053,6 +1045,8 @@ mod tests {
         ],
     )]
     struct SleepActor {}
+
+    impl Actor for SleepActor {}
 
     #[async_trait]
     impl Handler<u64> for SleepActor {
@@ -1450,6 +1444,136 @@ mod tests {
     // configured once at allocation. V1 intentionally does not
     // support dynamic address discovery - addresses are known
     // statically at allocation time.
+    #[tokio::test]
+    async fn test_undeliverable_message_return() {
+        // Proc can't send a message to a remote actor because the
+        // system connection is lost.
+        use hyperactor::mailbox::Undeliverable;
+        use hyperactor::test_utils::pingpong::PingPongActor;
+        use hyperactor::test_utils::pingpong::PingPongMessage;
+
+        // Use temporary config for this test
+        let config = hyperactor::config::global::lock();
+        let _guard = config.override_key(
+            hyperactor::config::MESSAGE_DELIVERY_TIMEOUT,
+            Duration::from_secs(1),
+        );
+
+        // Serve a system.
+        let server_handle = System::serve(
+            ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname)),
+            Duration::from_secs(120),
+            Duration::from_secs(120),
+        )
+        .await
+        .unwrap();
+        let mut system = System::new(server_handle.local_addr().clone());
+
+        // Build a supervisor.
+        let supervisor = system.attach().await.unwrap();
+        let (_sup_tx, _sup_rx) = supervisor.bind_actor_port::<ProcSupervisionMessage>();
+        let sup_ref = ActorRef::<ProcSupervisor>::attest(supervisor.self_id().clone());
+
+        // Construct a system sender.
+        let system_sender = BoxedMailboxSender::new(MailboxClient::new(
+            channel::dial(server_handle.local_addr().clone()).unwrap(),
+        ));
+
+        // Construct a proc forwarder in terms of the system sender.
+        let listen_addr = ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname));
+        let proc_forwarder =
+            BoxedMailboxSender::new(DialMailboxRouter::new_with_default(system_sender));
+
+        // Bootstrap proc 'world[0]', join the system.
+        let world_id = id!(world);
+        let proc_0 = Proc::new(world_id.proc_id(0), proc_forwarder.clone());
+        let _proc_actor_0 = ProcActor::bootstrap_for_proc(
+            proc_0.clone(),
+            world_id.clone(),
+            listen_addr,
+            server_handle.local_addr().clone(),
+            sup_ref.clone(),
+            Duration::from_secs(120),
+            HashMap::new(),
+            ProcLifecycleMode::ManagedBySystem,
+        )
+        .await
+        .unwrap();
+        let proc_0_client = proc_0.attach("client").unwrap();
+        let (proc_0_undeliverable_tx, mut proc_0_undeliverable_rx) = proc_0_client.open_port();
+
+        // Bootstrap a second proc 'world[1]', join the system.
+        let proc_1 = Proc::new(world_id.proc_id(1), proc_forwarder.clone());
+        let _proc_actor_1 = ProcActor::bootstrap_for_proc(
+            proc_1.clone(),
+            world_id.clone(),
+            ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname)),
+            server_handle.local_addr().clone(),
+            sup_ref.clone(),
+            Duration::from_secs(120),
+            HashMap::new(),
+            ProcLifecycleMode::ManagedBySystem,
+        )
+        .await
+        .unwrap();
+        let proc_1_client = proc_1.attach("client").unwrap();
+        let (proc_1_undeliverable_tx, mut _proc_1_undeliverable_rx) = proc_1_client.open_port();
+
+        // Spawn two actors 'ping' and 'pong' where 'ping' runs on
+        // 'world[0]' and 'pong' on 'world[1]' (that is, not on the
+        // same proc).
+        let ping_handle = proc_0
+            .spawn(
+                "ping",
+                PingPongActor::new(Some(proc_0_undeliverable_tx.bind()), None, None),
+            )
+            .await
+            .unwrap();
+        let pong_handle = proc_1
+            .spawn(
+                "pong",
+                PingPongActor::new(Some(proc_1_undeliverable_tx.bind()), None, None),
+            )
+            .await
+            .unwrap();
+
+        // Now kill the system server making message delivery between
+        // procs impossible.
+        server_handle.stop().await.unwrap();
+        server_handle.await;
+
+        let n = 100usize;
+        for i in 1..(n + 1) {
+            // Have 'ping' send 'pong' a message.
+            let ttl = 66 + i as u64; // Avoid ttl = 66!
+            let (once_handle, _) = proc_0_client.open_once_port::<bool>();
+            ping_handle
+                .send(PingPongMessage(ttl, pong_handle.bind(), once_handle.bind()))
+                .unwrap();
+        }
+
+        // `PingPongActor`s do not exit their message loop (a
+        // non-default actor behavior) when they have an undelivered
+        // message sent back to them (the reason being this very
+        // test).
+        assert!(matches!(*ping_handle.status().borrow(), ActorStatus::Idle));
+
+        // We expect n undelivered messages.
+        let Ok(Undeliverable(envelope)) = proc_0_undeliverable_rx.recv().await else {
+            unreachable!()
+        };
+        let PingPongMessage(_, _, _) = envelope.deserialized().unwrap();
+        let mut count = 1;
+        while let Ok(Some(Undeliverable(envelope))) = proc_0_undeliverable_rx.try_recv() {
+            // We care that every undeliverable message was accounted
+            // for. We can't assume anything about their arrival
+            // order.
+            count += 1;
+            let PingPongMessage(_, _, _) = envelope.deserialized().unwrap();
+        }
+        assert!(count == n);
+    }
+
     #[tracing_test::traced_test]
     #[tokio::test]
     #[cfg_attr(not(fbcode_build), ignore)]
@@ -1526,14 +1650,18 @@ mod tests {
         // Spawn two actors 'ping' and 'pong' where 'ping' runs on
         // 'world[0]' and 'pong' on 'world[1]' (that is, not on the
         // same proc).
-        let ping_params = PingPongActorParams::new(Some(proc_0_undeliverable_tx.bind()), None);
         let ping_handle = proc_0
-            .spawn::<PingPongActor>("ping", ping_params)
+            .spawn(
+                "ping",
+                PingPongActor::new(Some(proc_0_undeliverable_tx.bind()), None, None),
+            )
             .await
             .unwrap();
-        let pong_params = PingPongActorParams::new(Some(proc_1_undeliverable_tx.bind()), None);
         let pong_handle = proc_1
-            .spawn::<PingPongActor>("pong", pong_params)
+            .spawn(
+                "pong",
+                PingPongActor::new(Some(proc_1_undeliverable_tx.bind()), None, None),
+            )
             .await
             .unwrap();
 
@@ -1699,12 +1827,11 @@ mod tests {
         .await
         .unwrap();
         let (undeliverable_msg_tx, _) = cx.mailbox().open_port();
-        let params = PingPongActorParams::new(Some(undeliverable_msg_tx.bind()), None);
         let actor_ref = spawn::<PingPongActor>(
             cx,
             &bootstrap.proc_actor.bind(),
             &actor_id.to_string(),
-            &params,
+            &(Some(undeliverable_msg_tx.bind()), None, None),
         )
         .await
         .unwrap();
