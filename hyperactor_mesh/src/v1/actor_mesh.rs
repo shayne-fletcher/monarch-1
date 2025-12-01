@@ -1032,4 +1032,58 @@ mod tests {
             stop_duration
         );
     }
+
+    /// Test that actors stop gracefully when they respond to stop
+    /// signals within the timeout. Complementary to
+    /// test_actor_mesh_stop_timeout which tests abort behavior. V1
+    /// equivalent of
+    /// hyperactor_multiprocess/src/proc_actor.rs::test_stop
+    #[async_timed_test(timeout_secs = 30)]
+    #[cfg(fbcode_build)]
+    async fn test_actor_mesh_stop_graceful() {
+        hyperactor_telemetry::initialize_logging_for_test();
+
+        let instance = testing::instance().await;
+
+        // Create proc mesh with 2 replicas
+        let meshes = testing::proc_meshes(instance, extent!(replicas = 2)).await;
+        let proc_mesh = &meshes[1];
+
+        // Spawn TestActors - these stop cleanly (no blocking
+        // operations)
+        let actor_mesh = proc_mesh
+            .spawn::<testactor::TestActor>(instance, "test_actors", &())
+            .await
+            .unwrap();
+
+        let expected_actors = actor_mesh.values().count();
+        assert!(expected_actors > 0, "Should have spawned some actors");
+
+        // Time the stop operation
+        let stop_start = RealClock.now();
+        let result = actor_mesh.stop(instance).await;
+        let stop_duration = RealClock.now().duration_since(stop_start);
+
+        // Graceful stop should succeed (return Ok)
+        assert!(
+            result.is_ok(),
+            "Stop should succeed for responsive actors, got: {:?}",
+            result.err()
+        );
+
+        // Verify stop completed quickly (< 2 seconds). Responsive
+        // actors should stop almost immediately, not wait for
+        // timeout.
+        assert!(
+            stop_duration < std::time::Duration::from_secs(2),
+            "Graceful stop took {:?}, expected < 2s (actors should stop quickly)",
+            stop_duration
+        );
+
+        tracing::info!(
+            "Successfully stopped {} actors in {:?}",
+            expected_actors,
+            stop_duration
+        );
+    }
 }
