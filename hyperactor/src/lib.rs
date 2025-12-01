@@ -59,14 +59,12 @@
 #![feature(associated_type_defaults)]
 #![feature(box_patterns)]
 #![feature(btree_cursors)]
-#![feature(const_type_id)]
 #![feature(error_reporter)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(never_type)]
 #![feature(panic_update_hook)]
 #![feature(type_alias_impl_trait)]
 #![feature(trait_alias)]
-#![feature(panic_payload_as_str)]
 #![deny(missing_docs)]
 
 pub mod accum;
