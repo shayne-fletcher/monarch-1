@@ -847,7 +847,10 @@ async def test_flush_called_only_once() -> None:
             "monarch._src.actor.logging.IN_IPYTHON", True
         ), unittest.mock.patch(
             "monarch._src.actor.logging.flush_all_proc_mesh_logs"
-        ) as mock_flush:
+        ) as mock_flush, unittest.mock.patch(
+            "monarch._src.actor.logging.LoggingManager.enable_fd_capture_if_in_ipython",
+            return_value=None,
+        ):
             # Create 2 proc meshes with a large aggregation window
             pm1 = this_host().spawn_procs(per_host={"gpus": 2})
             _ = this_host().spawn_procs(per_host={"gpus": 2})
