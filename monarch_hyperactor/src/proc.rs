@@ -20,7 +20,6 @@ use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::time::Duration;
-use std::time::SystemTime;
 
 use anyhow::Result;
 use hyperactor::RemoteMessage;
@@ -42,8 +41,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use pyo3::types::PyType;
-use tokio::sync::OnceCell;
-use tokio::sync::watch;
 
 use crate::actor::PythonActor;
 use crate::actor::PythonActorHandle;
@@ -330,20 +327,8 @@ pub struct InstanceWrapper<M: RemoteMessage> {
     // TODO(T216450632): merge actor.rs and client.rs in monarch_extension
     #[allow(dead_code)]
     signal_port: PortHandle<Signal>,
-    last_controller_status_check: SystemTime,
-    controller_id: OnceCell<ActorId>,
-    #[allow(dead_code)]
-    controller_error_sender: watch::Sender<String>,
-    controller_error_receiver: watch::Receiver<String>,
     clock: ClockKind,
     actor_id: ActorId,
-}
-
-/// Error that can occur when there is controller supervision error.
-#[derive(thiserror::Error, Debug)]
-pub enum ControllerError {
-    #[error("controller actor {0} failed: {1}")]
-    Failed(ActorId, String),
 }
 
 impl<M: RemoteMessage> InstanceWrapper<M> {
@@ -360,7 +345,6 @@ impl<M: RemoteMessage> InstanceWrapper<M> {
 
         let (signal_port, signal_receiver) = instance.bind_actor_port::<Signal>();
 
-        let (controller_error_sender, controller_error_receiver) = watch::channel("".to_string());
         let actor_id = instance.self_id().clone();
 
         Ok(Self {
@@ -369,17 +353,9 @@ impl<M: RemoteMessage> InstanceWrapper<M> {
             signal_receiver,
             status: InstanceStatus::Running,
             signal_port,
-            last_controller_status_check: clock.system_time_now(),
-            controller_id: OnceCell::new(),
-            controller_error_sender,
-            controller_error_receiver,
             clock,
             actor_id,
         })
-    }
-
-    pub fn set_controller(&mut self, controller_id: ActorId) {
-        self.controller_id.set(controller_id).unwrap();
     }
 
     /// Send a message to any actor. It is the responsibility of the caller to ensure the right
@@ -416,39 +392,6 @@ impl<M: RemoteMessage> InstanceWrapper<M> {
         if signals.into_iter().any(|sig| matches!(sig, Signal::Stop)) {
             self.status = InstanceStatus::Stopped;
             anyhow::bail!("actor has been stopped");
-        }
-
-        if let Some(controller_id) = self.controller_id.get() {
-            // Check if there is any pending controller error.
-            match self.controller_error_receiver.has_changed() {
-                Ok(true) => {
-                    let controller_error = self.controller_error_receiver.borrow_and_update();
-                    return Err(ControllerError::Failed(
-                        controller_id.clone(),
-                        controller_error.clone(),
-                    )
-                    .into());
-                }
-                _ => {}
-            }
-
-            // Schedule next check for controller
-            let check_staleness = self
-                .last_controller_status_check
-                .elapsed()
-                .unwrap_or_default();
-
-            if check_staleness > Duration::from_secs(5) {
-                // NOTE: Controller supervision checking has been removed as it requires
-                // hyperactor_multiprocess, which monarch_hyperactor no longer depends on.
-                // This functionality was only used by the deprecated rust_backend_mesh.py.
-                // Modern mesh systems have their own supervision mechanisms.
-                tracing::debug!(
-                    controller_id = %controller_id,
-                    "Skipping deprecated controller supervision check"
-                );
-                self.last_controller_status_check = self.clock.system_time_now();
-            }
         }
 
         Ok(())
