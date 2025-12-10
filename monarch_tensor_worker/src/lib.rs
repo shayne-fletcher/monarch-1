@@ -1094,7 +1094,6 @@ mod tests {
     use monarch_messages::controller::WorkerError;
     use monarch_messages::worker::WorkerMessageClient;
     use monarch_types::PickledPyObject;
-    use pyo3::IntoPyObjectExt;
     use pyo3::Python;
     use pyo3::prelude::*;
     use pyo3::types::PyList;
@@ -1102,9 +1101,6 @@ mod tests {
     use rand::Rng;
     use rand::distributions::Alphanumeric;
     use timed_test::async_timed_test;
-    use torch_sys2::Device;
-    use torch_sys2::DeviceIndex;
-    use torch_sys2::MemoryFormat;
 
     use super::*;
     use crate::test_util::test_setup;
