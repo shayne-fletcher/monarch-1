@@ -340,6 +340,30 @@ _this_host_for_fake_in_process_host: _Lazy["HostMesh"] = _Lazy(
 )
 
 
+def shutdown_context() -> "Future[None]":
+    """Shutdown global actor context resources.
+
+    This should be called at the end of scripts that use the actor
+    system to ensure clean shutdown of background processes.
+
+    Returns:
+        Future[None]: A future that completes when shutdown is
+                      finished. Call with .get() to wait for
+                      completion.
+    """
+    from monarch._src.actor.future import Future
+
+    local_host = _this_host_for_fake_in_process_host.try_get()
+    if local_host is not None:
+        return local_host.shutdown()
+
+    # Nothing to shutdown - return a completed future
+    async def noop() -> None:
+        pass
+
+    return Future(coro=noop())
+
+
 def _init_root_proc_mesh() -> "ProcMesh":
     from monarch._src.actor.host_mesh import fake_in_process_host
 
