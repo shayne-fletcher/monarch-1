@@ -627,7 +627,13 @@ impl Drop for HostMesh {
             tracing::warn!(
                 host_mesh = %self.name,
                 hosts = hosts.len(),
-                "HostMesh dropped without a tokio runtime; skipping best-effort shutdown"
+                "HostMesh dropped without a Tokio runtime; skipping \
+                 best-effort shutdown. This indicates that .shutdown() \
+                 on this mesh has not been called before program exit \
+                 (perhaps due to a missing call to \
+                 'monarch.actor.shutdown_context()'?) This in turn can \
+                 lead to backtrace output due to folly SIGTERM \
+                 handlers."
             );
         }
 
