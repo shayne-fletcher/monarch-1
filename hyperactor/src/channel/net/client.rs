@@ -26,7 +26,6 @@ use tokio::sync::watch;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use tracing::Instrument;
-use tracing::Level;
 use tracing::Span;
 
 use super::framed::FrameReader;

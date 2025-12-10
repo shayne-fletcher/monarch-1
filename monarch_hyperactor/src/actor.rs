@@ -1326,7 +1326,7 @@ mod tests {
         let err = MeshError::ProcCreationError {
             host_rank: 0,
             mesh_agent: hyperactor::ActorRef::attest(id!(hello[0].actor[0])),
-            state,
+            state: Box::new(state),
         };
 
         let rust_msg = err.to_string();
