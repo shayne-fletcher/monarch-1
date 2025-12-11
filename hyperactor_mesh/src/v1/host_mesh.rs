@@ -927,7 +927,7 @@ impl HostMeshRef {
                     );
 
                     return Err(v1::Error::ProcCreationError {
-                        state,
+                        state: Box::new(state),
                         host_rank,
                         mesh_agent,
                     });
@@ -1520,8 +1520,9 @@ mod tests {
             .await
             .unwrap_err();
         assert_matches!(
-            err, v1::Error::ProcCreationError { state: resource::State { status: resource::Status::Failed(msg), ..}, .. }
-            if msg.contains("failed to configure process: Terminal(Stopped { exit_code: 1")
+            err,
+            v1::Error::ProcCreationError { state, .. }
+            if matches!(state.status, resource::Status::Failed(ref msg) if msg.contains("failed to configure process: Terminal(Stopped { exit_code: 1"))
         );
     }
 
