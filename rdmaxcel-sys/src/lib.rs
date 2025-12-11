@@ -21,7 +21,7 @@ mod inner {
     #[cfg(cargo)]
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-    // Manually define ibv_wc_flags as a bitfield (bindgen can't generate it from static const)
+    // Manually define ibv_wc_flags as a bitfield (bindgen isn't generating it)
     #[repr(transparent)]
     #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
     pub struct ibv_wc_flags(pub u32);
@@ -43,7 +43,7 @@ mod inner {
         }
     }
 
-    // Manually define ibv_access_flags as a bitfield (bindgen can't generate it from static const)
+    // Manually define ibv_access_flags as a bitfield (bindgen isn't generating it)
     #[repr(transparent)]
     #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
     pub struct ibv_access_flags(pub u32);
