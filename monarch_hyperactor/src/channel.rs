@@ -146,7 +146,6 @@ impl From<PyChannelTransport> for ChannelTransport {
     }
 }
 
-#[pymodule]
 pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     hyperactor_mod.add_class::<PyChannelTransport>()?;
     hyperactor_mod.add_class::<PyChannelAddr>()?;
