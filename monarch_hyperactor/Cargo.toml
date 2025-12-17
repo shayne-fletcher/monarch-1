@@ -65,7 +65,6 @@ build_utils = { path = "../build_utils" }
 
 [features]
 default = []
-extension-module = ["monarch_types/extension-module", "pyo3/extension-module"]
 packaged_rsync = []
 
 [lints]
