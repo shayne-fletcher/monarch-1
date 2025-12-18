@@ -388,7 +388,9 @@ def shutdown_context() -> "Future[None]":
                 shutdown_local_host_mesh,
             )
 
-            return Future(coro=shutdown_local_host_mesh())
+            # This function blocks and then exits the process
+            shutdown_local_host_mesh()
+            # Never reached
         except RuntimeError:
             # No local host mesh to shutdown
             pass

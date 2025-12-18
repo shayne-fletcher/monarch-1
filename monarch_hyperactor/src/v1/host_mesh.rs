@@ -344,13 +344,14 @@ fn py_host_mesh_from_bytes(bytes: &Bound<'_, PyBytes>) -> PyResult<PyHostMesh> {
 }
 
 #[pyfunction]
-fn shutdown_local_host_mesh() -> PyResult<PyPythonTask> {
+fn shutdown_local_host_mesh() -> PyResult<()> {
     let agent = HOST_MESH_AGENT_FOR_HOST
         .get()
         .ok_or_else(|| PyException::new_err("No local host mesh to shutdown"))?
         .clone();
 
-    PyPythonTask::new(async move {
+    // Block on the async shutdown operation
+    hyperactor::get_runtime().block_on(async move {
         // Create a temporary instance to send the shutdown message
         let temp_proc = hyperactor::Proc::local();
         let (instance, _) = temp_proc
@@ -365,8 +366,11 @@ fn shutdown_local_host_mesh() -> PyResult<PyPythonTask> {
             .await
             .map_err(|e| PyException::new_err(e.to_string()))?;
 
-        Ok(())
-    })
+        Ok::<(), pyo3::PyErr>(())
+    })?;
+
+    // Exit the process
+    std::process::exit(0)
 }
 
 pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
