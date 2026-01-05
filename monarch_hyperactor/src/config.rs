@@ -38,47 +38,39 @@ use pyo3::prelude::*;
 
 use crate::channel::PyBindSpec;
 
-/// Python wrapper for Encoding enum.
+/// Python enum for Encoding.
 ///
-/// This type bridges between Python strings (e.g., "bincode",
-/// "serde_json", "serde_multipart") and Rust's
-/// `hyperactor::data::Encoding` enum.
+/// Serialization format used for actor message payloads.
+#[pyclass(
+    module = "monarch._rust_bindings.monarch_hyperactor.config",
+    eq,
+    eq_int,
+    name = "Encoding"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PyEncoding(pub hyperactor::data::Encoding);
-
-impl From<PyEncoding> for hyperactor::data::Encoding {
-    fn from(e: PyEncoding) -> Self {
-        e.0
-    }
+pub enum PyEncoding {
+    Bincode,
+    Json,
+    Multipart,
 }
 
 impl From<hyperactor::data::Encoding> for PyEncoding {
     fn from(e: hyperactor::data::Encoding) -> Self {
-        PyEncoding(e)
+        match e {
+            hyperactor::data::Encoding::Bincode => PyEncoding::Bincode,
+            hyperactor::data::Encoding::Json => PyEncoding::Json,
+            hyperactor::data::Encoding::Multipart => PyEncoding::Multipart,
+        }
     }
 }
 
-impl<'py> FromPyObject<'py> for PyEncoding {
-    fn extract_bound(ob: &Bound<'py, PyAny>) -> PyResult<Self> {
-        let s: String = ob.extract()?;
-        let encoding = s.parse::<hyperactor::data::Encoding>().map_err(|e| {
-            PyValueError::new_err(format!(
-                "Invalid encoding '{}': {}. Valid values: bincode, serde_json, serde_multipart",
-                s, e
-            ))
-        })?;
-        Ok(PyEncoding(encoding))
-    }
-}
-
-impl<'py> IntoPyObject<'py> for PyEncoding {
-    type Target = PyAny;
-    type Output = Bound<'py, Self::Target>;
-    type Error = PyErr;
-
-    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
-        let formatted = self.0.to_string();
-        formatted.into_bound_py_any(py)
+impl From<PyEncoding> for hyperactor::data::Encoding {
+    fn from(e: PyEncoding) -> Self {
+        match e {
+            PyEncoding::Bincode => hyperactor::data::Encoding::Bincode,
+            PyEncoding::Json => hyperactor::data::Encoding::Json,
+            PyEncoding::Multipart => hyperactor::data::Encoding::Multipart,
+        }
     }
 }
 
@@ -637,6 +629,8 @@ pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     module.add_function(clear_runtime_config)?;
 
+    module.add_class::<PyEncoding>()?;
+
     Ok(())
 }
 
@@ -703,33 +697,50 @@ mod tests {
     }
 
     #[test]
-    fn test_pyencoding_parse_valid_values() {
+    fn test_pyencoding_enum_variants() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let s = PyString::new(py, "bincode");
-            let e: PyEncoding = s.extract().unwrap();
-            assert_eq!(e.0, hyperactor::data::Encoding::Bincode);
-
-            let s = PyString::new(py, "serde_json");
-            let e: PyEncoding = s.extract().unwrap();
-            assert_eq!(e.0, hyperactor::data::Encoding::Json);
-
-            let s = PyString::new(py, "serde_multipart");
-            let e: PyEncoding = s.extract().unwrap();
-            assert_eq!(e.0, hyperactor::data::Encoding::Multipart);
+            // Test all enum variants roundtrip
+            for variant in [PyEncoding::Bincode, PyEncoding::Json, PyEncoding::Multipart] {
+                let py_obj = Bound::new(py, variant).unwrap().into_any();
+                let back: PyEncoding = py_obj.extract().unwrap();
+                assert_eq!(back, variant);
+            }
         });
     }
 
     #[test]
-    fn test_pyencoding_parse_invalid_value() {
+    fn test_pyencoding_rejects_strings() {
         pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let s = PyString::new(py, "invalid_encoding");
+        Python::with_gil(|_py| {
+            // Strings ought not to work
+            let s = PyString::new(_py, "bincode");
             let result: PyResult<PyEncoding> = s.extract();
             assert!(result.is_err());
-            let err_msg = format!("{}", result.unwrap_err());
-            assert!(err_msg.contains("Invalid encoding"));
-            assert!(err_msg.contains("Valid values"));
+        });
+    }
+
+    #[test]
+    fn test_pyencoding_conversions() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|_py| {
+            // Test Rust enum -> PyEncoding -> Rust enum
+            let rust_enc = hyperactor::data::Encoding::Bincode;
+            let py_enc: PyEncoding = rust_enc.into();
+            assert_eq!(py_enc, PyEncoding::Bincode);
+
+            let back: hyperactor::data::Encoding = py_enc.into();
+            assert_eq!(back, rust_enc);
+
+            // Test all variants
+            assert_eq!(
+                PyEncoding::from(hyperactor::data::Encoding::Json),
+                PyEncoding::Json
+            );
+            assert_eq!(
+                PyEncoding::from(hyperactor::data::Encoding::Multipart),
+                PyEncoding::Multipart
+            );
         });
     }
 
@@ -738,10 +749,11 @@ mod tests {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             let original = hyperactor::data::Encoding::Multipart;
-            let py_encoding = PyEncoding(original);
-            let py_obj = py_encoding.into_pyobject(py).unwrap();
+            let py_encoding: PyEncoding = original.into();
+            let py_obj = Bound::new(py, py_encoding).unwrap().into_any();
             let back: PyEncoding = py_obj.extract().unwrap();
-            assert_eq!(back.0, original);
+            let rust_back: hyperactor::data::Encoding = back.into();
+            assert_eq!(rust_back, original);
         });
     }
 

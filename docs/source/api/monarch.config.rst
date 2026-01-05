@@ -359,15 +359,20 @@ Message Encoding
 ``default_encoding``
     Default message encoding format.
 
-    - **Type**: ``str``
-    - **Default**: ``"serde_multipart"``
-    - **Environment**: ``HYPERACTOR_DEFAULT_ENCODING``
+    - **Type**: ``Encoding`` enum
+    - **Default**: ``Encoding.Multipart``
+    - **Environment**: ``HYPERACTOR_DEFAULT_ENCODING`` (accepts ``"bincode"``, ``"serde_json"``, or ``"serde_multipart"``)
 
     Supported values:
 
-    - ``"bincode"`` - Binary encoding
-    - ``"serde_json"`` - JSON encoding
-    - ``"serde_multipart"`` - Multipart encoding (default)
+    - ``Encoding.Bincode`` - Bincode serialization (compact binary format via the ``bincode`` crate)
+    - ``Encoding.Json`` - JSON serialization (via ``serde_json``)
+    - ``Encoding.Multipart`` - Zero-copy multipart encoding that separates large binary fields from the message body, enabling efficient transmission via vectored I/O (default)
+
+    Example usage::
+
+        from monarch.config import Encoding, configure
+        configure(default_encoding=Encoding.Bincode)
 
 
 Mesh Bootstrap

@@ -20,6 +20,7 @@ from monarch._rust_bindings.monarch_hyperactor.channel import ChannelTransport
 from monarch._rust_bindings.monarch_hyperactor.config import (
     clear_runtime_config as _clear_runtime_config,
     configure as _configure,
+    Encoding,
     get_global_config as _get_global_config,
     get_runtime_config as _get_runtime_config,
 )
@@ -53,7 +54,7 @@ def configure(
     stop_actor_timeout: str | None = None,
     cleanup_timeout: str | None = None,
     remote_allocator_heartbeat_interval: str | None = None,
-    default_encoding: str | None = None,
+    default_encoding: Encoding | None = None,
     channel_net_rx_buffer_full_check_interval: str | None = None,
     message_latency_sampling_rate: float | None = None,
     enable_client_seq_assignment: bool | None = None,
@@ -111,7 +112,7 @@ def configure(
             stop_actor_timeout: Timeout for stopping actors (humantime).
             cleanup_timeout: Timeout for cleanup operations (humantime).
             remote_allocator_heartbeat_interval: Heartbeat interval for remote allocator (humantime).
-            default_encoding: Default message encoding ("bincode", "serde_json", or "serde_multipart").
+            default_encoding: Default message encoding (Encoding.Bincode, Encoding.Json, or Encoding.Multipart).
             channel_net_rx_buffer_full_check_interval: Network receive buffer check interval (humantime).
             message_latency_sampling_rate: Sampling rate for message latency tracking (0.0 to 1.0).
             enable_client_seq_assignment: Enable client-side sequence assignment.

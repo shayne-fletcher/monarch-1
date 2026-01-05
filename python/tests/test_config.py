@@ -260,11 +260,6 @@ def test_duration_config_multiple() -> None:
     assert config["tail_log_lines"] == 0
 
 
-# ============================================================================
-# Systematic tests for all 29 new config parameters added
-# ============================================================================
-
-
 @pytest.mark.parametrize(
     "param_name,test_value,expected_value,default_value",
     [
@@ -383,30 +378,34 @@ def test_new_float_param_message_latency_sampling_rate():
 
 
 def test_new_encoding_param():
-    """Test default_encoding string parameter with valid encodings."""
+    """Test default_encoding enum parameter with valid encodings."""
+    from monarch._rust_bindings.monarch_hyperactor.config import Encoding
+
     # Verify default value
     config = get_global_config()
-    assert config["default_encoding"] == "serde_multipart"
+    assert config["default_encoding"] == Encoding.Multipart
 
     # Test all valid encodings
-    valid_encodings = ["bincode", "serde_json", "serde_multipart"]
+    valid_encodings = [Encoding.Bincode, Encoding.Json, Encoding.Multipart]
     for encoding in valid_encodings:
         with configured(default_encoding=encoding) as config:
             assert config["default_encoding"] == encoding
 
     # Verify restoration
     config = get_global_config()
-    assert config["default_encoding"] == "serde_multipart"
+    assert config["default_encoding"] == Encoding.Multipart
 
 
 def test_new_encoding_param_invalid():
     """Test that invalid encoding values raise errors."""
-    with pytest.raises(TypeError, match="invalid value"):
-        with configured(default_encoding="invalid_encoding"):
+    # Strings aren't expected
+    with pytest.raises(TypeError):
+        with configured(default_encoding="bincode"):
             pass
 
-    with pytest.raises(TypeError, match="invalid value"):
-        with configured(default_encoding="xml"):
+    # Neither are numbers
+    with pytest.raises(TypeError):
+        with configured(default_encoding=123):
             pass
 
 
@@ -455,6 +454,8 @@ def test_new_port_range_param_invalid():
 
 def test_all_new_params_together():
     """Test setting all 29 new config parameters simultaneously."""
+    from monarch._rust_bindings.monarch_hyperactor.config import Encoding
+
     with configured(
         # Hyperactor timeouts and message handling
         process_exit_timeout="20s",
@@ -466,7 +467,7 @@ def test_all_new_params_together():
         stop_actor_timeout="15s",
         cleanup_timeout="25s",
         remote_allocator_heartbeat_interval="10s",
-        default_encoding="serde_json",
+        default_encoding=Encoding.Json,
         channel_net_rx_buffer_full_check_interval="200ms",
         message_latency_sampling_rate=0.5,
         enable_client_seq_assignment=True,
@@ -504,7 +505,7 @@ def test_all_new_params_together():
         assert config["stop_actor_timeout"] == "15s"
         assert config["cleanup_timeout"] == "25s"
         assert config["remote_allocator_heartbeat_interval"] == "10s"
-        assert config["default_encoding"] == "serde_json"
+        assert config["default_encoding"] == Encoding.Json
         assert config["channel_net_rx_buffer_full_check_interval"] == "200ms"
         assert config["message_latency_sampling_rate"] == pytest.approx(0.5, rel=1e-5)
         assert config["enable_client_seq_assignment"] is True
@@ -536,7 +537,7 @@ def test_all_new_params_together():
     assert config["stop_actor_timeout"] == "10s"
     assert config["cleanup_timeout"] == "3s"
     assert config["remote_allocator_heartbeat_interval"] == "5m"
-    assert config["default_encoding"] == "serde_multipart"
+    assert config["default_encoding"] == Encoding.Multipart
     assert config["channel_net_rx_buffer_full_check_interval"] == "5s"
     assert config["message_latency_sampling_rate"] == pytest.approx(0.01, rel=1e-5)
     assert config["enable_client_seq_assignment"] is False
