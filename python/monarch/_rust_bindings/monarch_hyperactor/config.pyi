@@ -10,9 +10,17 @@
 Type hints for the monarch_hyperactor.config Rust bindings.
 """
 
+from enum import Enum
 from typing import Any, Dict
 
 from monarch._rust_bindings.monarch_hyperactor.channel import ChannelTransport
+
+class Encoding(Enum):
+    """Message encoding format for serialization."""
+
+    Bincode: int
+    Json: int
+    Multipart: int
 
 def reload_config_from_env() -> None:
     """
@@ -49,7 +57,7 @@ def configure(
     stop_actor_timeout: str = ...,
     cleanup_timeout: str = ...,
     remote_allocator_heartbeat_interval: str = ...,
-    default_encoding: str = ...,
+    default_encoding: Encoding = ...,
     channel_net_rx_buffer_full_check_interval: str = ...,
     message_latency_sampling_rate: float = ...,
     enable_client_seq_assignment: bool = ...,
@@ -115,8 +123,8 @@ def configure(
         cleanup_timeout: Timeout for cleanup operations (humantime)
         remote_allocator_heartbeat_interval: Heartbeat interval for
             remote allocator (humantime)
-        default_encoding: Default message encoding ("bincode",
-            "serde_json", or "serde_multipart")
+        default_encoding: Default message encoding (Encoding.Bincode,
+            Encoding.Json, or Encoding.Multipart)
         channel_net_rx_buffer_full_check_interval: Network receive buffer
             check interval (humantime)
         message_latency_sampling_rate: Sampling rate for message latency
