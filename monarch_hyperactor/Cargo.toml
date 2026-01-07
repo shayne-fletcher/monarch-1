@@ -4,17 +4,12 @@
 name = "monarch_hyperactor"
 version = "0.0.0"
 authors = ["Meta"]
-edition = "2021"
+edition = "2024"
 license = "BSD-3-Clause"
 
 [[bin]]
 name = "monarch_hyperactor_test_bootstrap"
 path = "test/bootstrap.rs"
-edition = "2024"
-
-[[bin]]
-name = "process_allocator"
-edition = "2024"
 
 [[test]]
 name = "test_monarch_hyperactor"
