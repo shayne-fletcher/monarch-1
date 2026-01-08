@@ -1582,7 +1582,7 @@ mod tests {
         assert_matches!(
             err,
             v1::Error::ProcCreationError { state, .. }
-            if matches!(state.status, resource::Status::Failed(ref msg) if msg.contains("failed to configure process: Terminal(Stopped { exit_code: 1"))
+            if matches!(state.status, resource::Status::Failed(ref msg) if msg.contains("failed to configure process: Ready(Terminal(Stopped { exit_code: 1"))
         );
     }
 
