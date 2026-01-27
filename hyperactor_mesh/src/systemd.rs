@@ -61,7 +61,9 @@
 // systemd crate to be marked 'optional' in Cargo.toml. This use is to
 // assuage the "unused dependencies" linter.
 #[cfg(all(target_os = "linux", feature = "systemd"))]
-use systemd as _;
+use ::systemd as _;
+use hyperactor::clock::Clock;
+use hyperactor::clock::RealClock;
 use zbus::Connection;
 use zbus::Result;
 use zbus::proxy;
@@ -235,6 +237,86 @@ pub async fn start_transient_service(
         name: name.to_string(),
         path,
     })
+}
+
+/// Stop a systemd unit, treating "already gone" as success.
+///
+/// This is a convenience helper for transient units. By the time we
+/// attempt to stop a unit, systemd may have already garbage-collected
+/// it (e.g. due to `CollectMode=inactive-or-failed`), in which case
+/// `StopUnit` returns `org.freedesktop.systemd1.NoSuchUnit`.
+///
+/// We treat that specific error as a no-op and return `Ok(())`,
+/// while propagating any other D-Bus/systemd error to the caller.
+async fn stop_unit_best_effort(conn: &Connection, name: &str) -> zbus::Result<()> {
+    let systemd = SystemdManagerProxy::new(conn).await?;
+    if let Err(e) = systemd.stop_unit(name, "replace").await {
+        match e {
+            zbus::Error::MethodError(ref err_name, ..)
+                if err_name.as_str() == "org.freedesktop.systemd1.NoSuchUnit" =>
+            {
+                Ok(())
+            }
+            other => Err(other),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+/// Wait until a unit is gone (unloaded) from systemd, or timeout.
+///
+/// This polls `GetUnit` until it fails (meaning the unit no longer
+/// exists). Used after stopping a unit to ensure it's fully cleaned up.
+async fn wait_unit_gone(conn: &Connection, name: &str, timeout: std::time::Duration) {
+    let Ok(systemd) = SystemdManagerProxy::new(conn).await else {
+        return;
+    };
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        // get_unit fails once the unit is actually gone/unloaded.
+        if systemd.get_unit(name).await.is_err() {
+            return;
+        }
+
+        if std::time::Instant::now() >= deadline {
+            // Best-effort: don't block forever
+            return;
+        }
+
+        RealClock.sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Best-effort cleanup of a unit before (re-)starting it.
+///
+/// This stops the unit if running, resets any failed state, and waits
+/// briefly for systemd to unload it. Used to avoid collisions when
+/// reusing unit names.
+async fn cleanup_unit_best_effort(conn: &Connection, name: &str) {
+    let _ = stop_unit_best_effort(conn, name).await;
+    if let Ok(systemd) = SystemdManagerProxy::new(conn).await {
+        let _ = systemd.reset_failed_unit(name).await;
+    }
+    wait_unit_gone(conn, name, std::time::Duration::from_secs(2)).await;
+}
+
+/// Start a transient service after best-effort cleanup of any
+/// leftover unit with the same name.
+///
+/// This is the recommended way to start transient units that may be
+/// reused across tests or restarts, as it handles cleanup of stale
+/// units that could otherwise cause `StartTransientUnit` to fail.
+pub async fn start_transient_service_clean(
+    conn: &Connection,
+    name: &str,
+    mode: &str,
+    properties: Vec<(&str, zbus::zvariant::Value<'_>)>,
+    aux: Vec<(&str, Vec<(&str, zbus::zvariant::Value<'_>)>)>,
+) -> zbus::Result<SystemdUnitHandle> {
+    cleanup_unit_best_effort(conn, name).await;
+    start_transient_service(conn, name, mode, properties, aux).await
 }
 
 #[cfg(test)]
@@ -868,7 +950,7 @@ mod tests {
         ];
         let aux: Vec<(&str, Vec<(&str, Value<'_>)>)> = Vec::new();
 
-        let handle =
+        let _handle =
             start_transient_service_clean(&conn, &unit_name, "replace", props, aux).await?;
 
         // Wait for the marker to appear in the forwarded logs (up to
