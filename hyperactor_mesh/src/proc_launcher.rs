@@ -53,6 +53,9 @@ use tokio::sync::oneshot;
 
 use crate::bootstrap::BootstrapCommand;
 
+mod native;
+pub(crate) use native::NativeProcLauncher;
+
 /// Result of launching a proc.
 ///
 /// The launcher arranges for terminal status to be delivered on
