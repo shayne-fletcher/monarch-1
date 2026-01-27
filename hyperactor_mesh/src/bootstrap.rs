@@ -171,10 +171,14 @@ declare_attrs! {
 pub const BOOTSTRAP_ADDR_ENV: &str = "HYPERACTOR_MESH_BOOTSTRAP_ADDR";
 pub const BOOTSTRAP_INDEX_ENV: &str = "HYPERACTOR_MESH_INDEX";
 pub const CLIENT_TRACE_ID_ENV: &str = "MONARCH_CLIENT_TRACE_ID";
+
 /// A channel used by each process to receive its own stdout and stderr
 /// Because stdout and stderr can only be obtained by the parent process,
 /// they need to be streamed back to the process.
 pub(crate) const BOOTSTRAP_LOG_CHANNEL: &str = "BOOTSTRAP_LOG_CHANNEL";
+
+pub(crate) const BOOTSTRAP_MODE_ENV: &str = "HYPERACTOR_MESH_BOOTSTRAP_MODE";
+pub(crate) const PROCESS_NAME_ENV: &str = "HYPERACTOR_PROCESS_NAME";
 
 /// Messages sent from the process to the allocator. This is an envelope
 /// containing the index of the process (i.e., its "address" assigned by
@@ -378,13 +382,13 @@ impl Bootstrap {
     /// Serialize the mode into a environment-variable-safe string by
     /// base64-encoding its JSON representation.
     #[allow(clippy::result_large_err)]
-    fn to_env_safe_string(&self) -> v1::Result<String> {
+    pub(crate) fn to_env_safe_string(&self) -> v1::Result<String> {
         Ok(BASE64_STANDARD.encode(serde_json::to_string(&self)?))
     }
 
     /// Deserialize the mode from the representation returned by [`to_env_safe_string`].
     #[allow(clippy::result_large_err)]
-    fn from_env_safe_string(str: &str) -> v1::Result<Self> {
+    pub(crate) fn from_env_safe_string(str: &str) -> v1::Result<Self> {
         let data = BASE64_STANDARD.decode(str)?;
         let data = std::str::from_utf8(&data)?;
         Ok(serde_json::from_str(data)?)
