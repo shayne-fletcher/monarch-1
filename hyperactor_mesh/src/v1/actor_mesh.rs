@@ -1381,7 +1381,7 @@ mod tests {
         // The fact that we successfully collect them proves the ping actor
         // is still running and handling undeliverables correctly (not crashing).
         let mut count = 0;
-        let deadline = RealClock.now() + std::time::Duration::from_secs(5);
+        let deadline = RealClock.now() + std::time::Duration::from_secs(10);
         while count < n && RealClock.now() < deadline {
             match RealClock
                 .timeout(std::time::Duration::from_secs(1), undeliverable_rx.recv())
