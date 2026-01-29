@@ -644,7 +644,7 @@ mod tests {
                     // "agent".
                     mesh_agent,
                     bootstrap_command,
-                    proc_status: Some(ProcStatus::Ready { pid: _, started_at: _, addr: _, agent: proc_status_mesh_agent}),
+                    proc_status: Some(ProcStatus::Ready { started_at: _, addr: _, agent: proc_status_mesh_agent}),
                     ..
                 }),
             } if name == resource_name
