@@ -589,7 +589,7 @@ impl ActorMeshProtocol for ActorMeshRef<PythonActor> {
     }
 
     /// Stop the actor mesh asynchronously.
-    fn stop(&self, _instance: &PyInstance, reason: String) -> PyResult<PyPythonTask> {
+    fn stop(&self, _instance: &PyInstance, _reason: String) -> PyResult<PyPythonTask> {
         Err(PyNotImplementedError::new_err(
             "This cannot be used on ActorMeshRef, only on owned ActorMesh",
         ))
