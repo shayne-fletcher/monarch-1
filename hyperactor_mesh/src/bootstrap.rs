@@ -16,6 +16,7 @@ use std::io;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -66,6 +67,7 @@ use tracing::Instrument;
 use tracing::Level;
 use typeuri::Named;
 
+use crate::config::MESH_PROC_LAUNCHER_KIND;
 use crate::logging::OutputTarget;
 use crate::logging::StreamFwder;
 use crate::proc_launcher::LaunchOptions;
@@ -75,6 +77,7 @@ use crate::proc_launcher::ProcExitResult;
 use crate::proc_launcher::ProcLauncher;
 use crate::proc_launcher::ProcLauncherError;
 use crate::proc_launcher::StdioHandling;
+use crate::proc_launcher::SystemdProcLauncher;
 use crate::proc_launcher::format_process_name;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
@@ -1472,37 +1475,108 @@ impl<T: Into<PathBuf>> From<T> for BootstrapCommand {
     }
 }
 
-/// A process manager for launching and supervising **bootstrap
-/// processes** (via the [`bootstrap`] entry point).
+/// Selects which built-in process launcher backend to use for
+/// spawning procs.
 ///
-/// `BootstrapProcManager` is the host-side runtime for external procs
-/// in a hyperactor mesh. It delegates process spawning to the
-/// configured [`ProcLauncher`], forwards each child's stdout/stderr
-/// into the logging channel, and tracks lifecycle state through
-/// [`BootstrapProcHandle`] / [`ProcStatus`].
+/// This is an internal "implementation choice" control for the
+/// `ProcLauncher` abstraction: both variants are expected to satisfy
+/// the same lifecycle contract (launch, observe exit,
+/// terminate/kill), but they differ in *how* the OS process is
+/// supervised.
 ///
-/// Internally it maintains a map from [`ProcId`] to
-/// [`BootstrapProcHandle`], used for lifecycle queries (`status`) and
-/// exit monitoring.
+/// Variants:
+/// - [`LauncherKind::Native`]: spawns and supervises child processes
+///   directly using `tokio::process` (traditional parent/child
+///   model).
+/// - [`LauncherKind::Systemd`]: delegates supervision to `systemd
+///   --user` by creating transient `.service` units and observing
+///   lifecycle via D-Bus.
 ///
-/// Process cleanup on drop is handled by the launcher, which owns the
-/// PID table and sends `SIGKILL` to any still-running children.
+/// Configuration/parsing:
+/// - The empty string and `"native"` map to [`LauncherKind::Native`]
+///   (default).
+/// - `"systemd"` maps to [`LauncherKind::Systemd`].
+/// - Any other value is rejected as [`io::ErrorKind::InvalidInput`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LauncherKind {
+    /// Spawn and supervise OS children directly (tokio-based
+    /// launcher).
+    Native,
+    /// Spawn via transient `systemd --user` units and observe via
+    /// D-Bus.
+    Systemd,
+}
+
+impl FromStr for LauncherKind {
+    type Err = io::Error;
+
+    /// Parse a launcher kind from configuration text.
+    ///
+    /// Accepted values (case-insensitive, surrounding whitespace
+    /// ignored):
+    /// - `""` or `"native"` → [`LauncherKind::Native`]
+    /// - `"systemd"` → [`LauncherKind::Systemd`]
+    ///
+    /// Returns [`io::ErrorKind::InvalidInput`] for any other string.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "native" => Ok(Self::Native),
+            "systemd" => Ok(Self::Systemd),
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown proc launcher kind {other:?}; expected 'native' or 'systemd'"),
+            )),
+        }
+    }
+}
+
+/// Host-side manager for launching and supervising **bootstrap
+/// processes** (via the `bootstrap` entry point).
+///
+/// `BootstrapProcManager` is responsible for:
+/// - choosing and constructing the configured [`ProcLauncher`]
+///   backend,
+/// - preparing the bootstrap command/environment for each proc,
+/// - tracking proc lifecycle state via [`BootstrapProcHandle`] /
+///   [`ProcStatus`],
+/// - providing status/query APIs over the set of active procs.
+///
+/// It maintains an async registry mapping [`ProcId`] →
+/// [`BootstrapProcHandle`] for lifecycle queries and exit
+/// observation.
+///
+/// ## Stdio and cleanup
+///
+/// Stdio handling and shutdown/cleanup behavior are
+/// **launcher-dependent**:
+/// - The native launcher may capture/tail stdout/stderr and manages
+///   OS child processes directly.
+/// - The systemd launcher delegates supervision to systemd transient
+///   units on the user manager and does not expose a PID; stdio is
+///   managed by systemd.
+///
+/// On drop/shutdown, process cleanup is *best-effort* and performed
+/// via the selected launcher (e.g. direct child termination for
+/// native, `StopUnit` for systemd).
 pub struct BootstrapProcManager {
     /// The process launcher backend.
     launcher: Arc<dyn ProcLauncher>,
+
     /// The command specification used to bootstrap new processes.
     command: BootstrapCommand,
+
     /// Async registry of running children, keyed by [`ProcId`]. Holds
     /// [`BootstrapProcHandle`]s so callers can query or monitor
     /// status.
     children: Arc<tokio::sync::Mutex<HashMap<ProcId, BootstrapProcHandle>>>,
-    /// FileMonitor that aggregates logs from all children.
-    /// None if file monitor creation failed.
+
+    /// FileMonitor that aggregates logs from all children. None if
+    /// file monitor creation failed.
     file_appender: Option<Arc<crate::logging::FileAppender>>,
 
-    /// Directory for storing proc socket files. Procs place their sockets
-    /// in this directory, so that they can be looked up by other procs
-    /// for direct transfer.
+    /// Directory for storing proc socket files. Procs place their
+    /// sockets in this directory, so that they can be looked up by
+    /// other procs for direct transfer.
     socket_dir: TempDir,
 }
 
@@ -1514,7 +1588,15 @@ impl BootstrapProcManager {
     /// backed by a specific binary path (e.g. a bootstrap
     /// trampoline).
     pub(crate) fn new(command: BootstrapCommand) -> Result<Self, io::Error> {
-        let launcher: Arc<dyn ProcLauncher> = Arc::new(NativeProcLauncher::new());
+        let kind_str = hyperactor_config::global::get_cloned(MESH_PROC_LAUNCHER_KIND);
+        let kind: LauncherKind = kind_str.parse()?;
+
+        let launcher: Arc<dyn ProcLauncher> = match kind {
+            LauncherKind::Native => Arc::new(NativeProcLauncher::new()),
+            LauncherKind::Systemd => Arc::new(SystemdProcLauncher::new()),
+        };
+
+        tracing::info!(kind = ?kind, config_value = %kind_str, "proc launcher selected");
 
         let file_appender = if hyperactor_config::global::get(MESH_ENABLE_FILE_CAPTURE) {
             match crate::logging::FileAppender::new() {
@@ -3171,6 +3253,126 @@ mod tests {
         // BootstrapProcManager's won't send SIGKILLs to their spawned
         // children and there will be orphans left behind.
         host_mesh.shutdown(&instance).await.expect("host shutdown");
+    }
+
+    /// Same as `bootstrap_canonical_simple` but using the systemd
+    /// launcher backend.
+    #[tokio::test]
+    #[cfg(fbcode_build)]
+    async fn bootstrap_canonical_simple_systemd_launcher() {
+        // Acquire exclusive config lock and select systemd launcher.
+        let config = hyperactor_config::global::lock();
+        let _guard = config.override_key(MESH_PROC_LAUNCHER_KIND, "systemd".to_string());
+
+        // Create an actor instance we'll use to send and receive
+        // messages.
+        let instance = testing::instance();
+
+        // Configure a ProcessAllocator with the bootstrap binary.
+        let mut allocator = ProcessAllocator::new(Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        )));
+        // Request a new allocation of procs from the
+        // ProcessAllocator.
+        let alloc = allocator
+            .allocate(AllocSpec {
+                extent: extent!(replicas = 1),
+                constraints: Default::default(),
+                proc_name: None,
+                transport: ChannelTransport::Unix,
+                proc_allocation_mode: Default::default(),
+            })
+            .await
+            .unwrap();
+
+        // Build a HostMesh (see bootstrap_canonical_simple for
+        // detailed comments).
+        let mut host_mesh = HostMesh::allocate(&instance, Box::new(alloc), "test", None)
+            .await
+            .unwrap();
+
+        // Spawn a ProcMesh named "p0" on the host mesh.
+        let proc_mesh = host_mesh
+            .spawn(&instance, "p0", Extent::unity())
+            .await
+            .unwrap();
+
+        // Spawn an `ActorMesh<TestActor>` named "a0" on the proc
+        // mesh.
+        let actor_mesh: ActorMesh<testactor::TestActor> =
+            proc_mesh.spawn(&instance, "a0", &()).await.unwrap();
+
+        // Send a GetActorId message and verify we get a response.
+        let (port, mut rx) = instance.mailbox().open_port();
+        actor_mesh
+            .cast(&instance, testactor::GetActorId(port.bind()))
+            .unwrap();
+        let got_id = rx.recv().await.unwrap();
+        assert_eq!(
+            got_id,
+            actor_mesh.values().next().unwrap().actor_id().clone()
+        );
+
+        // Capture the proc_id and expected unit name before shutdown.
+        use crate::proc_launcher::SystemdProcLauncher;
+        use crate::systemd::SystemdManagerProxy;
+        use crate::systemd::SystemdUnitProxy;
+
+        let proc_id = proc_mesh.proc_ids().next().expect("one proc");
+        let expected_unit = SystemdProcLauncher::unit_name(&proc_id);
+
+        // Shutdown cleanly.
+        //
+        // Contract: after shutdown, procs are no longer running and
+        // the mesh is quiescent. We intentionally do NOT assert that
+        // the systemd transient unit disappears. With
+        // RemainAfterExit=true, systemd may keep the unit around for
+        // observation and GC it later according to its own policy;
+        // that persistence is not considered a leak.
+        host_mesh.shutdown(&instance).await.expect("host shutdown");
+
+        // Liveness check (best-effort): unit may persist, but should
+        // not remain running. With RemainAfterExit=true, systemd may
+        // keep the unit around in active/exited after the process has
+        // terminated. That is not a leak. We only require that the
+        // unit is not running after shutdown.
+        let conn = zbus::Connection::session().await.expect("D-Bus session");
+        let manager = SystemdManagerProxy::new(&conn)
+            .await
+            .expect("manager proxy");
+
+        let mut ok = false;
+        for _ in 0..50 {
+            match manager.get_unit(&expected_unit).await {
+                Err(_) => {
+                    // Unit already gone: fine.
+                    ok = true;
+                    break;
+                }
+                Ok(path) => {
+                    if let Ok(unit) = SystemdUnitProxy::builder(&conn)
+                        .path(path)
+                        .unwrap()
+                        .build()
+                        .await
+                    {
+                        let active = unit.active_state().await.unwrap_or_default();
+                        let sub = unit.sub_state().await.unwrap_or_default();
+                        // Fail only if still running; any other state
+                        // is acceptable.
+                        if !(active == "active" && sub == "running") && active != "activating" {
+                            ok = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            RealClock.sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            ok,
+            "unit should be gone or quiescent (not running) after shutdown"
+        );
     }
 
     #[tokio::test]
