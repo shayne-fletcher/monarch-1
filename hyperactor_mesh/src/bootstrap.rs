@@ -72,6 +72,8 @@ use typeuri::Named;
 
 use crate::logging::OutputTarget;
 use crate::logging::StreamFwder;
+use crate::proc_launcher::NativeProcLauncher;
+use crate::proc_launcher::ProcLauncher;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
 use crate::v1;
@@ -1630,8 +1632,9 @@ impl<T: Into<PathBuf>> From<T> for BootstrapCommand {
 /// Together these provide both a queryable, real-time status surface
 /// and a deterministic cleanup path, so no child processes are left
 /// orphaned if the manager itself is dropped.
-#[derive(Debug)]
 pub struct BootstrapProcManager {
+    /// The process launcher backend.
+    launcher: Arc<dyn ProcLauncher>,
     /// The command specification used to bootstrap new processes.
     command: BootstrapCommand,
     /// Async registry of running children, keyed by [`ProcId`]. Holds
@@ -1700,6 +1703,8 @@ impl BootstrapProcManager {
     /// backed by a specific binary path (e.g. a bootstrap
     /// trampoline).
     pub(crate) fn new(command: BootstrapCommand) -> Result<Self, io::Error> {
+        let launcher: Arc<dyn ProcLauncher> = Arc::new(NativeProcLauncher::new());
+
         let file_appender = if hyperactor_config::global::get(MESH_ENABLE_FILE_CAPTURE) {
             match crate::logging::FileAppender::new() {
                 Some(fm) => {
@@ -1716,6 +1721,7 @@ impl BootstrapProcManager {
         };
 
         Ok(Self {
+            launcher,
             command,
             children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
