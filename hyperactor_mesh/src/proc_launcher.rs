@@ -56,6 +56,9 @@ use crate::bootstrap::BootstrapCommand;
 mod native;
 pub(crate) use native::NativeProcLauncher;
 
+mod systemd;
+pub(crate) use systemd::SystemdProcLauncher;
+
 /// Result of launching a proc.
 ///
 /// The launcher arranges for terminal status to be delivered on
@@ -317,12 +320,24 @@ pub(crate) trait ProcLauncher: Send + Sync + 'static {
     async fn terminate(&self, proc_id: &ProcId, timeout: Duration)
     -> Result<(), ProcLauncherError>;
 
-    /// Initiate an immediate force-kill.
+    /// Initiate a force-kill.
     ///
     /// Semantics:
-    /// - Request immediate termination (SIGKILL / RPC / API call).
+    /// - Request termination as forcefully as the backend allows.
     /// - Return immediately; final status is delivered through
     ///   `exit_rx`.
+    ///
+    /// The exact mechanism is backend-specific:
+    /// - **Native**: sends SIGKILL directly to the PID.
+    /// - **Systemd**: calls `StopUnit` (same as `terminate`), which
+    ///   sends SIGTERM and escalates to SIGKILL after the unit's
+    ///   configured timeout. There is no separate "immediate SIGKILL"
+    ///   API in the systemd D-Bus interface without adding `KillUnit`.
+    ///
+    /// **Note**: For backends like systemd, `kill()` currently behaves
+    /// identically to `terminate()`. Callers who need a stronger
+    /// guarantee should await `exit_rx` with a timeout rather than
+    /// assuming immediate termination.
     ///
     /// Idempotent behavior is preferred: killing an already-dead proc
     /// should not be treated as an error unless the backend cannot
