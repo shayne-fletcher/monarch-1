@@ -2980,7 +2980,7 @@ mod tests {
             // Verify backtrace is captured. Note the backtrace message might
             // change in the future. If that happens, we need to update this
             // statement with something up-to-date.
-            assert!(error_msg.contains("rust_begin_unwind"));
+            assert!(error_msg.contains("library/std/src/panicking.rs"));
         }
     }
 
