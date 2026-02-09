@@ -26,7 +26,7 @@ pub fn format_proc_tree_with_urls(proc: &Proc, base_url: Option<&str>) -> String
 }
 
 /// URL-encode a string for use in a URL path component.
-fn url_encode_path(s: &str) -> String {
+pub(super) fn url_encode_path(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3);
     for c in s.chars() {
         match c {
