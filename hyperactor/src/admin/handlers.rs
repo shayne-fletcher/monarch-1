@@ -128,7 +128,7 @@ pub async fn get_actor(
 }
 
 /// Build ActorDetails from an InstanceCell.
-fn build_actor_details(cell: &InstanceCell) -> ActorDetails {
+pub(super) fn build_actor_details(cell: &InstanceCell) -> ActorDetails {
     let status = cell.status().borrow().clone();
     let mut children = Vec::new();
     cell.traverse(&mut |child, depth| {
