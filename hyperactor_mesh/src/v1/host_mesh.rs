@@ -21,6 +21,7 @@ use ndslice::view::CollectMeshExt;
 
 use crate::supervision::MeshFailure;
 
+pub mod host_admin;
 pub mod mesh_agent;
 
 use std::collections::HashSet;
@@ -48,6 +49,8 @@ use crate::Bootstrap;
 use crate::alloc::Alloc;
 use crate::bootstrap::BootstrapCommand;
 use crate::bootstrap::BootstrapProcManager;
+use crate::mesh_admin::MeshAdminAgent;
+use crate::mesh_admin::MeshAdminMessageClient;
 use crate::proc_mesh::DEFAULT_TRANSPORT;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
@@ -1071,6 +1074,31 @@ impl HostMeshRef {
     /// The name of the referenced host mesh.
     pub fn name(&self) -> &Name {
         &self.name
+    }
+
+    /// Spawn a [`MeshAdminAgent`] on `proc` and return its HTTP address.
+    ///
+    /// The agent aggregates admin state across all hosts in this mesh,
+    /// serving an HTTP API on an ephemeral port.
+    pub async fn spawn_admin(
+        &self,
+        cx: &impl hyperactor::context::Actor,
+        proc: &hyperactor::Proc,
+    ) -> anyhow::Result<std::net::SocketAddr> {
+        let hosts: Vec<(String, ActorRef<HostMeshAgent>)> = self
+            .ranks
+            .iter()
+            .map(|h| (h.0.to_string(), h.mesh_agent()))
+            .collect();
+        let agent_handle = proc.spawn("mesh_admin", MeshAdminAgent::new(hosts))?;
+        let agent_ref = agent_handle.bind::<MeshAdminAgent>();
+
+        let response = agent_ref.get_admin_addr(cx).await?;
+        let addr_str = response
+            .addr
+            .ok_or_else(|| anyhow::anyhow!("mesh admin agent did not report an address"))?;
+        let addr: std::net::SocketAddr = addr_str.parse()?;
+        Ok(addr)
     }
 
     #[hyperactor::instrument(fields(host_mesh=self.name.to_string(), proc_mesh=proc_mesh_name.to_string()))]

@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-//! Interactive TUI client for the hyperactor admin HTTP API.
+//! Interactive TUI client for the Monarch mesh admin HTTP API.
 //!
 //! Displays the full topology as a navigable tree: host → proc → actor.
 //! Selecting any node shows contextual details on the right pane,
@@ -39,13 +39,13 @@ use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
 use futures::StreamExt;
 use hyperactor::ActorId;
-use hyperactor::ProcId;
 use hyperactor::admin::ActorDetails;
 use hyperactor::admin::HostDetails;
 use hyperactor::admin::HostProcEntry;
 use hyperactor::admin::HostSummary;
 use hyperactor::admin::ProcDetails;
-use hyperactor::admin::ProcSummary;
+use indicatif::ProgressBar;
+use indicatif::ProgressStyle;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Constraint;
@@ -63,11 +63,8 @@ use ratatui::widgets::List;
 use ratatui::widgets::ListItem;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
+use serde::Deserialize;
 use serde_json::Value;
-
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
 
 /// Command-line arguments for the admin TUI.
 #[derive(Debug, Parser)]
@@ -82,9 +79,17 @@ struct Args {
     refresh_ms: u64,
 }
 
-// ---------------------------------------------------------------------------
+// Client-side projection of the mesh admin `/v1/hosts` response.
+// This type is private in mesh_admin.rs so we replicate it here for deserialization.
+#[derive(Debug, Deserialize)]
+struct MeshHostsResponse {
+    #[allow(dead_code)]
+    total: usize,
+    hosts: Vec<HostSummary>,
+    unreachable: Vec<String>,
+}
+
 // Topology tree model
-// ---------------------------------------------------------------------------
 
 /// What kind of entity a tree node represents.
 #[derive(Debug, Clone)]
@@ -93,15 +98,13 @@ enum NodeKind {
         addr: String,
     },
     Proc {
-        proc_id: ProcId,
-        /// Original API string for URL construction (ProcId round-trip
-        /// through Display/FromStr can change the ChannelAddr representation).
-        api_name: String,
+        host_addr: String,
+        proc_name: String,
     },
     Actor {
-        actor_id: ActorId,
-        /// Original proc API string for URL construction.
-        proc_api_name: String,
+        host_addr: String,
+        proc_name: String,
+        actor_name: String,
     },
 }
 
@@ -110,8 +113,15 @@ impl NodeKind {
     fn expand_key(&self) -> String {
         match self {
             NodeKind::Host { addr } => format!("host:{}", addr),
-            NodeKind::Proc { proc_id, .. } => format!("proc:{}", proc_id),
-            NodeKind::Actor { actor_id, .. } => format!("actor:{}", actor_id),
+            NodeKind::Proc {
+                host_addr,
+                proc_name,
+            } => format!("proc:{}:{}", host_addr, proc_name),
+            NodeKind::Actor {
+                host_addr,
+                proc_name,
+                actor_name,
+            } => format!("actor:{}:{}:{}", host_addr, proc_name, actor_name),
         }
     }
 }
@@ -134,9 +144,7 @@ enum NodeDetail {
     Actor(ActorDetails),
 }
 
-// ---------------------------------------------------------------------------
 // Application state
-// ---------------------------------------------------------------------------
 
 struct App {
     base_url: String,
@@ -153,6 +161,19 @@ struct App {
 
     last_refresh: String,
     error: Option<String>,
+
+    /// Whether to show system/infrastructure procs (prefixed with `[system]`).
+    show_system_procs: bool,
+}
+
+/// Result of handling a key event.
+enum KeyResult {
+    /// Nothing changed.
+    None,
+    /// Selection or expand/collapse changed; re-fetch detail.
+    DetailChanged,
+    /// A filter/view setting changed; full tree refresh needed.
+    NeedsRefresh,
 }
 
 impl App {
@@ -167,6 +188,7 @@ impl App {
             detail_error: None,
             last_refresh: String::new(),
             error: None,
+            show_system_procs: false,
         }
     }
 
@@ -200,8 +222,7 @@ impl App {
     ///
     /// 1. GET /v1/hosts → list of hosts
     /// 2. For each host, GET /v1/hosts/{addr} → proc names
-    /// 3. For each proc, GET /procs/{name} → root actors
-    /// 4. GET / → all procs; add any not already under a host as standalone entries
+    /// 3. For each proc, GET /v1/hosts/{addr}/procs/{name} → root actors
     async fn refresh(&mut self) {
         self.error = None;
 
@@ -219,19 +240,21 @@ impl App {
             .and_then(|idx| self.tree.get(idx))
             .map(|n| n.kind.expand_key());
 
-        let hosts = match self
+        let (hosts, unreachable_hosts) = match self
             .client
             .get(format!("{}/v1/hosts", self.base_url))
             .send()
             .await
         {
-            Ok(resp) if resp.status().is_success() => match resp.json::<Vec<HostSummary>>().await {
-                Ok(h) => h,
-                Err(e) => {
-                    self.error = Some(format!("Parse error: {}", e));
-                    return;
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<MeshHostsResponse>().await {
+                    Ok(mesh_resp) => (mesh_resp.hosts, mesh_resp.unreachable),
+                    Err(e) => {
+                        self.error = Some(format!("Parse error: {}", e));
+                        return;
+                    }
                 }
-            },
+            }
             Ok(resp) => {
                 self.error = Some(format!("HTTP {}", resp.status()));
                 return;
@@ -243,7 +266,6 @@ impl App {
         };
 
         let mut tree = Vec::new();
-        let mut hosted_procs: HashSet<String> = HashSet::new();
 
         for host in &hosts {
             let host_key = format!("host:{}", host.addr);
@@ -260,7 +282,11 @@ impl App {
             // Fetch host details to get proc names
             let host_details = self.fetch_host_details(&host.addr).await;
             let mut proc_entries: Vec<&HostProcEntry> = match &host_details {
-                Some(hd) => hd.procs.iter().collect(),
+                Some(hd) => hd
+                    .procs
+                    .iter()
+                    .filter(|p| self.show_system_procs || !p.name.starts_with("[system]"))
+                    .collect(),
                 None => continue,
             };
             proc_entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -271,25 +297,20 @@ impl App {
             }
 
             for entry in &proc_entries {
-                hosted_procs.insert(entry.name.clone());
-                self.append_proc_to_tree(&mut tree, &entry.name, 1, &expanded_keys)
+                self.append_proc_to_tree(&mut tree, &entry.name, &host.addr, 1, &expanded_keys)
                     .await;
             }
         }
 
-        // Fetch all procs and add any not already under a host
-        if let Some(all_procs) = self.fetch_all_procs().await {
-            let mut standalone: Vec<String> = all_procs
-                .into_iter()
-                .map(|p| p.name)
-                .filter(|name| !hosted_procs.contains(name))
-                .collect();
-            standalone.sort();
-
-            for proc_name in &standalone {
-                self.append_proc_to_tree(&mut tree, proc_name, 0, &expanded_keys)
-                    .await;
-            }
+        // Show unreachable hosts (greyed out, no children to expand)
+        for addr in &unreachable_hosts {
+            tree.push(TreeNode {
+                label: format!("{} (unreachable)", addr),
+                depth: 0,
+                kind: NodeKind::Host { addr: addr.clone() },
+                expanded: false,
+                has_children: false,
+            });
         }
 
         self.tree = tree;
@@ -326,8 +347,17 @@ impl App {
         }
     }
 
-    async fn fetch_proc_details(&self, proc_name: &str) -> Result<ProcDetails, String> {
-        let url = format!("{}/procs/{}", self.base_url, url_encode(proc_name));
+    async fn fetch_proc_details(
+        &self,
+        host_addr: &str,
+        proc_name: &str,
+    ) -> Result<ProcDetails, String> {
+        let url = format!(
+            "{}/v1/hosts/{}/procs/{}",
+            self.base_url,
+            url_encode(host_addr),
+            url_encode(proc_name),
+        );
         let resp = self
             .client
             .get(&url)
@@ -343,65 +373,49 @@ impl App {
         }
     }
 
-    /// Fetch all procs from the global admin state.
-    async fn fetch_all_procs(&self) -> Option<Vec<ProcSummary>> {
-        let url = format!("{}/", self.base_url);
-        let resp = self.client.get(&url).send().await.ok()?;
-        if resp.status().is_success() {
-            resp.json::<Vec<ProcSummary>>().await.ok()
-        } else {
-            None
-        }
-    }
-
     /// Append a proc and its actors to the tree at the given depth.
     async fn append_proc_to_tree(
         &self,
         tree: &mut Vec<TreeNode>,
         proc_name: &str,
+        host_addr: &str,
         depth: usize,
         expanded_keys: &HashSet<String>,
     ) {
-        let proc_id = match ProcId::from_str(proc_name) {
-            Ok(id) => id,
-            Err(_) => return, // admin API should always produce valid ProcId strings
+        let kind = NodeKind::Proc {
+            host_addr: host_addr.to_string(),
+            proc_name: proc_name.to_string(),
         };
-        let label = match &proc_id {
-            ProcId::Direct(_, name) => name.clone(),
-            _ => proc_name.to_string(),
-        };
-        let proc_key = format!("proc:{}", proc_id);
+        let proc_key = kind.expand_key();
+        let short_name = extract_short_proc_name(proc_name);
         tree.push(TreeNode {
-            label,
+            label: short_name,
             depth,
-            kind: NodeKind::Proc {
-                proc_id: proc_id.clone(),
-                api_name: proc_name.to_string(),
-            },
+            kind,
             expanded: expanded_keys.contains(&proc_key),
             has_children: true,
         });
 
         // Fetch proc details to get root actors
-        if let Ok(pd) = self.fetch_proc_details(proc_name).await {
-            for actor_str in &pd.root_actors {
-                let (label, actor_id) = match ActorId::from_str(actor_str) {
-                    Ok(id) => {
-                        let label = format!("{}[{}]", id.name(), id.pid());
-                        (label, id)
-                    }
-                    Err(_) => {
-                        // Fallback: construct a synthetic ActorId
-                        let id = ActorId(proc_id.clone(), actor_str.clone(), 0);
-                        (actor_str.clone(), id)
-                    }
+        if let Ok(pd) = self.fetch_proc_details(host_addr, proc_name).await {
+            for root_actor in &pd.root_actors {
+                // Parse the ActorId to get a short display label and the
+                // plain actor name (used for URL construction — the handler
+                // matches against `actor_id.name()`).
+                let (label, actor_name) = match ActorId::from_str(root_actor) {
+                    Ok(actor_id) => (
+                        format!("{}[{}]", actor_id.name(), actor_id.pid()),
+                        actor_id.name().to_string(),
+                    ),
+                    Err(_) => (root_actor.clone(), root_actor.clone()),
                 };
                 tree.push(TreeNode {
                     label,
                     depth: depth + 1,
                     kind: NodeKind::Actor {
-                        actor_id,
-                        proc_api_name: proc_name.to_string(),
+                        host_addr: host_addr.to_string(),
+                        proc_name: proc_name.to_string(),
+                        actor_name,
                     },
                     expanded: false,
                     has_children: false,
@@ -429,85 +443,87 @@ impl App {
                 Some(hd) => self.detail = Some(NodeDetail::Host(hd)),
                 None => self.detail_error = Some("Failed to fetch host details".to_string()),
             },
-            NodeKind::Proc { api_name, .. } => match self.fetch_proc_details(api_name).await {
+            NodeKind::Proc {
+                host_addr,
+                proc_name,
+            } => match self.fetch_proc_details(host_addr, proc_name).await {
                 Ok(pd) => self.detail = Some(NodeDetail::Proc(pd)),
                 Err(e) => self.detail_error = Some(e),
             },
             NodeKind::Actor {
-                actor_id,
-                proc_api_name,
+                host_addr,
+                proc_name,
+                actor_name,
             } => {
                 let url = format!(
-                    "{}/procs/{}/{}",
+                    "{}/v1/hosts/{}/procs/{}/{}",
                     self.base_url,
-                    url_encode(proc_api_name),
-                    url_encode(actor_id.name()),
+                    url_encode(host_addr),
+                    url_encode(proc_name),
+                    url_encode(actor_name),
                 );
                 match self.client.get(&url).send().await {
                     Ok(resp) if resp.status().is_success() => {
                         match resp.json::<ActorDetails>().await {
                             Ok(ad) => self.detail = Some(NodeDetail::Actor(ad)),
-                            Err(e) => {
-                                self.detail_error = Some(format!("Parse error: {}", e));
+                            Err(_) => {
+                                self.detail_error =
+                                    Some("Failed to parse actor details".to_string());
                             }
                         }
                     }
-                    Ok(resp) => {
-                        self.detail_error = Some(format!("HTTP {}", resp.status()));
-                    }
-                    Err(e) => {
-                        self.detail_error = Some(format!("Request failed: {}", e));
+                    _ => {
+                        self.detail_error = Some("Failed to fetch actor details".to_string());
                     }
                 }
             }
         }
     }
 
-    /// Handle a key event. Returns true if the selection changed or
-    /// a node was expanded/collapsed (i.e., detail should be re-fetched).
-    fn on_key(&mut self, key: KeyEvent) -> bool {
+    /// Handle a key event.
+    fn on_key(&mut self, key: KeyEvent) -> KeyResult {
         let visible = self.visible_indices();
         let vis_len = visible.len();
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
                 self.should_quit = true;
-                false
+                KeyResult::None
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
-                false
+                KeyResult::None
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.selected > 0 {
                     self.selected -= 1;
-                    true
+                    KeyResult::DetailChanged
                 } else {
-                    false
+                    KeyResult::None
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if self.selected + 1 < vis_len {
                     self.selected += 1;
-                    true
+                    KeyResult::DetailChanged
                 } else {
-                    false
+                    KeyResult::None
                 }
             }
             KeyCode::Home => {
                 if self.selected != 0 {
                     self.selected = 0;
-                    true
+                    KeyResult::DetailChanged
                 } else {
-                    false
+                    KeyResult::None
                 }
             }
             KeyCode::End => {
                 if vis_len > 0 && self.selected != vis_len - 1 {
                     self.selected = vis_len - 1;
-                    true
+                    KeyResult::DetailChanged
                 } else {
-                    false
+                    KeyResult::None
                 }
             }
             KeyCode::Tab => {
@@ -516,11 +532,11 @@ impl App {
                     if let Some(node) = self.tree.get_mut(tree_idx) {
                         if node.has_children && !node.expanded {
                             node.expanded = true;
-                            return true;
+                            return KeyResult::DetailChanged;
                         }
                     }
                 }
-                false
+                KeyResult::None
             }
             KeyCode::BackTab => {
                 // Collapse selected node
@@ -528,20 +544,39 @@ impl App {
                     if let Some(node) = self.tree.get_mut(tree_idx) {
                         if node.has_children && node.expanded {
                             node.expanded = false;
-                            return true;
+                            return KeyResult::DetailChanged;
                         }
                     }
                 }
-                false
+                KeyResult::None
             }
-            _ => false,
+            KeyCode::Char('e') => {
+                // Expand all
+                for node in &mut self.tree {
+                    if node.has_children {
+                        node.expanded = true;
+                    }
+                }
+                KeyResult::DetailChanged
+            }
+            KeyCode::Char('c') => {
+                // Collapse all (plain 'c'; Ctrl+C is handled above)
+                for node in &mut self.tree {
+                    node.expanded = false;
+                }
+                KeyResult::DetailChanged
+            }
+            KeyCode::Char('s') => {
+                // Toggle system proc visibility
+                self.show_system_procs = !self.show_system_procs;
+                KeyResult::NeedsRefresh
+            }
+            _ => KeyResult::None,
         }
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 /// URL-encode a string for use in URL path segments.
 fn url_encode(s: &str) -> String {
@@ -557,6 +592,28 @@ fn url_encode(s: &str) -> String {
         }
     }
     result
+}
+
+/// Extract a short display name from a full ProcId string.
+///
+/// ProcId::Direct format is `channel_addr,name`. We want just the `name` part.
+/// System procs are prefixed with `[system] ` — preserve the prefix and shorten
+/// the ProcId portion.
+/// If there's no comma, return the whole string.
+fn extract_short_proc_name(proc_id: &str) -> String {
+    if let Some(inner) = proc_id.strip_prefix("[system] ") {
+        let short = if let Some(pos) = inner.rfind(',') {
+            &inner[pos + 1..]
+        } else {
+            inner
+        };
+        return format!("[system] {}", short);
+    }
+    if let Some(pos) = proc_id.rfind(',') {
+        proc_id[pos + 1..].to_string()
+    } else {
+        proc_id.to_string()
+    }
 }
 
 fn format_event_summary(name: &str, fields: &Value) -> String {
@@ -608,9 +665,7 @@ fn chrono_now() -> String {
     format!("{:02}:{:02}:{:02}", hours, mins, s)
 }
 
-// ---------------------------------------------------------------------------
 // Terminal setup / teardown
-// ---------------------------------------------------------------------------
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
@@ -629,9 +684,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Main loop
-// ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -642,21 +695,45 @@ async fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    // Show an indicatif spinner on stderr while fetching initial data.
+    // This runs before the alternate screen so it's visible as a normal
+    // terminal line.
+    let mut app = App::new(&args.addr);
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .expect("valid template"),
+    );
+    spinner.set_message(format!(
+        "🦋 Monarch Admin — Connecting to {} ...",
+        app.base_url
+    ));
+    spinner.enable_steady_tick(Duration::from_millis(80));
+
+    let splash_start = tokio::time::Instant::now();
+    app.refresh().await;
+    let elapsed = splash_start.elapsed();
+    let min_splash = Duration::from_secs(2);
+    if elapsed < min_splash {
+        tokio::time::sleep(min_splash - elapsed).await;
+    }
+
+    spinner.finish_and_clear();
+
     let mut terminal = setup_terminal()?;
-    let result = run_app(&mut terminal, args).await;
+    let result = run_app(&mut terminal, &args, app).await;
     restore_terminal(&mut terminal)?;
     result
 }
 
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    args: Args,
+    args: &Args,
+    mut app: App,
 ) -> io::Result<()> {
-    let mut app = App::new(&args.addr);
     let mut refresh_interval = tokio::time::interval(Duration::from_millis(args.refresh_ms));
     let mut events = EventStream::new();
-
-    app.refresh().await;
 
     loop {
         terminal.draw(|frame| ui(frame, &app))?;
@@ -668,9 +745,14 @@ async fn run_app(
             maybe_event = events.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) => {
-                        let changed = app.on_key(key);
-                        if changed {
-                            app.fetch_selected_detail().await;
+                        match app.on_key(key) {
+                            KeyResult::DetailChanged => {
+                                app.fetch_selected_detail().await;
+                            }
+                            KeyResult::NeedsRefresh => {
+                                app.refresh().await;
+                            }
+                            KeyResult::None => {}
                         }
                     }
                     Some(Ok(Event::Resize(_, _))) => {}
@@ -687,9 +769,7 @@ async fn run_app(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // UI rendering
-// ---------------------------------------------------------------------------
 
 fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     let chunks = Layout::default()
@@ -710,15 +790,20 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let status = if let Some(err) = &app.error {
         format!("ERROR: {}", err)
     } else {
+        let sys = if app.show_system_procs {
+            " | system procs: shown"
+        } else {
+            ""
+        };
         format!(
-            "Connected to {} | Last refresh: {}",
-            app.base_url, app.last_refresh
+            "Connected to {} | Last refresh: {}{}",
+            app.base_url, app.last_refresh, sys
         )
     };
 
     let header = Paragraph::new(vec![
         Line::from(Span::styled(
-            "Hyperactor Admin",
+            "🦋 Monarch Admin",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -1002,7 +1087,7 @@ fn render_actor_detail(frame: &mut ratatui::Frame<'_>, area: Rect, details: &Act
 }
 
 fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect) {
-    let help = "q/Esc: quit | j/k: navigate | Tab: expand | Shift-Tab: collapse";
+    let help = "q: quit | j/k: navigate | Tab/Shift-Tab: expand/collapse | e/c: expand/collapse all | s: system procs";
     let footer = Paragraph::new(help)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));
