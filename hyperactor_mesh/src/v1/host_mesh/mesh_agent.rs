@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
@@ -28,6 +29,7 @@ use hyperactor::PortRef;
 use hyperactor::Proc;
 use hyperactor::ProcId;
 use hyperactor::RefClient;
+use hyperactor::actor::remote::Remote;
 use hyperactor::channel::ChannelTransport;
 use hyperactor::context;
 use hyperactor::context::Mailbox as _;
@@ -46,6 +48,8 @@ use crate::bootstrap;
 use crate::bootstrap::BootstrapCommand;
 use crate::bootstrap::BootstrapProcConfig;
 use crate::bootstrap::BootstrapProcManager;
+use crate::proc_launcher::ProcLauncher;
+use crate::proc_launcher::ProcLauncherError;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
 use crate::resource::ProcSpec;
@@ -84,7 +88,11 @@ impl HostAgentMode {
         }
     }
 
-    pub(crate) fn system_proc(&self) -> &Proc {
+    /// Get the system proc for this host.
+    ///
+    /// The system proc is where infrastructure actors (like proc
+    /// launchers) are spawned.
+    pub fn system_proc(&self) -> &Proc {
         #[allow(clippy::match_same_arms)]
         match self {
             HostAgentMode::Process { host, .. } => host.system_proc(),
@@ -92,7 +100,8 @@ impl HostAgentMode {
         }
     }
 
-    pub(crate) fn local_proc(&self) -> &Proc {
+    /// Get the local proc for this host.
+    pub fn local_proc(&self) -> &Proc {
         #[allow(clippy::match_same_arms)]
         match self {
             HostAgentMode::Process { host, .. } => host.local_proc(),
@@ -134,7 +143,8 @@ pub(crate) struct ProcCreationState {
         resource::GetRankStatus { cast = true },
         resource::List,
         ShutdownHost,
-        HostAdminQueryMessage
+        HostAdminQueryMessage,
+        GspawnOnSystemProc
     ]
 )]
 pub struct HostMeshAgent {
@@ -152,6 +162,37 @@ impl HostMeshAgent {
             created: HashMap::new(),
             local_mesh_agent: OnceLock::new(),
         }
+    }
+
+    /// Install a custom proc launcher.
+    ///
+    /// Only valid for Process mode hosts. Must be called before any spawn
+    /// operation that would initialize the default launcher.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The host is in Local mode (does not support custom launchers)
+    /// - The host has been shut down
+    /// - A launcher has already been installed
+    pub fn set_proc_launcher(
+        &mut self,
+        launcher: Arc<dyn ProcLauncher>,
+    ) -> Result<(), ProcLauncherError> {
+        match self.host.as_mut() {
+            Some(HostAgentMode::Process { host, .. }) => host.manager().set_launcher(launcher),
+            Some(HostAgentMode::Local(_)) => Err(ProcLauncherError::Other(
+                "Local mode does not support custom proc launchers".into(),
+            )),
+            None => Err(ProcLauncherError::Other("Host has been shut down".into())),
+        }
+    }
+
+    /// Get the system proc for spawning infrastructure actors.
+    ///
+    /// Returns `None` if the host has been shut down.
+    pub fn system_proc(&self) -> Option<&Proc> {
+        self.host.as_ref().map(|h| h.system_proc())
     }
 }
 
@@ -548,6 +589,150 @@ impl Handler<GetLocalProc> for HostMeshAgent {
     }
 }
 
+/// A local-only message to install a custom proc launcher.
+///
+/// This is used by monarch_hyperactor to install Python-based proc
+/// launchers. The message is not serializable and can only be sent
+/// within the same process.
+#[derive(hyperactor::Handler, hyperactor::HandleClient)]
+pub struct SetProcLauncher {
+    /// The proc launcher to install.
+    pub launcher: Arc<dyn ProcLauncher>,
+    /// Reply port to signal completion or error.
+    #[reply]
+    pub result: PortHandle<Result<(), String>>,
+}
+
+impl fmt::Debug for SetProcLauncher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SetProcLauncher")
+            .field("launcher", &"<dyn ProcLauncher>")
+            .field("result", &self.result)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl Handler<SetProcLauncher> for HostMeshAgent {
+    async fn handle(&mut self, cx: &Context<Self>, msg: SetProcLauncher) -> anyhow::Result<()> {
+        let result = self
+            .set_proc_launcher(msg.launcher)
+            .map_err(|e| e.to_string());
+        msg.result.send(cx, result)?;
+        Ok(())
+    }
+}
+
+/// Spawn an actor on the system proc by type name (idempotent).
+///
+/// Uses the actor registry ([`Remote`]) to find the actor type by
+/// name and spawn it on the system proc. If an actor with the given
+/// name already exists, returns its ID instead of failing. This makes
+/// the operation safe to retry.
+///
+/// This is used by monarch_hyperactor to spawn infrastructure actors
+/// like `ProcLauncherInstaller` without compile-time type
+/// dependencies.
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Named,
+    hyperactor::Handler,
+    hyperactor::HandleClient
+)]
+pub struct GspawnOnSystemProc {
+    /// The fully-qualified type name of the actor to spawn (e.g.,
+    /// "monarch_hyperactor::proc_launcher_installer::ProcLauncherInstaller").
+    pub actor_type: String,
+    /// The name to give the spawned actor.
+    pub actor_name: String,
+    /// Serialized parameters for the actor (bincode-encoded).
+    pub params_data: Vec<u8>,
+    /// Reply port for the result.
+    #[reply]
+    pub result: PortRef<Result<ActorId, String>>,
+}
+
+#[async_trait]
+impl Handler<GspawnOnSystemProc> for HostMeshAgent {
+    async fn handle(&mut self, cx: &Context<Self>, msg: GspawnOnSystemProc) -> anyhow::Result<()> {
+        let result = match &self.host {
+            Some(host) => {
+                let system_proc = host.system_proc();
+                let remote = Remote::collect();
+
+                match remote
+                    .gspawn(
+                        system_proc,
+                        &msg.actor_type,
+                        &msg.actor_name,
+                        msg.params_data,
+                        cx.headers().clone(),
+                    )
+                    .await
+                {
+                    Ok(actor_id) => Ok(actor_id),
+                    Err(e) => {
+                        // Check if this is an "already spawned" error
+                        // (idempotent)
+                        let err_str = e.to_string();
+                        if err_str.contains("has already been spawned") {
+                            // Return the existing actor ID
+                            // (idempotent behavior)
+                            let existing_id = system_proc.proc_id().actor_id(&msg.actor_name, 0);
+                            Ok(existing_id)
+                        } else {
+                            Err(err_str)
+                        }
+                    }
+                }
+            }
+            None => Err("Host has been shut down".to_string()),
+        };
+        msg.result.send(cx, result)?;
+        Ok(())
+    }
+}
+
+/// Test-only message to force default proc launcher initialization.
+///
+/// This triggers the same lock-in as a spawn would, without needing
+/// to set up the full spawn pipeline. Used by tests to verify that
+/// `SetProcLauncher` fails after default initialization.
+#[cfg(test)]
+#[derive(Debug, hyperactor::Handler, hyperactor::HandleClient)]
+pub struct ForceDefaultProcLauncherInit {
+    /// Reply port to signal completion or error.
+    #[reply]
+    pub result: PortHandle<Result<(), String>>,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl Handler<ForceDefaultProcLauncherInit> for HostMeshAgent {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        msg: ForceDefaultProcLauncherInit,
+    ) -> anyhow::Result<()> {
+        let result = match &self.host {
+            Some(HostAgentMode::Process { host, .. }) => {
+                // Force the get_or_init path - this locks in the
+                // default
+                host.manager().launcher();
+                Ok(())
+            }
+            Some(HostAgentMode::Local(_)) => {
+                Err("Local mode does not have a BootstrapProcManager".into())
+            }
+            None => Err("Host has been shut down".into()),
+        };
+        msg.result.send(cx, result)?;
+        Ok(())
+    }
+}
+
 /// A trampoline actor that spawns a [`Host`], and sends a reference to the
 /// corresponding [`HostMeshAgent`] to the provided reply port.
 ///
@@ -634,17 +819,214 @@ impl Handler<GetHostMeshAgent> for HostMeshAgentProcMeshTrampoline {
     }
 }
 
+// Test utilities (NOT under #[cfg(test)] - must be in bootstrap
+// binary image)
+//
+// This can't be defined under a `#[cfg(test)]` because there needs to
+// be an entry in the spawnable actor registry in the executable
+// 'hyperactor_mesh_test_bootstrap' for the GspawnOnSystemProc tests.
+
+/// Test utilities for mesh agent tests.
+pub mod test_utils {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use hyperactor::Actor;
+    use hyperactor::ActorId;
+    use hyperactor::ActorRef;
+    use hyperactor::Context;
+    use hyperactor::Handler;
+    use hyperactor::PortRef;
+    use serde::Deserialize;
+    use serde::Serialize;
+    use typeuri::Named;
+
+    use super::HostMeshAgent;
+    use super::SetProcLauncherClient;
+    use crate::proc_launcher::ProcLauncher;
+
+    /// A minimal test actor for system proc infrastructure tests.
+    ///
+    /// This actor is registered with `spawn = true` so it can be
+    /// spawned via `Remote::collect().gspawn()`. It derives `Default`
+    /// which triggers the blanket `RemoteSpawn` impl with `Params =
+    /// ()`.
+    #[derive(Debug, Default)]
+    #[hyperactor::export(spawn = true, handlers = [InstallLauncherViaDowncast])]
+    pub struct SystemProcTestActor {
+        pub initialized: bool,
+    }
+
+    impl Actor for SystemProcTestActor {}
+
+    /// Message to test the downcast_handle pattern for local message
+    /// sending.
+    ///
+    /// This message triggers `SystemProcTestActor` to:
+    /// 1. Use `ActorRef::attest` to create a reference to
+    ///    `HostMeshAgent`
+    /// 2. Use `downcast_handle` to get an `ActorHandle`
+    /// 3. Create a `DummyLauncher` locally
+    /// 4. Send `SetProcLauncher` via the handle
+    ///
+    /// This validates the pattern that `ProcLauncherInstaller` will use.
+    #[derive(
+        Debug,
+        Serialize,
+        Deserialize,
+        Named,
+        hyperactor::Handler,
+        hyperactor::HandleClient,
+        hyperactor::RefClient
+    )]
+    pub struct InstallLauncherViaDowncast {
+        /// The ActorId of the HostMeshAgent to send to.
+        pub host_agent_id: ActorId,
+        /// Reply port for the result.
+        #[reply]
+        pub result: PortRef<Result<(), String>>,
+    }
+
+    #[async_trait]
+    impl Handler<InstallLauncherViaDowncast> for SystemProcTestActor {
+        async fn handle(
+            &mut self,
+            cx: &Context<Self>,
+            msg: InstallLauncherViaDowncast,
+        ) -> anyhow::Result<()> {
+            // 1. Create ActorRef from the provided ActorId
+            let agent_ref: ActorRef<HostMeshAgent> = ActorRef::attest(msg.host_agent_id.clone());
+
+            // 2. Downcast to ActorHandle (only works if same proc)
+            let result = match agent_ref.downcast_handle(cx) {
+                Some(agent_handle) => {
+                    // 3. Create a launcher locally.
+                    //
+                    // In the real ProcLauncherInstaller, this would be:
+                    //   let python_actor = PythonActor::new(pickled_actor_class)?;
+                    //   let handle = python_actor.spawn(cx)?;
+                    //   handle.send(cx, init_message)?;  // Initialize with user's launcher
+                    //   let launcher = Arc::new(ActorProcLauncher::new(handle, mailbox, instance));
+                    //
+                    // For this test, we use a dummy:
+                    let launcher: Arc<dyn ProcLauncher> = Arc::new(TestDummyLauncher);
+
+                    // 4. Send SetProcLauncher via the handle
+                    agent_handle
+                        .set_proc_launcher(cx, launcher)
+                        .await
+                        .map_err(|e| format!("send failed: {}", e))
+                        .and_then(|r| r)
+                }
+                None => Err("downcast_handle failed: HostMeshAgent not on same proc".to_string()),
+            };
+
+            msg.result.send(cx, result)?;
+            Ok(())
+        }
+    }
+
+    /// A minimal dummy launcher for testing the downcast_handle pattern.
+    #[derive(Debug)]
+    struct TestDummyLauncher;
+
+    #[async_trait]
+    impl ProcLauncher for TestDummyLauncher {
+        async fn launch(
+            &self,
+            _proc_id: &hyperactor::ProcId,
+            _opts: crate::proc_launcher::LaunchOptions,
+        ) -> Result<crate::proc_launcher::LaunchResult, crate::proc_launcher::ProcLauncherError>
+        {
+            unimplemented!("TestDummyLauncher::launch should not be called in this test")
+        }
+
+        async fn terminate(
+            &self,
+            _proc_id: &hyperactor::ProcId,
+            _timeout: std::time::Duration,
+        ) -> Result<(), crate::proc_launcher::ProcLauncherError> {
+            Ok(())
+        }
+
+        async fn kill(
+            &self,
+            _proc_id: &hyperactor::ProcId,
+        ) -> Result<(), crate::proc_launcher::ProcLauncherError> {
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::sync::Arc;
+    use std::time::Duration;
 
+    use hyperactor::ActorRef;
     use hyperactor::Proc;
     use hyperactor::channel::ChannelTransport;
+    use hyperactor::clock::Clock;
+    use hyperactor::clock::RealClock;
 
     use super::*;
     use crate::bootstrap::ProcStatus;
+    use crate::proc_launcher::LaunchOptions;
+    use crate::proc_launcher::LaunchResult;
+    use crate::proc_launcher::ProcExitKind;
+    use crate::proc_launcher::ProcExitResult;
+    use crate::proc_launcher::ProcLauncher;
+    use crate::proc_launcher::ProcLauncherError;
+    use crate::proc_launcher::StdioHandling;
     use crate::resource::CreateOrUpdateClient;
     use crate::resource::GetStateClient;
+
+    /// A dummy proc launcher for testing. Does not actually launch
+    /// anything.
+    #[allow(dead_code)]
+    struct DummyLauncher {
+        marker: u64,
+    }
+
+    impl DummyLauncher {
+        fn new(marker: u64) -> Self {
+            Self { marker }
+        }
+    }
+
+    #[async_trait]
+    impl ProcLauncher for DummyLauncher {
+        async fn launch(
+            &self,
+            _proc_id: &hyperactor::ProcId,
+            _opts: LaunchOptions,
+        ) -> Result<LaunchResult, ProcLauncherError> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(ProcExitResult {
+                kind: ProcExitKind::Exited { code: 0 },
+                stderr_tail: Some(vec![]),
+            });
+            Ok(LaunchResult {
+                pid: None,
+                started_at: RealClock.system_time_now(),
+                stdio: StdioHandling::ManagedByLauncher,
+                exit_rx: rx,
+            })
+        }
+
+        async fn terminate(
+            &self,
+            _proc_id: &hyperactor::ProcId,
+            _timeout: Duration,
+        ) -> Result<(), ProcLauncherError> {
+            Ok(())
+        }
+
+        async fn kill(&self, _proc_id: &hyperactor::ProcId) -> Result<(), ProcLauncherError> {
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     #[cfg(fbcode_build)]
@@ -703,6 +1085,418 @@ mod tests {
               && proc_id == ProcId::Direct(host_addr.clone(), name.to_string())
               && mesh_agent == ActorRef::attest(ProcId::Direct(host_addr.clone(), name.to_string()).actor_id("agent", 0)) && bootstrap_command == Some(BootstrapCommand::test())
               && mesh_agent == proc_status_mesh_agent
+        );
+    }
+
+    // Tests that HostMeshAgent can receive and process a
+    // SetProcLauncher message, successfully installing a custom proc
+    // launcher.
+    #[tokio::test]
+    #[cfg(fbcode_build)]
+    async fn test_set_proc_launcher() {
+        // Create host and spawn HostMeshAgent
+        let host = Host::new(
+            BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
+            ChannelTransport::Unix.any(),
+        )
+        .await
+        .unwrap();
+
+        let system_proc = host.system_proc().clone();
+        let host_agent = system_proc
+            .spawn(
+                "agent",
+                HostMeshAgent::new(HostAgentMode::Process {
+                    host,
+                    exit_on_shutdown: false,
+                }),
+            )
+            .unwrap();
+
+        // Create a client to send messages
+        let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
+        let (client, _client_handle) = client_proc.instance("client").unwrap();
+
+        // Create a custom launcher
+        let custom_launcher: Arc<dyn ProcLauncher> = Arc::new(DummyLauncher::new(42));
+
+        // Send SetProcLauncher message
+        let result = host_agent
+            .set_proc_launcher(&client, custom_launcher)
+            .await
+            .expect("send should succeed");
+
+        // Verify the launcher was installed successfully
+        assert!(
+            result.is_ok(),
+            "set_proc_launcher should succeed on fresh host: {:?}",
+            result
+        );
+    }
+
+    /// SetProcLauncher fails if called twice.
+    #[tokio::test]
+    #[cfg(fbcode_build)]
+    async fn test_set_proc_launcher_twice_fails() {
+        // Create host and spawn HostMeshAgent
+        let host = Host::new(
+            BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
+            ChannelTransport::Unix.any(),
+        )
+        .await
+        .unwrap();
+
+        let system_proc = host.system_proc().clone();
+        let host_agent = system_proc
+            .spawn(
+                "agent",
+                HostMeshAgent::new(HostAgentMode::Process {
+                    host,
+                    exit_on_shutdown: false,
+                }),
+            )
+            .unwrap();
+
+        let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
+        let (client, _client_handle) = client_proc.instance("client").unwrap();
+
+        // First install should succeed
+        let first: Arc<dyn ProcLauncher> = Arc::new(DummyLauncher::new(1));
+        let result1 = host_agent
+            .set_proc_launcher(&client, first)
+            .await
+            .expect("send should succeed");
+        assert!(result1.is_ok(), "first install should succeed");
+
+        // Second install should fail
+        let second: Arc<dyn ProcLauncher> = Arc::new(DummyLauncher::new(2));
+        let result2 = host_agent
+            .set_proc_launcher(&client, second)
+            .await
+            .expect("send should succeed");
+        assert!(result2.is_err(), "second install should fail");
+
+        // Verify error message
+        let err_msg = result2.unwrap_err();
+        assert!(
+            err_msg.contains("already initialized"),
+            "error should mention 'already initialized', got: {}",
+            err_msg
+        );
+    }
+
+    /// SetProcLauncher fails after default initialization.
+    ///
+    /// This pins the "default locks it in" invariant: once launcher()
+    /// is called (e.g., by a spawn), set_proc_launcher() must fail.
+    #[tokio::test]
+    #[cfg(fbcode_build)]
+    async fn test_set_proc_launcher_after_default_init_fails() {
+        use super::ForceDefaultProcLauncherInitClient;
+
+        // Create host and spawn HostMeshAgent
+        let host = Host::new(
+            BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
+            ChannelTransport::Unix.any(),
+        )
+        .await
+        .unwrap();
+
+        let system_proc = host.system_proc().clone();
+        let host_agent = system_proc
+            .spawn(
+                "agent",
+                HostMeshAgent::new(HostAgentMode::Process {
+                    host,
+                    exit_on_shutdown: false,
+                }),
+            )
+            .unwrap();
+
+        let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
+        let (client, _client_handle) = client_proc.instance("client").unwrap();
+
+        // Force default initialization (simulates what spawn would do)
+        let init_result = host_agent
+            .force_default_proc_launcher_init(&client)
+            .await
+            .expect("send should succeed");
+        assert!(init_result.is_ok(), "force init should succeed");
+
+        // Now try to install custom - should fail
+        let custom: Arc<dyn ProcLauncher> = Arc::new(DummyLauncher::new(99));
+        let result = host_agent
+            .set_proc_launcher(&client, custom)
+            .await
+            .expect("send should succeed");
+
+        assert!(
+            result.is_err(),
+            "set_proc_launcher should fail after default init"
+        );
+
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("already initialized"),
+            "error should mention 'already initialized', got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("before first spawn"),
+            "error should mention 'before first spawn', got: {}",
+            err_msg
+        );
+    }
+
+    // GspawnOnSystemProc Tests
+    //
+    // Tests for spawning actors on the system proc via the Remote
+    // registry.
+
+    use hyperactor::actor::remote::Remote;
+
+    use super::GspawnOnSystemProcClient;
+    use super::test_utils::SystemProcTestActor;
+
+    // Get the fully-qualified type name for SystemProcTestActor from the
+    // registry.
+    fn system_proc_test_actor_type() -> String {
+        let remote = Remote::collect();
+        remote
+            .name_of::<SystemProcTestActor>()
+            .expect("SystemProcTestActor should be registered")
+            .to_string()
+    }
+
+    // GspawnOnSystemProc successfully spawns an actor.
+    #[tokio::test]
+    #[cfg(fbcode_build)]
+    async fn test_gspawn_on_system_proc_happy_path() {
+        // Create host and spawn HostMeshAgent
+        let host = Host::new(
+            BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
+            ChannelTransport::Unix.any(),
+        )
+        .await
+        .unwrap();
+
+        let system_proc = host.system_proc().clone();
+        let host_agent = system_proc
+            .spawn(
+                "agent",
+                HostMeshAgent::new(HostAgentMode::Process {
+                    host,
+                    exit_on_shutdown: false,
+                }),
+            )
+            .unwrap();
+
+        let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
+        let (client, _client_handle) = client_proc.instance("client").unwrap();
+
+        // Spawn an actor via GspawnOnSystemProc
+        let actor_type = system_proc_test_actor_type();
+        let params_data = bincode::serialize(&()).unwrap();
+
+        let result = host_agent
+            .gspawn_on_system_proc(&client, actor_type, "test_actor".to_string(), params_data)
+            .await
+            .expect("send should succeed");
+
+        // Should succeed and return an ActorId
+        assert!(result.is_ok(), "gspawn should succeed: {:?}", result);
+        let actor_id = result.unwrap();
+        assert_eq!(
+            actor_id.name(),
+            "test_actor",
+            "actor should have the requested name"
+        );
+    }
+
+    /// GspawnOnSystemProc is idempotent - second spawn returns
+    /// existing ID.
+    #[tokio::test]
+    #[cfg(fbcode_build)]
+    async fn test_gspawn_on_system_proc_idempotent() {
+        // Create host and spawn HostMeshAgent
+        let host = Host::new(
+            BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
+            ChannelTransport::Unix.any(),
+        )
+        .await
+        .unwrap();
+
+        let system_proc = host.system_proc().clone();
+        let host_agent = system_proc
+            .spawn(
+                "agent",
+                HostMeshAgent::new(HostAgentMode::Process {
+                    host,
+                    exit_on_shutdown: false,
+                }),
+            )
+            .unwrap();
+
+        let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
+        let (client, _client_handle) = client_proc.instance("client").unwrap();
+
+        let actor_type = system_proc_test_actor_type();
+        let params_data = bincode::serialize(&()).unwrap();
+
+        // First spawn
+        let result1 = host_agent
+            .gspawn_on_system_proc(
+                &client,
+                actor_type.clone(),
+                "idempotent_actor".to_string(),
+                params_data.clone(),
+            )
+            .await
+            .expect("send should succeed");
+        assert!(result1.is_ok(), "first spawn should succeed: {:?}", result1);
+        let actor_id1 = result1.unwrap();
+
+        // Second spawn with same name - should return the same ID (idempotent)
+        let result2 = host_agent
+            .gspawn_on_system_proc(
+                &client,
+                actor_type,
+                "idempotent_actor".to_string(),
+                params_data,
+            )
+            .await
+            .expect("send should succeed");
+        assert!(
+            result2.is_ok(),
+            "second spawn should succeed (idempotent): {:?}",
+            result2
+        );
+        let actor_id2 = result2.unwrap();
+
+        // Both should return the same actor ID
+        assert_eq!(
+            actor_id1, actor_id2,
+            "idempotent spawn should return same actor ID"
+        );
+    }
+
+    /// GspawnOnSystemProc fails for unknown actor type.
+    #[tokio::test]
+    #[cfg(fbcode_build)]
+    async fn test_gspawn_on_system_proc_bad_type() {
+        // Create host and spawn HostMeshAgent
+        let host = Host::new(
+            BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
+            ChannelTransport::Unix.any(),
+        )
+        .await
+        .unwrap();
+
+        let system_proc = host.system_proc().clone();
+        let host_agent = system_proc
+            .spawn(
+                "agent",
+                HostMeshAgent::new(HostAgentMode::Process {
+                    host,
+                    exit_on_shutdown: false,
+                }),
+            )
+            .unwrap();
+
+        let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
+        let (client, _client_handle) = client_proc.instance("client").unwrap();
+
+        // Try to spawn a non-existent actor type
+        let result = host_agent
+            .gspawn_on_system_proc(
+                &client,
+                "nonexistent::FakeActor".to_string(),
+                "fake_actor".to_string(),
+                vec![],
+            )
+            .await
+            .expect("send should succeed");
+
+        // Should fail with an error
+        assert!(result.is_err(), "gspawn with bad type should fail");
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("not registered"),
+            "error should indicate actor type not registered, got: {}",
+            err_msg
+        );
+    }
+
+    /// Test that an actor on the system proc can use downcast_handle
+    /// to send SetProcLauncher to HostMeshAgent.
+    ///
+    /// This  validates the pattern that  `ProcLauncherInstaller` will
+    /// use:
+    /// 1. Spawn via GspawnOnSystemProc
+    /// 2. Use ActorRef::attest + downcast_handle to get HostMeshAgent
+    ///   handle
+    /// 3. Send local-only SetProcLauncher message via the handle
+    #[tokio::test]
+    #[cfg(fbcode_build)]
+    async fn test_system_proc_downcast_handle_set_proc_launcher() {
+        use super::test_utils::*;
+
+        // Create host and spawn HostMeshAgent
+        let host = Host::new(
+            BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
+            ChannelTransport::Unix.any(),
+        )
+        .await
+        .unwrap();
+
+        let system_proc = host.system_proc().clone();
+        let host_agent = system_proc
+            .spawn(
+                "agent",
+                HostMeshAgent::new(HostAgentMode::Process {
+                    host,
+                    exit_on_shutdown: false,
+                }),
+            )
+            .unwrap();
+
+        let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
+        let (client, _client_handle) = client_proc.instance("client").unwrap();
+
+        // Spawn SystemProcTestActor on the system proc (same proc as
+        // HostMeshAgent)
+        let actor_type = system_proc_test_actor_type();
+        let params_data = bincode::serialize(&()).unwrap();
+
+        let result = host_agent
+            .gspawn_on_system_proc(
+                &client,
+                actor_type,
+                "launcher_installer".to_string(),
+                params_data,
+            )
+            .await
+            .expect("gspawn send should succeed");
+
+        assert!(result.is_ok(), "gspawn should succeed: {:?}", result);
+        let test_actor_id = result.unwrap();
+
+        // Get ActorRef to the spawned test actor
+        let test_actor_ref: ActorRef<super::test_utils::SystemProcTestActor> =
+            ActorRef::attest(test_actor_id);
+
+        // Send InstallLauncherViaDowncast to the test actor. This
+        // will trigger the downcast_handle + set_proc_launcher flow.
+        let install_result = test_actor_ref
+            .install_launcher_via_downcast(&client, host_agent.actor_id().clone())
+            .await
+            .expect("install_launcher_via_downcast send should succeed");
+
+        // Verify the downcast_handle + SetProcLauncher succeeded
+        assert!(
+            install_result.is_ok(),
+            "downcast_handle + set_proc_launcher should succeed: {:?}",
+            install_result
         );
     }
 }

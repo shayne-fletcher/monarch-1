@@ -1569,8 +1569,9 @@ impl FromStr for LauncherKind {
 /// via the selected launcher (e.g. direct child termination for
 /// native, `StopUnit` for systemd).
 pub struct BootstrapProcManager {
-    /// The process launcher backend.
-    launcher: Arc<dyn ProcLauncher>,
+    /// The process launcher backend. Initialized on first use via
+    /// `launcher()`, or explicitly via `set_launcher()`.
+    launcher: OnceLock<Arc<dyn ProcLauncher>>,
 
     /// The command specification used to bootstrap new processes.
     command: BootstrapCommand,
@@ -1598,16 +1599,6 @@ impl BootstrapProcManager {
     /// backed by a specific binary path (e.g. a bootstrap
     /// trampoline).
     pub(crate) fn new(command: BootstrapCommand) -> Result<Self, io::Error> {
-        let kind_str = hyperactor_config::global::get_cloned(MESH_PROC_LAUNCHER_KIND);
-        let kind: LauncherKind = kind_str.parse()?;
-
-        let launcher: Arc<dyn ProcLauncher> = match kind {
-            LauncherKind::Native => Arc::new(NativeProcLauncher::new()),
-            LauncherKind::Systemd => Arc::new(SystemdProcLauncher::new()),
-        };
-
-        tracing::info!(kind = ?kind, config_value = %kind_str, "proc launcher selected");
-
         let file_appender = if hyperactor_config::global::get(MESH_ENABLE_FILE_CAPTURE) {
             match crate::logging::FileAppender::new() {
                 Some(fm) => {
@@ -1624,11 +1615,44 @@ impl BootstrapProcManager {
         };
 
         Ok(Self {
-            launcher,
+            launcher: OnceLock::new(),
             command,
             children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             file_appender,
             socket_dir: runtime_dir()?,
+        })
+    }
+
+    /// Install a custom launcher.
+    ///
+    /// Returns error if already initialized (by prior
+    /// `set_launcher()` OR by a spawn that triggered default init via
+    /// `launcher()`).
+    ///
+    /// Must be called before any spawn operation that would
+    /// initialize the default launcher.
+    pub fn set_launcher(&self, launcher: Arc<dyn ProcLauncher>) -> Result<(), ProcLauncherError> {
+        self.launcher.set(launcher).map_err(|_| {
+            ProcLauncherError::Other(
+                "launcher already initialized; call set_proc_launcher before first spawn".into(),
+            )
+        })
+    }
+
+    /// Get the launcher, initializing with the default if not already
+    /// set.
+    ///
+    /// Once this is called, any subsequent calls to `set_launcher()`
+    /// will fail.
+    pub fn launcher(&self) -> &Arc<dyn ProcLauncher> {
+        self.launcher.get_or_init(|| {
+            let kind_str = hyperactor_config::global::get_cloned(MESH_PROC_LAUNCHER_KIND);
+            let kind: LauncherKind = kind_str.parse().unwrap_or(LauncherKind::Native);
+            tracing::info!(kind = ?kind, config_value = %kind_str, "using default proc launcher");
+            match kind {
+                LauncherKind::Native => Arc::new(NativeProcLauncher::new()),
+                LauncherKind::Systemd => Arc::new(SystemdProcLauncher::new()),
+            }
         })
     }
 
@@ -1850,7 +1874,7 @@ impl ProcManager for BootstrapProcManager {
 
         // Launch via the configured launcher backend.
         let launch_result = self
-            .launcher
+            .launcher()
             .launch(&proc_id, opts.clone())
             .await
             .map_err(|e| {
@@ -1911,7 +1935,7 @@ impl ProcManager for BootstrapProcManager {
         };
 
         // Create handle with launcher reference for terminate/kill delegation.
-        let handle = BootstrapProcHandle::new(proc_id.clone(), Arc::downgrade(&self.launcher));
+        let handle = BootstrapProcHandle::new(proc_id.clone(), Arc::downgrade(self.launcher()));
         handle.mark_running(launch_result.started_at);
         handle.set_stream_monitors(out_fwder, err_fwder);
 
@@ -3423,5 +3447,185 @@ mod tests {
             .new_client_instance(&temp_instance)
             .await
             .unwrap();
+    }
+
+    // BootstrapProcManager OnceLock Semantics Tests
+    //
+    // These tests verify the "install exactly once / default locks
+    // in" behavior of the proc launcher OnceLock.
+
+    use std::time::Duration;
+
+    use crate::proc_launcher::LaunchOptions;
+    use crate::proc_launcher::LaunchResult;
+    use crate::proc_launcher::ProcExitKind;
+    use crate::proc_launcher::ProcExitResult;
+    use crate::proc_launcher::ProcLauncher;
+    use crate::proc_launcher::ProcLauncherError;
+    use crate::proc_launcher::StdioHandling;
+
+    /// A dummy proc launcher for testing. Does not actually launch
+    /// anything.
+    #[allow(dead_code)]
+    struct DummyLauncher {
+        /// Marker value to identify this instance.
+        marker: u64,
+    }
+
+    impl DummyLauncher {
+        fn new(marker: u64) -> Self {
+            Self { marker }
+        }
+
+        #[allow(dead_code)]
+        fn marker(&self) -> u64 {
+            self.marker
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProcLauncher for DummyLauncher {
+        async fn launch(
+            &self,
+            _proc_id: &ProcId,
+            _opts: LaunchOptions,
+        ) -> Result<LaunchResult, ProcLauncherError> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            // Immediately send exit result
+            let _ = tx.send(ProcExitResult {
+                kind: ProcExitKind::Exited { code: 0 },
+                stderr_tail: Some(vec![]),
+            });
+            Ok(LaunchResult {
+                pid: None,
+                started_at: RealClock.system_time_now(),
+                stdio: StdioHandling::ManagedByLauncher,
+                exit_rx: rx,
+            })
+        }
+
+        async fn terminate(
+            &self,
+            _proc_id: &ProcId,
+            _timeout: Duration,
+        ) -> Result<(), ProcLauncherError> {
+            Ok(())
+        }
+
+        async fn kill(&self, _proc_id: &ProcId) -> Result<(), ProcLauncherError> {
+            Ok(())
+        }
+    }
+
+    // set_launcher() then launcher() returns the same Arc.
+    #[test]
+    #[cfg(fbcode_build)]
+    fn test_set_launcher_then_get() {
+        let manager = BootstrapProcManager::new(BootstrapCommand::test()).unwrap();
+
+        let custom: Arc<dyn ProcLauncher> = Arc::new(DummyLauncher::new(42));
+        let custom_ptr = Arc::as_ptr(&custom);
+
+        // Install the custom launcher
+        manager.set_launcher(custom).unwrap();
+
+        // Get the launcher and verify it's the same Arc
+        let got = manager.launcher();
+        let got_ptr = Arc::as_ptr(got);
+
+        assert_eq!(
+            custom_ptr, got_ptr,
+            "launcher() should return the same Arc that was set"
+        );
+    }
+
+    // launcher() first (forces default init), then set_launcher()
+    // fails.
+    #[test]
+    #[cfg(fbcode_build)]
+    fn test_get_launcher_then_set_fails() {
+        let manager = BootstrapProcManager::new(BootstrapCommand::test()).unwrap();
+
+        // Force default initialization by calling launcher()
+        let _ = manager.launcher();
+
+        // Now try to set a custom launcher - should fail
+        let custom: Arc<dyn ProcLauncher> = Arc::new(DummyLauncher::new(99));
+        let result = manager.set_launcher(custom);
+
+        assert!(
+            result.is_err(),
+            "set_launcher should fail after launcher() was called"
+        );
+
+        // Verify error message mentions the cause
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("already initialized"),
+            "error should mention 'already initialized', got: {}",
+            err_msg
+        );
+    }
+
+    // set_launcher() twice fails.
+    #[test]
+    #[cfg(fbcode_build)]
+    fn test_set_launcher_twice_fails() {
+        let manager = BootstrapProcManager::new(BootstrapCommand::test()).unwrap();
+
+        let first: Arc<dyn ProcLauncher> = Arc::new(DummyLauncher::new(1));
+        let second: Arc<dyn ProcLauncher> = Arc::new(DummyLauncher::new(2));
+
+        // First set should succeed
+        manager.set_launcher(first).unwrap();
+
+        // Second set should fail
+        let result = manager.set_launcher(second);
+        assert!(result.is_err(), "second set_launcher should fail");
+
+        // Verify error message
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("already initialized"),
+            "error should mention 'already initialized', got: {}",
+            err_msg
+        );
+    }
+
+    /// OnceLock is empty before any call.
+    #[test]
+    #[cfg(fbcode_build)]
+    fn test_launcher_initially_empty() {
+        let manager = BootstrapProcManager::new(BootstrapCommand::test()).unwrap();
+
+        // At this point, the OnceLock should be empty (not yet
+        // initialized) We can verify this by successfully calling
+        // set_launcher
+        let custom: Arc<dyn ProcLauncher> = Arc::new(DummyLauncher::new(123));
+        let result = manager.set_launcher(custom);
+
+        assert!(
+            result.is_ok(),
+            "set_launcher should succeed on fresh manager"
+        );
+    }
+
+    /// launcher() returns the same Arc on repeated calls.
+    #[test]
+    #[cfg(fbcode_build)]
+    fn test_launcher_idempotent() {
+        let manager = BootstrapProcManager::new(BootstrapCommand::test()).unwrap();
+
+        // Call launcher() twice
+        let first = manager.launcher();
+        let second = manager.launcher();
+
+        // Should return the same Arc (same pointer)
+        assert!(
+            Arc::ptr_eq(first, second),
+            "launcher() should return the same Arc on repeated calls"
+        );
     }
 }
