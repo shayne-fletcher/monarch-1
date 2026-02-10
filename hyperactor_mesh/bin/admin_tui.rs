@@ -930,7 +930,12 @@ fn render_actor_detail(frame: &mut ratatui::Frame<'_>, area: Rect, details: &Act
         ]),
         Line::from(vec![
             Span::styled("Processing time: ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{}us", details.total_processing_time_us)),
+            Span::raw(
+                humantime::format_duration(std::time::Duration::from_micros(
+                    details.total_processing_time_us,
+                ))
+                .to_string(),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Created: ", Style::default().fg(Color::Gray)),
