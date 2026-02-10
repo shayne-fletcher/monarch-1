@@ -6,10 +6,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-//! HTTP admin server for introspecting procs and actors.
+//! HTTP admin server for introspecting procs, actors, and hosts.
 //!
-//! The admin server provides a REST API for querying registered procs
-//! and their actor hierarchies.
+//! The admin server provides a REST API for querying registered procs,
+//! their actor hierarchies, and hosts that manage them.
 //!
 //! # Example
 //!
@@ -29,12 +29,19 @@ mod handlers;
 mod responses;
 mod tree;
 
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::RwLock;
 
 use axum::Router;
 use axum::routing::get;
 use dashmap::DashMap;
 pub use responses::ActorDetails;
+pub use responses::ApiError;
+pub use responses::HostDetails;
+pub use responses::HostProcEntry;
+pub use responses::HostSummary;
 pub use responses::ProcDetails;
 pub use responses::ProcSummary;
 pub use responses::RecordedEvent;
@@ -45,11 +52,60 @@ pub use tree::format_proc_tree_with_urls;
 
 use crate::Proc;
 use crate::ProcId;
+use crate::channel::ChannelAddr;
 use crate::proc::WeakProc;
 
-/// Global admin state holding registered procs.
+/// Trait for type-erased host introspection.
+///
+/// Implemented by `HostAdminHandle` to allow the admin server to query
+/// host state without knowing the concrete `ProcManager` type.
+pub(crate) trait HostIntrospect: Send + Sync {
+    /// The host's frontend channel address.
+    fn addr(&self) -> ChannelAddr;
+    /// Names of procs managed by this host.
+    fn proc_names(&self) -> Vec<String>;
+}
+
+/// Shared handle for host admin introspection.
+///
+/// Created when a `Host<M>` is constructed, updated when procs are spawned,
+/// and deregistered when the host is dropped. This provides a type-erased
+/// view of the host's state for the admin server.
+#[derive(Clone)]
+pub(crate) struct HostAdminHandle {
+    addr: ChannelAddr,
+    procs: Arc<RwLock<HashSet<String>>>,
+}
+
+impl HostAdminHandle {
+    /// Create a new admin handle for a host at the given address.
+    pub(crate) fn new(addr: ChannelAddr) -> Self {
+        Self {
+            addr,
+            procs: Arc::new(RwLock::new(HashSet::new())),
+        }
+    }
+
+    /// Record that a proc with the given name has been spawned on this host.
+    pub(crate) fn add_proc(&self, name: &str) {
+        self.procs.write().unwrap().insert(name.to_string());
+    }
+}
+
+impl HostIntrospect for HostAdminHandle {
+    fn addr(&self) -> ChannelAddr {
+        self.addr.clone()
+    }
+
+    fn proc_names(&self) -> Vec<String> {
+        self.procs.read().unwrap().iter().cloned().collect()
+    }
+}
+
+/// Global admin state holding registered procs and hosts.
 struct AdminState {
     procs: DashMap<ProcId, WeakProc>,
+    hosts: DashMap<String, Arc<dyn HostIntrospect>>,
 }
 
 /// Returns the global admin state singleton.
@@ -57,6 +113,7 @@ fn global() -> &'static AdminState {
     static ADMIN_STATE: OnceLock<AdminState> = OnceLock::new();
     ADMIN_STATE.get_or_init(|| AdminState {
         procs: DashMap::new(),
+        hosts: DashMap::new(),
     })
 }
 
@@ -84,6 +141,21 @@ pub(crate) fn deregister_proc_by_id(proc_id: &ProcId) {
     global().procs.remove(proc_id);
 }
 
+/// Register a host with the admin server.
+///
+/// The handle is stored as an `Arc<dyn HostIntrospect>` keyed by the
+/// host's address string.
+pub(crate) fn register_host(handle: Arc<dyn HostIntrospect>) {
+    global().hosts.insert(handle.addr().to_string(), handle);
+}
+
+/// Deregister a host from the admin server.
+///
+/// Called from `Host::drop` to clean up when the host is dropped.
+pub(crate) fn deregister_host(addr: &ChannelAddr) {
+    global().hosts.remove(&addr.to_string());
+}
+
 /// Creates the axum router for the admin server.
 fn create_router() -> Router {
     Router::new()
@@ -91,6 +163,8 @@ fn create_router() -> Router {
         .route("/tree", get(handlers::tree_dump))
         .route("/procs/{proc_name}", get(handlers::get_proc))
         .route("/procs/{proc_name}/{actor_name}", get(handlers::get_actor))
+        .route("/v1/hosts", get(handlers::list_hosts))
+        .route("/v1/hosts/{host_addr}", get(handlers::get_host))
         .route("/{*reference}", get(handlers::resolve_reference))
 }
 
@@ -175,5 +249,84 @@ mod tests {
         assert_eq!(response.status(), axum::http::StatusCode::OK);
 
         // No cleanup needed; weak ref will be cleaned up automatically
+    }
+
+    #[tokio::test]
+    async fn test_register_and_deregister_host() {
+        use std::str::FromStr;
+
+        use crate::channel::ChannelAddr;
+
+        let addr = ChannelAddr::from_str("local:99901").unwrap();
+        let handle = HostAdminHandle::new(addr.clone());
+        handle.add_proc("proc1");
+        handle.add_proc("proc2");
+
+        register_host(Arc::new(handle.clone()));
+
+        // Host should be registered
+        assert!(global().hosts.contains_key(&addr.to_string()));
+
+        // Verify proc names (drop the Ref before deregistering to avoid deadlock)
+        {
+            let entry = global().hosts.get(&addr.to_string()).unwrap();
+            let names = entry.value().proc_names();
+            assert_eq!(names.len(), 2);
+            assert!(names.contains(&"proc1".to_string()));
+            assert!(names.contains(&"proc2".to_string()));
+        }
+
+        // Deregister
+        deregister_host(&addr);
+        assert!(!global().hosts.contains_key(&addr.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_list_hosts_endpoint() {
+        use std::str::FromStr;
+
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let addr = ChannelAddr::from_str("local:99902").unwrap();
+        let handle = HostAdminHandle::new(addr.clone());
+        register_host(Arc::new(handle));
+
+        let app = create_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/hosts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        // Clean up
+        deregister_host(&addr);
+    }
+
+    #[tokio::test]
+    async fn test_get_host_not_found() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = create_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/hosts/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
     }
 }

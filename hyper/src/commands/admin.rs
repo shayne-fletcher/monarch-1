@@ -15,6 +15,8 @@ use chrono::DateTime;
 use chrono::Duration;
 use chrono::Local;
 use hyperactor::admin::ActorDetails;
+use hyperactor::admin::HostDetails;
+use hyperactor::admin::HostSummary;
 use hyperactor::admin::ProcDetails;
 use hyperactor::admin::ProcSummary;
 use hyperactor::admin::ReferenceInfo;
@@ -38,6 +40,8 @@ enum AdminAction {
     Info(InfoCommand),
     /// Show flight recorder events
     Events(EventsCommand),
+    /// List or inspect hosts
+    Hosts(HostsCommand),
 }
 
 #[derive(clap::Args, Debug)]
@@ -58,6 +62,12 @@ struct EventsCommand {
     actor_ref: String,
 }
 
+#[derive(clap::Args, Debug)]
+struct HostsCommand {
+    /// Host address to inspect (omit to list all hosts)
+    host_addr: Option<String>,
+}
+
 impl AdminCommand {
     pub async fn run(self) -> Result<()> {
         let client = reqwest::Client::new();
@@ -67,6 +77,7 @@ impl AdminCommand {
             AdminAction::Ps(cmd) => cmd.run(&client, &base_url).await,
             AdminAction::Info(cmd) => cmd.run(&client, &base_url).await,
             AdminAction::Events(cmd) => cmd.run(&client, &base_url).await,
+            AdminAction::Hosts(cmd) => cmd.run(&client, &base_url).await,
         }
     }
 }
@@ -224,6 +235,53 @@ impl EventsCommand {
             );
         }
         Ok(())
+    }
+}
+
+impl HostsCommand {
+    async fn run(self, client: &reqwest::Client, base_url: &str) -> Result<()> {
+        match self.host_addr {
+            Some(addr) => {
+                // Show details for a specific host
+                let encoded = urlencoding::encode(&addr);
+                let url = format!("{}/v1/hosts/{}", base_url, encoded);
+                let resp = client.get(&url).send().await?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("host not found: {}", addr);
+                }
+                let details: HostDetails = resp.json().await?;
+
+                println!("addr: {}", details.addr);
+                println!("procs: {}", details.procs.len());
+                if let Some(agent_url) = &details.agent_url {
+                    println!("agent_url: {}", agent_url);
+                }
+                if details.procs.is_empty() {
+                    println!("managed_procs: []");
+                } else {
+                    println!("managed_procs:");
+                    for proc in &details.procs {
+                        println!("  - {}", proc.name);
+                    }
+                }
+                Ok(())
+            }
+            None => {
+                // List all hosts
+                let url = format!("{}/v1/hosts", base_url);
+                let resp = client.get(&url).send().await?;
+                let hosts: Vec<HostSummary> = resp.json().await?;
+
+                let mut tw = TabWriter::new(vec![]);
+                writeln!(tw, "HOST_ADDR\tPROCS")?;
+                for host in &hosts {
+                    writeln!(tw, "{}\t{}", host.addr, host.num_procs)?;
+                }
+                tw.flush()?;
+                print!("{}", String::from_utf8(tw.into_inner()?)?);
+                Ok(())
+            }
+        }
     }
 }
 
