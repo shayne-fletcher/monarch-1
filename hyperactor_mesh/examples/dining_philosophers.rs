@@ -14,6 +14,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use clap::Parser;
 use hyperactor::Actor;
 use hyperactor::Bind;
 use hyperactor::Context;
@@ -37,6 +38,19 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
 use typeuri::Named;
+
+/// Command-line arguments for the dining philosophers example.
+#[derive(Parser)]
+#[command(name = "dining_philosophers")]
+struct Args {
+    /// Run all procs in-process (makes actors visible in admin tree).
+    ///
+    /// By default, procs are spawned as separate OS processes. With this
+    /// flag, all procs run in the current process, which allows the admin
+    /// tree endpoint to show all actors (useful for debugging with the TUI).
+    #[arg(long)]
+    in_process: bool,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum ChopstickStatus {
@@ -241,12 +255,15 @@ impl Waiter {
 async fn main() -> Result<ExitCode> {
     hyperactor::initialize_with_current_runtime();
 
-    // Option: run as a local process mesh
-    // let host_mesh = HostMesh::process(extent!(hosts = 1), BootstrapCommand::current().unwrap())
-    //     .await
-    //     .unwrap();
+    let args = Args::parse();
 
-    let host_mesh = HostMesh::local().await?;
+    // Use in-process mode for debugging (actors visible in admin tree),
+    // or child-process mode (default) for production-like behavior.
+    let host_mesh = if args.in_process {
+        HostMesh::local_in_process().await?
+    } else {
+        HostMesh::local().await?
+    };
 
     let group_size = 5;
     let instance = global_root_client();

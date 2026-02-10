@@ -13,6 +13,7 @@ use hyperactor::channel::ChannelTransport;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
 use hyperactor::host::Host;
+use hyperactor::host::LocalProcManager;
 use hyperactor_config::CONFIG;
 use hyperactor_config::ConfigAttr;
 use hyperactor_config::attrs::declare_attrs;
@@ -48,6 +49,7 @@ use crate::alloc::Alloc;
 use crate::bootstrap::BootstrapCommand;
 use crate::bootstrap::BootstrapProcManager;
 use crate::proc_mesh::DEFAULT_TRANSPORT;
+use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
 use crate::resource::CreateOrUpdateClient;
 use crate::resource::GetRankStatus;
@@ -63,6 +65,7 @@ use crate::v1::ValueMesh;
 use crate::v1::host_mesh::mesh_agent::HostAgentMode;
 pub use crate::v1::host_mesh::mesh_agent::HostMeshAgent;
 use crate::v1::host_mesh::mesh_agent::HostMeshAgentProcMeshTrampoline;
+use crate::v1::host_mesh::mesh_agent::ProcManagerSpawnFn;
 use crate::v1::host_mesh::mesh_agent::ProcState;
 use crate::v1::host_mesh::mesh_agent::ShutdownHostClient;
 use crate::v1::mesh_controller::HostMeshController;
@@ -291,6 +294,38 @@ impl HostMesh {
                     exit_on_shutdown: false,
                 }),
             )
+            .map_err(v1::Error::SingletonActorSpawnError)?;
+        host_mesh_agent.bind::<HostMeshAgent>();
+
+        let host = HostRef(addr);
+        let host_mesh_ref = HostMeshRef::new(
+            Name::new("local").unwrap(),
+            extent!(hosts = 1).into(),
+            vec![host],
+        )?;
+        Ok(HostMesh::take(host_mesh_ref))
+    }
+
+    /// Create a local in-process host mesh where all procs run in the
+    /// current OS process.
+    ///
+    /// Unlike [`local`] which spawns child processes for each proc,
+    /// this method uses [`LocalProcManager`] to run everything
+    /// in-process. This makes all actors visible in the admin tree
+    /// (useful for debugging with the TUI).
+    ///
+    /// This API is intended for tests, examples, and debugging.
+    pub async fn local_in_process() -> v1::Result<HostMesh> {
+        let addr = hyperactor_config::global::get_cloned(DEFAULT_TRANSPORT).binding_addr();
+
+        let spawn: ProcManagerSpawnFn =
+            Box::new(|proc| Box::pin(std::future::ready(ProcMeshAgent::boot_v1(proc))));
+        let manager = LocalProcManager::new(spawn);
+        let host = Host::new(manager, addr).await?;
+        let addr = host.addr().clone();
+        let system_proc = host.system_proc().clone();
+        let host_mesh_agent = system_proc
+            .spawn("agent", HostMeshAgent::new(HostAgentMode::Local(host)))
             .map_err(v1::Error::SingletonActorSpawnError)?;
         host_mesh_agent.bind::<HostMeshAgent>();
 
