@@ -61,6 +61,7 @@ use ratatui::widgets::Block;
 use ratatui::widgets::Borders;
 use ratatui::widgets::List;
 use ratatui::widgets::ListItem;
+use ratatui::widgets::ListState;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use serde::Deserialize;
@@ -105,6 +106,9 @@ enum NodeKind {
         host_addr: String,
         proc_name: String,
         actor_name: String,
+        /// Display label including pid (e.g. "sieve[0]"), used for
+        /// unique expand keys when multiple actors share the same name.
+        actor_label: String,
     },
 }
 
@@ -120,8 +124,9 @@ impl NodeKind {
             NodeKind::Actor {
                 host_addr,
                 proc_name,
-                actor_name,
-            } => format!("actor:{}:{}:{}", host_addr, proc_name, actor_name),
+                actor_label,
+                ..
+            } => format!("actor:{}:{}:{}", host_addr, proc_name, actor_label),
         }
     }
 }
@@ -396,9 +401,9 @@ impl App {
             has_children: true,
         });
 
-        // Fetch proc details to get root actors
+        // Fetch proc details to get actors
         if let Ok(pd) = self.fetch_proc_details(host_addr, proc_name).await {
-            for root_actor in &pd.root_actors {
+            for root_actor in &pd.actors {
                 // Parse the ActorId to get a short display label and the
                 // plain actor name (used for URL construction — the handler
                 // matches against `actor_id.name()`).
@@ -410,12 +415,13 @@ impl App {
                     Err(_) => (root_actor.clone(), root_actor.clone()),
                 };
                 tree.push(TreeNode {
-                    label,
+                    label: label.clone(),
                     depth: depth + 1,
                     kind: NodeKind::Actor {
                         host_addr: host_addr.to_string(),
                         proc_name: proc_name.to_string(),
                         actor_name,
+                        actor_label: label,
                     },
                     expanded: false,
                     has_children: false,
@@ -454,6 +460,7 @@ impl App {
                 host_addr,
                 proc_name,
                 actor_name,
+                ..
             } => {
                 let url = format!(
                     "{}/v1/hosts/{}/procs/{}/{}",
@@ -510,7 +517,7 @@ impl App {
                     KeyResult::None
                 }
             }
-            KeyCode::Home => {
+            KeyCode::Home | KeyCode::Char('g') => {
                 if self.selected != 0 {
                     self.selected = 0;
                     KeyResult::DetailChanged
@@ -518,7 +525,7 @@ impl App {
                     KeyResult::None
                 }
             }
-            KeyCode::End => {
+            KeyCode::End | KeyCode::Char('G') => {
                 if vis_len > 0 && self.selected != vis_len - 1 {
                     self.selected = vis_len - 1;
                     KeyResult::DetailChanged
@@ -889,8 +896,11 @@ fn render_topology_tree(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Gray));
 
-    let list = List::new(items).block(block);
-    frame.render_widget(list, area);
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default());
+    let mut list_state = ListState::default().with_selected(Some(app.selected));
+    frame.render_stateful_widget(list, area, &mut list_state);
 }
 
 /// Render contextual details for the selected node.
@@ -943,9 +953,15 @@ fn render_host_detail(frame: &mut ratatui::Frame<'_>, area: Rect, details: &Host
     }
     lines.push(Line::default());
     for proc in &details.procs {
+        let actor_info = if proc.num_actors > 0 {
+            format!(" ({} actors)", proc.num_actors)
+        } else {
+            String::new()
+        };
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(&proc.name, Style::default().fg(Color::Green)),
+            Span::styled(actor_info, Style::default().fg(Color::DarkGray)),
         ]));
     }
 
@@ -965,12 +981,19 @@ fn render_proc_detail(frame: &mut ratatui::Frame<'_>, area: Rect, details: &Proc
             Span::raw(&details.proc_name),
         ]),
         Line::from(vec![
-            Span::styled("Root actors: ", Style::default().fg(Color::Gray)),
-            Span::raw(details.root_actors.len().to_string()),
+            Span::styled("Actors: ", Style::default().fg(Color::Gray)),
+            Span::raw(details.actors.len().to_string()),
         ]),
         Line::default(),
     ];
-    for actor in &details.root_actors {
+    for (i, actor) in details.actors.iter().enumerate() {
+        if i >= 50 {
+            lines.push(Line::from(Span::styled(
+                format!("  ... and {} more", details.actors.len() - 50),
+                Style::default().fg(Color::DarkGray),
+            )));
+            break;
+        }
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::raw(actor),
@@ -1087,7 +1110,7 @@ fn render_actor_detail(frame: &mut ratatui::Frame<'_>, area: Rect, details: &Act
 }
 
 fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect) {
-    let help = "q: quit | j/k: navigate | Tab/Shift-Tab: expand/collapse | e/c: expand/collapse all | s: system procs";
+    let help = "q: quit | j/k: navigate | g/G: top/bottom | Tab/Shift-Tab: expand/collapse | e/c: expand/collapse all | s: system procs";
     let footer = Paragraph::new(help)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));

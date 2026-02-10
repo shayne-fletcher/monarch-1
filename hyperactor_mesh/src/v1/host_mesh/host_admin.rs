@@ -176,18 +176,25 @@ impl HostAdminQueryMessageHandler for HostMeshAgent {
         let mut procs: Vec<hyperactor::admin::HostProcEntry> = vec![
             hyperactor::admin::HostProcEntry {
                 name: format!("[system] {}", host.system_proc().proc_id()),
+                num_actors: host.system_proc().all_actor_ids().len(),
                 url: String::new(),
             },
             hyperactor::admin::HostProcEntry {
                 name: format!("[system] {}", host.local_proc().proc_id()),
+                num_actors: host.local_proc().all_actor_ids().len(),
                 url: String::new(),
             },
         ];
 
         // User-spawned procs
         for name in self.created.keys() {
+            let name_str = name.to_string();
+            let num_actors = hyperactor::admin::local_proc_details(&name_str)
+                .map(|pd| pd.actors.len())
+                .unwrap_or(0);
             procs.push(hyperactor::admin::HostProcEntry {
-                name: name.to_string(),
+                name: name_str,
+                num_actors,
                 url: format!("/v1/hosts/{}/procs/{}", host_addr, name),
             });
         }
