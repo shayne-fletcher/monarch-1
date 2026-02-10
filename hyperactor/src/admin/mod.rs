@@ -30,6 +30,7 @@ mod responses;
 mod tree;
 
 use std::collections::HashSet;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -50,6 +51,7 @@ use tokio::net::TcpListener;
 pub use tree::format_proc_tree;
 pub use tree::format_proc_tree_with_urls;
 
+use crate::ActorId;
 use crate::Proc;
 use crate::ProcId;
 use crate::channel::ChannelAddr;
@@ -170,34 +172,36 @@ pub fn create_router() -> Router {
 
 /// Query proc details from a `Proc` reference.
 ///
-/// Returns the proc name and its root actor IDs. This is the same data
-/// served by `GET /procs/{name}` but accessible programmatically for
-/// use in actor-messaging-based admin proxies.
+/// Returns the proc name and all actor IDs (including dynamically
+/// spawned children). This is the same data served by `GET /procs/{name}`
+/// but accessible programmatically for use in actor-messaging-based
+/// admin proxies.
 pub fn query_proc_details(proc: &Proc) -> ProcDetails {
-    let root_actors = proc
-        .root_actor_ids()
+    let actors = proc
+        .all_actor_ids()
         .into_iter()
         .map(|id| id.to_string())
         .collect();
     ProcDetails {
         proc_name: proc.proc_id().to_string(),
-        root_actors,
+        actors,
     }
 }
 
 /// Query actor details from a `Proc` reference by actor name.
 ///
-/// Traverses the proc's actor tree to find the named actor and returns
+/// Searches the proc's actors to find one matching by name and returns
 /// its details including status, flight recorder, and children. Returns
 /// `None` if no actor with the given name is found.
 pub fn query_actor_details(proc: &Proc, actor_name: &str) -> Option<ActorDetails> {
-    let mut found_actor_id = None;
-    proc.traverse(&mut |cell, _| {
-        if cell.actor_id().name() == actor_name && found_actor_id.is_none() {
-            found_actor_id = Some(cell.actor_id().clone());
-        }
-    });
-    let actor_id = found_actor_id?;
+    // Try parsing as a full ActorId first, then fall back to name match.
+    let actor_id = if let Ok(id) = ActorId::from_str(actor_name) {
+        id
+    } else {
+        proc.all_actor_ids()
+            .into_iter()
+            .find(|id| id.name() == actor_name)?
+    };
     let cell = proc.get_instance(&actor_id)?;
     Some(handlers::build_actor_details(&cell))
 }
@@ -207,7 +211,6 @@ pub fn query_actor_details(proc: &Proc, actor_name: &str) -> Option<ActorDetails
 /// Returns `None` if the proc name is not a valid `ProcId` or if the
 /// proc is not registered locally (e.g. it's in another OS process).
 pub fn local_proc_details(proc_name: &str) -> Option<ProcDetails> {
-    use std::str::FromStr;
     let proc_id = ProcId::from_str(proc_name).ok()?;
     let state = global();
     let weak = state.procs.get(&proc_id)?;
@@ -219,7 +222,6 @@ pub fn local_proc_details(proc_name: &str) -> Option<ProcDetails> {
 ///
 /// Returns `None` if the proc or actor is not found locally.
 pub fn local_actor_details(proc_name: &str, actor_name: &str) -> Option<ActorDetails> {
-    use std::str::FromStr;
     let proc_id = ProcId::from_str(proc_name).ok()?;
     let state = global();
     let weak = state.procs.get(&proc_id)?;

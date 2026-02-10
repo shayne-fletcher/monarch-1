@@ -147,7 +147,7 @@ impl PsCommand {
                 if resp.status().is_success() {
                     if let Ok(proc_details) = resp.json::<ProcDetails>().await {
                         // Recursively collect all actors starting from roots
-                        for root_actor in &proc_details.root_actors {
+                        for root_actor in &proc_details.actors {
                             collect_actors_recursive(client, base_url, root_actor, &mut all_actors)
                                 .await;
                         }

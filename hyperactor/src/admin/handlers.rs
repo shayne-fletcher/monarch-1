@@ -44,10 +44,7 @@ pub async fn list_procs() -> Json<Vec<ProcSummary>> {
         .iter()
         .filter_map(|entry| {
             let proc = entry.value().upgrade()?;
-            let mut num_actors = 0;
-            proc.traverse(&mut |_, _| {
-                num_actors += 1;
-            });
+            let num_actors = proc.all_actor_ids().len();
             Some(ProcSummary {
                 name: entry.key().to_string(),
                 num_actors,
@@ -92,16 +89,13 @@ pub async fn get_proc(Path(proc_name): Path<String>) -> Result<Json<ProcDetails>
     let weak = state.procs.get(&proc_id).ok_or(StatusCode::NOT_FOUND)?;
     let proc = weak.upgrade().ok_or(StatusCode::NOT_FOUND)?;
 
-    let root_actors: Vec<String> = proc
-        .root_actor_ids()
+    let actors: Vec<String> = proc
+        .all_actor_ids()
         .into_iter()
         .map(|id| id.to_string())
         .collect();
 
-    Ok(Json(ProcDetails {
-        proc_name,
-        root_actors,
-    }))
+    Ok(Json(ProcDetails { proc_name, actors }))
 }
 
 /// GET /procs/{proc_name}/{actor_name} - Get details for a specific actor.
@@ -113,15 +107,18 @@ pub async fn get_actor(
     let weak = state.procs.get(&proc_id).ok_or(StatusCode::NOT_FOUND)?;
     let proc = weak.upgrade().ok_or(StatusCode::NOT_FOUND)?;
 
-    // Find actor by name by traversing all actors
-    let mut found_actor_id = None;
-    proc.traverse(&mut |cell, _| {
-        if cell.actor_id().name() == actor_name && found_actor_id.is_none() {
-            found_actor_id = Some(cell.actor_id().clone());
-        }
-    });
+    // Try parsing as a full ActorId first, then fall back to name match.
+    let actor_id = if let Ok(id) = ActorId::from_str(&actor_name) {
+        id
+    } else {
+        // Find actor by name in the flat instances map (no recursion).
+        let found = proc
+            .all_actor_ids()
+            .into_iter()
+            .find(|id| id.name() == actor_name);
+        found.ok_or(StatusCode::NOT_FOUND)?
+    };
 
-    let actor_id = found_actor_id.ok_or(StatusCode::NOT_FOUND)?;
     let cell = proc.get_instance(&actor_id).ok_or(StatusCode::NOT_FOUND)?;
 
     Ok(Json(build_actor_details(&cell)))
@@ -130,12 +127,11 @@ pub async fn get_actor(
 /// Build ActorDetails from an InstanceCell.
 pub(super) fn build_actor_details(cell: &InstanceCell) -> ActorDetails {
     let status = cell.status().borrow().clone();
-    let mut children = Vec::new();
-    cell.traverse(&mut |child, depth| {
-        if depth == 1 {
-            children.push(child.actor_id().to_string());
-        }
-    });
+    let children: Vec<String> = cell
+        .child_actor_ids()
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect();
 
     let events = cell.recording().tail();
     let flight_recorder: Vec<RecordedEvent> = events
@@ -205,8 +201,8 @@ pub async fn resolve_reference(Path(reference): Path<String>) -> impl IntoRespon
     match &parsed {
         Reference::Proc(proc_id) => match state.procs.get(proc_id).and_then(|w| w.upgrade()) {
             Some(proc) => {
-                let root_actors: Vec<String> = proc
-                    .root_actor_ids()
+                let actors: Vec<String> = proc
+                    .all_actor_ids()
                     .into_iter()
                     .map(|id| id.to_string())
                     .collect();
@@ -214,7 +210,7 @@ pub async fn resolve_reference(Path(reference): Path<String>) -> impl IntoRespon
                     StatusCode::OK,
                     Json(serde_json::json!(ReferenceInfo::Proc(ProcDetails {
                         proc_name: proc_id.to_string(),
-                        root_actors,
+                        actors,
                     }))),
                 )
             }
@@ -288,7 +284,11 @@ pub async fn get_host(
         .into_iter()
         .map(|name| {
             let url = format!("{}/procs/{}", base_url, url_encode_path(&name));
-            HostProcEntry { name, url }
+            HostProcEntry {
+                name,
+                num_actors: 0,
+                url,
+            }
         })
         .collect();
 

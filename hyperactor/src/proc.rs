@@ -444,6 +444,16 @@ impl Proc {
             .collect()
     }
 
+    /// Returns the ActorIds of all live actors in this proc, including
+    /// dynamically spawned children.
+    pub fn all_actor_ids(&self) -> Vec<ActorId> {
+        self.state()
+            .instances
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     /// Create a child instance. Called from `Instance`.
     fn child_instance(
         &self,
@@ -1917,6 +1927,15 @@ impl InstanceCell {
     /// The number of children this instance has.
     pub fn child_count(&self) -> usize {
         self.inner.children.len()
+    }
+
+    /// Returns the ActorIds of this instance's direct children.
+    pub fn child_actor_ids(&self) -> Vec<ActorId> {
+        self.inner
+            .children
+            .iter()
+            .map(|entry| entry.value().actor_id().clone())
+            .collect()
     }
 
     /// Get a child by its PID.

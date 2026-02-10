@@ -29,8 +29,8 @@ pub struct ProcSummary {
 pub struct ProcDetails {
     /// The proc's name/ID.
     pub proc_name: String,
-    /// Names of root actors (pid=0).
-    pub root_actors: Vec<String>,
+    /// Names of all actors in this proc, including dynamically spawned children.
+    pub actors: Vec<String>,
 }
 
 /// A recorded event from the flight recorder.
@@ -110,6 +110,8 @@ pub struct HostDetails {
 pub struct HostProcEntry {
     /// The proc's name.
     pub name: String,
+    /// Number of actors in this proc.
+    pub num_actors: usize,
     /// URL path to this proc's detail endpoint (e.g.
     /// "/procs/tcp%3A...").
     pub url: String,
