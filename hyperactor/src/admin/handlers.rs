@@ -21,11 +21,16 @@ use chrono::Utc;
 
 use super::global;
 use super::responses::ActorDetails;
+use super::responses::ApiError;
+use super::responses::HostDetails;
+use super::responses::HostProcEntry;
+use super::responses::HostSummary;
 use super::responses::ProcDetails;
 use super::responses::ProcSummary;
 use super::responses::RecordedEvent;
 use super::responses::ReferenceInfo;
 use super::tree::format_proc_tree_with_urls;
+use super::tree::url_encode_path;
 use crate::ActorId;
 use crate::ProcId;
 use crate::proc::InstanceCell;
@@ -233,4 +238,63 @@ pub async fn resolve_reference(Path(reference): Path<String>) -> impl IntoRespon
             Json(serde_json::json!({"error": "unsupported reference type"})),
         ),
     }
+}
+
+/// GET /v1/hosts - List all registered hosts.
+pub async fn list_hosts() -> Json<Vec<HostSummary>> {
+    let state = global();
+    let hosts: Vec<HostSummary> = state
+        .hosts
+        .iter()
+        .map(|entry| {
+            let handle = entry.value();
+            HostSummary {
+                addr: handle.addr().to_string(),
+                num_procs: handle.proc_names().len(),
+            }
+        })
+        .collect();
+    Json(hosts)
+}
+
+/// GET /v1/hosts/{host_addr} - Get details for a specific host.
+pub async fn get_host(
+    headers: HeaderMap,
+    Path(host_addr): Path<String>,
+) -> Result<Json<HostDetails>, ApiError> {
+    let state = global();
+    let entry = state.hosts.get(&host_addr).ok_or_else(|| {
+        ApiError::not_found(
+            "Host not found",
+            Some(serde_json::json!({ "addr": host_addr })),
+        )
+    })?;
+
+    let handle = entry.value();
+
+    // Extract base URL from headers for building drill-down links
+    let host_header = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("http");
+    let base_url = format!("{}://{}", scheme, host_header);
+
+    let procs: Vec<HostProcEntry> = handle
+        .proc_names()
+        .into_iter()
+        .map(|name| {
+            let url = format!("{}/procs/{}", base_url, url_encode_path(&name));
+            HostProcEntry { name, url }
+        })
+        .collect();
+
+    Ok(Json(HostDetails {
+        addr: handle.addr().to_string(),
+        procs,
+        agent_url: None, // Set by hyperactor_mesh layer when HostMeshAgent is available
+    }))
 }
