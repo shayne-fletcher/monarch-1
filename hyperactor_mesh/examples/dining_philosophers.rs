@@ -23,7 +23,6 @@ use hyperactor::Instance;
 use hyperactor::PortRef;
 use hyperactor::RemoteSpawn;
 use hyperactor::Unbind;
-use hyperactor::admin;
 use hyperactor::context;
 use hyperactor_config::Attrs;
 use hyperactor_mesh::comm::multicast::CastInfo;
@@ -268,14 +267,16 @@ async fn main() -> Result<ExitCode> {
     let group_size = 5;
     let instance = global_root_client();
 
-    // Start the admin HTTP server in a background task
+    // Start the admin HTTP server in a background task.
+    // Uses the mesh-aware admin proxy so child procs in separate
+    // OS processes are queryable via actor messaging.
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let admin_addr = listener.local_addr()?;
     println!("Admin server listening on http://{}", admin_addr);
     println!("  - List procs:    curl http://{}/", admin_addr);
     println!("  - Actor tree:    curl http://{}/tree", admin_addr);
     tokio::spawn(async move {
-        if let Err(e) = admin::serve(listener).await {
+        if let Err(e) = hyperactor_mesh::admin_proxy::serve(listener).await {
             tracing::error!("admin server error: {}", e);
         }
     });

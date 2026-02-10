@@ -25,7 +25,7 @@
 //! admin::serve(listener).await?;
 //! ```
 
-mod handlers;
+pub mod handlers;
 mod responses;
 mod tree;
 
@@ -157,7 +157,7 @@ pub(crate) fn deregister_host(addr: &ChannelAddr) {
 }
 
 /// Creates the axum router for the admin server.
-fn create_router() -> Router {
+pub fn create_router() -> Router {
     Router::new()
         .route("/", get(handlers::list_procs))
         .route("/tree", get(handlers::tree_dump))
@@ -166,6 +166,65 @@ fn create_router() -> Router {
         .route("/v1/hosts", get(handlers::list_hosts))
         .route("/v1/hosts/{host_addr}", get(handlers::get_host))
         .route("/{*reference}", get(handlers::resolve_reference))
+}
+
+/// Query proc details from a `Proc` reference.
+///
+/// Returns the proc name and its root actor IDs. This is the same data
+/// served by `GET /procs/{name}` but accessible programmatically for
+/// use in actor-messaging-based admin proxies.
+pub fn query_proc_details(proc: &Proc) -> ProcDetails {
+    let root_actors = proc
+        .root_actor_ids()
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect();
+    ProcDetails {
+        proc_name: proc.proc_id().to_string(),
+        root_actors,
+    }
+}
+
+/// Query actor details from a `Proc` reference by actor name.
+///
+/// Traverses the proc's actor tree to find the named actor and returns
+/// its details including status, flight recorder, and children. Returns
+/// `None` if no actor with the given name is found.
+pub fn query_actor_details(proc: &Proc, actor_name: &str) -> Option<ActorDetails> {
+    let mut found_actor_id = None;
+    proc.traverse(&mut |cell, _| {
+        if cell.actor_id().name() == actor_name && found_actor_id.is_none() {
+            found_actor_id = Some(cell.actor_id().clone());
+        }
+    });
+    let actor_id = found_actor_id?;
+    let cell = proc.get_instance(&actor_id)?;
+    Some(handlers::build_actor_details(&cell))
+}
+
+/// Look up proc details from the local admin state by proc name string.
+///
+/// Returns `None` if the proc name is not a valid `ProcId` or if the
+/// proc is not registered locally (e.g. it's in another OS process).
+pub fn local_proc_details(proc_name: &str) -> Option<ProcDetails> {
+    use std::str::FromStr;
+    let proc_id = ProcId::from_str(proc_name).ok()?;
+    let state = global();
+    let weak = state.procs.get(&proc_id)?;
+    let proc = weak.upgrade()?;
+    Some(query_proc_details(&proc))
+}
+
+/// Look up actor details from the local admin state by proc name and actor name.
+///
+/// Returns `None` if the proc or actor is not found locally.
+pub fn local_actor_details(proc_name: &str, actor_name: &str) -> Option<ActorDetails> {
+    use std::str::FromStr;
+    let proc_id = ProcId::from_str(proc_name).ok()?;
+    let state = global();
+    let weak = state.procs.get(&proc_id)?;
+    let proc = weak.upgrade()?;
+    query_actor_details(&proc, actor_name)
 }
 
 /// Start serving the admin HTTP server.
