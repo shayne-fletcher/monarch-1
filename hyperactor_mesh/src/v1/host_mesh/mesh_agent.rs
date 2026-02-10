@@ -51,9 +51,9 @@ use crate::resource;
 use crate::resource::ProcSpec;
 use crate::v1::Name;
 
-type ProcManagerSpawnFuture =
+pub(crate) type ProcManagerSpawnFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<ActorHandle<ProcMeshAgent>>> + Send>>;
-type ProcManagerSpawnFn = Box<dyn Fn(Proc) -> ProcManagerSpawnFuture + Send + Sync>;
+pub(crate) type ProcManagerSpawnFn = Box<dyn Fn(Proc) -> ProcManagerSpawnFuture + Send + Sync>;
 
 /// Represents the different ways a [`Host`] can be managed by an agent.
 ///
