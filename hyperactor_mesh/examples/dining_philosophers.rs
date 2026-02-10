@@ -21,8 +21,10 @@ use hyperactor::Context;
 use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::PortRef;
+use hyperactor::Proc;
 use hyperactor::RemoteSpawn;
 use hyperactor::Unbind;
+use hyperactor::channel::ChannelTransport;
 use hyperactor::context;
 use hyperactor_config::Attrs;
 use hyperactor_mesh::comm::multicast::CastInfo;
@@ -34,7 +36,6 @@ use hyperactor_mesh::v1::host_mesh::HostMesh;
 use ndslice::ViewExt;
 use serde::Deserialize;
 use serde::Serialize;
-use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
 use typeuri::Named;
 
@@ -267,19 +268,16 @@ async fn main() -> Result<ExitCode> {
     let group_size = 5;
     let instance = global_root_client();
 
-    // Start the admin HTTP server in a background task.
-    // Uses the mesh-aware admin proxy so child procs in separate
-    // OS processes are queryable via actor messaging.
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let admin_addr = listener.local_addr()?;
-    println!("Admin server listening on http://{}", admin_addr);
-    println!("  - List procs:    curl http://{}/", admin_addr);
-    println!("  - Actor tree:    curl http://{}/tree", admin_addr);
-    tokio::spawn(async move {
-        if let Err(e) = hyperactor_mesh::admin_proxy::serve(listener).await {
-            tracing::error!("admin server error: {}", e);
-        }
-    });
+    // Start the mesh admin agent, which aggregates admin state
+    // across all hosts and serves an HTTP API.
+    let admin_proc = Proc::direct(ChannelTransport::Unix.any(), "mesh_admin".to_string())?;
+    let mesh_admin_addr = host_mesh.spawn_admin(instance, &admin_proc).await?;
+    println!("Mesh admin server listening on http://{}", mesh_admin_addr);
+    println!(
+        "  - List hosts:    curl http://{}/v1/hosts",
+        mesh_admin_addr
+    );
+    println!("  - Mesh tree:     curl http://{}/v1/tree", mesh_admin_addr);
 
     let proc_mesh = host_mesh
         .spawn(instance, "philosophers", extent!(replica = group_size))

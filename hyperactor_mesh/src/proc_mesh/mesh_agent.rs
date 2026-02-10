@@ -79,7 +79,7 @@ wirevalue::register_type!(StopActorResult);
 /// `serde_json::Value` which doesn't implement `Named`, so we serialize
 /// them to JSON strings for transport over actor messaging.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
-pub(crate) struct AdminQueryResponse {
+pub struct AdminQueryResponse {
     /// JSON-serialized response, or None if the queried entity was not found.
     pub json: Option<String>,
 }

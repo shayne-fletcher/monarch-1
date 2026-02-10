@@ -25,6 +25,7 @@ pub mod config;
 pub mod connect;
 pub mod logging;
 pub mod mesh;
+pub mod mesh_admin;
 pub mod mesh_selection;
 mod metrics;
 pub mod proc_launcher;
