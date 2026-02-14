@@ -174,6 +174,10 @@ fn bench_actor_mesh_message_sizes(c: &mut Criterion) {
 
                         let num_actors = actor_mesh.region().num_ranks();
 
+                        // Scale timeout with payload size: 30s base + 10s per 100MB.
+                        let recv_timeout =
+                            Duration::from_secs(30 + (message_size as u64 / 100_000_000) * 10);
+
                         let start = Instant::now();
                         for i in 0..iters {
                             let (tx, mut rx) = instance.mailbox().open_port();
@@ -193,9 +197,8 @@ fn bench_actor_mesh_message_sizes(c: &mut Criterion) {
                             let mut msg_rcv = 0;
                             while msg_rcv < num_actors {
                                 #[allow(clippy::disallowed_methods)]
-                                let _ = tokio::time::timeout(Duration::from_secs(10), rx.recv())
-                                    .await
-                                    .unwrap();
+                                let _ =
+                                    tokio::time::timeout(recv_timeout, rx.recv()).await.unwrap();
                                 msg_rcv += 1;
                             }
                         }

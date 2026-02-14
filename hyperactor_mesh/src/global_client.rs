@@ -176,9 +176,10 @@ impl GlobalClientActor {
                         let work = work.expect("inconsistent work queue state");
                         if let Err(err) = work.handle(&mut self, instance).await {
                             for supervision_event in self.supervision_rx.drain() {
-                                if let Err(err) = instance.handle_supervision_event(&mut self, supervision_event).await {
-                                    break 'messages err;
-                                }
+                                tracing::warn!(
+                                    %supervision_event,
+                                    "global root client absorbed child supervision event (during error drain)",
+                                );
                             }
                             let kind = ActorErrorKind::processing(err);
                             break ActorError {
@@ -191,9 +192,16 @@ impl GlobalClientActor {
                         // TODO: do we need any signal handling for the root client?
                     }
                     Ok(supervision_event) = self.supervision_rx.recv() => {
-                        if let Err(err) = instance.handle_supervision_event(&mut self, supervision_event).await {
-                            break err;
-                        }
+                        // The global root client is the root of the
+                        // supervision tree: there is no parent to
+                        // escalate to.  Child-actor failures (e.g.
+                        // ActorMeshControllers detecting dead procs
+                        // after mesh teardown) are expected and must
+                        // not crash the process.
+                        tracing::warn!(
+                            %supervision_event,
+                            "global root client absorbed child supervision event",
+                        );
                     }
                 };
             };
@@ -374,7 +382,7 @@ mod tests {
 
     use hyperactor::PortId;
     use hyperactor::id;
-    use hyperactor_config::attrs::Attrs;
+    use hyperactor_config::Flattrs;
     use ndslice::extent;
 
     use super::*;
@@ -398,7 +406,7 @@ mod tests {
             client.self_id().clone(),
             PortId(dest_actor, 0),
             wirevalue::Any::serialize(&0u64).unwrap(),
-            Attrs::new(),
+            Flattrs::new(),
         );
         // Target the global root client's well-known Undeliverable port.
         let undeliverable_port =
