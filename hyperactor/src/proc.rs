@@ -214,6 +214,7 @@ impl Proc {
             name = "ProcStatus",
             status = "Created"
         );
+
         let proc = Self {
             inner: Arc::new(ProcState {
                 proc_id,
