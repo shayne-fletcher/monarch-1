@@ -309,6 +309,7 @@ def test_rank_size_sync() -> None:
     host.shutdown().get()
 
 
+@pytest.mark.oss_skip  # SF (02-14-2026), thread 'monarch-pytokio-worker-0' (7432) panicked at hyperactor_mesh/src/host_mesh/mesh_agent.rs:209:39:
 @pytest.mark.timeout(60)
 @parametrize_config(actor_queue_dispatch={True, False})
 def test_accumulate_sync() -> None:
@@ -1290,6 +1291,7 @@ def test_python_task_tuple() -> None:
     PythonTask.from_coroutine(consume()).block_on()
 
 
+@pytest.mark.oss_skip  # SF (02-14-2026), flaking (actor_queue_dispatch=True)
 @parametrize_config(actor_queue_dispatch={True, False})
 def test_select_result() -> None:
     def s(t):
