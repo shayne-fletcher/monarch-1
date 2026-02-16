@@ -126,7 +126,7 @@ struct Args {
     addr: String,
 
     /// Refresh interval in milliseconds
-    #[arg(long, default_value_t = 5000)]
+    #[arg(long, default_value_t = 1000)]
     refresh_ms: u64,
 }
 
@@ -351,6 +351,96 @@ impl NodeType {
     }
 }
 
+/// Color scheme for the TUI.
+///
+/// Defines all colors and styles used throughout the interface. This
+/// abstraction allows for consistent theming and makes it easy to add
+/// alternative schemes (light mode, high contrast, etc.) in the
+/// future.
+///
+/// ## Color Semantics
+///
+/// Colors carry consistent meaning across the interface:
+/// - 🟢 **Green**: Topology/scale (host/proc/actor counts, success)
+/// - 🟡 **Yellow**: Timing/temporal (refresh intervals, warnings)
+/// - 🟣 **Magenta**: Selection/focus (current node, highlighted items)
+/// - 🔵 **Blue**: System state/config (toggles, system procs, actors)
+/// - ⚪ **Gray**: Secondary info (URLs, labels, borders)
+/// - 🔴 **Red**: Errors (error states, failures)
+/// - 🔷 **Cyan**: Important headers (app name, help headings)
+///
+/// ## Semantic Categories
+///
+/// - **UI chrome**: App name, borders, footer
+/// - **Node types**: Colors for root/host/proc/actor in tree
+/// - **States**: Error, warning, success for status display
+/// - **Header stats**: Timing, topology counts, selection, config
+/// - **Help overlay**: Markdown rendering styles
+struct ColorScheme {
+    // UI chrome
+    app_name: Style,
+    border: Style,
+    _border_focused: Style,
+    _footer_help: Style,
+
+    // Node types (tree rendering)
+    node_root: Style,
+    node_host: Style,
+    node_proc: Style,
+    node_actor: Style,
+    _node_error: Style,
+
+    // Semantic states
+    error: Style,
+    info: Style,
+
+    // Header stat categories
+    stat_timing: Style,    // refresh intervals, durations (temporal)
+    stat_selection: Style, // current selection (focus)
+    stat_system: Style,    // config toggles (state)
+    stat_url: Style,       // connection info (secondary)
+    stat_label: Style,     // stat labels/prefixes
+    stat_value: Style,     // stat numeric values
+}
+
+impl ColorScheme {
+    /// Default dark theme.
+    ///
+    /// This is the current color scheme used throughout the TUI.
+    fn default_dark() -> Self {
+        Self {
+            // UI chrome
+            app_name: Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            border: Style::default().fg(Color::Gray),
+            _border_focused: Style::default().fg(Color::Cyan),
+            _footer_help: Style::default().fg(Color::DarkGray),
+
+            // Node types
+            node_root: Style::default().fg(Color::Cyan),
+            node_host: Style::default().fg(Color::Green),
+            node_proc: Style::default().fg(Color::Yellow),
+            node_actor: Style::default().fg(Color::LightBlue),
+            _node_error: Style::default().fg(Color::Red),
+
+            // Semantic states
+            error: Style::default().fg(Color::Red),
+            info: Style::default().fg(Color::Cyan),
+
+            // Header stats
+            stat_timing: Style::default().fg(Color::Yellow),
+            stat_selection: Style::default().fg(Color::Magenta),
+            stat_system: Style::default().fg(Color::Blue),
+            stat_url: Style::default().fg(Color::DarkGray),
+            stat_label: Style::default().fg(Color::Gray),
+            stat_value: Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        }
+    }
+}
+
 /// A node in the topology tree.
 ///
 /// Represents the actual tree structure (not a flattened view).
@@ -489,8 +579,13 @@ struct App {
     tree: Option<TreeNode>,
     /// Navigation cursor over visible tree indices.
     cursor: Cursor,
-    /// Detail payload for the selected node (served from
-    /// `fetch_cache` when available).
+    /// Scroll offset for topology tree (top visible row).
+    tree_scroll_offset: usize,
+    /// Height of the topology tree viewport in rows (updated during
+    /// rendering).
+    tree_viewport_height: usize,
+    /// Detail payload for the selected node (usually served from
+    /// `node_cache`).
     detail: Option<NodePayload>,
     /// Error string for the detail pane when fetching/parsing the
     /// selected node fails.
@@ -510,6 +605,9 @@ struct App {
     refresh_gen: u64,
     /// Monotonic sequence counter for timestamp ordering.
     seq_counter: u64,
+
+    /// Color scheme for the entire UI.
+    scheme: ColorScheme,
 }
 
 /// Result of handling a key event.
@@ -540,6 +638,8 @@ impl App {
             should_quit: false,
             tree: None,
             cursor: Cursor::new(0),
+            tree_scroll_offset: 0,
+            tree_viewport_height: 20, // Default, updated during rendering
             detail: None,
             detail_error: None,
             last_refresh: String::new(),
@@ -548,6 +648,7 @@ impl App {
             fetch_cache: HashMap::new(),
             refresh_gen: 0,
             seq_counter: 0,
+            scheme: ColorScheme::default_dark(),
         }
     }
 
@@ -625,6 +726,19 @@ impl App {
             Some(root) => VisibleRows::new(flatten_tree(root)),
             None => VisibleRows::new(Vec::new()),
         }
+    }
+
+    /// Count nodes by type in the current tree.
+    ///
+    /// Returns (hosts, procs, actors) counts for all nodes in the
+    /// tree, regardless of expanded state.
+    /// Get the currently selected node's type and label.
+    ///
+    /// Returns `None` if no node is selected or tree is empty.
+    fn current_selection(&self) -> Option<(NodeType, &str)> {
+        let rows = self.visible_rows();
+        rows.get(&self.cursor)
+            .map(|row| (row.node.node_type, row.node.label.as_str()))
     }
 
     /// Get the currently selected node's reference.
@@ -825,10 +939,11 @@ impl App {
 
                 if let Some(cp) = child_payload {
                     // Apply system proc filtering.
-                    if let NodeProperties::Proc { is_system, .. } = cp.properties {
-                        if !self.show_system_procs && is_system {
-                            continue;
-                        }
+                    if let NodeProperties::Proc { is_system, .. } = cp.properties
+                        && !self.show_system_procs
+                        && is_system
+                    {
+                        continue;
                     }
                     child_nodes.push(TreeNode {
                         reference: child_ref.clone(),
@@ -843,24 +958,20 @@ impl App {
             }
         }
 
-        // Update node with new data using fold-based traversal.
-        let reference_owned = reference.to_string();
-        self.mutate_tree(|root| {
-            use std::ops::ControlFlow;
-            let _ = fold_tree_mut(root, &mut |node| {
-                if node.reference == reference_owned {
-                    node.label = derive_label(&payload);
-                    node.has_children = !payload.children.is_empty();
-                    node.fetched = true;
-                    node.node_type = NodeType::from_properties(&payload.properties);
-                    node.children = child_nodes.clone();
-                    node.expanded = true;
-                    ControlFlow::Break(())
-                } else {
-                    ControlFlow::Continue(())
-                }
-            });
-        });
+        // Now update the node with the new data.
+        if let Some(root) = &mut self.tree
+            && let Some(node) = find_node_mut(root, reference)
+        {
+            node.label = derive_label(&payload);
+            node.has_children = !payload.children.is_empty();
+            node.fetched = true;
+            node.node_type = NodeType::from_properties(&payload.properties);
+            node.children = child_nodes;
+            node.expanded = true;
+        }
+
+        // Keep scroll offset stable during expansion - the cursor
+        // position and view should remain unchanged.
     }
 
     /// Update the right-hand detail pane for the currently selected
@@ -892,6 +1003,28 @@ impl App {
         }
     }
 
+    /// Fetch SKILL.md from the `/SKILL.md` endpoint if not already cached.
+    /// Adjust scroll offset to ensure cursor remains visible within
+    /// the viewport.
+    ///
+    /// After Ctrl+L sets an explicit offset to position the selected
+    /// item at the top, this method preserves that positioning during
+    /// navigation, only adjusting when the cursor would move
+    /// off-screen.
+    fn ensure_cursor_visible(&mut self) {
+        let pos = self.cursor.pos();
+        if pos < self.tree_scroll_offset {
+            // Cursor moved above visible area, scroll up to show it at
+            // top.
+            self.tree_scroll_offset = pos;
+        } else if pos >= self.tree_scroll_offset + self.tree_viewport_height {
+            // Cursor moved below visible area, scroll down to show it
+            // near bottom.
+            self.tree_scroll_offset = pos.saturating_sub(self.tree_viewport_height - 1);
+        }
+        // Otherwise, cursor is visible - keep offset unchanged.
+    }
+
     /// Handle a single keypress and update in-memory UI state.
     ///
     /// Returns a `KeyResult` describing whether only the
@@ -903,16 +1036,19 @@ impl App {
         let rows = self.visible_rows();
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => {
+            KeyCode::Char('q') => {
+                // Quit immediately
                 self.should_quit = true;
                 KeyResult::None
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Ctrl+C: immediate quit
                 self.should_quit = true;
                 KeyResult::None
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.cursor.move_up() {
+                    self.ensure_cursor_visible();
                     KeyResult::DetailChanged
                 } else {
                     KeyResult::None
@@ -920,6 +1056,7 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if self.cursor.move_down() {
+                    self.ensure_cursor_visible();
                     KeyResult::DetailChanged
                 } else {
                     KeyResult::None
@@ -927,6 +1064,7 @@ impl App {
             }
             KeyCode::Home | KeyCode::Char('g') => {
                 if self.cursor.home() {
+                    self.ensure_cursor_visible();
                     KeyResult::DetailChanged
                 } else {
                     KeyResult::None
@@ -934,18 +1072,37 @@ impl App {
             }
             KeyCode::End | KeyCode::Char('G') => {
                 if self.cursor.end() {
+                    self.ensure_cursor_visible();
                     KeyResult::DetailChanged
                 } else {
                     KeyResult::None
                 }
             }
+            KeyCode::PageDown => {
+                // Page down (also Ctrl+V for Emacs compatibility)
+                let page_size = 10;
+                let new_pos =
+                    (self.cursor.pos() + page_size).min(self.cursor.len().saturating_sub(1));
+                self.cursor.set_pos(new_pos);
+                self.ensure_cursor_visible();
+                KeyResult::DetailChanged
+            }
+            KeyCode::PageUp => {
+                // Page up (also Alt+V for Emacs compatibility)
+                let page_size = 10;
+                let new_pos = self.cursor.pos().saturating_sub(page_size);
+                self.cursor.set_pos(new_pos);
+                self.ensure_cursor_visible();
+                KeyResult::DetailChanged
+            }
             KeyCode::Tab => {
                 // Expand selected node; lazily fetch children.
-                if let Some(row) = rows.get(&self.cursor) {
-                    if row.node.has_children && !row.node.expanded {
-                        let reference = row.node.reference.clone();
-                        return KeyResult::ExpandNode(reference);
-                    }
+                if let Some(row) = rows.get(&self.cursor)
+                    && row.node.has_children
+                    && !row.node.expanded
+                {
+                    let reference = row.node.reference.clone();
+                    return KeyResult::ExpandNode(reference);
                 }
                 KeyResult::None
             }
@@ -959,28 +1116,18 @@ impl App {
                     }
                 });
 
-                if let Some((reference, depth)) = to_collapse {
-                    let mut collapsed = false;
-                    self.mutate_tree(|root| {
-                        use std::ops::ControlFlow;
-                        // Find across root's children (root itself is not rendered)
-                        for child in &mut root.children {
-                            let result = fold_tree_mut_with_depth(child, 0, &mut |node, d| {
-                                if node.reference == reference && d == depth {
-                                    node.expanded = false;
-                                    collapsed = true;
-                                    ControlFlow::Break(())
-                                } else {
-                                    ControlFlow::Continue(())
-                                }
-                            });
-                            if result.is_break() {
-                                return;
-                            }
+                if let Some((reference, depth)) = to_collapse
+                    && let Some(root) = &mut self.tree
+                {
+                    let mut count = 0;
+                    // Find across root's children (root itself is not rendered)
+                    for child in &mut root.children {
+                        if let Some(node) =
+                            find_node_at_depth_mut(child, &reference, depth, 0, &mut count)
+                        {
+                            node.expanded = false;
+                            return KeyResult::DetailChanged;
                         }
-                    });
-                    if collapsed {
-                        return KeyResult::DetailChanged;
                     }
                 }
                 KeyResult::None
@@ -998,6 +1145,45 @@ impl App {
                 // Toggle system proc visibility
                 self.show_system_procs = !self.show_system_procs;
                 KeyResult::NeedsRefresh
+            }
+            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Scroll selected item to top of visible area
+                self.tree_scroll_offset = self.cursor.pos();
+                KeyResult::None
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Page down (Ctrl+D, vi-style)
+                let page_size = 10;
+                let new_pos =
+                    (self.cursor.pos() + page_size).min(self.cursor.len().saturating_sub(1));
+                self.cursor.set_pos(new_pos);
+                self.ensure_cursor_visible();
+                KeyResult::DetailChanged
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Page up (Ctrl+U, vi-style)
+                let page_size = 10;
+                let new_pos = self.cursor.pos().saturating_sub(page_size);
+                self.cursor.set_pos(new_pos);
+                self.ensure_cursor_visible();
+                KeyResult::DetailChanged
+            }
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Page down (Ctrl+V, Emacs-style)
+                let page_size = 10;
+                let new_pos =
+                    (self.cursor.pos() + page_size).min(self.cursor.len().saturating_sub(1));
+                self.cursor.set_pos(new_pos);
+                self.ensure_cursor_visible();
+                KeyResult::DetailChanged
+            }
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::ALT) => {
+                // Page up (Alt+V, Emacs-style - may not work in all terminals)
+                let page_size = 10;
+                let new_pos = self.cursor.pos().saturating_sub(page_size);
+                self.cursor.set_pos(new_pos);
+                self.ensure_cursor_visible();
+                KeyResult::DetailChanged
             }
             _ => KeyResult::None,
         }
@@ -1334,6 +1520,7 @@ fn collapse_all(node: &mut TreeNode) {
 /// if it appears in its own ancestor path (true cycle). This allows
 /// legitimate dual appearances (nodes appearing in both supervision
 /// tree and flat list).
+#[allow(clippy::too_many_arguments)]
 fn build_tree_node<'a>(
     client: &'a reqwest::Client,
     base_url: &'a str,
@@ -1380,11 +1567,12 @@ fn build_tree_node<'a>(
         };
 
         // Filter system procs.
-        if let NodeProperties::Proc { is_system, .. } = payload.properties {
-            if !show_system_procs && is_system {
-                path.pop();
-                return None;
-            }
+        if let NodeProperties::Proc { is_system, .. } = payload.properties
+            && !show_system_procs
+            && is_system
+        {
+            path.pop();
+            return None;
         }
 
         let label = derive_label(&payload);
@@ -1521,7 +1709,7 @@ fn build_tree_node<'a>(
 /// parses as an `ActorId`.
 fn derive_label(payload: &NodePayload) -> String {
     match &payload.properties {
-        NodeProperties::Root { num_hosts } => format!("Mesh Root ({} hosts)", num_hosts),
+        NodeProperties::Root { num_hosts, .. } => format!("Mesh Root ({} hosts)", num_hosts),
         NodeProperties::Host { addr, num_procs } => format!("{}  ({} procs)", addr, num_procs),
         NodeProperties::Proc {
             proc_name,
@@ -1651,6 +1839,23 @@ fn format_local_time(timestamp: &str) -> String {
         .unwrap_or_else(|_| timestamp.get(11..19).unwrap_or(timestamp).to_string())
 }
 
+/// Format uptime duration from ISO-8601 start timestamp.
+///
+/// Rounds to nearest 30 seconds for cleaner display.
+fn format_uptime(started_at: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(started_at) {
+        Ok(start_time) => {
+            let now = chrono::Utc::now();
+            let duration = now.signed_duration_since(start_time);
+            let total_secs = duration.num_seconds();
+            let rounded_secs = ((total_secs + 15) / 30) * 30;
+            let std_duration = Duration::from_secs(rounded_secs as u64);
+            humantime::format_duration(std_duration).to_string()
+        }
+        Err(_) => "unknown".to_string(),
+    }
+}
+
 // Terminal setup / teardown
 
 /// Put the terminal into "TUI mode".
@@ -1731,6 +1936,11 @@ async fn run_app(
     let mut events = EventStream::new();
 
     loop {
+        // Update viewport height before rendering. The body area is
+        // terminal height minus header (3 rows) and footer (2 rows).
+        let terminal_size = terminal.size()?;
+        app.tree_viewport_height = terminal_size.height.saturating_sub(5) as usize;
+
         terminal.draw(|frame| ui(frame, &app))?;
 
         tokio::select! {
@@ -1749,6 +1959,12 @@ async fn run_app(
                             }
                             KeyResult::ExpandNode(reference) => {
                                 app.expand_node(&reference).await;
+                                // Update cursor length to reflect new children
+                                let rows = app.visible_rows();
+                                app.cursor.update_len(rows.len());
+                                // Move cursor to first child after expanding
+                                app.cursor.move_down();
+                                app.ensure_cursor_visible();
                                 app.update_selected_detail().await;
                             }
                             KeyResult::None => {}
@@ -1791,33 +2007,135 @@ fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
 
 /// Render the top status/header bar.
 ///
-/// Shows connection status (or the last refresh time) and reflects
-/// current view toggles like whether system procs are visible.
+/// Displays a colorful, information-dense header with topology stats,
+/// selection context, and system state. Uses semantic colors from the
+/// scheme for visual hierarchy and readability.
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let status = if let Some(err) = &app.error {
-        format!("ERROR: {}", err)
-    } else {
-        let sys = if app.show_system_procs {
-            " | system procs: shown"
+    // Error state overrides normal display
+    if let Some(err) = &app.error {
+        let header = Paragraph::new(vec![
+            Line::from(Span::styled("m-admin", app.scheme.app_name)),
+            Line::from(Span::styled(format!("ERROR: {}", err), app.scheme.error)),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(app.scheme.border),
+        );
+        frame.render_widget(header, area);
+        return;
+    }
+
+    // Gather stats
+    let selection = app.current_selection();
+    let sys_state = if app.show_system_procs { "on" } else { "off" };
+
+    // Extract uptime and username from root node
+    let (uptime_str, username) = if let Some(root_payload) = app.get_cached_payload("root") {
+        if let NodeProperties::Root {
+            started_at,
+            started_by,
+            ..
+        } = &root_payload.properties
+        {
+            (Some(format_uptime(started_at)), Some(started_by.clone()))
         } else {
-            ""
-        };
-        format!(
-            "Connected to {} | Last refresh: {}{}",
-            app.base_url, app.last_refresh, sys
-        )
+            (None, None)
+        }
+    } else {
+        (None, None)
     };
 
-    let header = Paragraph::new(vec![
-        Line::from(Span::styled(
-            "m-admin",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(status, Style::default().fg(Color::Gray))),
-    ])
-    .block(Block::default().borders(Borders::BOTTOM));
+    // Line 1: App name • URL • up: 2h 34m • @user • sys:off
+    let mut line1_spans = vec![
+        Span::styled("m-admin", app.scheme.app_name),
+        Span::styled(" • ", app.scheme.stat_label),
+        Span::styled(&app.base_url, app.scheme.stat_url),
+    ];
+
+    // Add uptime if available
+    if let Some(uptime) = uptime_str {
+        line1_spans.extend(vec![
+            Span::styled(" • ", app.scheme.stat_label),
+            Span::styled("up: ", app.scheme.stat_label),
+            Span::styled(uptime, app.scheme.stat_timing),
+        ]);
+    }
+
+    // Add username if available
+    if let Some(user) = username {
+        line1_spans.extend(vec![
+            Span::styled(" • ", app.scheme.stat_label),
+            Span::styled(format!("@{}", user), app.scheme.stat_system),
+        ]);
+    }
+
+    // Cache size and error count
+    let cache_size = app.fetch_cache.len();
+    let error_count = app
+        .fetch_cache
+        .values()
+        .filter(|state| matches!(state, FetchState::Error { .. }))
+        .count();
+
+    line1_spans.extend(vec![
+        Span::styled(" • ", app.scheme.stat_label),
+        Span::styled("cache:", app.scheme.stat_label),
+        Span::styled(cache_size.to_string(), app.scheme.stat_value),
+    ]);
+
+    if error_count > 0 {
+        line1_spans.extend(vec![
+            Span::styled(" err:", app.scheme.stat_label),
+            Span::styled(error_count.to_string(), app.scheme.error),
+        ]);
+    }
+
+    line1_spans.extend(vec![
+        Span::styled(" • ", app.scheme.stat_label),
+        Span::styled("sys:", app.scheme.stat_label),
+        Span::styled(sys_state, app.scheme.stat_system),
+    ]);
+
+    // Line 2: Selection context • Last refresh time
+    let mut line2_spans = vec![];
+
+    if let Some((node_type, label)) = selection {
+        let type_str = match node_type {
+            NodeType::Root => "root",
+            NodeType::Host => "host",
+            NodeType::Proc => "proc",
+            NodeType::Actor => "actor",
+        };
+        let type_style = match node_type {
+            NodeType::Root => app.scheme.node_root,
+            NodeType::Host => app.scheme.node_host,
+            NodeType::Proc => app.scheme.node_proc,
+            NodeType::Actor => app.scheme.node_actor,
+        };
+        line2_spans.extend(vec![
+            Span::styled("▸ ", app.scheme.stat_selection),
+            Span::styled(type_str, type_style),
+            Span::styled(" ", Style::default()),
+            Span::styled(label, app.scheme.stat_selection),
+        ]);
+    } else {
+        line2_spans.push(Span::styled("No selection", app.scheme.info));
+    }
+
+    if !app.last_refresh.is_empty() {
+        line2_spans.extend(vec![
+            Span::styled(" • ", app.scheme.stat_label),
+            Span::styled("⟳ ", app.scheme.stat_timing),
+            Span::styled(&app.last_refresh, app.scheme.stat_timing),
+        ]);
+    }
+
+    let header = Paragraph::new(vec![Line::from(line1_spans), Line::from(line2_spans)]).block(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(app.scheme.border),
+    );
 
     frame.render_widget(header, area);
 }
@@ -1882,15 +2200,13 @@ fn render_topology_tree(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             };
 
             let style = if vis_idx == app.cursor.pos() {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+                app.scheme.stat_selection.add_modifier(Modifier::BOLD)
             } else {
                 match node.node_type {
-                    NodeType::Root => Style::default().fg(Color::Magenta),
-                    NodeType::Host => Style::default().fg(Color::Cyan),
-                    NodeType::Proc => Style::default().fg(Color::Green),
-                    NodeType::Actor => Style::default().fg(Color::White),
+                    NodeType::Root => app.scheme.node_root,
+                    NodeType::Host => app.scheme.node_host,
+                    NodeType::Proc => app.scheme.node_proc,
+                    NodeType::Actor => app.scheme.node_actor,
                 }
             };
 
@@ -1904,12 +2220,14 @@ fn render_topology_tree(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let block = Block::default()
         .title("Topology")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray));
+        .border_style(app.scheme.border);
 
     let list = List::new(items)
         .block(block)
         .highlight_style(Style::default());
-    let mut list_state = ListState::default().with_selected(Some(app.cursor.pos()));
+    let mut list_state = ListState::default()
+        .with_selected(Some(app.cursor.pos()))
+        .with_offset(app.tree_scroll_offset);
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
@@ -1922,22 +2240,22 @@ fn render_topology_tree(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 /// node" placeholder message.
 fn render_detail_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     match &app.detail {
-        Some(payload) => render_node_detail(frame, area, payload),
+        Some(payload) => render_node_detail(frame, area, payload, &app.scheme),
         None => {
             let msg = app
                 .detail_error
                 .as_deref()
                 .unwrap_or("Select a node to view details");
-            let color = if app.detail_error.is_some() {
-                Color::Red
+            let msg_style = if app.detail_error.is_some() {
+                app.scheme.error
             } else {
-                Color::Gray
+                app.scheme.info
             };
             let block = Block::default()
                 .title("Details")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Gray));
-            let p = Paragraph::new(Span::styled(msg, Style::default().fg(color))).block(block);
+                .border_style(app.scheme.border);
+            let p = Paragraph::new(Span::styled(msg, msg_style)).block(block);
             frame.render_widget(p, area);
         }
     }
@@ -1950,20 +2268,31 @@ fn render_detail_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 /// (`render_root_detail`, `render_host_detail`, `render_proc_detail`,
 /// or `render_actor_detail`) with the relevant fields extracted from
 /// the payload.
-fn render_node_detail(frame: &mut ratatui::Frame<'_>, area: Rect, payload: &NodePayload) {
+fn render_node_detail(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    payload: &NodePayload,
+    scheme: &ColorScheme,
+) {
     match &payload.properties {
-        NodeProperties::Root { num_hosts } => {
-            render_root_detail(frame, area, payload, *num_hosts);
+        NodeProperties::Root {
+            num_hosts,
+            started_at,
+            started_by,
+        } => {
+            render_root_detail(
+                frame, area, payload, *num_hosts, started_at, started_by, scheme,
+            );
         }
         NodeProperties::Host { addr, num_procs } => {
-            render_host_detail(frame, area, payload, addr, *num_procs);
+            render_host_detail(frame, area, payload, addr, *num_procs, scheme);
         }
         NodeProperties::Proc {
             proc_name,
             num_actors,
             ..
         } => {
-            render_proc_detail(frame, area, payload, proc_name, *num_actors);
+            render_proc_detail(frame, area, payload, proc_name, *num_actors, scheme);
         }
         NodeProperties::Actor {
             actor_status,
@@ -1985,12 +2314,19 @@ fn render_node_detail(frame: &mut ratatui::Frame<'_>, area: Rect, payload: &Node
                 last_message_handler.as_deref(),
                 *total_processing_time_us,
                 flight_recorder.as_deref(),
+                scheme,
             );
         }
         NodeProperties::Error { code, message } => {
             let text = format!("Error: {} — {}", code, message);
             let paragraph = Paragraph::new(text)
-                .block(Block::default().borders(Borders::ALL).title("Error"))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(scheme.border)
+                        .title("Error"),
+                )
+                .style(scheme.error)
                 .wrap(Wrap { trim: true });
             frame.render_widget(paragraph, area);
         }
@@ -2007,16 +2343,33 @@ fn render_root_detail(
     area: Rect,
     payload: &NodePayload,
     num_hosts: usize,
+    started_at: &str,
+    started_by: &str,
+    scheme: &ColorScheme,
 ) {
     let block = Block::default()
         .title("Root Details")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray));
+        .border_style(scheme.border);
+
+    let uptime_str = format_uptime(started_at);
 
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Hosts: ", Style::default().fg(Color::Gray)),
             Span::raw(num_hosts.to_string()),
+        ]),
+        Line::from(vec![
+            Span::styled("Started by: ", Style::default().fg(Color::Gray)),
+            Span::raw(started_by),
+        ]),
+        Line::from(vec![
+            Span::styled("Uptime: ", Style::default().fg(Color::Gray)),
+            Span::raw(&uptime_str),
+        ]),
+        Line::from(vec![
+            Span::styled("Started at: ", Style::default().fg(Color::Gray)),
+            Span::raw(format_local_time(started_at)),
         ]),
         Line::default(),
     ];
@@ -2041,11 +2394,12 @@ fn render_host_detail(
     payload: &NodePayload,
     addr: &str,
     num_procs: usize,
+    scheme: &ColorScheme,
 ) {
     let block = Block::default()
         .title("Host Details")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray));
+        .border_style(scheme.border);
 
     let mut lines = vec![
         Line::from(vec![
@@ -2084,11 +2438,12 @@ fn render_proc_detail(
     payload: &NodePayload,
     proc_name: &str,
     num_actors: usize,
+    scheme: &ColorScheme,
 ) {
     let block = Block::default()
         .title("Proc Details")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray));
+        .border_style(scheme.border);
 
     let mut lines = vec![
         Line::from(vec![
@@ -2138,6 +2493,7 @@ fn render_actor_detail(
     last_message_handler: Option<&str>,
     total_processing_time_us: u64,
     flight_recorder_json: Option<&str>,
+    _scheme: &ColorScheme,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
