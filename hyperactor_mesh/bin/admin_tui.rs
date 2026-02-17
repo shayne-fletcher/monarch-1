@@ -618,8 +618,8 @@ enum KeyResult {
     DetailChanged,
     /// A filter/view setting changed; full tree refresh needed.
     NeedsRefresh,
-    /// Lazily expand the node at the given reference.
-    ExpandNode(String),
+    /// Lazily expand the node at the given (reference, depth).
+    ExpandNode(String, usize),
 }
 
 impl App {
@@ -871,21 +871,10 @@ impl App {
     /// fetches from the admin API. For Proc/Actor parents, children
     /// are inserted as placeholders (lazy fetching). For Root/Host
     /// parents, children are eagerly fetched.
-    async fn expand_node(&mut self, reference: &str) {
-        // Check if node exists and is already expanded.
-        let already_expanded = if let Some(root) = self.tree() {
-            if let Some(node) = find_node_by_ref(root, reference) {
-                node.expanded && !node.children.is_empty()
-            } else {
-                self.error = Some(format!("Node not found: {}", reference));
-                return;
-            }
-        } else {
-            return;
-        };
-
-        if already_expanded {
-            return;
+    async fn expand_node(&mut self, reference: &str, depth: usize) -> bool {
+        // Early check: bail if no tree.
+        if self.tree.is_none() {
+            return false;
         }
 
         // Fetch payload (releases tree borrow).
@@ -894,9 +883,9 @@ impl App {
             FetchState::Ready { value, .. } => value,
             FetchState::Error { msg, .. } => {
                 self.error = Some(format!("Expand failed: {}", msg));
-                return;
+                return false;
             }
-            FetchState::Unknown => return,
+            FetchState::Unknown => return false,
         };
 
         // Build children from payload.
@@ -959,19 +948,32 @@ impl App {
         }
 
         // Now update the node with the new data.
-        if let Some(root) = &mut self.tree
-            && let Some(node) = find_node_mut(root, reference)
-        {
-            node.label = derive_label(&payload);
-            node.has_children = !payload.children.is_empty();
-            node.fetched = true;
-            node.node_type = NodeType::from_properties(&payload.properties);
-            node.children = child_nodes;
-            node.expanded = true;
+        if let Some(root) = &mut self.tree {
+            let mut count = 0;
+            // Find across root's children (root itself is not rendered)
+            for child in &mut root.children {
+                if let Some(node) =
+                    find_node_at_depth_mut(child, reference, depth, 0, &mut count)
+                {
+                    // Skip if already expanded with children
+                    if node.expanded && !node.children.is_empty() {
+                        return false;
+                    }
+
+                    node.label = derive_label(&payload);
+                    node.has_children = !payload.children.is_empty();
+                    node.fetched = true;
+                    node.node_type = NodeType::from_properties(&payload.properties);
+                    node.children = child_nodes;
+                    node.expanded = true;
+                    // Keep scroll offset stable during expansion - the cursor
+                    // position and view should remain unchanged.
+                    return true;
+                }
+            }
         }
 
-        // Keep scroll offset stable during expansion - the cursor
-        // position and view should remain unchanged.
+        false
     }
 
     /// Update the right-hand detail pane for the currently selected
@@ -1102,7 +1104,8 @@ impl App {
                     && !row.node.expanded
                 {
                     let reference = row.node.reference.clone();
-                    return KeyResult::ExpandNode(reference);
+                    let depth = row.depth;
+                    return KeyResult::ExpandNode(reference, depth);
                 }
                 KeyResult::None
             }
@@ -1957,14 +1960,15 @@ async fn run_app(
                             KeyResult::NeedsRefresh => {
                                 app.refresh().await;
                             }
-                            KeyResult::ExpandNode(reference) => {
-                                app.expand_node(&reference).await;
-                                // Update cursor length to reflect new children
-                                let rows = app.visible_rows();
-                                app.cursor.update_len(rows.len());
-                                // Move cursor to first child after expanding
-                                app.cursor.move_down();
-                                app.ensure_cursor_visible();
+                            KeyResult::ExpandNode(reference, depth) => {
+                                if app.expand_node(&reference, depth).await {
+                                    // Update cursor length to reflect new children
+                                    let rows = app.visible_rows();
+                                    app.cursor.update_len(rows.len());
+                                    // Move cursor to first child after expanding
+                                    app.cursor.move_down();
+                                    app.ensure_cursor_visible();
+                                }
                                 app.update_selected_detail().await;
                             }
                             KeyResult::None => {}
