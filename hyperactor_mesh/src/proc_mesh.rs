@@ -99,6 +99,12 @@ declare_attrs! {
     pub attr GET_ACTOR_STATE_MAX_IDLE: Duration = Duration::from_secs(30);
 }
 
+/// Name used for the mesh communication actor spawned on each user proc.
+///
+/// The `CommActor` enables proc-to-proc mesh messaging and is always
+/// present as a system actor (`system_children`) on every proc mesh member.
+pub const COMM_ACTOR_NAME: &str = "comm";
+
 /// A reference to a single [`hyperactor::Proc`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcRef {
@@ -219,7 +225,7 @@ impl ProcMesh {
         C::A: Handler<MeshFailure>,
     {
         let comm_actor_name = if spawn_comm_actor {
-            Some(Name::new("comm").unwrap())
+            Some(Name::new(COMM_ACTOR_NAME).unwrap())
         } else {
             None
         };

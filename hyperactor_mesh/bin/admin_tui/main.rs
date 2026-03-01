@@ -108,6 +108,7 @@
 mod actions;
 mod app;
 mod client;
+mod diagnostics;
 mod fetch;
 mod filter;
 mod format;
@@ -195,13 +196,77 @@ async fn main() -> io::Result<()> {
     run(None).await
 }
 
+async fn run_diagnose(client: reqwest::Client, base_url: String) -> io::Result<()> {
+    use crate::diagnostics::DiagOutcome;
+    use crate::diagnostics::DiagPhase;
+    use crate::diagnostics::run_diagnostics;
+
+    // Global timeout: prevents hanging if the server is unreachable or
+    // per-probe timeouts interact badly with very large meshes.
+    const GLOBAL_TIMEOUT_SECS: u64 = 120;
+
+    let mut rx = run_diagnostics(client, base_url);
+    let mut results = Vec::new();
+
+    let timed_out = tokio::time::timeout(Duration::from_secs(GLOBAL_TIMEOUT_SECS), async {
+        while let Some(r) = rx.recv().await {
+            results.push(r);
+        }
+    })
+    .await
+    .is_err();
+
+    let is_pass =
+        |o: &DiagOutcome| matches!(o, DiagOutcome::Pass { .. } | DiagOutcome::Slow { .. });
+
+    let total = results.len();
+    let passed = results.iter().filter(|r| is_pass(&r.outcome)).count();
+    let admin_total = results
+        .iter()
+        .filter(|r| r.phase == DiagPhase::AdminInfra)
+        .count();
+    let admin_passed = results
+        .iter()
+        .filter(|r| r.phase == DiagPhase::AdminInfra && is_pass(&r.outcome))
+        .count();
+    let mesh_total = results
+        .iter()
+        .filter(|r| r.phase == DiagPhase::Mesh)
+        .count();
+    let mesh_passed = results
+        .iter()
+        .filter(|r| r.phase == DiagPhase::Mesh && is_pass(&r.outcome))
+        .count();
+    let healthy = passed == total && !timed_out;
+
+    let report = serde_json::json!({
+        "checks": results,
+        "timed_out": timed_out,
+        "summary": {
+            "total": total,
+            "passed": passed,
+            "failed": total - passed,
+            "admin_infra_passed": admin_passed,
+            "admin_infra_total": admin_total,
+            "mesh_passed": mesh_passed,
+            "mesh_total": mesh_total,
+            "healthy": healthy,
+        }
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
+    );
+
+    if !healthy {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 async fn run(fb: Option<fbinit::FacebookInit>) -> io::Result<()> {
     let mut args = Args::parse();
-
-    if !io::stdout().is_terminal() {
-        eprintln!("This TUI requires a real terminal.");
-        return Ok(());
-    }
 
     // Resolve mast_conda:/// handles to https://fqdn:port before
     // building the HTTP client (INV-DISPATCH).
@@ -213,6 +278,15 @@ async fn run(fb: Option<fbinit::FacebookInit>) -> io::Result<()> {
     // Build the HTTP client and base URL, configuring TLS when
     // certificates are available.
     let (base_url, client) = client::build_client(&args);
+
+    if args.diagnose {
+        return run_diagnose(client, base_url).await;
+    }
+
+    if !io::stdout().is_terminal() {
+        eprintln!("This TUI requires a real terminal.");
+        return Ok(());
+    }
 
     // Show an indicatif spinner on stderr while fetching initial data.
     // This runs before the alternate screen so it's visible as a normal

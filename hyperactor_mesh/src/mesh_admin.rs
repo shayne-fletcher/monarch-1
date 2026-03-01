@@ -861,9 +861,14 @@ impl MeshAdminAgent {
     ///
     /// First tries `IntrospectMessage::QueryChild` against the owning
     /// `HostMeshAgent` (system procs). If that returns an error
-    /// payload, falls back to sending `IntrospectMessage::Query` to
-    /// the conventional `ProcAgent` actor (`<proc_id>/agent[0]`)
-    /// for user procs.
+    /// payload, falls back to `ProcAgent` for user procs by querying
+    /// `QueryChild(Reference::Proc(proc_id))` on
+    /// `<proc_id>/proc_agent[0]`.
+    ///
+    /// Invariant PA-1: proc-node children used by admin/TUI must be
+    /// derived from live proc state at query time (no additional
+    /// publish event required). An `Entity`-view fallback is kept for
+    /// backward compatibility with older agents.
     async fn resolve_proc_node(
         &self,
         cx: &Context<'_, Self>,
@@ -915,8 +920,8 @@ impl MeshAdminAgent {
         let (reply_handle, reply_rx) = open_once_port::<NodePayload>(cx);
         agent_port.send(
             cx,
-            IntrospectMessage::Query {
-                view: hyperactor::introspect::IntrospectView::Entity,
+            IntrospectMessage::QueryChild {
+                child_ref: Reference::Proc(proc_id.clone()),
                 reply: reply_handle.bind(),
             },
         )?;
@@ -928,6 +933,26 @@ impl MeshAdminAgent {
             .map_err(|e| {
                 anyhow::anyhow!("failed to receive proc mesh agent introspection: {}", e)
             })?;
+
+        // Backward compatibility: older agents only answered proc
+        // details through Entity view.
+        if matches!(payload.properties, NodeProperties::Error { .. }) {
+            let (reply_handle, reply_rx) = open_once_port::<NodePayload>(cx);
+            agent_port.send(
+                cx,
+                IntrospectMessage::Query {
+                    view: hyperactor::introspect::IntrospectView::Entity,
+                    reply: reply_handle.bind(),
+                },
+            )?;
+            payload = RealClock
+                .timeout(SINGLE_HOST_TIMEOUT, reply_rx.recv())
+                .await
+                .map_err(|_| anyhow::anyhow!("timed out querying proc mesh agent"))?
+                .map_err(|e| {
+                    anyhow::anyhow!("failed to receive proc mesh agent introspection: {}", e)
+                })?;
+        }
 
         // The ProcAgent sets identity to its own ActorId, but the
         // caller asked for the proc by ProcId. Override so the
@@ -1001,7 +1026,40 @@ impl MeshAdminAgent {
             if anchor_is_system {
                 system_children.push(anchor_ref);
             }
-            children.extend(actor_payload.children);
+
+            // Query each supervision child to check is_system.
+            for child_ref in actor_payload.children {
+                if let Ok(child_actor_id) = child_ref.parse::<ActorId>() {
+                    let child_port =
+                        PortRef::<IntrospectMessage>::attest_message_port(&child_actor_id);
+                    let (reply_handle, reply_rx) = open_once_port::<NodePayload>(cx);
+                    let child_is_system = if child_port
+                        .send(
+                            cx,
+                            IntrospectMessage::Query {
+                                view: hyperactor::introspect::IntrospectView::Actor,
+                                reply: reply_handle.bind(),
+                            },
+                        )
+                        .is_ok()
+                    {
+                        matches!(
+                            RealClock.timeout(SINGLE_HOST_TIMEOUT, reply_rx.recv()).await,
+                            Ok(Ok(p))
+                                if matches!(
+                                    &p.properties,
+                                    NodeProperties::Actor { is_system: true, .. }
+                                )
+                        )
+                    } else {
+                        false
+                    };
+                    if child_is_system {
+                        system_children.push(child_ref.clone());
+                    }
+                }
+                children.push(child_ref);
+            }
             (children, system_children)
         };
 
@@ -2864,5 +2922,146 @@ mod tests {
         };
         let head = super::head_hostname(&response).unwrap();
         assert_eq!(head, "host_0");
+    }
+
+    // Verifies that GET /v1/{proc_id} reflects actors spawned directly
+    // on a proc — bypassing ProcAgent's gspawn message and therefore
+    // never triggering publish_introspect_properties — so that the
+    // resolved children list is always derived from live proc state.
+    //
+    // Regression guard for the bug introduced in 9a08d559: the switch
+    // from a live handle_introspect to a cached publish model made
+    // supervision-spawned actors (e.g. every sieve actor after
+    // sieve[0]) invisible to the TUI.
+    //
+    // Invariant PA-1 (admin path): proc-node children consumed by the
+    // TUI are sourced from live proc state via ProcAgent
+    // QueryChild(Reference::Proc), not solely from cached published
+    // snapshots. Direct proc.spawn() of actor X must make X visible on
+    // the next resolve of that proc. See also
+    // proc_agent::tests::test_query_child_proc_returns_live_children.
+    #[tokio::test]
+    async fn test_proc_children_reflect_directly_spawned_actors() {
+        use hyperactor::Proc;
+        use hyperactor::actor::ActorStatus;
+        use hyperactor::channel::ChannelTransport;
+        use hyperactor::host::Host;
+        use hyperactor::host::LocalProcManager;
+
+        use crate::host_mesh::mesh_agent::HOST_MESH_AGENT_ACTOR_NAME;
+        use crate::host_mesh::mesh_agent::HostAgentMode;
+        use crate::host_mesh::mesh_agent::ProcManagerSpawnFn;
+        use crate::proc_agent::PROC_AGENT_ACTOR_NAME;
+        use crate::proc_agent::ProcAgent;
+
+        // Stand up a HostMeshAgent. The user proc gets its own
+        // ephemeral address; we register that address in
+        // MeshAdminAgent so resolve_proc_node can look it up.
+        // HostMeshAgent won't know the user proc (it wasn't spawned
+        // through it), so QueryChild returns Error and resolve falls
+        // back to querying proc_agent[0] via QueryChild(Proc) — the
+        // path being tested.
+        let spawn_fn: ProcManagerSpawnFn =
+            Box::new(|proc| Box::pin(std::future::ready(ProcAgent::boot_v1(proc, None))));
+        let manager = LocalProcManager::new(spawn_fn);
+        let host = Host::new(manager, ChannelTransport::Unix.any())
+            .await
+            .unwrap();
+        let system_proc = host.system_proc().clone();
+        let host_agent_handle = system_proc
+            .spawn(
+                HOST_MESH_AGENT_ACTOR_NAME,
+                HostMeshAgent::new(HostAgentMode::Local(host)),
+            )
+            .unwrap();
+        let host_agent_ref: ActorRef<HostMeshAgent> = host_agent_handle.bind();
+
+        // User proc: own ephemeral Unix socket, own ProcAgent.
+        let user_proc =
+            Proc::direct(ChannelTransport::Unix.any(), "user_proc".to_string()).unwrap();
+        let user_proc_addr = match user_proc.proc_id() {
+            ProcId::Direct(addr, _) => addr.to_string(),
+            _ => panic!("expected Direct ProcId"),
+        };
+        let agent_handle = ProcAgent::boot_v1(user_proc.clone(), None).unwrap();
+        agent_handle
+            .status()
+            .wait_for(|s| matches!(s, ActorStatus::Idle))
+            .await
+            .unwrap();
+
+        // MeshAdminAgent: register the user proc's addr as a "host"
+        // pointing to host_agent_ref. That agent doesn't know the
+        // user proc, so QueryChild → Error → fallback to proc_agent.
+        let admin_proc = Proc::direct(ChannelTransport::Unix.any(), "admin".to_string()).unwrap();
+        use hyperactor::test_utils::proc_supervison::ProcSupervisionCoordinator;
+        let _supervision = ProcSupervisionCoordinator::set(&admin_proc).await.unwrap();
+        let admin_handle = admin_proc
+            .spawn(
+                MESH_ADMIN_ACTOR_NAME,
+                MeshAdminAgent::new(
+                    vec![(user_proc_addr, host_agent_ref.clone())],
+                    None,
+                    Some("[::]:0".parse().unwrap()),
+                ),
+            )
+            .unwrap();
+        let admin_ref: ActorRef<MeshAdminAgent> = admin_handle.bind();
+
+        let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
+        let (client, _client_handle) = client_proc.instance("client").unwrap();
+
+        // Resolve the user proc via MeshAdminAgent. HostMeshAgent
+        // returns Error for QueryChild → fallback to proc_agent[0]
+        // QueryChild(Reference::Proc) → live NodeProperties::Proc.
+        let user_proc_ref = user_proc.proc_id().to_string();
+        let resp = admin_ref
+            .resolve(&client, user_proc_ref.clone())
+            .await
+            .unwrap();
+        let node = resp.0.unwrap();
+        assert!(
+            matches!(node.properties, NodeProperties::Proc { .. }),
+            "expected Proc, got {:?}",
+            node.properties
+        );
+        let initial_count = node.children.len();
+        assert!(
+            node.children
+                .iter()
+                .any(|c| c.contains(PROC_AGENT_ACTOR_NAME)),
+            "initial children {:?} should contain proc_agent",
+            node.children
+        );
+
+        // Spawn an actor directly on the user proc, bypassing gspawn.
+        // This simulates how sieve[0] spawns sieve[1], sieve[2], etc.
+        user_proc
+            .spawn("extra_actor", TestIntrospectableActor)
+            .unwrap();
+
+        // Resolve again — the new actor must appear immediately
+        // without any republish, proving PA-1 is satisfied.
+        let resp2 = admin_ref
+            .resolve(&client, user_proc_ref.clone())
+            .await
+            .unwrap();
+        let node2 = resp2.0.unwrap();
+        assert!(
+            matches!(node2.properties, NodeProperties::Proc { .. }),
+            "expected Proc, got {:?}",
+            node2.properties
+        );
+        assert!(
+            node2.children.iter().any(|c| c.contains("extra_actor")),
+            "after direct spawn, children {:?} should contain extra_actor",
+            node2.children
+        );
+        assert!(
+            node2.children.len() >= initial_count + 1,
+            "expected at least {} children after direct spawn, got {:?}",
+            initial_count + 1,
+            node2.children
+        );
     }
 }

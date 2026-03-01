@@ -233,6 +233,7 @@ impl<A: Referable> Debug for ActorMeshController<A> {
 #[async_trait]
 impl<A: Referable> Actor for ActorMeshController<A> {
     async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
+        this.set_system();
         // Start the monitor task.
         // There's a shared monitor for all whole mesh ref. Note that slices do
         // not share the health state. This is fine because requerying a slice
@@ -848,6 +849,11 @@ impl ProcMeshController {
 
 #[async_trait]
 impl Actor for ProcMeshController {
+    async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
+        this.set_system();
+        Ok(())
+    }
+
     async fn cleanup(
         &mut self,
         this: &Instance<Self>,
@@ -887,6 +893,11 @@ impl HostMeshController {
 
 #[async_trait]
 impl Actor for HostMeshController {
+    async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
+        this.set_system();
+        Ok(())
+    }
+
     async fn cleanup(
         &mut self,
         this: &Instance<Self>,

@@ -18,6 +18,7 @@ use ratatui::layout::Direction;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
+use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -27,6 +28,10 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 
 use crate::App;
+use crate::diagnostics::DiagNodeRole;
+use crate::diagnostics::DiagOutcome;
+use crate::diagnostics::DiagPhase;
+use crate::diagnostics::DiagResult;
 use crate::format::format_event_summary;
 use crate::format::format_local_time;
 use crate::format::format_relative_time;
@@ -42,6 +47,10 @@ use crate::theme::Labels;
 /// the last fetch error (`app.detail_error`) or a neutral "select a
 /// node" placeholder message.
 pub(crate) fn render_detail_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    if app.diag_running || !app.diag_results.is_empty() {
+        render_diagnostics_pane(frame, area, app);
+        return;
+    }
     match &app.detail {
         Some(payload) => {
             render_node_detail(frame, area, payload, &app.theme.scheme, &app.theme.labels)
@@ -441,4 +450,168 @@ fn render_actor_detail(
         .block(recorder_block)
         .wrap(Wrap { trim: true });
     frame.render_widget(recorder, chunks[1]);
+}
+
+/// Render the live self-diagnostic pane.
+///
+/// Shows phase-separated probe results as they stream in. While the
+/// run is still in progress a "Running…" indicator is shown; once
+/// complete a summary line reports overall health.
+fn render_diagnostics_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    let scheme = &app.theme.scheme;
+    let labels = &app.theme.labels;
+    let results = &app.diag_results;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let sep_style = Style::default().add_modifier(Modifier::BOLD);
+
+    // Admin Infra section
+    lines.push(Line::from(Span::styled(
+        "── Admin Infra ──────────────────────────────────",
+        sep_style,
+    )));
+    for r in results.iter().filter(|r| r.phase == DiagPhase::AdminInfra) {
+        lines.push(diag_result_line(r, scheme, labels));
+    }
+
+    lines.push(Line::default());
+
+    // Mesh section
+    lines.push(Line::from(Span::styled(
+        "── Mesh ─────────────────────────────────────────",
+        sep_style,
+    )));
+    for r in results.iter().filter(|r| r.phase == DiagPhase::Mesh) {
+        lines.push(diag_result_line(r, scheme, labels));
+    }
+
+    if app.diag_running {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(labels.diag_running, scheme.info)));
+    } else if !results.is_empty() {
+        let admin_pass = results
+            .iter()
+            .filter(|r| {
+                r.phase == DiagPhase::AdminInfra
+                    && matches!(
+                        r.outcome,
+                        DiagOutcome::Pass { .. } | DiagOutcome::Slow { .. }
+                    )
+            })
+            .count();
+        let admin_total = results
+            .iter()
+            .filter(|r| r.phase == DiagPhase::AdminInfra)
+            .count();
+        let mesh_pass = results
+            .iter()
+            .filter(|r| {
+                r.phase == DiagPhase::Mesh
+                    && matches!(
+                        r.outcome,
+                        DiagOutcome::Pass { .. } | DiagOutcome::Slow { .. }
+                    )
+            })
+            .count();
+        let mesh_total = results
+            .iter()
+            .filter(|r| r.phase == DiagPhase::Mesh)
+            .count();
+        let total_pass = admin_pass + mesh_pass;
+        let total = results.len();
+        let any_fail = results
+            .iter()
+            .any(|r| matches!(r.outcome, DiagOutcome::Fail { .. }));
+
+        let admin_status = if admin_pass == admin_total && admin_total > 0 {
+            labels.diag_status_healthy
+        } else {
+            labels.diag_status_failing
+        };
+        let mesh_status = if mesh_total == 0 {
+            labels.diag_status_na
+        } else if mesh_pass == mesh_total {
+            labels.diag_status_healthy
+        } else {
+            labels.diag_status_failing
+        };
+        let summary = if !any_fail {
+            format!(
+                "{} {} {}. {} {} {} {}.",
+                labels.diag_checks_all,
+                total,
+                labels.diag_checks_passed,
+                labels.diag_admin_label,
+                admin_status,
+                labels.diag_mesh_label,
+                mesh_status,
+            )
+        } else {
+            format!(
+                "{}/{} {}. {} {}/{}. {} {}/{}.",
+                total_pass,
+                total,
+                labels.diag_checks_passed,
+                labels.diag_admin_label,
+                admin_pass,
+                admin_total,
+                labels.diag_mesh_label,
+                mesh_pass,
+                mesh_total,
+            )
+        };
+        let summary_style = if any_fail {
+            scheme.error
+        } else {
+            scheme.detail_status_ok
+        };
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(summary, summary_style)));
+    }
+
+    let block = Block::default()
+        .title(labels.pane_diagnostics)
+        .borders(Borders::ALL)
+        .border_style(scheme.border);
+    let p = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((app.diag_scroll, 0));
+    frame.render_widget(p, area);
+}
+
+/// Format one diagnostic probe result as a TUI row.
+fn diag_result_line(r: &DiagResult, scheme: &ColorScheme, labels: &Labels) -> Line<'static> {
+    let (icon, icon_style) = match &r.outcome {
+        DiagOutcome::Pass { .. } => ("✓", scheme.detail_status_ok),
+        DiagOutcome::Slow { .. } => ("⚠", scheme.detail_status_warn),
+        DiagOutcome::Fail { .. } => ("✗", scheme.error),
+    };
+    let timing = match &r.outcome {
+        DiagOutcome::Pass { elapsed_ms } | DiagOutcome::Slow { elapsed_ms } => {
+            format!(" {}ms", elapsed_ms)
+        }
+        DiagOutcome::Fail { elapsed_ms, error } => format!(" {}ms — {}", elapsed_ms, error),
+    };
+    let mut spans = vec![
+        Span::styled(format!(" {} ", icon), icon_style),
+        Span::raw(r.label.clone()),
+        Span::styled(timing, scheme.detail_label),
+    ];
+    if let Some(role) = r.note {
+        let note = match role {
+            DiagNodeRole::AdminServer => labels.diag_note_admin_server,
+            DiagNodeRole::HostAgent => labels.diag_note_host_agent,
+            DiagNodeRole::AdminServiceProc => labels.diag_note_admin_service_proc,
+            DiagNodeRole::IntrospectionHandler => labels.diag_note_introspection_handler,
+            DiagNodeRole::ActorLifecycleManager => labels.diag_note_actor_lifecycle_manager,
+            DiagNodeRole::RootClientBridge => labels.diag_note_root_client_bridge,
+            DiagNodeRole::CommActor => labels.diag_note_comm_actor,
+            DiagNodeRole::ProcAgent => labels.diag_note_proc_agent,
+            DiagNodeRole::UserProc => labels.diag_note_user_proc,
+            DiagNodeRole::UserActor => labels.diag_note_user_actor,
+        };
+        spans.push(Span::styled(format!("  — {}", note), scheme.stat_url));
+    }
+    Line::from(spans)
 }
