@@ -153,6 +153,24 @@ use crate::host_mesh::mesh_agent::HostMeshAgent;
 /// Actor name used when spawning the mesh admin agent.
 pub const MESH_ADMIN_ACTOR_NAME: &str = "mesh_admin";
 
+/// Actor name for the HTTP bridge client mailbox on the service proc.
+///
+/// Unlike `MESH_ADMIN_ACTOR_NAME`, this is not a full actor: it is a
+/// client-mode `Instance<()>` created via
+/// `Proc::introspectable_instance()` and driven by Axum's Tokio task
+/// pool rather than an actor message loop. A separate instance is
+/// required because `MeshAdminAgent`'s own `Instance<Self>` is only
+/// accessible inside its message loop and cannot be shared with
+/// external tasks. This instance gives the HTTP handlers a routable
+/// proc identity so they can open one-shot reply ports
+/// (`open_once_port`) to receive responses from `MeshAdminAgent`.
+///
+/// Unlike a plain `instance()`, this uses
+/// `Proc::introspectable_instance()` so the bridge responds to
+/// `IntrospectMessage::Query` and appears as a navigable node in the
+/// mesh TUI rather than causing a 504 when selected.
+pub const MESH_ADMIN_BRIDGE_NAME: &str = "mesh_admin_bridge";
+
 /// Timeout for targeted queries that hit a single, specific host.
 /// Kept short so a slow or dying actor cannot block the
 /// single-threaded MeshAdminAgent message loop (which serializes
@@ -569,7 +587,10 @@ impl Actor for MeshAdminAgent {
         // Create a dedicated client mailbox on system_proc for the
         // HTTP bridge's reply ports. This avoids sharing the admin
         // actor's own mailbox with async HTTP handlers.
-        let (bridge_cx, bridge_handle) = this.proc().instance("admin_bridge")?;
+        let (bridge_cx, bridge_handle) = this
+            .proc()
+            .introspectable_instance(MESH_ADMIN_BRIDGE_NAME)?;
+        bridge_cx.set_system();
         let bridge_state = Arc::new(BridgeState {
             admin_ref: ActorRef::attest(this.self_id().clone()),
             bridge_cx,
@@ -752,9 +773,7 @@ impl MeshAdminAgent {
     /// introspectable. Each proc appears as a root child; the
     /// actor is the "anchor" used to discover the proc's contents.
     fn standalone_proc_actors(&self) -> impl Iterator<Item = &ActorId> {
-        self.root_client_actor_id
-            .iter()
-            .chain(self.self_actor_id.iter())
+        self.root_client_actor_id.iter()
     }
 
     /// If `proc_id` belongs to a standalone proc, return the anchor
