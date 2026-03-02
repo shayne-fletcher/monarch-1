@@ -431,6 +431,42 @@ impl Proc {
         Ok((instance, handle))
     }
 
+    /// Create a lightweight client instance that handles
+    /// [`IntrospectMessage`].
+    ///
+    /// Like [`instance`](Self::instance), this creates a client-mode
+    /// instance with no actor message loop. Unlike `instance`, it
+    /// spawns a dedicated introspect task, so the instance responds
+    /// to `IntrospectMessage::Query` and is visible and navigable in
+    /// admin tooling such as the mesh TUI.
+    ///
+    /// # Invariants
+    ///
+    /// - **CI-1 (client status):** `IntrospectMessage::Query` returns
+    ///   `NodeProperties::Actor { actor_status: "client",
+    ///   actor_type: "()", .. }`.
+    /// - **CI-2 (snapshot on drop):** Dropping the returned
+    ///   `Instance<()>` transitions its status to terminal, which
+    ///   causes the introspect task to store a terminated snapshot
+    ///   (same post-mortem semantics as regular actors).
+    ///
+    /// Requires an active Tokio runtime (calls `tokio::spawn`).
+    pub fn introspectable_instance(
+        &self,
+        name: &str,
+    ) -> Result<(Instance<()>, ActorHandle<()>), anyhow::Error> {
+        let actor_id = self.allocate_root_id(name)?;
+        let (instance, receivers) = Instance::new(self.clone(), actor_id, false, None);
+        let handle = ActorHandle::new(instance.inner.cell.clone(), instance.inner.ports.clone());
+        instance.change_status(ActorStatus::Client);
+        tokio::spawn(crate::introspect::serve_introspect(
+            instance.inner.cell.clone(),
+            instance.inner.mailbox.clone(),
+            receivers.introspect,
+        ));
+        Ok((instance, handle))
+    }
+
     /// Create and return an actor instance, its handle, and its
     /// receivers. This allows actors to be "inverted": the caller can
     /// use the returned [`Instance`] to send and receive messages,
