@@ -440,9 +440,9 @@ impl ColorScheme {
             _footer_help: Style::default().fg(polar3),
 
             // Node types
-            node_root: Style::default().fg(frost_teal),
-            node_host: Style::default().fg(aurora_green),
-            node_proc: Style::default().fg(aurora_yellow),
+            node_root: Style::default().fg(frost_teal).add_modifier(Modifier::BOLD),
+            node_host: Style::default().fg(aurora_green).add_modifier(Modifier::BOLD),
+            node_proc: Style::default().fg(aurora_yellow).add_modifier(Modifier::BOLD),
             node_actor: Style::default().fg(frost_blue),
             node_failed: Style::default().fg(aurora_red),
             node_system_actor: Style::default().fg(frost_dark),
@@ -456,14 +456,16 @@ impl ColorScheme {
             stat_selection: Style::default().fg(aurora_purple),
             stat_system: Style::default().fg(frost_dark),
             stat_url: Style::default().fg(polar3),
-            stat_label: Style::default().fg(snow0),
+            stat_label: Style::default().fg(snow0).add_modifier(Modifier::BOLD),
             _stat_value: Style::default().fg(snow2).add_modifier(Modifier::BOLD),
 
             // Detail pane and misc
-            detail_label: Style::default().fg(snow0),
+            detail_label: Style::default().fg(snow0).add_modifier(Modifier::BOLD),
             detail_stopped: Style::default().fg(polar3),
             detail_status_ok: Style::default().fg(aurora_green),
-            detail_status_warn: Style::default().fg(aurora_orange),
+            detail_status_warn: Style::default()
+                .fg(aurora_orange)
+                .add_modifier(Modifier::BOLD),
             detail_status_failed: Style::default().fg(aurora_red).add_modifier(Modifier::BOLD),
             footer_help: Style::default().fg(polar3),
             header_class_bracket: Style::default().fg(polar3),
@@ -499,9 +501,9 @@ impl ColorScheme {
             _footer_help: Style::default().fg(base7),
 
             // Node types
-            node_root: Style::default().fg(teal),
-            node_host: Style::default().fg(green),
-            node_proc: Style::default().fg(yellow),
+            node_root: Style::default().fg(teal).add_modifier(Modifier::BOLD),
+            node_host: Style::default().fg(green).add_modifier(Modifier::BOLD),
+            node_proc: Style::default().fg(yellow).add_modifier(Modifier::BOLD),
             node_actor: Style::default().fg(blue),
             node_failed: Style::default().fg(red),
             node_system_actor: Style::default().fg(orange),
@@ -515,14 +517,14 @@ impl ColorScheme {
             stat_selection: Style::default().fg(violet),
             stat_system: Style::default().fg(dark_blue),
             stat_url: Style::default().fg(base7),
-            stat_label: Style::default().fg(fg),
+            stat_label: Style::default().fg(fg).add_modifier(Modifier::BOLD),
             _stat_value: Style::default().fg(fg_alt).add_modifier(Modifier::BOLD),
 
             // Detail pane and misc
-            detail_label: Style::default().fg(fg),
+            detail_label: Style::default().fg(fg).add_modifier(Modifier::BOLD),
             detail_stopped: Style::default().fg(base7),
             detail_status_ok: Style::default().fg(green),
-            detail_status_warn: Style::default().fg(orange),
+            detail_status_warn: Style::default().fg(orange).add_modifier(Modifier::BOLD),
             detail_status_failed: Style::default().fg(red).add_modifier(Modifier::BOLD),
             footer_help: Style::default().fg(base7),
             header_class_bracket: Style::default().fg(base7),
