@@ -7,6 +7,7 @@
  */
 
 use hyperactor::ActorRef;
+use hyperactor::host::SERVICE_PROC_NAME;
 use hyperactor::reference::ProcId;
 use hyperactor::reference::Reference;
 use hyperactor_mesh::global_root_client;
@@ -28,7 +29,7 @@ impl ShowCommand {
 
                 // Codify obtaining a proc's agent in `hyperactor_mesh` somewhere.
                 let agent: ActorRef<HostMeshAgent> = ActorRef::attest(
-                    ProcId::Direct(host, "service".to_string()).actor_id("agent", 0),
+                    ProcId::Direct(host, SERVICE_PROC_NAME.to_string()).actor_id("agent", 0),
                 );
 
                 let state = agent.get_state(&client, proc.parse().unwrap()).await?;

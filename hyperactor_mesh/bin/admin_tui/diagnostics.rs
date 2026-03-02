@@ -31,6 +31,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
+use hyperactor::host::LOCAL_PROC_NAME;
 use hyperactor::introspect::NodeProperties;
 use hyperactor_mesh::host_mesh::mesh_agent::HOST_MESH_AGENT_ACTOR_NAME;
 use hyperactor_mesh::mesh_admin::MESH_ADMIN_ACTOR_NAME;
@@ -80,6 +81,10 @@ pub(crate) enum DiagNodeRole {
     ActorLifecycleManager,
     /// The `mesh_admin_bridge` instance that connects admin to the mesh.
     RootClientBridge,
+    /// The local client proc — in-process, starts empty (LP-1). Gets a
+    /// ProcAgent and root client actor only when activated via
+    /// `this_proc()` (Python/Monarch).
+    LocalClientProc,
     /// The `comm` actor on a user proc — enables proc-to-proc mesh messaging.
     CommActor,
     /// The `proc_agent` actor on a user proc — manages actor spawn and lifecycle.
@@ -113,6 +118,52 @@ const SLOW_MS: u64 = 500;
 // so server-side 504s are surfaced as Fail(error) rather than our own
 // timeout.
 const TIMEOUT_MS: u64 = 5000;
+
+/// Aggregated pass/fail counts across both diagnostic phases.
+/// Computed from a completed (or in-progress) result slice.
+#[derive(Debug, Clone)]
+pub(crate) struct DiagSummary {
+    pub(crate) total: usize,
+    /// Probes that returned Pass or Slow.
+    pub(crate) passed: usize,
+    pub(crate) admin_total: usize,
+    pub(crate) admin_passed: usize,
+    pub(crate) mesh_total: usize,
+    pub(crate) mesh_passed: usize,
+    /// True if any probe returned `DiagOutcome::Fail`.
+    pub(crate) any_fail: bool,
+}
+
+impl DiagSummary {
+    pub(crate) fn from_results(results: &[DiagResult]) -> Self {
+        let is_pass = |o: &DiagOutcome| {
+            matches!(o, DiagOutcome::Pass { .. } | DiagOutcome::Slow { .. })
+        };
+        Self {
+            total: results.len(),
+            passed: results.iter().filter(|r| is_pass(&r.outcome)).count(),
+            admin_total: results
+                .iter()
+                .filter(|r| r.phase == DiagPhase::AdminInfra)
+                .count(),
+            admin_passed: results
+                .iter()
+                .filter(|r| r.phase == DiagPhase::AdminInfra && is_pass(&r.outcome))
+                .count(),
+            mesh_total: results
+                .iter()
+                .filter(|r| r.phase == DiagPhase::Mesh)
+                .count(),
+            mesh_passed: results
+                .iter()
+                .filter(|r| r.phase == DiagPhase::Mesh && is_pass(&r.outcome))
+                .count(),
+            any_fail: results
+                .iter()
+                .any(|r| matches!(r.outcome, DiagOutcome::Fail { .. })),
+        }
+    }
+}
 
 /// Run the full diagnostic suite against `base_url`.
 ///
@@ -208,6 +259,18 @@ fn label_from_payload(reference: &str, payload: &hyperactor::introspect::NodePay
     }
 }
 
+/// Classify the operational role of a system proc by name.
+///
+/// Uses naming convention as identity — consistent with
+/// `hyperactor::host` construction. See LP-1.
+fn proc_role(proc_name: &str) -> DiagNodeRole {
+    if proc_name == LOCAL_PROC_NAME {
+        DiagNodeRole::LocalClientProc
+    } else {
+        DiagNodeRole::AdminServiceProc
+    }
+}
+
 /// Full diagnostic walk. Probes in order and emits results.
 async fn walk(client: &reqwest::Client, base_url: &str, tx: &mpsc::Sender<DiagResult>) {
     // Phase 1 — Admin Infra
@@ -281,7 +344,13 @@ async fn walk(client: &reqwest::Client, base_url: &str, tx: &mpsc::Sender<DiagRe
             if let Some(p) = &proc_payload {
                 r.label = label_from_payload(proc_ref, p);
             }
-            r.note = Some(DiagNodeRole::AdminServiceProc);
+            // Role is derived from proc_name via proc_role(). Only set
+            // when the proc resolved successfully; leave None on fetch
+            // failure so a bad probe isn't mislabelled.
+            r.note = proc_payload.as_ref().and_then(|p| match &p.properties {
+                NodeProperties::Proc { proc_name, .. } => Some(proc_role(proc_name)),
+                _ => None,
+            });
             emit!(tx, r);
 
             if let Some(proc_payload) = proc_payload {
@@ -403,5 +472,51 @@ async fn walk(client: &reqwest::Client, base_url: &str, tx: &mpsc::Sender<DiagRe
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn phase_fail_count(results: &[DiagResult], phase: DiagPhase) -> usize {
+        results
+            .iter()
+            .filter(|r| r.phase == phase && matches!(r.outcome, DiagOutcome::Fail { .. }))
+            .count()
+    }
+
+    // Invariant LP-1: proc_role() maps proc names to roles by naming
+    // convention. Pin this mapping so renames or new system procs are
+    // caught at compile time.
+    #[test]
+    fn test_proc_role_classification() {
+        assert!(matches!(
+            proc_role(LOCAL_PROC_NAME),
+            DiagNodeRole::LocalClientProc
+        ));
+        assert!(matches!(
+            proc_role(hyperactor::host::SERVICE_PROC_NAME),
+            DiagNodeRole::AdminServiceProc
+        ));
+        assert!(matches!(
+            proc_role("anything_else"),
+            DiagNodeRole::AdminServiceProc
+        ));
+    }
+
+    // Invariant LP-1: the local proc starts empty in pure Rust. A Pass
+    // result for LocalClientProc with no subsequent actor probes must
+    // not contribute AdminInfra failures.
+    #[test]
+    fn test_empty_local_proc_does_not_degrade_admin_health() {
+        let results = vec![DiagResult {
+            label: "local".to_string(),
+            reference: "some_ref".to_string(),
+            note: Some(DiagNodeRole::LocalClientProc),
+            phase: DiagPhase::AdminInfra,
+            outcome: DiagOutcome::Pass { elapsed_ms: 1 },
+        }];
+        assert_eq!(phase_fail_count(&results, DiagPhase::AdminInfra), 0);
     }
 }

@@ -6,7 +6,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use chrono::Local;
 use std::collections::HashSet;
 use std::io;
 use std::time::Duration;
@@ -121,8 +123,15 @@ pub(crate) struct App {
     pub(crate) diag_running: bool,
     /// Live channel from `run_diagnostics`; `None` when idle.
     pub(crate) diag_rx: Option<mpsc::Receiver<DiagResult>>,
+    /// Local time at which the last diagnostic run completed
+    /// (`HH:MM:SS`). `None` while running or before any run.
+    pub(crate) diag_completed_at: Option<String>,
     /// Vertical scroll offset for the diagnostics pane.
-    pub(crate) diag_scroll: u16,
+    pub(crate) diag_scroll: Cell<u16>,
+    /// Cached max-scroll for the diagnostics pane, written each render
+    /// frame. `Cell` allows the render function (`&App`) to write back
+    /// without changing its signature.
+    pub(crate) diag_max_scroll: Cell<u16>,
 }
 
 impl App {
@@ -160,7 +169,9 @@ impl App {
             diag_results: Vec::new(),
             diag_running: false,
             diag_rx: None,
-            diag_scroll: 0,
+            diag_completed_at: None,
+            diag_scroll: Cell::new(0),
+            diag_max_scroll: Cell::new(u16::MAX),
         }
     }
 
@@ -599,13 +610,30 @@ impl App {
                     self.diag_results.clear();
                     self.diag_running = false;
                     self.diag_rx = None;
-                    self.diag_scroll = 0;
+                    self.diag_completed_at = None;
+                    self.diag_scroll.set(0);
+                    self.diag_max_scroll.set(u16::MAX);
+                }
+                KeyCode::Char('q') => {
+                    self.should_quit = true;
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.should_quit = true;
+                }
+                KeyCode::Char('r') | KeyCode::Char('d') => {
+                    return KeyResult::RunDiagnostics;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    self.diag_scroll = self.diag_scroll.saturating_sub(1);
+                    self.diag_scroll
+                        .set(self.diag_scroll.get().saturating_sub(1));
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    self.diag_scroll = self.diag_scroll.saturating_add(1);
+                    self.diag_scroll.set(
+                        self.diag_scroll
+                            .get()
+                            .saturating_add(1)
+                            .min(self.diag_max_scroll.get()),
+                    );
                 }
                 _ => {}
             }
@@ -733,7 +761,7 @@ impl App {
                 }
             }
             KeyCode::Char('d') => {
-                // Open diagnostics pane (any key closes it).
+                // Open diagnostics pane (Esc to close, j/k to scroll).
                 KeyResult::RunDiagnostics
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -834,7 +862,9 @@ pub(crate) async fn run_app(
                             KeyResult::RunDiagnostics => {
                                 app.diag_running = true;
                                 app.diag_results.clear();
-                                app.diag_scroll = 0;
+                                app.diag_completed_at = None;
+                                app.diag_scroll.set(0);
+                                app.diag_max_scroll.set(u16::MAX);
                                 app.diag_rx = Some(run_diagnostics(
                                     app.client.clone(),
                                     app.base_url.clone(),
@@ -853,6 +883,9 @@ pub(crate) async fn run_app(
                     None => {
                         app.diag_running = false;
                         app.diag_rx = None;
+                        app.diag_completed_at = Some(
+                            Local::now().format("%H:%M:%S").to_string(),
+                        );
                     }
                 }
             }

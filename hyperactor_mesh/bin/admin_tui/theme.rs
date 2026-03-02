@@ -169,6 +169,9 @@ pub(crate) struct Labels {
 
     // Diagnostic pane status / summary strings
     pub(crate) diag_running: &'static str,
+    pub(crate) diag_live_updates: &'static str,
+    pub(crate) diag_completed_at: &'static str,
+    pub(crate) diag_static_snapshot: &'static str,
     pub(crate) diag_checks_all: &'static str,
     pub(crate) diag_checks_passed: &'static str,
     pub(crate) diag_admin_label: &'static str,
@@ -181,6 +184,7 @@ pub(crate) struct Labels {
     pub(crate) diag_note_admin_server: &'static str,
     pub(crate) diag_note_host_agent: &'static str,
     pub(crate) diag_note_admin_service_proc: &'static str,
+    pub(crate) diag_note_local_client_proc: &'static str,
     pub(crate) diag_note_introspection_handler: &'static str,
     pub(crate) diag_note_actor_lifecycle_manager: &'static str,
     pub(crate) diag_note_root_client_bridge: &'static str,
@@ -202,6 +206,8 @@ pub(crate) struct Labels {
 
     // Footer
     pub(crate) footer_help_text: &'static str,
+    pub(crate) footer_diag_running_help_text: &'static str,
+    pub(crate) footer_diag_help_text: &'static str,
 }
 
 impl Labels {
@@ -245,6 +251,9 @@ impl Labels {
             yes: "yes",
             no: "no",
             diag_running: "Running\u{2026}",
+            diag_live_updates: "live updates",
+            diag_completed_at: "Completed at",
+            diag_static_snapshot: "static snapshot",
             diag_checks_all: "All",
             diag_checks_passed: "checks passed",
             diag_admin_label: "Admin:",
@@ -255,6 +264,7 @@ impl Labels {
             diag_note_admin_server: "admin HTTP server — lists connected hosts",
             diag_note_host_agent: "host agent — manages procs on this machine",
             diag_note_admin_service_proc: "admin service proc — hosts the admin actor layer",
+            diag_note_local_client_proc: "local client proc — in-process actors (empty in pure Rust)",
             diag_note_introspection_handler: "handles GET /v1/\u{2026} HTTP requests",
             diag_note_actor_lifecycle_manager: "manages actor spawn and lifecycle",
             diag_note_root_client_bridge: "root client bridge — connects admin to the mesh",
@@ -272,6 +282,8 @@ impl Labels {
             pane_flight_recorder: "Flight Recorder",
             pane_diagnostics: "Diagnostics",
             footer_help_text: "q: quit | j/k: navigate | g/G: top/bottom | Tab: expand/collapse | c: collapse all | s: system procs | h: stopped actors | d: diag",
+            footer_diag_running_help_text: "q: quit | Esc: cancel | j/k: scroll",
+            footer_diag_help_text: "q: quit | Esc: back to topology | j/k: scroll | r: rerun",
         }
     }
 
@@ -315,6 +327,9 @@ impl Labels {
             yes: "是",
             no: "否",
             diag_running: "运行中\u{2026}",
+            diag_live_updates: "实时更新",
+            diag_completed_at: "完成于",
+            diag_static_snapshot: "静态快照",
             diag_checks_all: "所有",
             diag_checks_passed: "项检查通过",
             diag_admin_label: "管理:",
@@ -325,6 +340,7 @@ impl Labels {
             diag_note_admin_server: "管理HTTP服务器 — 列出已连接主机",
             diag_note_host_agent: "主机代理 — 管理此机器上的进程",
             diag_note_admin_service_proc: "管理服务进程 — 承载管理员Actor层",
+            diag_note_local_client_proc: "本地客户端进程 — 进程内Actor（纯Rust中为空）",
             diag_note_introspection_handler: "处理 GET /v1/\u{2026} HTTP请求",
             diag_note_actor_lifecycle_manager: "管理Actor派生和生命周期",
             diag_note_root_client_bridge: "根客户端桥 — 连接管理员与用户网格",
@@ -342,6 +358,8 @@ impl Labels {
             pane_flight_recorder: "飞行记录器",
             pane_diagnostics: "诊断",
             footer_help_text: "q: 退出 | j/k: 导航 | g/G: 顶部/底部 | Tab: 展开/折叠 | c: 全部折叠 | s: 系统进程 | h: 已停止 | d: 诊断",
+            footer_diag_running_help_text: "q: 退出 | Esc: 取消 | j/k: 滚动",
+            footer_diag_help_text: "q: 退出 | Esc: 返回拓扑 | j/k: 滚动 | r: 重新运行",
         }
     }
 }

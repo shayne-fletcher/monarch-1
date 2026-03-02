@@ -42,7 +42,9 @@ use hyperactor::context;
 use hyperactor::context::Mailbox as _;
 use hyperactor::host::Host;
 use hyperactor::host::HostError;
+use hyperactor::host::LOCAL_PROC_NAME;
 use hyperactor::host::LocalProcManager;
+use hyperactor::host::SERVICE_PROC_NAME;
 use hyperactor::mailbox::PortSender as _;
 use hyperactor_config::Flattrs;
 use hyperactor_config::attrs::Attrs;
@@ -222,7 +224,9 @@ pub const HOST_MESH_AGENT_ACTOR_NAME: &str = "agent";
 pub struct HostMeshAgent {
     pub(crate) host: Option<HostAgentMode>,
     pub(crate) created: HashMap<Name, ProcCreationState>,
-    /// Stores the lazily initialized proc mesh agent for the local proc.
+    /// Lazily initialized ProcAgent on the host's local proc.
+    /// Boots on first [`GetLocalProc`] (LP-1 — see
+    /// `hyperactor::host::LOCAL_PROC_NAME`).
     local_mesh_agent: OnceLock<anyhow::Result<ActorHandle<ProcAgent>>>,
 }
 
@@ -320,9 +324,9 @@ impl Actor for HostMeshAgent {
             let proc = match child_ref {
                 Reference::Proc(proc_id) => {
                     if *proc_id == *system_proc.proc_id() {
-                        Some((&system_proc, "service"))
+                        Some((&system_proc, SERVICE_PROC_NAME))
                     } else if *proc_id == *local_proc.proc_id() {
-                        Some((&local_proc, "local"))
+                        Some((&local_proc, LOCAL_PROC_NAME))
                     } else {
                         None
                     }
@@ -750,9 +754,14 @@ impl Handler<SetClientConfig> for HostMeshAgent {
     }
 }
 
-/// A local-only message to access the "local" proc on the host.
-/// This is used to bootstrap the root mesh process client on the
-/// local singleton host mesh.
+/// Boot the ProcAgent on the host's local proc (LP-1).
+///
+/// The local proc starts empty; this message activates it by spawning
+/// a `ProcAgent` (once, via `OnceLock`). Called by
+/// `monarch_hyperactor::bootstrap_host` when setting up the Python
+/// `this_proc()` singleton.
+///
+/// See also: `hyperactor::host::LOCAL_PROC_NAME`.
 #[derive(Debug, hyperactor::Handler, hyperactor::HandleClient)]
 pub struct GetLocalProc {
     #[reply]
