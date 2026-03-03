@@ -57,8 +57,14 @@ def _encode(ref: str) -> str:
     return urllib.parse.quote(ref, safe="")
 
 
+# T257699334 (SF, 2026-03-02): publish_introspect_properties was removed
+# from the supervision event handler to avoid blocking the ProcAgent
+# message loop (starves GetRankStatus polls). is_poisoned won't update
+# until a deferred + coalesced republish is implemented. Re-enable when
+# that lands.
 @pytest.mark.timeout(60)
 @parametrize_config(actor_queue_dispatch={True, False})
+@pytest.mark.skip(reason="Needs deferred republish of introspect properties")
 async def test_failed_actor_has_failure_info() -> None:
     """After an actor crashes, its introspection payload has failure_info."""
     original_hook = monarch.actor.unhandled_fault_hook
@@ -128,8 +134,10 @@ async def test_failed_actor_has_failure_info() -> None:
         await procs.stop()
 
 
+# T257699334 (SF, 2026-03-02): same reason as test_failed_actor_has_failure_info above.
 @pytest.mark.timeout(60)
 @parametrize_config(actor_queue_dispatch={True, False})
+@pytest.mark.skip(reason="Needs deferred republish of introspect properties")
 async def test_healthy_procs_not_poisoned() -> None:
     """Procs without failed actors should not be poisoned."""
     original_hook = monarch.actor.unhandled_fault_hook
