@@ -575,8 +575,14 @@ impl Handler<ActorSupervisionEvent> for ProcAgent {
                 .entry(event.actor_id.clone())
                 .or_default()
                 .push(event.clone());
-            // Republish so introspection picks up is_poisoned / failed_actor_count.
-            self.publish_introspect_properties(cx);
+            // TODO(T257699334): republish introspect properties so the
+            // TUI picks up is_poisoned / failed_actor_count immediately.
+            // Calling publish_introspect_properties inline here is a
+            // known regression: it iterates all live + terminated
+            // actors to rebuild the children list, blocking the
+            // ProcAgent message loop and starving GetRankStatus polls.
+            // Follow up with a deferred + coalesced republish (dirty
+            // flag + self-message) so the handler returns immediately.
         }
         if let Some(supervisor) = self.state.supervisor() {
             supervisor.send(cx, event)?;
