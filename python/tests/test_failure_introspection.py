@@ -17,6 +17,7 @@ Verifies that when an actor fails, the introspection API exposes:
 import asyncio
 import json
 import ssl
+import urllib.parse
 import urllib.request
 
 import monarch.actor
@@ -57,14 +58,8 @@ def _encode(ref: str) -> str:
     return urllib.parse.quote(ref, safe="")
 
 
-# T257699334 (SF, 2026-03-02): publish_introspect_properties was removed
-# from the supervision event handler to avoid blocking the ProcAgent
-# message loop (starves GetRankStatus polls). is_poisoned won't update
-# until a deferred + coalesced republish is implemented. Re-enable when
-# that lands.
 @pytest.mark.timeout(60)
 @parametrize_config(actor_queue_dispatch={True, False})
-@pytest.mark.skip(reason="Needs deferred republish of introspect properties")
 async def test_failed_actor_has_failure_info() -> None:
     """After an actor crashes, its introspection payload has failure_info."""
     original_hook = monarch.actor.unhandled_fault_hook
@@ -72,7 +67,7 @@ async def test_failed_actor_has_failure_info() -> None:
     monarch.actor.unhandled_fault_hook = lambda failure: faulted.set()
     try:
         host = this_host()
-        base = await host._spawn_admin()
+        base = await host._spawn_admin(admin_addr="[::]:0")
 
         procs = host.spawn_procs(per_host={"replica": 2})
         workers = procs.spawn("worker", FailWorker)
@@ -134,10 +129,8 @@ async def test_failed_actor_has_failure_info() -> None:
         await procs.stop()
 
 
-# T257699334 (SF, 2026-03-02): same reason as test_failed_actor_has_failure_info above.
 @pytest.mark.timeout(60)
 @parametrize_config(actor_queue_dispatch={True, False})
-@pytest.mark.skip(reason="Needs deferred republish of introspect properties")
 async def test_healthy_procs_not_poisoned() -> None:
     """Procs without failed actors should not be poisoned."""
     original_hook = monarch.actor.unhandled_fault_hook
@@ -145,7 +138,7 @@ async def test_healthy_procs_not_poisoned() -> None:
     monarch.actor.unhandled_fault_hook = lambda failure: faulted.set()
     try:
         host = this_host()
-        base = await host._spawn_admin()
+        base = await host._spawn_admin(admin_addr="[::]:0")
 
         procs = host.spawn_procs(per_host={"replica": 3})
         workers = procs.spawn("worker", FailWorker)

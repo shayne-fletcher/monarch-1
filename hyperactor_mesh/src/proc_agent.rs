@@ -78,6 +78,23 @@ pub enum StopActorResult {
 }
 wirevalue::register_type!(StopActorResult);
 
+/// Deferred republish of introspect properties.
+///
+/// Sent as a zero-delay self-message from the supervision event
+/// handler so it returns immediately without blocking the ProcAgent
+/// message loop. Multiple rapid supervision events (e.g., 4 actors
+/// failing simultaneously via broadcast) coalesce into a single
+/// republish via the `introspect_dirty` flag.
+///
+/// Without this, calling `publish_introspect_properties` inline in
+/// the supervision handler starves `GetRankStatus` polls from the
+/// `ActorMeshController`, preventing `__supervise__` from firing
+/// within the test timeout. See D94960791 for the root cause
+/// analysis.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named, Bind, Unbind)]
+struct RepublishIntrospect;
+wirevalue::register_type!(RepublishIntrospect);
+
 #[derive(
     Debug,
     Clone,
@@ -215,6 +232,7 @@ struct ActorInstanceState {
         resource::StopAll { cast = true },
         resource::GetState<ActorState> { cast = true },
         resource::GetRankStatus { cast = true },
+        RepublishIntrospect { cast = true },
     ]
 )]
 pub struct ProcAgent {
@@ -229,6 +247,9 @@ pub struct ProcAgent {
     /// If record_supervision_events is true, then this will contain the list
     /// of all events that were received.
     supervision_events: HashMap<ActorId, Vec<ActorSupervisionEvent>>,
+    /// True when supervision events have arrived but introspect
+    /// properties haven't been republished yet.
+    introspect_dirty: bool,
     /// If set, the StopAll handler will send the exit code through this
     /// channel instead of calling process::exit directly, allowing the
     /// caller to perform graceful shutdown (e.g. draining the mailbox server).
@@ -254,6 +275,7 @@ impl ProcAgent {
             actor_states: HashMap::new(),
             record_supervision_events: false,
             supervision_events: HashMap::new(),
+            introspect_dirty: false,
             shutdown_tx: None,
         };
         let handle = proc.spawn::<Self>("mesh", agent)?;
@@ -271,6 +293,7 @@ impl ProcAgent {
             actor_states: HashMap::new(),
             record_supervision_events: true,
             supervision_events: HashMap::new(),
+            introspect_dirty: false,
             shutdown_tx,
         };
         proc.spawn::<Self>(PROC_AGENT_ACTOR_NAME, agent)
@@ -575,14 +598,16 @@ impl Handler<ActorSupervisionEvent> for ProcAgent {
                 .entry(event.actor_id.clone())
                 .or_default()
                 .push(event.clone());
-            // TODO(T257699334): republish introspect properties so the
-            // TUI picks up is_poisoned / failed_actor_count immediately.
-            // Calling publish_introspect_properties inline here is a
-            // known regression: it iterates all live + terminated
-            // actors to rebuild the children list, blocking the
-            // ProcAgent message loop and starving GetRankStatus polls.
-            // Follow up with a deferred + coalesced republish (dirty
-            // flag + self-message) so the handler returns immediately.
+            // Defer republish so introspection picks up is_poisoned /
+            // failed_actor_count without blocking the message loop.
+            // Multiple rapid events coalesce into one republish.
+            if !self.introspect_dirty {
+                self.introspect_dirty = true;
+                let _ = cx.self_message_with_delay(
+                    RepublishIntrospect,
+                    std::time::Duration::from_millis(100),
+                );
+            }
         }
         if let Some(supervisor) = self.state.supervisor() {
             supervisor.send(cx, event)?;
@@ -599,6 +624,17 @@ impl Handler<ActorSupervisionEvent> for ProcAgent {
             // We should have a custom "crash" function here, so that this works
             // in testing of the LocalAllocator, etc.
             std::process::exit(1);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<RepublishIntrospect> for ProcAgent {
+    async fn handle(&mut self, cx: &Context<Self>, _: RepublishIntrospect) -> anyhow::Result<()> {
+        if self.introspect_dirty {
+            self.introspect_dirty = false;
+            self.publish_introspect_properties(cx);
         }
         Ok(())
     }
