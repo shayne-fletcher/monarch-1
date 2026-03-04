@@ -2913,6 +2913,7 @@ mod tests {
         use hyperactor::testing::proc_supervison::ProcSupervisionCoordinator;
 
         use crate::host_mesh::host_agent::HOST_MESH_AGENT_ACTOR_NAME;
+        use crate::host_mesh::host_agent::HostAgent;
         use crate::host_mesh::host_agent::HostAgentMode;
         use crate::host_mesh::host_agent::ProcManagerSpawnFn;
         use crate::proc_agent::PROC_AGENT_ACTOR_NAME;
