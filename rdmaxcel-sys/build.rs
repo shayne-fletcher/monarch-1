@@ -457,7 +457,7 @@ fn compile_gpu_source(
 
     // Compile with nvcc/hipcc
     let mut cmd = std::process::Command::new(&compiler);
-    cmd.args(&[
+    cmd.args([
         "-c",
         &gpu_source.to_string_lossy(),
         "-o",
@@ -497,7 +497,7 @@ fn compile_gpu_source(
 
     // Create static library
     let ar_output = std::process::Command::new("ar")
-        .args(&[
+        .args([
             "rcs",
             &lib_path.to_string_lossy(),
             &obj_path.to_string_lossy(),
