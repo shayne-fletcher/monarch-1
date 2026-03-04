@@ -14,6 +14,7 @@ use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
 use hyperactor::host::Host;
 use hyperactor::host::LocalProcManager;
+use hyperactor::host::SERVICE_PROC_NAME;
 use hyperactor_config::CONFIG;
 use hyperactor_config::ConfigAttr;
 use hyperactor_config::attrs::declare_attrs;
@@ -123,7 +124,7 @@ impl HostRef {
 
     /// The service proc on this host.
     fn service_proc(&self) -> ProcId {
-        ProcId(self.0.clone(), "service".to_string())
+        ProcId(self.0.clone(), SERVICE_PROC_NAME.to_string())
     }
 
     /// Request an orderly teardown of this host and all procs it

@@ -197,8 +197,7 @@ async fn main() -> io::Result<()> {
 }
 
 async fn run_diagnose(client: reqwest::Client, base_url: String) -> io::Result<()> {
-    use crate::diagnostics::DiagOutcome;
-    use crate::diagnostics::DiagPhase;
+    use crate::diagnostics::DiagSummary;
     use crate::diagnostics::run_diagnostics;
 
     // Global timeout: prevents hanging if the server is unreachable or
@@ -217,40 +216,20 @@ async fn run_diagnose(client: reqwest::Client, base_url: String) -> io::Result<(
         .await
         .is_err();
 
-    let is_pass =
-        |o: &DiagOutcome| matches!(o, DiagOutcome::Pass { .. } | DiagOutcome::Slow { .. });
-
-    let total = results.len();
-    let passed = results.iter().filter(|r| is_pass(&r.outcome)).count();
-    let admin_total = results
-        .iter()
-        .filter(|r| r.phase == DiagPhase::AdminInfra)
-        .count();
-    let admin_passed = results
-        .iter()
-        .filter(|r| r.phase == DiagPhase::AdminInfra && is_pass(&r.outcome))
-        .count();
-    let mesh_total = results
-        .iter()
-        .filter(|r| r.phase == DiagPhase::Mesh)
-        .count();
-    let mesh_passed = results
-        .iter()
-        .filter(|r| r.phase == DiagPhase::Mesh && is_pass(&r.outcome))
-        .count();
-    let healthy = passed == total && !timed_out;
+    let s = DiagSummary::from_results(&results);
+    let healthy = s.passed == s.total && !timed_out;
 
     let report = serde_json::json!({
         "checks": results,
         "timed_out": timed_out,
         "summary": {
-            "total": total,
-            "passed": passed,
-            "failed": total - passed,
-            "admin_infra_passed": admin_passed,
-            "admin_infra_total": admin_total,
-            "mesh_passed": mesh_passed,
-            "mesh_total": mesh_total,
+            "total": s.total,
+            "passed": s.passed,
+            "failed": s.total - s.passed,
+            "admin_infra_passed": s.admin_passed,
+            "admin_infra_total": s.admin_total,
+            "mesh_passed": s.mesh_passed,
+            "mesh_total": s.mesh_total,
             "healthy": healthy,
         }
     });
