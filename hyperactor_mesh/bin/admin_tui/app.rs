@@ -21,6 +21,7 @@ use hyperactor::introspect::NodePayload;
 use hyperactor::introspect::NodeProperties;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use tokio::sync::mpsc;
 
 use crate::Args;
 use crate::Cursor;
@@ -37,6 +38,8 @@ use crate::collapse_all;
 use crate::collect_expanded_refs;
 use crate::collect_refs;
 use crate::derive_label;
+use crate::diagnostics::DiagResult;
+use crate::diagnostics::run_diagnostics;
 use crate::fetch_with_join;
 use crate::find_at_depth_from_root_mut;
 use crate::flatten_tree;
@@ -111,6 +114,15 @@ pub(crate) struct App {
     pub(crate) theme_name: ThemeName,
     /// Active language (for display in header).
     pub(crate) lang_name: LangName,
+
+    /// Accumulated results from the running/completed diagnostic suite.
+    pub(crate) diag_results: Vec<DiagResult>,
+    /// True while the diagnostic task is still sending results.
+    pub(crate) diag_running: bool,
+    /// Live channel from `run_diagnostics`; `None` when idle.
+    pub(crate) diag_rx: Option<mpsc::Receiver<DiagResult>>,
+    /// Vertical scroll offset for the diagnostics pane.
+    pub(crate) diag_scroll: u16,
 }
 
 impl App {
@@ -145,6 +157,10 @@ impl App {
             theme: Theme::new(theme_name, lang_name),
             theme_name,
             lang_name,
+            diag_results: Vec::new(),
+            diag_running: false,
+            diag_rx: None,
+            diag_scroll: 0,
         }
     }
 
@@ -576,6 +592,26 @@ impl App {
     /// (e.g. after expanding nodes or toggling system-proc
     /// visibility).
     pub(crate) fn on_key(&mut self, key: KeyEvent) -> KeyResult {
+        // When the diagnostics pane is showing, intercept navigation keys.
+        if self.diag_running || !self.diag_results.is_empty() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.diag_results.clear();
+                    self.diag_running = false;
+                    self.diag_rx = None;
+                    self.diag_scroll = 0;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.diag_scroll = self.diag_scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.diag_scroll = self.diag_scroll.saturating_add(1);
+                }
+                _ => {}
+            }
+            return KeyResult::None;
+        }
+
         let rows = self.visible_rows();
 
         match key.code {
@@ -696,6 +732,10 @@ impl App {
                     KeyResult::None
                 }
             }
+            KeyCode::Char('d') => {
+                // Open diagnostics pane (any key closes it).
+                KeyResult::RunDiagnostics
+            }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 // Page up (Ctrl+U, vi-style)
                 if self.cursor.page_up(10) {
@@ -725,6 +765,18 @@ impl App {
             }
             _ => KeyResult::None,
         }
+    }
+}
+
+/// Receive the next diagnostic result if a run is in progress.
+///
+/// Returns `std::future::pending()` when `rx` is `None` so the
+/// `tokio::select!` arm is never woken — equivalent to disabling
+/// the arm without requiring conditional compilation.
+async fn recv_diag(rx: &mut Option<mpsc::Receiver<DiagResult>>) -> Option<DiagResult> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -779,11 +831,29 @@ pub(crate) async fn run_app(
                                 }
                                 app.update_selected_detail().await;
                             }
+                            KeyResult::RunDiagnostics => {
+                                app.diag_running = true;
+                                app.diag_results.clear();
+                                app.diag_scroll = 0;
+                                app.diag_rx = Some(run_diagnostics(
+                                    app.client.clone(),
+                                    app.base_url.clone(),
+                                ));
+                            }
                             KeyResult::None => {}
                         }
                     }
                     Some(Ok(Event::Resize(_, _))) => {}
                     _ => {}
+                }
+            }
+            result = recv_diag(&mut app.diag_rx) => {
+                match result {
+                    Some(r) => app.diag_results.push(r),
+                    None => {
+                        app.diag_running = false;
+                        app.diag_rx = None;
+                    }
                 }
             }
         }

@@ -105,6 +105,14 @@ pub(crate) struct Args {
     /// Path to a PEM client private key for mutual TLS.
     #[arg(long)]
     pub(crate) tls_key: Option<String>,
+
+    /// Run diagnostics and print a JSON report to stdout, then exit.
+    ///
+    /// Walks the full resolution graph (root → hosts → service proc
+    /// actors → user procs → user actors) and probes each node.
+    /// Exits 0 when all checks pass, 1 when any fail.
+    #[arg(long)]
+    pub(crate) diagnose: bool,
 }
 
 /// All user-visible text in the TUI.
@@ -159,6 +167,28 @@ pub(crate) struct Labels {
     pub(crate) yes: &'static str,
     pub(crate) no: &'static str,
 
+    // Diagnostic pane status / summary strings
+    pub(crate) diag_running: &'static str,
+    pub(crate) diag_checks_all: &'static str,
+    pub(crate) diag_checks_passed: &'static str,
+    pub(crate) diag_admin_label: &'static str,
+    pub(crate) diag_mesh_label: &'static str,
+    pub(crate) diag_status_healthy: &'static str,
+    pub(crate) diag_status_failing: &'static str,
+    pub(crate) diag_status_na: &'static str,
+
+    // Diagnostic pane node annotations
+    pub(crate) diag_note_admin_server: &'static str,
+    pub(crate) diag_note_host_agent: &'static str,
+    pub(crate) diag_note_admin_service_proc: &'static str,
+    pub(crate) diag_note_introspection_handler: &'static str,
+    pub(crate) diag_note_actor_lifecycle_manager: &'static str,
+    pub(crate) diag_note_root_client_bridge: &'static str,
+    pub(crate) diag_note_comm_actor: &'static str,
+    pub(crate) diag_note_proc_agent: &'static str,
+    pub(crate) diag_note_user_proc: &'static str,
+    pub(crate) diag_note_user_actor: &'static str,
+
     // Pane titles
     pub(crate) pane_topology: &'static str,
     pub(crate) pane_details: &'static str,
@@ -168,6 +198,7 @@ pub(crate) struct Labels {
     pub(crate) pane_proc_details: &'static str,
     pub(crate) pane_actor_details: &'static str,
     pub(crate) pane_flight_recorder: &'static str,
+    pub(crate) pane_diagnostics: &'static str,
 
     // Footer
     pub(crate) footer_help_text: &'static str,
@@ -213,6 +244,24 @@ impl Labels {
             failed_actors: "Failed actors: ",
             yes: "yes",
             no: "no",
+            diag_running: "Running\u{2026}",
+            diag_checks_all: "All",
+            diag_checks_passed: "checks passed",
+            diag_admin_label: "Admin:",
+            diag_mesh_label: "Mesh:",
+            diag_status_healthy: "healthy",
+            diag_status_failing: "failing",
+            diag_status_na: "n/a",
+            diag_note_admin_server: "admin HTTP server — lists connected hosts",
+            diag_note_host_agent: "host agent — manages procs on this machine",
+            diag_note_admin_service_proc: "admin service proc — hosts the admin actor layer",
+            diag_note_introspection_handler: "handles GET /v1/\u{2026} HTTP requests",
+            diag_note_actor_lifecycle_manager: "manages actor spawn and lifecycle",
+            diag_note_root_client_bridge: "root client bridge — connects admin to the mesh",
+            diag_note_comm_actor: "mesh comm actor — enables proc-to-proc messaging",
+            diag_note_proc_agent: "proc agent — manages actor spawn and lifecycle on this proc",
+            diag_note_user_proc: "user proc — your workload is alive",
+            diag_note_user_actor: "user actor — reachable through full stack",
             pane_topology: "Topology",
             pane_details: "Details",
             pane_error: "Error",
@@ -221,7 +270,8 @@ impl Labels {
             pane_proc_details: "Proc Details",
             pane_actor_details: "Actor Details",
             pane_flight_recorder: "Flight Recorder",
-            footer_help_text: "q: quit | j/k: navigate | g/G: top/bottom | Tab: expand/collapse | c: collapse all | s: system procs | h: stopped actors",
+            pane_diagnostics: "Diagnostics",
+            footer_help_text: "q: quit | j/k: navigate | g/G: top/bottom | Tab: expand/collapse | c: collapse all | s: system procs | h: stopped actors | d: diag",
         }
     }
 
@@ -264,6 +314,24 @@ impl Labels {
             failed_actors: "失败执行器: ",
             yes: "是",
             no: "否",
+            diag_running: "运行中\u{2026}",
+            diag_checks_all: "所有",
+            diag_checks_passed: "项检查通过",
+            diag_admin_label: "管理:",
+            diag_mesh_label: "网格:",
+            diag_status_healthy: "健康",
+            diag_status_failing: "失败",
+            diag_status_na: "不适用",
+            diag_note_admin_server: "管理HTTP服务器 — 列出已连接主机",
+            diag_note_host_agent: "主机代理 — 管理此机器上的进程",
+            diag_note_admin_service_proc: "管理服务进程 — 承载管理员Actor层",
+            diag_note_introspection_handler: "处理 GET /v1/\u{2026} HTTP请求",
+            diag_note_actor_lifecycle_manager: "管理Actor派生和生命周期",
+            diag_note_root_client_bridge: "根客户端桥 — 连接管理员与用户网格",
+            diag_note_comm_actor: "网格通信Actor — 实现进程间消息传递",
+            diag_note_proc_agent: "进程代理 — 管理此进程上的Actor派生和生命周期",
+            diag_note_user_proc: "用户进程 — 您的工作负载正在运行",
+            diag_note_user_actor: "用户Actor — 可通过完整堆栈访问",
             pane_topology: "拓扑",
             pane_details: "详情",
             pane_error: "错误",
@@ -272,7 +340,8 @@ impl Labels {
             pane_proc_details: "进程详情",
             pane_actor_details: "执行器详情",
             pane_flight_recorder: "飞行记录器",
-            footer_help_text: "q: 退出 | j/k: 导航 | g/G: 顶部/底部 | Tab: 展开/折叠 | c: 全部折叠 | s: 系统进程 | h: 已停止",
+            pane_diagnostics: "诊断",
+            footer_help_text: "q: 退出 | j/k: 导航 | g/G: 顶部/底部 | Tab: 展开/折叠 | c: 全部折叠 | s: 系统进程 | h: 已停止 | d: 诊断",
         }
     }
 }
