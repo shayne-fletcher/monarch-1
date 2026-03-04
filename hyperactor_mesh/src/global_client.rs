@@ -358,6 +358,11 @@ fn fresh_instance() -> (
         work,
     } = ai;
 
+    // GlobalClientActor uses a custom run loop that bypasses the
+    // standard Actor::init lifecycle hook, so set_system() must be
+    // called here explicitly.
+    client_instance.set_system();
+
     // Bind the actor's well-known ports (Signal,
     // Undeliverable<MessageEnvelope>, IntrospectMessage, and the
     // MeshFailure handler). Undeliverable messages are routed to
