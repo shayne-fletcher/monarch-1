@@ -469,9 +469,9 @@ fn compile_gpu_source(
     ]);
 
     if is_rocm {
-        cmd.args(&["-fPIC", "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1"]);
+        cmd.args(["-fPIC", "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1"]);
     } else {
-        cmd.args(&[
+        cmd.args([
             "--compiler-options",
             "-fPIC",
             "--expt-extended-lambda",
