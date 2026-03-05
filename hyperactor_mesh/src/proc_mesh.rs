@@ -193,7 +193,7 @@ impl ProcMesh {
         // supervision event handler. Last-mesh-wins semantics: if a
         // previous mesh installed a sink, it is replaced.
         if let Some(first) = ranks.first() {
-            crate::global_client::set_global_supervision_sink(
+            crate::global_context::set_global_supervision_sink(
                 first.agent.port::<ActorSupervisionEvent>(),
             );
         }
