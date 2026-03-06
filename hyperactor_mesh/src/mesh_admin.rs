@@ -1074,15 +1074,11 @@ impl MeshAdminAgent {
 
         let proc_name = proc_id.name().to_string();
 
-        // Procs are never system.
-        let is_system = false;
-
         Ok(NodePayload {
             identity: proc_id.to_string(),
             properties: NodeProperties::Proc {
                 proc_name,
                 num_actors: children.len(),
-                is_system,
                 system_children,
                 stopped_children: vec![],
                 stopped_retention_cap: 0,
@@ -1958,14 +1954,11 @@ mod tests {
             .await
             .unwrap();
         let proc_node = proc_resp.0.unwrap();
-        if let NodeProperties::Proc { is_system, .. } = &proc_node.properties {
-            assert!(
-                !is_system,
-                "procs are never system; is_system should be false"
-            );
-        } else {
-            panic!("expected Proc properties, got {:?}", proc_node.properties);
-        }
+        assert!(
+            matches!(proc_node.properties, NodeProperties::Proc { .. }),
+            "expected Proc properties, got {:?}",
+            proc_node.properties
+        );
         assert_eq!(proc_node.parent, Some(host_child_ref_str.clone()));
         // The system proc should have at least the "host_agent" actor.
         assert!(
@@ -2006,13 +1999,12 @@ mod tests {
         );
     }
 
-    // Verifies MeshAdminAgent::resolve correctly sets
-    // NodeProperties::Proc.is_system=false for all procs. Procs are
-    // never system; only actors can be. Spawns a user proc via
+    // Verifies MeshAdminAgent::resolve returns NodeProperties::Proc
+    // for all proc children. Spawns a user proc via
     // CreateOrUpdate<ProcSpec>, resolves all host proc-children, and
-    // asserts every proc reports is_system=false.
+    // asserts every proc returns Proc properties.
     #[tokio::test]
-    async fn test_is_system_flag_false_for_all_procs() {
+    async fn test_proc_properties_for_all_procs() {
         use std::time::Duration;
 
         use hyperactor::Proc;
@@ -2098,7 +2090,7 @@ mod tests {
             host_node.children.len()
         );
 
-        // Resolve each proc child and verify is_system.
+        // Resolve each proc child and verify it has Proc properties.
         let user_proc_name_str = user_proc_name.to_string();
         let mut found_system = false;
         let mut found_user = false;
@@ -2108,17 +2100,7 @@ mod tests {
                 .await
                 .unwrap();
             let node = resp.0.unwrap();
-            if let NodeProperties::Proc {
-                is_system,
-                proc_name,
-                ..
-            } = &node.properties
-            {
-                assert!(
-                    !is_system,
-                    "proc '{}' should have is_system=false; procs are never system",
-                    proc_name
-                );
+            if let NodeProperties::Proc { proc_name, .. } = &node.properties {
                 if proc_name.contains(&user_proc_name_str) {
                     found_user = true;
                 } else {
@@ -2435,7 +2417,7 @@ mod tests {
     //
     // 1. The identity of the resolved system proc matches the plain
     //    ProcId reference from the host's system_children list.
-    // 2. The properties are NodeProperties::Proc with is_system=false.
+    // 2. The properties are NodeProperties::Proc.
     // 3. The parent is set to the HostId format ("host:<actor_id>").
     // 4. The as_of field is present and non-empty.
     #[tokio::test]
@@ -2523,7 +2505,7 @@ mod tests {
             expected_system_ref
         );
 
-        // -- 7. Resolve a proc child and verify is_system=false --
+        // -- 7. Resolve a proc child and verify it has Proc properties --
         let proc_child_ref = &host_node.children[0];
         let proc_resp = admin_ref
             .resolve(&client, proc_child_ref.clone())
@@ -2536,25 +2518,11 @@ mod tests {
             "identity must match the proc ref from the host's children list"
         );
 
-        match &proc_node.properties {
-            NodeProperties::Proc {
-                is_system,
-                proc_name,
-                ..
-            } => {
-                assert!(
-                    !is_system,
-                    "proc '{}' should have is_system=false; procs are never system",
-                    proc_name
-                );
-            }
-            other => {
-                panic!(
-                    "expected NodeProperties::Proc with is_system=false, got {:?}",
-                    other
-                );
-            }
-        }
+        assert!(
+            matches!(proc_node.properties, NodeProperties::Proc { .. }),
+            "expected NodeProperties::Proc, got {:?}",
+            proc_node.properties
+        );
 
         assert_eq!(
             proc_node.parent,
