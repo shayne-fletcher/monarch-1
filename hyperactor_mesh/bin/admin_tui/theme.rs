@@ -75,7 +75,7 @@ pub(crate) struct Args {
     pub(crate) mast_resolver: Option<String>,
 
     /// Refresh interval in milliseconds
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, default_value_t = 2000)]
     pub(crate) refresh_ms: u64,
 
     /// Color theme
