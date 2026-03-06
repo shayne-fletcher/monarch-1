@@ -349,7 +349,6 @@ impl Actor for HostAgent {
                         properties: NodeProperties::Proc {
                             proc_name: label.to_string(),
                             num_actors: actors.len(),
-                            is_system: false,
                             system_children: system_actors,
                             stopped_children: Vec::new(),
                             stopped_retention_cap: 0,
