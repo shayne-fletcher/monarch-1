@@ -54,7 +54,7 @@ hyperactor_config = { version = "0.0.0", path = "../hyperactor_config" }
 hyperactor_macros = { version = "0.0.0", path = "../hyperactor_macros" }
 hyperactor_telemetry = { version = "0.0.0", path = "../hyperactor_telemetry" }
 indenter = "0.3.4"
-inventory = "0.3.21"
+inventory = "0.3.22"
 lazy_static = "1.5"
 local-ip-address = "0.5.7"
 ndslice = { version = "0.0.0", path = "../ndslice" }
