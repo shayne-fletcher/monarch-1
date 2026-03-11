@@ -14,6 +14,15 @@
 //!
 //! It also stores bounded snapshots of terminated actors for
 //! post-mortem introspection.
+//!
+//! ## Client instance invariants (CI-*)
+//!
+//! - **CI-1 (client status):** `IntrospectMessage::Query` on an
+//!   introspectable instance returns `status: "client"` and
+//!   `actor_type: "()"` in attrs.
+//! - **CI-2 (snapshot on drop):** Dropping the returned `Instance<()>`
+//!   transitions its status to terminal, causing the introspect task
+//!   to store a terminated snapshot.
 
 use std::any::Any;
 use std::any::TypeId;
@@ -374,15 +383,7 @@ impl Proc {
     /// to `IntrospectMessage::Query` and is visible and navigable in
     /// admin tooling such as the mesh TUI.
     ///
-    /// # Invariants
-    ///
-    /// - **CI-1 (client status):** `IntrospectMessage::Query` returns
-    ///   an `IntrospectResult` with `status: "client"` and
-    ///   `actor_type: "()"` in attrs.
-    /// - **CI-2 (snapshot on drop):** Dropping the returned
-    ///   `Instance<()>` transitions its status to terminal, which
-    ///   causes the introspect task to store a terminated snapshot
-    ///   (same post-mortem semantics as regular actors).
+    /// See CI-1, CI-2 in module doc.
     ///
     /// Requires an active Tokio runtime (calls `tokio::spawn`).
     pub fn introspectable_instance(
@@ -1038,12 +1039,9 @@ impl<A: Actor> Drop for InstanceState<A> {
 /// Receivers created by [`Instance::new`] that must be threaded to
 /// their respective consumers (actor loop, introspect task, etc.).
 ///
-/// # Invariant S10
+/// # Invariant
 ///
-/// The introspect receiver is created for every instance in
-/// `Instance::new()`. Callers that run a message loop (`start()`)
-/// spawn the introspect task. `child_instance()` intentionally
-/// drops the receiver.
+/// See S10 in `introspect` module doc.
 pub struct InstanceReceivers<A: Actor> {
     /// Signal and supervision receivers for the actor loop. `None`
     /// for detached/client instances that don't run an actor loop.
@@ -1095,12 +1093,7 @@ impl<A: Actor> Instance<A> {
         // creation. bind_actor_port() registers in the mailbox
         // dispatch table at IntrospectMessage::port().
         //
-        // Invariant S3: senders target IntrospectMessage::port() — the
-        // same PortId used here — so routing is unchanged across processes.
-        // Invariant S4: pre-registration ensures no WorkCell creation
-        // for IntrospectMessage -- the port gets its own channel.
-        // Invariant S9: port bound exactly once here via
-        // bind_actor_port(); no other site calls bind for this port.
+        // Exercises S3, S4, S9 (see introspect module doc).
         let (introspect_port, introspect_receiver) =
             ports.open_message_port::<IntrospectMessage>().unwrap();
         introspect_port.bind_actor_port();
@@ -2078,8 +2071,7 @@ struct InstanceCellState {
     /// introspection runtime handler for `QueryChild` messages.
     /// `None` means `QueryChild` returns a "not_found" error.
     ///
-    /// Invariant S7: system procs are resolvable without entering
-    /// the actor loop — the callback runs on the introspect task.
+    /// See S7 in `introspect` module doc.
     query_child_handler: RwLock<
         Option<Box<dyn (Fn(&crate::reference::Reference) -> IntrospectResult) + Send + Sync>>,
     >,
@@ -3679,9 +3671,7 @@ mod tests {
         );
     }
 
-    // Invariant FI-1/FI-2: supervision_event is stored on the
-    // InstanceCell when an actor fails and is readable after
-    // termination.
+    // Exercises FI-1/FI-2 (see introspect.rs module-scope comment).
     #[async_timed_test(timeout_secs = 30)]
     async fn test_supervision_event_stored_on_failure() {
         let proc = Proc::local();
@@ -3706,7 +3696,7 @@ mod tests {
         assert_eq!(event.actually_failing_actor().actor_id, actor_id);
     }
 
-    // FI-2: clean stop produces no supervision_event.
+    // Exercises FI-2 (see introspect.rs module-scope comment).
     #[async_timed_test(timeout_secs = 30)]
     async fn test_supervision_event_none_on_clean_stop() {
         let proc = Proc::local();
@@ -3724,8 +3714,7 @@ mod tests {
         );
     }
 
-    // Invariant: propagated failures carry the originating actor's
-    // identity through actually_failing_actor().
+    // Exercises FI-4 (see introspect.rs module-scope comment).
     #[async_timed_test(timeout_secs = 30)]
     async fn test_supervision_event_on_propagated_failure() {
         let proc = Proc::local();
@@ -3760,7 +3749,7 @@ mod tests {
         assert_eq!(event.actually_failing_actor().actor_id, child_id);
     }
 
-    // Invariant: resolve_actor_ref returns None for terminal actors.
+    // Exercises S11 (see introspect.rs module doc).
     //
     // A live actor is resolvable. After drain_and_stop + await, the
     // actor's status is terminal and resolve_actor_ref must return

@@ -25,9 +25,7 @@
 //! See `mesh_admin.rs` for MC-1..MC-5 (CLI contract, hostname
 //! extraction, FQDN qualification, admin port resolution).
 //!
-//! - **MC-5**: [`resolve_admin_port`] uses the explicit
-//!   override when provided, otherwise reads the port from
-//!   `MESH_ADMIN_ADDR` config.
+//! See mesh_admin.rs module doc for MC-5.
 //!
 //! # Address handling
 //!
