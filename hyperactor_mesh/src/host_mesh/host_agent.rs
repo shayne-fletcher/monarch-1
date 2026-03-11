@@ -365,6 +365,7 @@ impl Actor for HostAgent {
                             is_poisoned: false,
                             failed_actor_count: 0,
                         },
+                        attrs: "{}".to_string(),
                         children: actors,
                         parent: Some(HostId(self_id.clone()).to_string()),
                         as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now())
@@ -377,6 +378,7 @@ impl Actor for HostAgent {
                         code: "not_found".into(),
                         message: format!("child {} not found", child_ref),
                     },
+                    attrs: "{}".to_string(),
                     children: Vec::new(),
                     parent: None,
                     as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now())
