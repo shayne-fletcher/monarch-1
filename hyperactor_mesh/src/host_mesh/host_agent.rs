@@ -283,11 +283,19 @@ impl HostAgent {
 
         let num_procs = children.len();
         cx.publish_properties(PublishedPropertiesKind::Host {
-            addr,
+            addr: addr.clone(),
             num_procs,
             children,
-            system_children,
+            system_children: system_children.clone(),
         });
+
+        // Attrs-based introspection (IA-2: dual-write).
+        let mut attrs = hyperactor_config::Attrs::new();
+        attrs.set(crate::introspect::NODE_TYPE, "host".to_string());
+        attrs.set(crate::introspect::ADDR, addr);
+        attrs.set(crate::introspect::NUM_PROCS, num_procs);
+        attrs.set(crate::introspect::SYSTEM_CHILDREN, system_children);
+        cx.publish_attrs(attrs);
     }
 }
 
@@ -354,6 +362,15 @@ impl Actor for HostAgent {
                         }
                         actors.push(ref_str);
                     }
+                    // Build attrs for this proc node.
+                    let mut attrs = hyperactor_config::Attrs::new();
+                    attrs.set(crate::introspect::NODE_TYPE, "proc".to_string());
+                    attrs.set(crate::introspect::PROC_NAME, label.to_string());
+                    attrs.set(crate::introspect::NUM_ACTORS, actors.len());
+                    attrs.set(crate::introspect::SYSTEM_CHILDREN, system_actors.clone());
+                    let attrs_json =
+                        serde_json::to_string(&attrs).unwrap_or_else(|_| "{}".to_string());
+
                     NodePayload {
                         identity: proc.proc_id().to_string(),
                         properties: NodeProperties::Proc {
@@ -365,7 +382,7 @@ impl Actor for HostAgent {
                             is_poisoned: false,
                             failed_actor_count: 0,
                         },
-                        attrs: "{}".to_string(),
+                        attrs: attrs_json,
                         children: actors,
                         parent: Some(HostId(self_id.clone()).to_string()),
                         as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now())
