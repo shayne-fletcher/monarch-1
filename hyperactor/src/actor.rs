@@ -2084,6 +2084,53 @@ mod tests {
         handle.await;
     }
 
+    /// Verify InstanceCell Attrs storage: `set_published_attrs`
+    /// replaces the whole bag, `merge_published_attr` merges a single
+    /// key incrementally. (Instance methods are thin wrappers over
+    /// these.)
+    #[tokio::test]
+    async fn test_publish_attrs_round_trip() {
+        use hyperactor_config::Attrs;
+        use hyperactor_config::declare_attrs;
+
+        declare_attrs! {
+            attr TEST_KEY_A: String;
+            attr TEST_KEY_B: u64;
+        }
+
+        let proc = Proc::local();
+        let (client, _) = proc.instance("client").unwrap();
+        let (tx, _rx) = client.open_port::<u64>();
+        let actor = EchoActor(tx.bind());
+        let handle = proc.spawn::<EchoActor>("echo_attrs", actor).unwrap();
+
+        // Before publishing, attrs are None.
+        assert!(handle.cell().published_attrs().is_none());
+
+        // publish_attrs: replace entire bag.
+        let mut attrs = Attrs::new();
+        attrs.set(TEST_KEY_A, "hello".to_string());
+        handle.cell().set_published_attrs(attrs);
+        let published = handle.cell().published_attrs().unwrap();
+        assert_eq!(published.get(TEST_KEY_A), Some(&"hello".to_string()));
+
+        // publish_attr: merge single key into existing bag.
+        handle.cell().merge_published_attr(TEST_KEY_B, 42u64);
+        let published = handle.cell().published_attrs().unwrap();
+        assert_eq!(published.get(TEST_KEY_A), Some(&"hello".to_string()));
+        assert_eq!(published.get(TEST_KEY_B), Some(&42u64));
+
+        // publish_attr: overwrite existing key.
+        handle
+            .cell()
+            .merge_published_attr(TEST_KEY_A, "world".to_string());
+        let published = handle.cell().published_attrs().unwrap();
+        assert_eq!(published.get(TEST_KEY_A), Some(&"world".to_string()));
+
+        handle.drain_and_stop("test").unwrap();
+        handle.await;
+    }
+
     /// Verify the query_child_handler callback: register a callback,
     /// invoke it via `query_child()`, and confirm the response.
     #[tokio::test]
