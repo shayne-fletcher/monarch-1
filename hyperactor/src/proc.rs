@@ -3745,7 +3745,7 @@ mod tests {
         assert_eq!(event.actually_failing_actor().actor_id, actor_id);
     }
 
-    // Invariant FI-2/INV-6: clean stop produces no supervision_event.
+    // FI-2: clean stop produces no supervision_event.
     #[async_timed_test(timeout_secs = 30)]
     async fn test_supervision_event_none_on_clean_stop() {
         let proc = Proc::local();
@@ -3832,7 +3832,7 @@ mod tests {
         );
     }
 
-    // INV-3: terminated snapshot for a failed actor has failure_info.
+    // FI-3: terminated snapshot for a failed actor has failure_info.
     #[async_timed_test(timeout_secs = 30)]
     async fn test_terminated_snapshot_has_failure_info() {
         let proc = Proc::local();
@@ -3867,7 +3867,7 @@ mod tests {
         }
     }
 
-    // INV-4: propagated failure has root_cause pointing to child.
+    // FI-4: propagated failure has root_cause pointing to child.
     #[async_timed_test(timeout_secs = 30)]
     async fn test_propagated_failure_info() {
         let proc = Proc::local();
@@ -4057,7 +4057,7 @@ mod tests {
         assert_eq!(parent_b.cell().child_count(), 1);
     }
 
-    // INV-6: cleanly stopped actor has no failure_info.
+    // FI-6: cleanly stopped actor has no failure_info.
     #[async_timed_test(timeout_secs = 30)]
     async fn test_stopped_snapshot_has_no_failure_info() {
         let proc = Proc::local();

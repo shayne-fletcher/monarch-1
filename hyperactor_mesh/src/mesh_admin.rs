@@ -83,6 +83,20 @@
 //! Together these ensure that the TUI can correlate responses to tree
 //! nodes, and that upward/downward navigation is consistent.
 //!
+//! ## Proc-resolution invariants (SP-*)
+//!
+//! When a proc reference is resolved, the returned `NodePayload`
+//! satisfies:
+//!
+//! - **SP-1 (identity):** The identity matches the ProcId reference
+//!   from the parent's children list.
+//! - **SP-2 (properties):** The properties are `NodeProperties::Proc`.
+//! - **SP-3 (parent):** The parent is set to the HostId format
+//!   (`"host:<actor_id>"`).
+//! - **SP-4 (as_of):** The `as_of` field is present and non-empty.
+//!
+//! Enforced by `test_system_proc_identity`.
+//!
 //! ## Robustness invariant
 //!
 //! **`MeshAdminAgent` must never crash the OS process it resides in.**
@@ -146,6 +160,30 @@
 //! list in `SpawnMeshAdmin`. This works for same-process and
 //! cross-process setups because merge+dedeup happens in the caller
 //! process before sending the spawn request.
+//!
+//! ## MAST resolution invariants (MC-*)
+//!
+//! CLI-based `mast_conda:///` resolution (OSS-compatible fallback):
+//!
+//! - **MC-1 (cli-contract):** `mast get-status --json <job>` must
+//!   exit 0 and produce valid JSON. Missing binary → distinct error.
+//!   Non-zero exit → includes exit code and stderr. Malformed JSON →
+//!   parse error.
+//! - **MC-2 (head-hostname):** `head_hostname` extracts the first
+//!   hostname by ascending task index from the last attempt of each
+//!   task group.
+//! - **MC-3 (fqdn-idempotent):** `qualify_fqdn` passes through
+//!   hostnames containing a dot. Short hostnames are qualified via
+//!   `getaddrinfo(AI_CANONNAME)`. Failure falls back to the raw
+//!   hostname.
+//! - **MC-4 (fqdn-nonblocking):** `qualify_fqdn` runs the blocking
+//!   `getaddrinfo` syscall via `spawn_blocking`.
+//! - **MC-5 (admin-port):** `resolve_admin_port` uses the explicit
+//!   override when provided, otherwise reads the port from
+//!   `MESH_ADMIN_ADDR` config.
+//!
+//! Enforced by `test_head_hostname_*`, `test_qualify_fqdn_*`,
+//! `test_resolve_mast_*`, `test_resolve_admin_port_*`.
 
 use std::collections::HashMap;
 use std::io;
@@ -865,6 +903,15 @@ impl MeshAdminAgent {
             .map(|agent| HostId(agent.actor_id().clone()).to_string())
             .collect();
         let system_children: Vec<String> = Vec::new();
+        let mut attrs = hyperactor_config::Attrs::new();
+        attrs.set(crate::introspect::NODE_TYPE, "root".to_string());
+        attrs.set(crate::introspect::NUM_HOSTS, self.hosts.len());
+        if let Ok(t) = humantime::parse_rfc3339(&self.started_at) {
+            attrs.set(crate::introspect::STARTED_AT, t);
+        }
+        attrs.set(crate::introspect::STARTED_BY, self.started_by.clone());
+        attrs.set(crate::introspect::SYSTEM_CHILDREN, system_children.clone());
+        let attrs_json = serde_json::to_string(&attrs).unwrap_or_else(|_| "{}".to_string());
         NodePayload {
             identity: "root".to_string(),
             properties: NodeProperties::Root {
@@ -873,7 +920,7 @@ impl MeshAdminAgent {
                 started_by: self.started_by.clone(),
                 system_children,
             },
-            attrs: "{}".to_string(),
+            attrs: attrs_json,
             children,
             parent: None,
             as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now()).to_string(),
@@ -1098,6 +1145,14 @@ impl MeshAdminAgent {
 
         let proc_name = proc_id.name().to_string();
 
+        // IA-2: dual-write attrs for standalone proc.
+        let mut attrs = hyperactor_config::Attrs::new();
+        attrs.set(crate::introspect::NODE_TYPE, "proc".to_string());
+        attrs.set(crate::introspect::PROC_NAME, proc_name.clone());
+        attrs.set(crate::introspect::NUM_ACTORS, children.len());
+        attrs.set(crate::introspect::SYSTEM_CHILDREN, system_children.clone());
+        let attrs_json = serde_json::to_string(&attrs).unwrap_or_else(|_| "{}".to_string());
+
         Ok(NodePayload {
             identity: proc_id.to_string(),
             properties: NodeProperties::Proc {
@@ -1109,7 +1164,7 @@ impl MeshAdminAgent {
                 is_poisoned: false,
                 failed_actor_count: 0,
             },
-            attrs: "{}".to_string(),
+            attrs: attrs_json,
             children,
             as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now()).to_string(),
             parent: Some("root".to_string()),
@@ -1566,35 +1621,9 @@ fn derive_actor_label(reference: &str) -> String {
     }
 }
 
-// -- CLI-based mast_conda:/// resolution (INV-CLI-CONTRACT) --
+// -- CLI-based mast_conda:/// resolution --
 //
-// This is the OSS-compatible fallback for resolving `mast_conda:///`
-// handles. It shells out to `mast get-status --json <job>` and parses
-// the response. The thrift-based equivalent lives in
-// `hyperactor_meta::mesh_admin::resolve_mast_handle`.
-//
-// Invariants:
-//
-// - **INV-CLI-CONTRACT**: `mast get-status --json <job>` must exit 0
-//   and produce valid JSON. Missing binary → distinct error. Non-zero
-//   exit → includes exit code and stderr. Malformed JSON → parse
-//   error.
-//
-// - **INV-HEAD-HOSTNAME**: `head_hostname` extracts the first
-//   hostname by ascending task index from the last attempt of each
-//   task group.
-//
-// - **INV-FQDN-IDEMPOTENT**: `qualify_fqdn` passes through hostnames
-//   containing a dot. Short hostnames are qualified via
-//   `getaddrinfo(AI_CANONNAME)`. Failure falls back to the raw
-//   hostname.
-//
-// - **INV-FQDN-NONBLOCKING**: `qualify_fqdn` runs the blocking
-//   `getaddrinfo` syscall via `spawn_blocking`.
-//
-// - **INV-ADMIN-PORT**: `resolve_admin_port` uses the explicit
-//   override when provided, otherwise reads the port from
-//   `MESH_ADMIN_ADDR` config.
+// See module doc for MC-1..MC-5 invariants.
 
 /// Top-level response from `mast get-status --json`.
 #[derive(serde::Deserialize)]
@@ -1624,7 +1653,7 @@ struct MastTaskAttempt {
 }
 
 /// Extract the head node hostname from a parsed MAST status response
-/// (INV-HEAD-HOSTNAME).
+/// (MC-2).
 ///
 /// For each task group, the last attempt is selected. Within that
 /// attempt, each task's last execution attempt provides the hostname.
@@ -1657,8 +1686,8 @@ fn head_hostname(response: &MastStatusResponse) -> Result<String, String> {
 }
 
 /// Qualify a short hostname to an FQDN via
-/// `getaddrinfo(AI_CANONNAME)` (INV-FQDN-IDEMPOTENT,
-/// INV-FQDN-NONBLOCKING).
+/// `getaddrinfo(AI_CANONNAME)` (MC-3,
+/// MC-4).
 ///
 /// Called via `spawn_blocking` to avoid blocking tokio workers. Falls
 /// back to the raw hostname on any failure.
@@ -1720,7 +1749,7 @@ fn qualify_fqdn_blocking(hostname: &str) -> String {
 }
 
 /// Resolve admin port from an explicit override or `MESH_ADMIN_ADDR`
-/// config (INV-ADMIN-PORT).
+/// config (MC-5).
 ///
 /// When `port_override` is `Some`, that port is used directly. When
 /// `None`, the port is read from the `MESH_ADMIN_ADDR` configuration
@@ -1740,7 +1769,7 @@ fn resolve_admin_port(port_override: Option<u16>) -> Result<u16, anyhow::Error> 
 
 /// Resolve a `mast_conda:///<job-name>` handle into an
 /// `https://<fqdn>:<port>` base URL by shelling out to the `mast` CLI
-/// (INV-CLI-CONTRACT).
+/// (MC-1).
 ///
 /// This is the OSS-compatible counterpart to
 /// `hyperactor_meta::mesh_admin::resolve_mast_handle`. The `cmd`
@@ -1873,6 +1902,28 @@ mod tests {
                 .children
                 .contains(&HostId(actor_id2.clone()).to_string())
         );
+
+        // IA-1, IA-2: root attrs populated.
+        {
+            use crate::introspect::*;
+            let attrs: serde_json::Value =
+                serde_json::from_str(&payload.attrs).expect("IA-1: root attrs must be valid JSON");
+            assert!(attrs.is_object(), "IA-1: root attrs must be a JSON object");
+            assert_eq!(
+                attrs.get(NODE_TYPE.name()).and_then(|v| v.as_str()),
+                Some("root"),
+                "root attrs must contain node_type=root"
+            );
+            assert_eq!(
+                attrs.get(NUM_HOSTS.name()).and_then(|v| v.as_u64()),
+                Some(2),
+                "root attrs must contain num_hosts=2"
+            );
+            assert!(
+                attrs.get(STARTED_BY.name()).is_some(),
+                "root attrs must contain started_by"
+            );
+        }
     }
 
     // End-to-end smoke test for MeshAdminAgent::resolve that walks
@@ -2135,6 +2186,14 @@ mod tests {
                 } else {
                     found_system = true;
                 }
+                // IA-1: attrs is valid JSON.
+                let attrs: serde_json::Value =
+                    serde_json::from_str(&node.attrs).expect("IA-1: proc attrs must be valid JSON");
+                assert!(attrs.is_object(), "IA-1: proc attrs must be a JSON object");
+                // Note: IA-2 (mesh-topology keys in attrs) is not yet
+                // verified here — user procs are resolved via
+                // MeshAdminAgent::resolve_proc_node which doesn't read
+                // ProcAgent's published attrs yet (Task 8).
             } else {
                 // Host agent cross-reference — skip.
             }
@@ -2443,15 +2502,7 @@ mod tests {
         );
     }
 
-    // Verifies that procs are never system (system_children is empty
-    // for procs) and that resolving them produces
-    // correct payloads:
-    //
-    // 1. The identity of the resolved system proc matches the plain
-    //    ProcId reference from the host's system_children list.
-    // 2. The properties are NodeProperties::Proc.
-    // 3. The parent is set to the HostId format ("host:<actor_id>").
-    // 4. The as_of field is present and non-empty.
+    // Exercises SP-1..SP-4 plus IA-1/IA-2 for host/proc payloads.
     #[tokio::test]
     async fn test_system_proc_identity() {
         use hyperactor::Proc;
@@ -2528,6 +2579,34 @@ mod tests {
             "host system_children should be empty (procs are never system), got {:?}",
             system_children
         );
+        // -- 5b. Verify host node attrs (IA-1, IA-2) --
+        {
+            use crate::introspect::*;
+
+            let host_attrs: serde_json::Value = serde_json::from_str(&host_node.attrs)
+                .expect("IA-1: host attrs must be valid JSON");
+            assert!(
+                host_attrs.is_object(),
+                "IA-1: host attrs must be a JSON object"
+            );
+            assert_eq!(
+                host_attrs.get(NODE_TYPE.name()).and_then(|v| v.as_str()),
+                Some("host"),
+                "host attrs must contain node_type=host"
+            );
+            assert!(
+                host_attrs
+                    .get(ADDR.name())
+                    .and_then(|v| v.as_str())
+                    .is_some(),
+                "host attrs must contain addr"
+            );
+            assert!(
+                host_attrs.get(NUM_PROCS.name()).is_some(),
+                "host attrs must contain num_procs"
+            );
+        }
+
         // -- 6. Verify host children contain the system proc --
         let expected_system_ref = system_proc_id.to_string();
         assert!(
@@ -2537,7 +2616,7 @@ mod tests {
             expected_system_ref
         );
 
-        // -- 7. Resolve a proc child and verify it has Proc properties --
+        // -- 7. Resolve a proc child --
         let proc_child_ref = &host_node.children[0];
         let proc_resp = admin_ref
             .resolve(&client, proc_child_ref.clone())
@@ -2566,6 +2645,33 @@ mod tests {
             !proc_node.as_of.is_empty(),
             "as_of should be present and non-empty"
         );
+
+        // -- 8. Verify proc node attrs (IA-1, IA-2) --
+        {
+            use crate::introspect::*;
+            let proc_attrs: serde_json::Value = serde_json::from_str(&proc_node.attrs)
+                .expect("IA-1: proc attrs must be valid JSON");
+            assert!(
+                proc_attrs.is_object(),
+                "IA-1: proc attrs must be a JSON object"
+            );
+            assert_eq!(
+                proc_attrs.get(NODE_TYPE.name()).and_then(|v| v.as_str()),
+                Some("proc"),
+                "proc attrs must contain node_type=proc"
+            );
+            assert!(
+                proc_attrs
+                    .get(PROC_NAME.name())
+                    .and_then(|v| v.as_str())
+                    .is_some(),
+                "proc attrs must contain proc_name"
+            );
+            assert!(
+                proc_attrs.get(NUM_ACTORS.name()).is_some(),
+                "proc attrs must contain num_actors"
+            );
+        }
     }
 
     // -- MAST CLI resolver tests --
@@ -2596,7 +2702,7 @@ mod tests {
         }
     }
 
-    // INV-HEAD-HOSTNAME: single group, tasks sorted by ascending index.
+    // MC-2: single group, tasks sorted by ascending index.
     #[test]
     fn test_head_hostname_single_group() {
         let response = mast_response_from_hosts(&[(2, "host2"), (0, "host0"), (1, "host1")]);
@@ -2604,7 +2710,7 @@ mod tests {
         assert_eq!(head, "host0");
     }
 
-    // INV-HEAD-HOSTNAME: last attempt selected per task.
+    // MC-2: last attempt selected per task.
     #[test]
     fn test_head_hostname_last_attempt_wins() {
         let mut tasks = std::collections::HashMap::new();
@@ -2631,7 +2737,7 @@ mod tests {
         assert_eq!(head, "new_host");
     }
 
-    // INV-HEAD-HOSTNAME: multiple groups merged and sorted.
+    // MC-2: multiple groups merged and sorted.
     #[test]
     fn test_head_hostname_multiple_groups() {
         let mut tasks_a = std::collections::HashMap::new();
@@ -2666,7 +2772,7 @@ mod tests {
         assert_eq!(head, "host_b0");
     }
 
-    // INV-HEAD-HOSTNAME: no hostnames → error.
+    // MC-2: no hostnames → error.
     #[test]
     fn test_head_hostname_empty() {
         let response = super::MastStatusResponse {
@@ -2677,7 +2783,7 @@ mod tests {
         assert!(super::head_hostname(&response).is_err());
     }
 
-    // INV-HEAD-HOSTNAME: hostname field is None (task not yet
+    // MC-2: hostname field is None (task not yet
     // allocated) → skipped.
     #[test]
     fn test_head_hostname_skips_unallocated() {
@@ -2704,7 +2810,7 @@ mod tests {
         assert_eq!(head, "allocated_host");
     }
 
-    // INV-FQDN-IDEMPOTENT: hostname with dot passes through
+    // MC-3: hostname with dot passes through
     // unchanged (no DNS lookup).
     #[tokio::test]
     async fn test_qualify_fqdn_already_qualified() {
@@ -2712,7 +2818,7 @@ mod tests {
         assert_eq!(fqdn, "fake.nonexistent.tld");
     }
 
-    // INV-FQDN-IDEMPOTENT, INV-FQDN-NONBLOCKING: short hostname
+    // MC-3, MC-4: short hostname
     // goes through getaddrinfo via spawn_blocking. The result is
     // environment-dependent, but must be non-empty and the call
     // must complete without hanging.
@@ -2722,7 +2828,7 @@ mod tests {
         assert!(!fqdn.is_empty(), "qualify_fqdn returned empty string");
     }
 
-    // INV-FQDN-IDEMPOTENT: nonexistent short hostname falls back
+    // MC-3: nonexistent short hostname falls back
     // to the raw input.
     #[tokio::test]
     async fn test_qualify_fqdn_nonexistent_fallback() {
@@ -2731,13 +2837,13 @@ mod tests {
         assert_eq!(fqdn, input);
     }
 
-    // INV-ADMIN-PORT: explicit override is used directly.
+    // MC-5: explicit override is used directly.
     #[test]
     fn test_resolve_admin_port_override() {
         assert_eq!(super::resolve_admin_port(Some(8080)).unwrap(), 8080);
     }
 
-    // INV-ADMIN-PORT: falls back to MESH_ADMIN_ADDR config
+    // MC-5: falls back to MESH_ADMIN_ADDR config
     // (default [::]:1729).
     #[test]
     fn test_resolve_admin_port_from_config() {
@@ -2745,7 +2851,7 @@ mod tests {
         assert_eq!(port, 1729);
     }
 
-    // INV-CLI-CONTRACT: missing binary produces a "not found" error.
+    // MC-1: missing binary produces a "not found" error.
     #[tokio::test]
     async fn test_cli_missing_binary() {
         let result = super::try_resolve_mast_handle(
@@ -2774,7 +2880,7 @@ mod tests {
         (dir, path_str)
     }
 
-    // INV-CLI-CONTRACT: valid JSON, happy path end-to-end.
+    // MC-1: valid JSON, happy path end-to-end.
     #[tokio::test]
     async fn test_cli_happy_path() {
         let json = r#"{"latestAttempt":{"taskGroupExecutionAttempts":{"trainers":[{"taskExecutionAttempts":{"0":[{"hostname":"devgpu042"}]}}]}}}"#;
@@ -2787,7 +2893,7 @@ mod tests {
         assert!(url.ends_with(":1729"), "url: {}", url);
     }
 
-    // INV-CLI-CONTRACT: malformed JSON produces a parse error.
+    // MC-1: malformed JSON produces a parse error.
     #[tokio::test]
     async fn test_cli_malformed_json() {
         let (_dir, script_path) = write_test_script("#!/bin/sh\necho 'not json'\n");
@@ -2802,7 +2908,7 @@ mod tests {
         );
     }
 
-    // INV-CLI-CONTRACT: non-zero exit includes code + stderr.
+    // MC-1: non-zero exit includes code + stderr.
     #[tokio::test]
     async fn test_cli_nonzero_exit() {
         let (_dir, script_path) =
@@ -2818,7 +2924,7 @@ mod tests {
         );
     }
 
-    // INV-CLI-CONTRACT: handle without mast_conda:/// prefix is
+    // MC-1: handle without mast_conda:/// prefix is
     // rejected with a clear error.
     #[tokio::test]
     async fn test_cli_missing_prefix() {
@@ -2831,7 +2937,7 @@ mod tests {
         );
     }
 
-    // INV-HEAD-HOSTNAME: a task group with zero attempts is skipped.
+    // MC-2: a task group with zero attempts is skipped.
     #[test]
     fn test_head_hostname_empty_attempts_vec() {
         let response = super::MastStatusResponse {
@@ -2845,7 +2951,7 @@ mod tests {
         assert!(super::head_hostname(&response).is_err());
     }
 
-    // INV-HEAD-HOSTNAME: non-numeric task index keys sort last
+    // MC-2: non-numeric task index keys sort last
     // (i64::MAX fallback).
     #[test]
     fn test_head_hostname_non_numeric_index() {

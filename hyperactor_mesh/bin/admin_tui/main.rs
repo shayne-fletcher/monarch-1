@@ -256,7 +256,7 @@ async fn run(fb: Option<fbinit::FacebookInit>) -> io::Result<()> {
     let mut args = Args::parse();
 
     // Resolve mast_conda:/// handles to https://fqdn:port before
-    // building the HTTP client (INV-DISPATCH).
+    // building the HTTP client (MR-1).
     if args.addr.starts_with("mast_conda:///") {
         let resolver = client::MastResolver::new(fb, args.mast_resolver.as_deref());
         args.addr = client::resolve_mast_addr(&resolver, &args.addr, args.admin_port).await;
