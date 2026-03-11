@@ -539,23 +539,9 @@ pub fn live_actor_payload(cell: &InstanceCell) -> IntrospectResult {
 ///
 /// The actor's message loop never sees these messages.
 ///
-/// # Invariants
+/// # Invariants exercised
 ///
-/// - **S1:** Introspection does not depend on actor responsiveness --
-///   this task runs independently; a wedged actor is still introspectable.
-/// - **S2:** Introspection does not perturb observed state -- reads
-///   `InstanceCell` directly, never sets `last_message_handler`.
-/// - **S4:** `IntrospectMessage` never produces a `WorkCell` -- the
-///   introspect port has its own channel, separate from the work queue.
-/// - **S5:** Replies never use `PanickingMailboxSender` -- replies go
-///   through `Mailbox::serialize_and_send_once`.
-/// - **S6:** View semantics -- Actor view uses live structural state +
-///   supervision children; Entity view uses published properties +
-///   domain children.
-/// - **S11:** Terminated snapshots do not keep actors resolvable --
-///   `store_terminated_snapshot` writes to the proc's snapshot map,
-///   not the instances map. `resolve_actor_ref` checks terminal status
-///   independently and is unaffected by snapshot storage.
+/// Exercises S1, S2, S4, S5, S6, S11 (see module doc).
 pub async fn serve_introspect(
     cell: InstanceCell,
     mailbox: crate::mailbox::Mailbox,

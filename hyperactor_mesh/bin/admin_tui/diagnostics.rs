@@ -487,9 +487,7 @@ mod tests {
             .count()
     }
 
-    // Invariant LP-1: proc_role() maps proc names to roles by naming
-    // convention. Pin this mapping so renames or new system procs are
-    // caught at compile time.
+    // Exercises LP-1 (see hyperactor::host module doc).
     #[test]
     fn test_proc_role_classification() {
         assert!(matches!(
@@ -506,9 +504,7 @@ mod tests {
         ));
     }
 
-    // Invariant LP-1: the local proc starts empty in pure Rust. A Pass
-    // result for LocalClientProc with no subsequent actor probes must
-    // not contribute AdminInfra failures.
+    // Exercises LP-1 (see hyperactor::host module doc).
     #[test]
     fn test_empty_local_proc_does_not_degrade_admin_health() {
         let results = vec![DiagResult {

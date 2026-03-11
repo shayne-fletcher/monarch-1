@@ -1482,13 +1482,7 @@ mod tests {
     // gspawn message handler and therefore never triggers
     // publish_introspect_properties.
     //
-    // Invariant PA-1 (canonical):
-    // For proc-node resolution used by admin/TUI, children lists
-    // (children/system_children/stopped_children) must be derived from
-    // live proc state at query time rather than only from the last
-    // published snapshot.
-    // Required behavior: direct proc.spawn() of actor X is visible on
-    // the next proc resolve (no extra publish event required).
+    // Exercises PA-1 (see mesh_admin module doc).
     //
     // Regression guard for the bug introduced in 9a08d559: removing
     // handle_introspect left publish_introspect_properties as the only

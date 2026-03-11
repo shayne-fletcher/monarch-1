@@ -67,18 +67,17 @@
 //! (i.e., tooling can deliver `IntrospectMessage::Query` to one of its
 //! actors), then it is introspectable and appears in the admin graph.**
 //!
-//! ## Navigation identity invariant
+//! ## Navigation identity invariants (NI-*)
 //!
-//! Every `NodePayload` in the topology tree satisfies two properties:
+//! Every `NodePayload` in the topology tree satisfies:
 //!
-//! 1. **Identity = reference**: a node's `identity` field must equal the
-//!    reference string that was used to resolve it. If the TUI asks for
-//!    reference `R` and gets back a payload, `payload.identity == R`.
+//! - **NI-1 (identity = reference):** A node's `identity` field must
+//!   equal the reference string used to resolve it. If the TUI asks
+//!   for reference `R`, `payload.identity == R`.
 //!
-//! 2. **Parent coherence**: a node's `parent` field must equal the
-//!    `identity` of the node it appears under. If node `P` lists `R` in
-//!    its `children`, then the payload for `R` must have
-//!    `payload.parent == Some(P.identity)`.
+//! - **NI-2 (parent coherence):** A node's `parent` field must equal
+//!   the `identity` of the node it appears under. If node `P` lists
+//!   `R` in its `children`, then `R.parent == Some(P.identity)`.
 //!
 //! Together these ensure that the TUI can correlate responses to tree
 //! nodes, and that upward/downward navigation is consistent.
@@ -97,62 +96,58 @@
 //!
 //! Enforced by `test_system_proc_identity`.
 //!
-//! ## Robustness invariant
+//! ## Proc-agent invariants (PA-*)
 //!
-//! **`MeshAdminAgent` must never crash the OS process it resides in.**
-//! Every handler catches errors and converts them into structured
-//! error payloads (`ResolveReferenceResponse(Err(..))`,
-//! `NodeProperties::Error`, etc.) rather than propagating panics or
-//! unwinding. Failed reply sends (the caller went away) are silently
-//! swallowed.
+//! - **PA-1 (live children):** Proc-node children used by admin/TUI
+//!   must be derived from live proc state at query time. No
+//!   additional publish event is required for a newly spawned actor
+//!   to appear.
 //!
-//! ## TLS transport invariant
+//! Enforced by `test_proc_children_reflect_directly_spawned_actors`.
 //!
-//! **At Meta (`fbcode_build`):** The admin HTTP server **requires**
-//! mutual TLS. At startup it probes for certificates via
-//! [`try_tls_acceptor`](hyperactor::channel::try_tls_acceptor) with
-//! client cert enforcement enabled. If no usable certificate bundle
-//! is found, `init()` returns an error — there is no plain HTTP
-//! fallback. Clients must present a valid certificate signed by
-//! Meta's root CA; connections without a client cert are rejected
-//! during the TLS handshake.
+//! ## Robustness invariant (MA-R1)
 //!
-//! **In OSS:** TLS is best-effort. The server probes for certificates
-//! but falls back to plain HTTP if none are found. Client certificates
-//! are not required.
+//! - **MA-R1 (no-crash):** `MeshAdminAgent` must never crash the OS
+//!   process it resides in. Every handler catches errors and converts
+//!   them into structured error payloads
+//!   (`ResolveReferenceResponse(Err(..))`, `NodeProperties::Error`,
+//!   etc.) rather than propagating panics or unwinding. Failed reply
+//!   sends (the caller went away) are silently swallowed.
 //!
-//! **`admin_host` includes the scheme**: the URL returned by
-//! `GetAdminAddr` is always `https://host:port` or
-//! `http://host:port`, never a bare `host:port`. All callers (Rust
-//! examples, Python examples, TUI, tests) receive and use this full
-//! URL directly.
+//! ## TLS transport invariant (MA-T1)
 //!
-//! ## Client host invariant (A/C)
+//! - **MA-T1 (tls):** At Meta (`fbcode_build`), the admin HTTP
+//!   server **requires** mutual TLS. At startup it probes for
+//!   certificates via `try_tls_acceptor` with client cert
+//!   enforcement enabled. If no usable certificate bundle is found,
+//!   `init()` returns an error — no plain HTTP fallback. In OSS,
+//!   TLS is best-effort with plain HTTP fallback.
+//!
+//! - **MA-T2 (scheme-in-url):** The URL returned by `GetAdminAddr`
+//!   is always `https://host:port` or `http://host:port`, never a
+//!   bare `host:port`. All callers receive and use this full URL
+//!   directly.
+//!
+//! ## Client host invariants (CH-*)
 //!
 //! Let **A** denote the observed host mesh (the host mesh for which
 //! this `MeshAdminAgent` was spawned), and let **C** denote the
 //! process-global singleton client host mesh in the caller process
 //! (whose local proc hosts the root client actor).
 //!
-//! C may or may not be a member of A:
+//! - **CH-1 (deduplication):** When C ∈ A, the client host appears
+//!   exactly once in the admin host list (deduplicated by `HostAgent`
+//!   `ActorId` identity). When C ∉ A, `spawn_admin` includes C
+//!   alongside A's hosts so the admin introspects C as a normal host
+//!   subtree, not as a standalone proc.
 //!
-//! - **C ∈ A:** The client host is already one of A's hosts. It
-//!   appears exactly once in the admin host list (deduplicated by
-//!   `HostAgent` `ActorId` identity).
-//! - **C ∉ A:** The client host is separate from A.
-//!   [`HostMeshRef::spawn_admin`] includes C alongside A's hosts so
-//!   the admin introspects C as a normal host subtree (`host -> proc
-//!   -> actors`), not as a standalone proc.
+//! - **CH-2 (reachability):** In both cases, the root client actor
+//!   is reachable through the standard host → proc → actor walk.
 //!
-//! In both cases, the root client actor is reachable through the
-//! standard host -> proc -> actor walk.
-//!
-//! **Ordering invariant:** `spawn_admin` requires `cx: &impl
-//! context::Actor` (the caller's root client instance). Constructing
-//! that instance initializes C (Rust: `context().await`; Python:
-//! bootstrap path). Therefore C is available when `spawn_admin`
-//! executes. Any refactor must preserve this ordering: creating `cx`
-//! initializes C, and `spawn_admin` consumes `cx`.
+//! - **CH-3 (ordering):** `spawn_admin` requires `cx: &impl
+//!   context::Actor` (the caller's root client instance). Constructing
+//!   that instance initializes C. Therefore C is available when
+//!   `spawn_admin` executes. Any refactor must preserve this ordering.
 //!
 //! **Mechanism:** [`HostMeshRef::spawn_admin`] reads C from the
 //! caller process (via `try_this_host()`), merges it with A's host
@@ -1003,15 +998,13 @@ impl MeshAdminAgent {
     /// Resolve a `ProcId` reference into a proc-level `NodePayload`.
     ///
     /// First tries `IntrospectMessage::QueryChild` against the owning
-    /// `HostAgent` (which recognizes service and local procs). If that returns an error
-    /// payload, falls back to `ProcAgent` for user procs by querying
-    /// `QueryChild(hyperactor_reference::Reference::Proc(proc_id))` on
-    /// `<proc_id>/proc_agent[0]`.
+    /// `HostAgent` (which recognizes service and local procs). If
+    /// that returns an error payload, falls back to `ProcAgent` for
+    /// user procs by querying
+    /// `QueryChild(hyperactor_reference::Reference::Proc(proc_id))`
+    /// on `<proc_id>/proc_agent[0]`.
     ///
-    /// Invariant PA-1: proc-node children used by admin/TUI must be
-    /// derived from live proc state at query time (no additional
-    /// publish event required). An `Entity`-view fallback is kept for
-    /// backward compatibility with older agents.
+    /// See PA-1 in module doc.
     async fn resolve_proc_node(
         &self,
         cx: &Context<'_, Self>,
@@ -2420,14 +2413,14 @@ mod tests {
             let resp = admin_ref.resolve(&client, ref_str.clone()).await.unwrap();
             let node = resp.0.unwrap();
 
-            // Invariant 1: identity matches the reference used.
+            // NI-1: identity matches the reference used.
             assert_eq!(
                 node.identity, ref_str,
                 "identity mismatch: resolved '{}' but payload.identity = '{}'",
                 ref_str, node.identity
             );
 
-            // Invariant 2: parent matches the parent node's identity.
+            // NI-2: parent matches the parent node's identity.
             assert_eq!(
                 node.parent, expected_parent,
                 "parent mismatch for '{}': expected {:?}, got {:?}",
@@ -2897,11 +2890,7 @@ mod tests {
     // supervision-spawned actors (e.g. every sieve actor after
     // sieve[0]) invisible to the TUI.
     //
-    // Invariant PA-1 (admin path): proc-node children consumed by the
-    // TUI are sourced from live proc state via ProcAgent
-    // QueryChild(Reference::Proc), not solely from cached published
-    // snapshots. Direct proc.spawn() of actor X must make X visible on
-    // the next resolve of that proc. See also
+    // Exercises PA-1 (see module doc). See also
     // proc_agent::tests::test_query_child_proc_returns_live_children.
     #[tokio::test]
     async fn test_proc_children_reflect_directly_spawned_actors() {

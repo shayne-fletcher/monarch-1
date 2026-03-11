@@ -2186,12 +2186,11 @@ mod tests {
         handle.await;
     }
 
-    /// Invariant S1: a stuck/wedged actor can still be introspected.
+    /// Exercises S1 (see `introspect` module doc).
     ///
-    /// The introspect runtime task runs outside the actor's message
-    /// loop, so it can reply even when the actor is blocked in a
-    /// handler. The response reports the live processing status and
-    /// the user-message handler — not IntrospectMessage.
+    /// Sends a wedging message, then queries introspect while the
+    /// actor is blocked. The response must arrive and report live
+    /// processing status.
     #[tokio::test]
     async fn test_introspect_wedged() {
         #[derive(Debug, Default)]
@@ -2253,9 +2252,10 @@ mod tests {
         assert_handler_not_contains(&payload, "IntrospectMessage");
     }
 
-    /// Invariant S2: introspect queries do not perturb the actor's
-    /// observable state. After a user message, two consecutive
-    /// introspect queries both report the user message handler.
+    /// Exercises S2 (see `introspect` module doc).
+    ///
+    /// After a user message, two consecutive introspect queries both
+    /// report the user message handler.
     #[tokio::test]
     async fn test_introspect_no_perturbation() {
         let proc = Proc::local();
@@ -2314,9 +2314,7 @@ mod tests {
         handle.await;
     }
 
-    /// CI-1: `introspectable_instance` responds to
-    /// `IntrospectMessage::Query` with actor attrs where
-    /// `actor_status` is `"client"` and `actor_type` is `"()"`.
+    /// Exercises CI-1 (see `proc` module doc).
     ///
     /// Unlike a plain `instance()`, which drops the introspect
     /// receiver so queries are silently discarded, an
@@ -2384,14 +2382,10 @@ mod tests {
         );
     }
 
-    /// CI-2: dropping an `introspectable_instance` stores a
-    /// terminated snapshot in the proc.
+    /// Exercises CI-2 (see `proc` module doc).
     ///
-    /// `InstanceState::drop` transitions status to `Stopped`.
-    /// `serve_introspect` observes the terminal status, calls
-    /// `live_actor_payload`, and stores the result via
-    /// `store_terminated_snapshot` before exiting — the same
-    /// post-mortem semantics as a regular actor.
+    /// Dropping the instance transitions status to terminal,
+    /// causing `serve_introspect` to store a terminated snapshot.
     #[tokio::test]
     async fn test_introspectable_instance_snapshot_on_drop() {
         let proc = Proc::local();
