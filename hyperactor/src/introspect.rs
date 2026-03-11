@@ -63,12 +63,170 @@
 
 use std::time::SystemTime;
 
+use hyperactor_config::INTROSPECT;
+use hyperactor_config::IntrospectAttr;
+use hyperactor_config::declare_attrs;
 use serde::Deserialize;
 use serde::Serialize;
 use typeuri::Named;
 
 use crate::InstanceCell;
 use crate::reference;
+
+// Introspection attr keys — actor-runtime concepts.
+//
+// These keys are populated by the introspect handler from
+// InstanceCell data. Mesh-topology keys (node_type, addr, num_procs,
+// etc.) are declared in hyperactor_mesh::introspect_keys.
+//
+// Naming convention:
+//
+// - Attr names are node-type-agnostic. The `node_type` attr (from the
+//   mesh layer) identifies what kind of node it is; individual attr
+//   names don't repeat that. So `status`, not `actor_status`.
+// - Related attrs share a prefix to form a group. The `failure_*`
+//   keys decompose failure info into flat attrs — the `failure_`
+//   prefix groups them semantically.
+// - `actor_type` is an exception: the `actor_` prefix disambiguates
+//   it from `node_type` (mesh-layer concept). `actor_type` is the
+//   Rust actor type name; `node_type` is the topology role.
+// - Use real types where possible (e.g. SystemTime for timestamps),
+//   not String. Serialization format is a presentation concern.
+// - Internal key names are fully-qualified by `declare_attrs!`
+//   (module_path + attr constant), e.g.
+//   `hyperactor::introspect::status`.
+// - HTTP/schema public key names come from `@meta(INTROSPECT =
+//   IntrospectAttr { name, desc })`. Keep `name` explicit so API
+//   stability is decoupled from internal refactors.
+//
+// Invariants:
+//
+// - **IK-1 (metadata completeness):** Every actor-runtime
+//   introspection key must carry `@meta(INTROSPECT = ...)` with
+//   non-empty `name` and `desc`. Enforced by
+//   `test_introspect_keys_are_tagged`.
+// - **IK-2 (short-name uniqueness):** No two introspection keys
+//   may share the same `IntrospectAttr.name`. Duplicates would break
+//   the FQ→short HTTP remap and schema output. Enforced by
+//   `test_introspect_short_names_are_globally_unique` within this
+//   test binary; full cross-crate coverage requires an integration
+//   test that links all introspection key crates.
+declare_attrs! {
+    /// Actor lifecycle status: "running", "stopped", "failed".
+    ///
+    /// Together with `STATUS_REASON`, these two attrs replace the
+    /// former `actor_status` prefix protocol (`"stopped:reason"`,
+    /// `"failed:reason"`) with structured fields, eliminating string
+    /// prefix parsing in consumers.
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "status".into(),
+        desc: "Actor lifecycle status: running, stopped, failed".into(),
+    })
+    pub attr STATUS: String;
+
+    /// Reason for stop/failure (absent when running).
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "status_reason".into(),
+        desc: "Reason for stop/failure (absent when running)".into(),
+    })
+    pub attr STATUS_REASON: String;
+
+    /// Fully-qualified actor type name.
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "actor_type".into(),
+        desc: "Fully-qualified actor type name".into(),
+    })
+    pub attr ACTOR_TYPE: String;
+
+    /// Number of messages processed by this actor.
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "messages_processed".into(),
+        desc: "Number of messages processed by this actor".into(),
+    })
+    pub attr MESSAGES_PROCESSED: u64 = 0;
+
+    /// Timestamp when this actor was created.
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "created_at".into(),
+        desc: "Timestamp when this actor was created".into(),
+    })
+    pub attr CREATED_AT: SystemTime;
+
+    /// Name of the last message handler invoked.
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "last_handler".into(),
+        desc: "Name of the last message handler invoked".into(),
+    })
+    pub attr LAST_HANDLER: String;
+
+    /// Total CPU time in message handlers (microseconds).
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "total_processing_time_us".into(),
+        desc: "Total CPU time in message handlers (microseconds)".into(),
+    })
+    pub attr TOTAL_PROCESSING_TIME_US: u64 = 0;
+
+    /// Flight recorder JSON (recent trace events).
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "flight_recorder".into(),
+        desc: "Flight recorder JSON (recent trace events)".into(),
+    })
+    pub attr FLIGHT_RECORDER: String;
+
+    /// Whether this actor is infrastructure/system.
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "is_system".into(),
+        desc: "Whether this actor is infrastructure/system".into(),
+    })
+    pub attr IS_SYSTEM: bool = false;
+
+    // Failure attrs — decomposition of FailureInfo into flat attrs.
+    //
+    // - **FI-A1 (presence):** failure_* attrs are present iff
+    //   status == "failed"; absent otherwise. (Attr-level restatement
+    //   of FI-3.)
+    // - **FI-A2 (propagation):** failure_is_propagated == true iff
+    //   failure_root_cause_actor != this actor's id. (Attr-level
+    //   restatement of FI-4.)
+    // FI-1, FI-2 (write ordering) are enforced in proc.rs serve()
+    // and are unaffected by the representation change.
+    // FI-5, FI-6 are proc/mesh-level and unaffected.
+
+    /// Failure error message.
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "failure_error_message".into(),
+        desc: "Failure error message".into(),
+    })
+    pub attr FAILURE_ERROR_MESSAGE: String;
+
+    /// Actor that caused the failure (root cause).
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "failure_root_cause_actor".into(),
+        desc: "Actor that caused the failure (root cause)".into(),
+    })
+    pub attr FAILURE_ROOT_CAUSE_ACTOR: String;
+
+    /// Name of root cause actor.
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "failure_root_cause_name".into(),
+        desc: "Name of root cause actor".into(),
+    })
+    pub attr FAILURE_ROOT_CAUSE_NAME: String;
+
+    /// Timestamp when failure occurred.
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "failure_occurred_at".into(),
+        desc: "Timestamp when failure occurred".into(),
+    })
+    pub attr FAILURE_OCCURRED_AT: SystemTime;
+
+    /// Whether the failure was propagated from a child.
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "failure_is_propagated".into(),
+        desc: "Whether the failure was propagated from a child".into(),
+    })
+    pub attr FAILURE_IS_PROPAGATED: bool = false;
+}
 
 /// Structured failure information extracted from an
 /// [`ActorSupervisionEvent`](crate::supervision::ActorSupervisionEvent)
@@ -601,4 +759,97 @@ pub async fn serve_introspect(
         actor_id = %cell.actor_id(),
         "introspect task exiting"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Enforces IK-1 (metadata completeness) for all actor-runtime
+    /// introspection keys.
+    #[test]
+    fn test_introspect_keys_are_tagged() {
+        let cases = vec![
+            ("status", STATUS.attrs()),
+            ("status_reason", STATUS_REASON.attrs()),
+            ("actor_type", ACTOR_TYPE.attrs()),
+            ("messages_processed", MESSAGES_PROCESSED.attrs()),
+            ("created_at", CREATED_AT.attrs()),
+            ("last_handler", LAST_HANDLER.attrs()),
+            ("total_processing_time_us", TOTAL_PROCESSING_TIME_US.attrs()),
+            ("flight_recorder", FLIGHT_RECORDER.attrs()),
+            ("is_system", IS_SYSTEM.attrs()),
+            ("failure_error_message", FAILURE_ERROR_MESSAGE.attrs()),
+            ("failure_root_cause_actor", FAILURE_ROOT_CAUSE_ACTOR.attrs()),
+            ("failure_root_cause_name", FAILURE_ROOT_CAUSE_NAME.attrs()),
+            ("failure_occurred_at", FAILURE_OCCURRED_AT.attrs()),
+            ("failure_is_propagated", FAILURE_IS_PROPAGATED.attrs()),
+        ];
+
+        for (expected_name, meta) in &cases {
+            // IK-1: every key must have INTROSPECT with non-empty
+            // name and desc.
+            let introspect = meta
+                .get(INTROSPECT)
+                .unwrap_or_else(|| panic!("{expected_name}: missing INTROSPECT meta-attr"));
+            assert_eq!(
+                introspect.name, *expected_name,
+                "short name mismatch for {expected_name}"
+            );
+            assert!(
+                !introspect.desc.is_empty(),
+                "{expected_name}: desc should not be empty"
+            );
+        }
+
+        // Exhaustiveness: verify cases covers all INTROSPECT-tagged
+        // keys declared in this module.
+        use hyperactor_config::attrs::AttrKeyInfo;
+        let registry_count = inventory::iter::<AttrKeyInfo>()
+            .filter(|info| {
+                info.name.starts_with("hyperactor::introspect::")
+                    && info.meta.get(INTROSPECT).is_some()
+            })
+            .count();
+        assert_eq!(
+            cases.len(),
+            registry_count,
+            "test must cover all INTROSPECT-tagged keys in this module"
+        );
+    }
+
+    /// Enforces IK-2 (short-name uniqueness) and metadata quality
+    /// across all crates linked into this test binary. Iterates
+    /// the global `declare_attrs!` inventory and checks that no two
+    /// keys tagged with `INTROSPECT` share the same short name, and
+    /// that all tagged keys have non-empty name and desc.
+    #[test]
+    fn test_introspect_short_names_are_globally_unique() {
+        use hyperactor_config::attrs::AttrKeyInfo;
+
+        let mut seen = std::collections::HashMap::new();
+        for info in inventory::iter::<AttrKeyInfo>() {
+            let Some(introspect) = info.meta.get(INTROSPECT) else {
+                continue;
+            };
+            // Metadata quality: every tagged key must have
+            // non-empty name and desc.
+            assert!(
+                !introspect.name.is_empty(),
+                "INTROSPECT key {:?} has empty name",
+                info.name
+            );
+            assert!(
+                !introspect.desc.is_empty(),
+                "INTROSPECT key {:?} has empty desc",
+                info.name
+            );
+            if let Some(prev_fq) = seen.insert(introspect.name.clone(), info.name) {
+                panic!(
+                    "IK-2 violation: duplicate short name {:?} declared by both {:?} and {:?}",
+                    introspect.name, prev_fq, info.name
+                );
+            }
+        }
+    }
 }
