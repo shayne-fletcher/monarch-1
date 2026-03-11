@@ -378,12 +378,35 @@ wirevalue::register_type!(NodeProperties);
 /// Every addressable entity (root, host, proc, actor) is represented
 /// as a `NodePayload`. The client navigates the mesh by fetching a
 /// node and following its `children` references.
+///
+/// # Attrs Invariants
+///
+/// - **IA-1 (attrs-json):** `attrs` is always a valid JSON object
+///   string. Fallback is `"{}"` on serialization error.
+/// - **IA-2 (dual-write):** During migration, actor nodes populate
+///   both `properties` and `attrs` from the same data.
+/// - **IA-3 (runtime-precedence):** Runtime-owned introspection keys
+///   (STATUS, ACTOR_TYPE, etc.) override any same-named keys in
+///   published attrs.
+/// - **IA-4 (status-shape):** `status_reason` is present in `attrs`
+///   iff the status encoding carries a reason (`stopped:*` or
+///   `failed:*`).
+/// - **IA-5 (failure-shape):** `failure_*` attrs are present iff
+///   effective status is `failed`. (Restates FI-A1.)
+/// - **IA-6 (payload-totality):** Every introspection `NodePayload`
+///   sets `attrs` — never omitted, never null.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
 pub struct NodePayload {
     /// Canonical reference string for this node.
     pub identity: String,
     /// Node-specific metadata (type, status, metrics, etc.).
     pub properties: NodeProperties,
+    /// JSON-serialized `Attrs` bag containing introspection
+    /// attributes. Parallel field alongside `properties` during
+    /// migration — both are populated from the same data.
+    /// Consumers currently read `properties`; once migrated to
+    /// read `attrs`, `properties` will be removed.
+    pub attrs: String,
     /// Reference strings the client can GET next to descend the
     /// tree.
     pub children: Vec<String>,
@@ -529,6 +552,77 @@ pub fn format_timestamp(time: SystemTime) -> String {
     humantime::format_rfc3339_millis(time).to_string()
 }
 
+/// Build a JSON-serialized `Attrs` string from values already
+/// computed by `live_actor_payload`. Reuses the same data — no
+/// redundant reads from `InstanceCell`.
+///
+/// Populates actor-runtime keys (STATUS, ACTOR_TYPE, etc.),
+/// decomposes the status prefix protocol into STATUS + STATUS_REASON,
+/// and decomposes FailureInfo into individual FAILURE_* attrs. Merges
+/// in any published attrs from the cell.
+///
+/// Starts from `published_attrs()` and overlays runtime keys on top.
+/// Runtime keys always win over any same-named published key (IA-3).
+fn build_actor_attrs(
+    cell: &crate::InstanceCell,
+    status_str: &str,
+    is_system: bool,
+    last_handler_str: &Option<String>,
+    flight_recorder: &Option<String>,
+    failure_info: &Option<FailureInfo>,
+) -> String {
+    let mut attrs = cell.published_attrs().unwrap_or_default();
+
+    // IA-4: status_reason present iff status carries a reason.
+    if let Some(reason) = status_str.strip_prefix("stopped:") {
+        attrs.set(STATUS, "stopped".to_string());
+        attrs.set(STATUS_REASON, reason.trim().to_string());
+    } else if let Some(reason) = status_str.strip_prefix("failed:") {
+        attrs.set(STATUS, "failed".to_string());
+        attrs.set(STATUS_REASON, reason.trim().to_string());
+    } else {
+        attrs.set(STATUS, status_str.to_lowercase());
+        // IA-4: clear any stale status_reason from published attrs.
+        attrs.remove(STATUS_REASON);
+    }
+
+    attrs.set(ACTOR_TYPE, cell.actor_type_name().to_string());
+    attrs.set(MESSAGES_PROCESSED, cell.num_processed_messages());
+    attrs.set(CREATED_AT, cell.created_at());
+    attrs.set(TOTAL_PROCESSING_TIME_US, cell.total_processing_time_us());
+    attrs.set(IS_SYSTEM, is_system);
+
+    if let Some(handler) = last_handler_str {
+        attrs.set(LAST_HANDLER, handler.clone());
+    }
+    if let Some(fr) = flight_recorder {
+        attrs.set(FLIGHT_RECORDER, fr.clone());
+    }
+
+    // IA-5 / FI-A1: failure attrs present iff status == "failed".
+    if let Some(fi) = failure_info {
+        attrs.set(FAILURE_ERROR_MESSAGE, fi.error_message.clone());
+        attrs.set(FAILURE_ROOT_CAUSE_ACTOR, fi.root_cause_actor.clone());
+        if let Some(name) = &fi.root_cause_name {
+            attrs.set(FAILURE_ROOT_CAUSE_NAME, name.clone());
+        }
+        if let Ok(t) = humantime::parse_rfc3339(&fi.occurred_at) {
+            attrs.set(FAILURE_OCCURRED_AT, t);
+        }
+        // FI-A2: is_propagated iff root_cause_actor != this actor.
+        attrs.set(FAILURE_IS_PROPAGATED, fi.is_propagated);
+    } else {
+        // IA-5: clear any stale failure attrs from published attrs.
+        attrs.remove(FAILURE_ERROR_MESSAGE);
+        attrs.remove(FAILURE_ROOT_CAUSE_ACTOR);
+        attrs.remove(FAILURE_ROOT_CAUSE_NAME);
+        attrs.remove(FAILURE_OCCURRED_AT);
+        attrs.remove(FAILURE_IS_PROPAGATED);
+    }
+
+    serde_json::to_string(&attrs).unwrap_or_else(|_| "{}".to_string())
+}
+
 /// Build a [`NodePayload`] from live [`InstanceCell`] state.
 ///
 /// Reads the current live status and last handler directly from
@@ -585,25 +679,40 @@ pub fn live_actor_payload(cell: &InstanceCell) -> NodePayload {
         None
     };
 
+    let is_system = cell.is_system()
+        || cell.published_properties().is_some_and(|p| {
+            matches!(
+                p.kind,
+                PublishedPropertiesKind::Host { .. } | PublishedPropertiesKind::Proc { .. }
+            )
+        });
+
+    let actor_status_str = status.to_string();
+    let last_handler_str = last_handler.map(|info| info.to_string());
+
+    let attrs = build_actor_attrs(
+        cell,
+        &actor_status_str,
+        is_system,
+        &last_handler_str,
+        &flight_recorder,
+        &failure_info,
+    );
+
     NodePayload {
         identity: actor_id.to_string(),
         properties: NodeProperties::Actor {
-            actor_status: status.to_string(),
+            actor_status: actor_status_str,
             actor_type: cell.actor_type_name().to_string(),
             messages_processed: cell.num_processed_messages(),
             created_at: format_timestamp(cell.created_at()),
-            last_message_handler: last_handler.map(|info| info.to_string()),
+            last_message_handler: last_handler_str,
             total_processing_time_us: cell.total_processing_time_us(),
             flight_recorder,
-            is_system: cell.is_system()
-                || cell.published_properties().is_some_and(|p| {
-                    matches!(
-                        p.kind,
-                        PublishedPropertiesKind::Host { .. } | PublishedPropertiesKind::Proc { .. }
-                    )
-                }),
+            is_system,
             failure_info,
         },
+        attrs,
         children,
         parent: supervisor,
         as_of: format_timestamp(std::time::SystemTime::now()),
@@ -714,9 +823,14 @@ pub async fn serve_introspect(
                                     failed_actor_count,
                                 },
                             };
+                            let attrs = cell
+                                .published_attrs()
+                                .map(|a| serde_json::to_string(&a).unwrap_or_else(|_| "{}".into()))
+                                .unwrap_or_else(|| "{}".into());
                             NodePayload {
                                 identity: cell.actor_id().to_string(),
                                 properties,
+                                attrs,
                                 children,
                                 parent: cell.parent().map(|p| p.actor_id().to_string()),
                                 as_of: format_timestamp(published_at),
@@ -739,6 +853,7 @@ pub async fn serve_introspect(
                         code: "not_found".into(),
                         message: format!("child {} not found (no callback registered)", child_ref),
                     },
+                    attrs: "{}".to_string(),
                     children: Vec::new(),
                     parent: None,
                     as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now())
@@ -852,4 +967,8 @@ mod tests {
             }
         }
     }
+
+    // IA-1, IA-4, IA-5 tests require spawning actors and live in
+    // actor.rs where #[hyperactor::export] and test infrastructure
+    // are available.
 }
