@@ -77,7 +77,7 @@ use crate::reference;
 //
 // These keys are populated by the introspect handler from
 // InstanceCell data. Mesh-topology keys (node_type, addr, num_procs,
-// etc.) are declared in hyperactor_mesh::introspect_keys.
+// etc.) are declared in hyperactor_mesh::introspect.
 //
 // Naming convention:
 //
@@ -237,7 +237,7 @@ declare_attrs! {
 ///
 /// The failure introspection pipeline (from `serve()` in `proc.rs`
 /// through this struct to the TUI) maintains six invariants. Each
-/// is documented at its enforcement site with an `INV-N` comment.
+/// is documented at its enforcement site with an `FI-N` comment.
 ///
 /// - **FI-1 (event-before-status):** All `InstanceCell` state that
 ///   [`live_actor_payload`] reads must be written BEFORE
