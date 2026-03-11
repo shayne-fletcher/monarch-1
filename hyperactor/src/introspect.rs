@@ -17,12 +17,12 @@
 //! - Live status is reported accurately.
 //!
 //! Infrastructure actors publish domain-specific metadata via
-//! [`PublishedProperties`], which the introspect task reads for
+//! `publish_attrs()`, which the introspect task reads for
 //! Entity-view queries. Non-addressable children (e.g., system procs)
 //! are resolved via a callback registered on [`InstanceCell`].
 //!
-//! Callers navigate topology by fetching a [`NodePayload`] and
-//! following its `children` references.
+//! Callers navigate topology by fetching an [`IntrospectResult`]
+//! and following its `children` references.
 //!
 //! # Design Invariants
 //!
@@ -180,6 +180,29 @@ declare_attrs! {
     })
     pub attr IS_SYSTEM: bool = false;
 
+    /// Child reference strings for tree navigation. Published by
+    /// infrastructure actors (HostMeshAgent, ProcAgent) so the
+    /// Entity view can return children without parsing mesh-layer keys.
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "children".into(),
+        desc: "Child reference strings for tree navigation".into(),
+    })
+    pub attr CHILDREN: Vec<String>;
+
+    /// Machine-readable error code for error nodes.
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "error_code".into(),
+        desc: "Machine-readable error code (e.g. not_found)".into(),
+    })
+    pub attr ERROR_CODE: String;
+
+    /// Human-readable error message for error nodes.
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "error_message".into(),
+        desc: "Human-readable error message".into(),
+    })
+    pub attr ERROR_MESSAGE: String;
+
     // Failure attrs — decomposition of FailureInfo into flat attrs.
     //
     // - **FI-A1 (presence):** failure_* attrs are present iff
@@ -228,194 +251,55 @@ declare_attrs! {
     pub attr FAILURE_IS_PROPAGATED: bool = false;
 }
 
-/// Structured failure information extracted from an
-/// [`ActorSupervisionEvent`](crate::supervision::ActorSupervisionEvent)
-/// at introspection time. Provides root-cause provenance without
-/// carrying the recursive event type across the wire.
+// Failure introspection pipeline invariants (FI-1 through FI-6).
+//
+// The FailureInfo presentation type lives in
+// hyperactor_mesh::introspect; these invariants are documented
+// here because the enforcement sites are in hyperactor
+// (proc.rs serve(), live_actor_payload).
+//
+// - **FI-1 (event-before-status):** All `InstanceCell` state that
+//   `live_actor_payload` reads must be written BEFORE
+//   `change_status()` transitions to terminal. Enforced in
+//   `proc.rs` `serve()`.
+// - **FI-2 (write-once):** `InstanceCellState::supervision_event`
+//   is written at most once per actor lifetime. Enforced in
+//   `proc.rs` `serve()` terminal paths.
+// - **FI-3 (failure attrs ↔ status):** Failure attrs are present
+//   iff status is `"failed"`. Enforced in `build_actor_attrs`.
+// - **FI-4 (is_propagated ↔ root_cause_actor):**
+//   `failure_is_propagated == true` iff
+//   `failure_root_cause_actor != this_actor_id`. Enforced in
+//   `live_actor_payload`.
+// - **FI-5 (is_poisoned ↔ failed_actor_count):**
+//   `is_poisoned == true` iff `failed_actor_count > 0`. Enforced
+//   in `ProcAgent::publish_introspect_properties()`.
+// - **FI-6 (clean stop = no artifacts):** When an actor stops
+//   cleanly, `supervision_event` is `None`, failure attrs are
+//   absent, and the actor does not contribute to
+//   `failed_actor_count`.
+
+/// Internal introspection result. Carries attrs as a JSON string.
+/// The mesh layer constructs the API-facing `NodePayload` (with
+/// `properties`) from this via `derive_properties`.
 ///
-/// # Invariants
-///
-/// The failure introspection pipeline (from `serve()` in `proc.rs`
-/// through this struct to the TUI) maintains six invariants. Each
-/// is documented at its enforcement site with an `FI-N` comment.
-///
-/// - **FI-1 (event-before-status):** All `InstanceCell` state that
-///   [`live_actor_payload`] reads must be written BEFORE
-///   `change_status()` transitions to terminal. Enforced in
-///   `proc.rs` `serve()`.
-/// - **FI-2 (write-once):** `InstanceCellState::supervision_event`
-///   is written at most once per actor lifetime. Enforced in
-///   `proc.rs` `serve()` terminal paths.
-/// - **FI-3 (failure_info ↔ actor_status):**
-///   `failure_info.is_some()` iff
-///   `actor_status.starts_with("failed:")`. Enforced in
-///   [`live_actor_payload`].
-/// - **FI-4 (is_propagated ↔ root_cause_actor):**
-///   `is_propagated == true` iff `root_cause_actor !=
-///   this_actor_id`. Enforced in [`live_actor_payload`].
-/// - **FI-5 (is_poisoned ↔ failed_actor_count):**
-///   `is_poisoned == true` iff `failed_actor_count > 0`. Enforced
-///   in `mesh_agent.rs` `publish_introspect_properties()`.
-/// - **FI-6 (clean stop = no artifacts):** When an actor stops
-///   cleanly, `supervision_event` is `None`, `failure_info` is
-///   `None`, and the actor does not contribute to
-///   `failed_actor_count`.
+/// This is the internal wire type — it travels over actor ports
+/// via `IntrospectMessage`. The presentation-layer `NodePayload`
+/// (with `NodeProperties`) lives in `hyperactor_mesh::introspect`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
-pub struct FailureInfo {
-    /// The error message (from `ActorStatus::Failed` display).
-    pub error_message: String,
-    /// The actor that originally caused the failure (root cause).
-    /// Same as this actor if the failure originated here.
-    pub root_cause_actor: String,
-    /// Display name of the root cause actor, if set.
-    pub root_cause_name: Option<String>,
-    /// When the failure occurred (formatted timestamp).
-    pub occurred_at: String,
-    /// `true` if this actor is propagating a child's failure,
-    /// `false` if the failure originated in this actor.
-    pub is_propagated: bool,
-}
-wirevalue::register_type!(FailureInfo);
-
-/// Kept "wire-friendly" (no `serde_json::Value`) so it can be encoded
-/// via wirevalue's bincode path, while the HTTP layer can still
-/// expose structured JSON via `Serialize`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
-pub enum NodeProperties {
-    /// Synthetic mesh root node (not a real actor/proc).
-    Root {
-        /// Number of hosts registered with the mesh admin agent.
-        num_hosts: usize,
-        /// When the mesh was started (ISO-8601 timestamp).
-        started_at: String,
-        /// Username who started the mesh.
-        started_by: String,
-        /// Children that are infrastructure-owned (system procs,
-        /// admin procs) and should be hidden by default.
-        system_children: Vec<String>,
-    },
-
-    /// A host in the mesh, represented by its `HostAgent`.
-    Host {
-        /// Host address (e.g. `127.0.0.1:12345`).
-        addr: String,
-        /// Number of procs currently reported on this host.
-        num_procs: usize,
-        /// References of children that are system/infrastructure
-        /// procs.
-        system_children: Vec<String>,
-    },
-
-    /// Properties describing a proc running on a host.
-    Proc {
-        /// Human-readable proc identifier.
-        proc_name: String,
-        /// Number of actors currently hosted by this proc.
-        num_actors: usize,
-        /// References of children that are system/infrastructure
-        /// actors. Allows the TUI to filter lazily without fetching
-        /// each child individually.
-        system_children: Vec<String>,
-        /// References of children that are stopped or failed.
-        /// Populated from terminated snapshots so the TUI can
-        /// filter/gray without per-child fetches.
-        stopped_children: Vec<String>,
-        /// Maximum number of terminated snapshots retained.
-        /// When `stopped_children.len() >= stopped_retention_cap`,
-        /// the list is at capacity and older entries were evicted.
-        stopped_retention_cap: usize,
-        /// Whether this proc is refusing new spawns because at least
-        /// one actor has an unhandled supervision event.
-        /// FI-5: `is_poisoned` iff `failed_actor_count > 0`.
-        is_poisoned: bool,
-        /// Number of actors with unhandled supervision events.
-        failed_actor_count: usize,
-    },
-
-    /// Runtime metadata for a single actor instance.
-    Actor {
-        /// Current lifecycle/status of the actor (e.g. "Running",
-        /// "Stopped").
-        actor_status: String,
-        /// Concrete actor type name.
-        actor_type: String,
-        /// Total number of messages processed by this actor so far.
-        messages_processed: u64,
-        /// Actor creation time, as an ISO-8601 timestamp string.
-        created_at: String,
-        /// Name of the most recent message handler run by the actor,
-        /// if known.
-        last_message_handler: Option<String>,
-        /// Cumulative time spent processing messages, in
-        /// microseconds.
-        total_processing_time_us: u64,
-        /// Serialized flight-recorder events for the actor, if
-        /// enabled/available.
-        flight_recorder: Option<String>,
-        /// Whether this actor is infrastructure-owned (e.g.
-        /// ProcAgent, HostAgent) rather than user-created.
-        is_system: bool,
-        /// Structured failure information, present only for failed
-        /// actors. `None` for running or cleanly stopped actors.
-        /// FI-3: `failure_info.is_some()` iff
-        /// `actor_status.starts_with("failed:")`.
-        failure_info: Option<FailureInfo>,
-    },
-
-    /// Error sentinel returned when a child reference cannot be
-    /// resolved.
-    Error {
-        /// Machine-readable error code (e.g. "not_found").
-        code: String,
-        /// Human-readable error message.
-        message: String,
-    },
-}
-wirevalue::register_type!(NodeProperties);
-
-/// Uniform response for any node in the mesh topology.
-///
-/// Every addressable entity (root, host, proc, actor) is represented
-/// as a `NodePayload`. The client navigates the mesh by fetching a
-/// node and following its `children` references.
-///
-/// # Attrs Invariants
-///
-/// - **IA-1 (attrs-json):** `attrs` is always a valid JSON object
-///   string. Fallback is `"{}"` on serialization error.
-/// - **IA-2 (dual-write):** During migration, actor nodes populate
-///   both `properties` and `attrs` from the same data.
-/// - **IA-3 (runtime-precedence):** Runtime-owned introspection keys
-///   (STATUS, ACTOR_TYPE, etc.) override any same-named keys in
-///   published attrs.
-/// - **IA-4 (status-shape):** `status_reason` is present in `attrs`
-///   iff the status encoding carries a reason (`stopped:*` or
-///   `failed:*`).
-/// - **IA-5 (failure-shape):** `failure_*` attrs are present iff
-///   effective status is `failed`. (Restates FI-A1.)
-/// - **IA-6 (payload-totality):** Every introspection `NodePayload`
-///   sets `attrs` — never omitted, never null.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
-pub struct NodePayload {
+pub struct IntrospectResult {
     /// Canonical reference string for this node.
     pub identity: String,
-    /// Node-specific metadata (type, status, metrics, etc.).
-    pub properties: NodeProperties,
-    /// JSON-serialized `Attrs` bag containing introspection
-    /// attributes. Parallel field alongside `properties` during
-    /// migration — both are populated from the same data.
-    /// Consumers currently read `properties`; once migrated to
-    /// read `attrs`, `properties` will be removed.
+    /// JSON-serialized `Attrs` bag containing introspection attributes.
     pub attrs: String,
-    /// Reference strings the client can GET next to descend the
-    /// tree.
+    /// Reference strings the client can GET next to descend the tree.
     pub children: Vec<String>,
     /// Parent node reference for upward navigation.
     pub parent: Option<String>,
     /// ISO 8601 timestamp indicating when this data was captured.
     pub as_of: String,
 }
-wirevalue::register_type!(NodePayload);
+wirevalue::register_type!(IntrospectResult);
 
 /// Context for introspection query - what aspect of the actor to
 /// describe.
@@ -424,6 +308,10 @@ wirevalue::register_type!(NodePayload);
 /// have dual nature: they manage entities (Proc, Host) while also
 /// being actors themselves. IntrospectView allows callers to
 /// specify which aspect to query.
+// TODO(monarch-introspection): IntrospectView currently uses
+// Entity/Actor naming. Consider renaming to runtime-neutral query
+// modes (e.g. Published/Runtime) to avoid mesh-domain wording in
+// hyperactor while preserving behavior and wire compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Named)]
 pub enum IntrospectView {
     /// Return managed-entity properties (Proc, Host, etc.) for
@@ -449,22 +337,21 @@ pub enum IntrospectMessage {
         /// View context - Entity or Actor.
         view: IntrospectView,
         /// Reply port receiving the actor's self-description.
-        reply: reference::OncePortRef<NodePayload>,
+        reply: reference::OncePortRef<IntrospectResult>,
     },
     /// "Describe one of your children."
     QueryChild {
         /// Reference identifying the child to describe.
         child_ref: reference::Reference,
         /// Reply port receiving the child's description.
-        reply: reference::OncePortRef<NodePayload>,
+        reply: reference::OncePortRef<IntrospectResult>,
     },
 }
 wirevalue::register_type!(IntrospectMessage);
 
 /// Structured tracing event from the actor-local flight recorder.
 ///
-/// Deserialization target for the `flight_recorder` JSON string in
-/// [`NodeProperties::Actor`].
+/// Deserialization target for the `FLIGHT_RECORDER` attrs JSON string.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordedEvent {
     /// ISO 8601 timestamp of the event.
@@ -483,69 +370,6 @@ pub struct RecordedEvent {
     pub fields: serde_json::Value,
 }
 
-/// Domain-specific properties an actor may publish for introspection.
-///
-/// Infrastructure actors (HostAgent, ProcAgent) push these to
-/// make their managed-entity metadata available to the introspection
-/// runtime without going through the actor's message handler. The
-/// runtime handler reads the last-published value and merges it into
-/// the [`NodePayload`] response for Entity-view queries.
-///
-/// Values may be arbitrarily stale for stuck actors — they reflect
-/// whatever the actor last published before it stopped making
-/// progress. The `published_at` timestamp makes staleness visible to
-/// tooling.
-#[derive(Debug, Clone)]
-pub struct PublishedProperties {
-    /// When these properties were last published.
-    pub published_at: SystemTime,
-    /// Domain-specific metadata.
-    pub kind: PublishedPropertiesKind,
-}
-
-/// The domain-specific metadata variants that an actor may publish.
-///
-/// Only `Host` and `Proc` variants are available — actors cannot
-/// publish `Root` or `Error` payloads.
-#[derive(Debug, Clone)]
-pub enum PublishedPropertiesKind {
-    /// A host in the mesh.
-    Host {
-        /// Host address (e.g. `127.0.0.1:12345`).
-        addr: String,
-        /// Number of procs currently reported on this host.
-        num_procs: usize,
-        /// Custom children list (system procs + user procs).
-        children: Vec<String>,
-        /// Children that are system/infrastructure procs.
-        system_children: Vec<String>,
-    },
-    /// A proc running on a host.
-    Proc {
-        /// Human-readable proc identifier.
-        proc_name: String,
-        /// Number of actors currently hosted by this proc.
-        num_actors: usize,
-        /// Custom children list (all actors in the proc).
-        children: Vec<String>,
-        /// Children that are system/infrastructure actors, reported
-        /// by the proc so the TUI can filter without fetching each
-        /// child.
-        system_children: Vec<String>,
-        /// Children that are stopped or failed. Populated from
-        /// terminated snapshots so the TUI can filter/gray without
-        /// per-child fetches.
-        stopped_children: Vec<String>,
-        /// Maximum number of terminated snapshots retained.
-        stopped_retention_cap: usize,
-        /// Whether this proc is refusing new spawns due to actor
-        /// failures.
-        is_poisoned: bool,
-        /// Number of actors with unhandled supervision events.
-        failed_actor_count: usize,
-    },
-}
-
 /// Format a [`SystemTime`] as an ISO 8601 timestamp with millisecond
 /// precision.
 pub fn format_timestamp(time: SystemTime) -> String {
@@ -558,49 +382,68 @@ pub fn format_timestamp(time: SystemTime) -> String {
 ///
 /// Populates actor-runtime keys (STATUS, ACTOR_TYPE, etc.),
 /// decomposes the status prefix protocol into STATUS + STATUS_REASON,
-/// and decomposes FailureInfo into individual FAILURE_* attrs. Merges
-/// in any published attrs from the cell.
+/// and decomposes failure fields into individual FAILURE_* attrs.
 ///
-/// Starts from `published_attrs()` and overlays runtime keys on top.
-/// Runtime keys always win over any same-named published key (IA-3).
-fn build_actor_attrs(
-    cell: &crate::InstanceCell,
-    status_str: &str,
-    is_system: bool,
-    last_handler_str: &Option<String>,
-    flight_recorder: &Option<String>,
-    failure_info: &Option<FailureInfo>,
-) -> String {
-    let mut attrs = cell.published_attrs().unwrap_or_default();
+/// Starts from a fresh `Attrs` bag — published attrs (node_type,
+/// addr, etc.) are NOT included. This ensures the Actor view
+/// produces actor-only data; the Entity view handles published
+/// attrs separately.
+/// Failure fields extracted from a supervision event.
+struct FailureSnapshot {
+    error_message: String,
+    root_cause_actor: String,
+    root_cause_name: Option<String>,
+    occurred_at: String,
+    is_propagated: bool,
+}
 
-    // IA-4: status_reason present iff status carries a reason.
-    if let Some(reason) = status_str.strip_prefix("stopped:") {
+/// Pre-computed actor state for building the attrs JSON string.
+/// Avoids redundant InstanceCell reads — `live_actor_payload`
+/// computes these once and passes them in.
+struct ActorSnapshot {
+    status_str: String,
+    is_system: bool,
+    last_handler: Option<String>,
+    flight_recorder: Option<String>,
+    failure: Option<FailureSnapshot>,
+}
+
+fn build_actor_attrs(cell: &crate::InstanceCell, snap: &ActorSnapshot) -> String {
+    // Actor view builds a clean attrs bag with only actor-runtime
+    // keys. Published attrs (node_type, addr, etc.) belong to the
+    // Entity view — they are NOT merged here. This ensures that
+    // e.g. a HostMeshAgent resolved via Actor view produces Actor
+    // properties, not Host properties.
+    let mut attrs = hyperactor_config::Attrs::new();
+
+    // IA-3: status_reason present iff status carries a reason.
+    if let Some(reason) = snap.status_str.strip_prefix("stopped:") {
         attrs.set(STATUS, "stopped".to_string());
         attrs.set(STATUS_REASON, reason.trim().to_string());
-    } else if let Some(reason) = status_str.strip_prefix("failed:") {
+    } else if let Some(reason) = snap.status_str.strip_prefix("failed:") {
         attrs.set(STATUS, "failed".to_string());
         attrs.set(STATUS_REASON, reason.trim().to_string());
     } else {
-        attrs.set(STATUS, status_str.to_lowercase());
-        // IA-4: clear any stale status_reason from published attrs.
-        attrs.remove(STATUS_REASON);
+        attrs.set(STATUS, snap.status_str.clone());
+        // IA-3: no status_reason for non-terminal states —
+        // guaranteed by fresh Attrs bag.
     }
 
     attrs.set(ACTOR_TYPE, cell.actor_type_name().to_string());
     attrs.set(MESSAGES_PROCESSED, cell.num_processed_messages());
     attrs.set(CREATED_AT, cell.created_at());
     attrs.set(TOTAL_PROCESSING_TIME_US, cell.total_processing_time_us());
-    attrs.set(IS_SYSTEM, is_system);
+    attrs.set(IS_SYSTEM, snap.is_system);
 
-    if let Some(handler) = last_handler_str {
+    if let Some(handler) = &snap.last_handler {
         attrs.set(LAST_HANDLER, handler.clone());
     }
-    if let Some(fr) = flight_recorder {
+    if let Some(fr) = &snap.flight_recorder {
         attrs.set(FLIGHT_RECORDER, fr.clone());
     }
 
-    // IA-5 / FI-A1: failure attrs present iff status == "failed".
-    if let Some(fi) = failure_info {
+    // IA-4 / FI-A1: failure attrs present iff status == "failed".
+    if let Some(fi) = &snap.failure {
         attrs.set(FAILURE_ERROR_MESSAGE, fi.error_message.clone());
         attrs.set(FAILURE_ROOT_CAUSE_ACTOR, fi.root_cause_actor.clone());
         if let Some(name) = &fi.root_cause_name {
@@ -609,26 +452,20 @@ fn build_actor_attrs(
         if let Ok(t) = humantime::parse_rfc3339(&fi.occurred_at) {
             attrs.set(FAILURE_OCCURRED_AT, t);
         }
-        // FI-A2: is_propagated iff root_cause_actor != this actor.
         attrs.set(FAILURE_IS_PROPAGATED, fi.is_propagated);
-    } else {
-        // IA-5: clear any stale failure attrs from published attrs.
-        attrs.remove(FAILURE_ERROR_MESSAGE);
-        attrs.remove(FAILURE_ROOT_CAUSE_ACTOR);
-        attrs.remove(FAILURE_ROOT_CAUSE_NAME);
-        attrs.remove(FAILURE_OCCURRED_AT);
-        attrs.remove(FAILURE_IS_PROPAGATED);
     }
+    // IA-4: failure attrs absent when not failed — guaranteed by
+    // starting from a fresh Attrs bag (no stale keys possible).
 
     serde_json::to_string(&attrs).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Build a [`NodePayload`] from live [`InstanceCell`] state.
+/// Build an [`IntrospectResult`] from live [`InstanceCell`] state.
 ///
 /// Reads the current live status and last handler directly from
 /// the cell. Used by the introspect task (which runs outside
 /// the actor's message loop) and by `Instance::introspect_payload`.
-pub fn live_actor_payload(cell: &InstanceCell) -> NodePayload {
+pub fn live_actor_payload(cell: &InstanceCell) -> IntrospectResult {
     let actor_id = cell.actor_id();
     let status = cell.status().borrow().clone();
     let last_handler = cell.last_message_handler();
@@ -662,56 +499,33 @@ pub fn live_actor_payload(cell: &InstanceCell) -> NodePayload {
 
     // FI-3: failure_info is computed from the same status value as
     // actor_status, ensuring they agree on whether the actor failed.
-    let failure_info = if status.is_failed() {
+    let failure = if status.is_failed() {
         cell.supervision_event().map(|event| {
             let root = event.actually_failing_actor();
-            // FI-4: is_propagated iff root_cause_actor != this actor.
-            let is_propagated = root.actor_id != *actor_id;
-            FailureInfo {
+            FailureSnapshot {
                 error_message: event.actor_status.to_string(),
                 root_cause_actor: root.actor_id.to_string(),
                 root_cause_name: root.display_name.clone(),
                 occurred_at: format_timestamp(event.occurred_at),
-                is_propagated,
+                is_propagated: root.actor_id != *actor_id,
             }
         })
     } else {
         None
     };
 
-    let is_system = cell.is_system()
-        || cell.published_properties().is_some_and(|p| {
-            matches!(
-                p.kind,
-                PublishedPropertiesKind::Host { .. } | PublishedPropertiesKind::Proc { .. }
-            )
-        });
+    let snap = ActorSnapshot {
+        status_str: status.to_string(),
+        is_system: cell.is_system(),
+        last_handler: last_handler.map(|info| info.to_string()),
+        flight_recorder,
+        failure,
+    };
 
-    let actor_status_str = status.to_string();
-    let last_handler_str = last_handler.map(|info| info.to_string());
+    let attrs = build_actor_attrs(cell, &snap);
 
-    let attrs = build_actor_attrs(
-        cell,
-        &actor_status_str,
-        is_system,
-        &last_handler_str,
-        &flight_recorder,
-        &failure_info,
-    );
-
-    NodePayload {
+    IntrospectResult {
         identity: actor_id.to_string(),
-        properties: NodeProperties::Actor {
-            actor_status: actor_status_str,
-            actor_type: cell.actor_type_name().to_string(),
-            messages_processed: cell.num_processed_messages(),
-            created_at: format_timestamp(cell.created_at()),
-            last_message_handler: last_handler_str,
-            total_processing_time_us: cell.total_processing_time_us(),
-            flight_recorder,
-            is_system,
-            failure_info,
-        },
         attrs,
         children,
         parent: supervisor,
@@ -786,54 +600,18 @@ pub async fn serve_introspect(
         let result = match msg {
             IntrospectMessage::Query { view, reply } => {
                 let payload = match view {
-                    IntrospectView::Entity => match cell.published_properties() {
-                        Some(props) => {
-                            let published_at = props.published_at;
-                            let children = match &props.kind {
-                                PublishedPropertiesKind::Host { children, .. } => children.clone(),
-                                PublishedPropertiesKind::Proc { children, .. } => children.clone(),
-                            };
-                            let properties = match props.kind {
-                                PublishedPropertiesKind::Host {
-                                    addr,
-                                    num_procs,
-                                    system_children,
-                                    ..
-                                } => NodeProperties::Host {
-                                    addr,
-                                    num_procs,
-                                    system_children,
-                                },
-                                PublishedPropertiesKind::Proc {
-                                    proc_name,
-                                    num_actors,
-                                    system_children,
-                                    stopped_children,
-                                    stopped_retention_cap,
-                                    is_poisoned,
-                                    failed_actor_count,
-                                    ..
-                                } => NodeProperties::Proc {
-                                    proc_name,
-                                    num_actors,
-                                    system_children,
-                                    stopped_children,
-                                    stopped_retention_cap,
-                                    is_poisoned,
-                                    failed_actor_count,
-                                },
-                            };
-                            let attrs = cell
-                                .published_attrs()
-                                .map(|a| serde_json::to_string(&a).unwrap_or_else(|_| "{}".into()))
-                                .unwrap_or_else(|| "{}".into());
-                            NodePayload {
+                    IntrospectView::Entity => match cell.published_attrs() {
+                        Some(published) => {
+                            let attrs_json =
+                                serde_json::to_string(&published).unwrap_or_else(|_| "{}".into());
+                            let children: Vec<String> =
+                                published.get(CHILDREN).cloned().unwrap_or_default();
+                            IntrospectResult {
                                 identity: cell.actor_id().to_string(),
-                                properties,
-                                attrs,
+                                attrs: attrs_json,
                                 children,
                                 parent: cell.parent().map(|p| p.actor_id().to_string()),
-                                as_of: format_timestamp(published_at),
+                                as_of: format_timestamp(std::time::SystemTime::now()),
                             }
                         }
                         None => live_actor_payload(&cell),
@@ -847,17 +625,22 @@ pub async fn serve_introspect(
                 )
             }
             IntrospectMessage::QueryChild { child_ref, reply } => {
-                let payload = cell.query_child(&child_ref).unwrap_or_else(|| NodePayload {
-                    identity: String::new(),
-                    properties: NodeProperties::Error {
-                        code: "not_found".into(),
-                        message: format!("child {} not found (no callback registered)", child_ref),
-                    },
-                    attrs: "{}".to_string(),
-                    children: Vec::new(),
-                    parent: None,
-                    as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now())
-                        .to_string(),
+                let payload = cell.query_child(&child_ref).unwrap_or_else(|| {
+                    let mut error_attrs = hyperactor_config::Attrs::new();
+                    error_attrs.set(ERROR_CODE, "not_found".to_string());
+                    error_attrs.set(
+                        ERROR_MESSAGE,
+                        format!("child {} not found (no callback registered)", child_ref),
+                    );
+                    IntrospectResult {
+                        identity: String::new(),
+                        attrs: serde_json::to_string(&error_attrs)
+                            .unwrap_or_else(|_| "{}".to_string()),
+                        children: Vec::new(),
+                        parent: None,
+                        as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now())
+                            .to_string(),
+                    }
                 });
                 mailbox.serialize_and_send_once(
                     reply,
@@ -894,6 +677,9 @@ mod tests {
             ("total_processing_time_us", TOTAL_PROCESSING_TIME_US.attrs()),
             ("flight_recorder", FLIGHT_RECORDER.attrs()),
             ("is_system", IS_SYSTEM.attrs()),
+            ("children", CHILDREN.attrs()),
+            ("error_code", ERROR_CODE.attrs()),
+            ("error_message", ERROR_MESSAGE.attrs()),
             ("failure_error_message", FAILURE_ERROR_MESSAGE.attrs()),
             ("failure_root_cause_actor", FAILURE_ROOT_CAUSE_ACTOR.attrs()),
             ("failure_root_cause_name", FAILURE_ROOT_CAUSE_NAME.attrs()),
@@ -968,7 +754,7 @@ mod tests {
         }
     }
 
-    // IA-1, IA-4, IA-5 tests require spawning actors and live in
+    // IA-1, IA-3, IA-4 tests require spawning actors and live in
     // actor.rs where #[hyperactor::export] and test infrastructure
     // are available.
 }

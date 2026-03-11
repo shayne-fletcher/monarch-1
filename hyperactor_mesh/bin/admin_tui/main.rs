@@ -149,9 +149,9 @@ pub(crate) use filter::*;
 pub(crate) use format::*;
 // Re-exports so #[cfg(test)] mod tests can use `use super::*`.
 #[allow(unused_imports)]
-pub(crate) use hyperactor::introspect::NodePayload;
+pub(crate) use hyperactor_mesh::introspect::NodePayload;
 #[allow(unused_imports)]
-pub(crate) use hyperactor::introspect::NodeProperties;
+pub(crate) use hyperactor_mesh::introspect::NodeProperties;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 pub(crate) use model::*;
