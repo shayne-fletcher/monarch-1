@@ -6,8 +6,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use hyperactor::introspect::NodePayload;
-use hyperactor::introspect::NodeProperties;
+use hyperactor_mesh::introspect::NodePayload;
+use hyperactor_mesh::introspect::NodeProperties;
 
 use crate::filter::is_failed_node;
 use crate::filter::is_stopped_node;
@@ -333,9 +333,9 @@ impl<'a> VisibleRows<'a> {
 
 #[cfg(test)]
 mod tests {
-    use hyperactor::introspect::FailureInfo;
-    use hyperactor::introspect::NodePayload;
-    use hyperactor::introspect::NodeProperties;
+    use hyperactor_mesh::introspect::FailureInfo;
+    use hyperactor_mesh::introspect::NodePayload;
+    use hyperactor_mesh::introspect::NodeProperties;
 
     use super::*;
 
@@ -357,7 +357,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "2026-01-01T00:00:00.000Z".to_string(),
-            attrs: "{}".to_string(),
         }
     }
 
@@ -589,7 +588,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         let node = TreeNode::from_payload("actor1".to_string(), &payload);
         assert!(node.stopped);
@@ -620,7 +618,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         let node = TreeNode::from_payload("host_agent[0]".to_string(), &payload);
         assert!(node.is_system);
@@ -650,7 +647,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         let node = TreeNode::from_payload("proc1".to_string(), &payload);
         assert!(!node.stopped);
@@ -680,7 +676,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         let node = TreeNode::from_payload("actor1".to_string(), &payload);
         assert!(node.failed);
@@ -712,7 +707,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         let mut node = TreeNode::from_payload("actor1".to_string(), &payload);
         let child_is_stopped = true;
@@ -748,7 +742,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         let mut node = TreeNode::from_payload("actor1".to_string(), &payload);
         assert!(node.stopped);

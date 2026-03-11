@@ -207,8 +207,7 @@ use hyperactor::Instance;
 use hyperactor::RefClient;
 use hyperactor::channel::try_tls_acceptor;
 use hyperactor::introspect::IntrospectMessage;
-use hyperactor::introspect::NodePayload;
-use hyperactor::introspect::NodeProperties;
+use hyperactor::introspect::IntrospectResult;
 use hyperactor::mailbox::open_once_port;
 use hyperactor::reference as hyperactor_reference;
 use serde::Deserialize;
@@ -220,6 +219,58 @@ use typeuri::Named;
 
 use crate::host_mesh::host_agent::HostAgent;
 use crate::host_mesh::host_agent::HostId;
+use crate::introspect::NodePayload;
+use crate::introspect::NodeProperties;
+use crate::introspect::to_node_payload;
+
+/// Send an `IntrospectMessage` to an actor and receive the reply.
+/// Encapsulates open_once_port + send + timeout + error handling.
+async fn query_introspect(
+    cx: &hyperactor::Context<'_, MeshAdminAgent>,
+    actor_id: &hyperactor_reference::ActorId,
+    view: hyperactor::introspect::IntrospectView,
+    timeout: Duration,
+    err_ctx: &str,
+) -> Result<IntrospectResult, anyhow::Error> {
+    let introspect_port =
+        hyperactor_reference::PortRef::<IntrospectMessage>::attest_message_port(actor_id);
+    let (reply_handle, reply_rx) = open_once_port::<IntrospectResult>(cx);
+    introspect_port.send(
+        cx,
+        IntrospectMessage::Query {
+            view,
+            reply: reply_handle.bind(),
+        },
+    )?;
+    tokio::time::timeout(timeout, reply_rx.recv())
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out {}", err_ctx))?
+        .map_err(|e| anyhow::anyhow!("failed to receive {}: {}", err_ctx, e))
+}
+
+/// Send an `IntrospectMessage::QueryChild` to an actor.
+async fn query_child_introspect(
+    cx: &hyperactor::Context<'_, MeshAdminAgent>,
+    actor_id: &hyperactor_reference::ActorId,
+    child_ref: hyperactor_reference::Reference,
+    timeout: Duration,
+    err_ctx: &str,
+) -> Result<IntrospectResult, anyhow::Error> {
+    let introspect_port =
+        hyperactor_reference::PortRef::<IntrospectMessage>::attest_message_port(actor_id);
+    let (reply_handle, reply_rx) = open_once_port::<IntrospectResult>(cx);
+    introspect_port.send(
+        cx,
+        IntrospectMessage::QueryChild {
+            child_ref,
+            reply: reply_handle.bind(),
+        },
+    )?;
+    tokio::time::timeout(timeout, reply_rx.recv())
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out {}", err_ctx))?
+        .map_err(|e| anyhow::anyhow!("failed to receive {}: {}", err_ctx, e))
+}
 
 /// Actor name used when spawning the mesh admin agent.
 pub const MESH_ADMIN_ACTOR_NAME: &str = "mesh_admin";
@@ -914,16 +965,10 @@ impl MeshAdminAgent {
         let attrs_json = serde_json::to_string(&attrs).unwrap_or_else(|_| "{}".to_string());
         NodePayload {
             identity: "root".to_string(),
-            properties: NodeProperties::Root {
-                num_hosts: self.hosts.len(),
-                started_at: self.started_at.clone(),
-                started_by: self.started_by.clone(),
-                system_children,
-            },
-            attrs: attrs_json,
+            properties: crate::introspect::derive_properties(&attrs_json),
             children,
             parent: None,
-            as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now()).to_string(),
+            as_of: hyperactor::introspect::format_timestamp(std::time::SystemTime::now()),
         }
     }
 
@@ -940,25 +985,19 @@ impl MeshAdminAgent {
         cx: &Context<'_, Self>,
         actor_id: &hyperactor_reference::ActorId,
     ) -> Result<NodePayload, anyhow::Error> {
-        let introspect_port =
-            hyperactor_reference::PortRef::<IntrospectMessage>::attest_message_port(actor_id);
-        let (reply_handle, reply_rx) = open_once_port::<NodePayload>(cx);
-        introspect_port.send(
+        let result = query_introspect(
             cx,
-            IntrospectMessage::Query {
-                view: hyperactor::introspect::IntrospectView::Entity,
-                reply: reply_handle.bind(),
-            },
-        )?;
-
-        let mut payload = tokio::time::timeout(SINGLE_HOST_TIMEOUT, reply_rx.recv())
-            .await
-            .map_err(|_| anyhow::anyhow!("timed out querying host agent"))?
-            .map_err(|e| anyhow::anyhow!("failed to receive host introspection: {}", e))?;
-
-        payload.identity = HostId(actor_id.clone()).to_string();
-        payload.parent = Some("root".to_string());
-        Ok(payload)
+            actor_id,
+            hyperactor::introspect::IntrospectView::Entity,
+            SINGLE_HOST_TIMEOUT,
+            "querying host agent",
+        )
+        .await?;
+        Ok(crate::introspect::to_node_payload_with(
+            result,
+            HostId(actor_id.clone()).to_string(),
+            Some("root".to_string()),
+        ))
     }
 
     /// Resolve a `ProcId` reference into a proc-level `NodePayload`.
@@ -986,60 +1025,38 @@ impl MeshAdminAgent {
             .ok_or_else(|| anyhow::anyhow!("host not found: {}", host_addr))?;
 
         // Try the host agent's QueryChild first.
-        let child_ref = hyperactor_reference::Reference::Proc(proc_id.clone());
-        let introspect_port =
-            hyperactor_reference::PortRef::<IntrospectMessage>::attest_message_port(
-                agent.actor_id(),
-            );
-        let (reply_handle, reply_rx) = open_once_port::<NodePayload>(cx);
-        introspect_port.send(
+        let result = query_child_introspect(
             cx,
-            IntrospectMessage::QueryChild {
-                child_ref,
-                reply: reply_handle.bind(),
-            },
-        )?;
-
-        let payload = tokio::time::timeout(QUERY_CHILD_TIMEOUT, reply_rx.recv())
-            .await
-            .map_err(|_| anyhow::anyhow!("timed out querying proc details"))?
-            .map_err(|e| anyhow::anyhow!("failed to receive proc introspection: {}", e))?;
+            agent.actor_id(),
+            hyperactor_reference::Reference::Proc(proc_id.clone()),
+            QUERY_CHILD_TIMEOUT,
+            "querying proc details",
+        )
+        .await?;
 
         // If the host recognized the proc, use its response directly.
+        // No identity/parent normalization — QueryChild sets them correctly.
+        let payload = to_node_payload(result);
         if !matches!(payload.properties, NodeProperties::Error { .. }) {
             return Ok(payload);
         }
 
-        // Fall back to querying the ProcAgent directly (user
-        // procs). The conventional ProcAgent ActorId is
-        // <proc_id>/proc_agent[0].
+        // Fall back to querying the ProcAgent directly (user procs).
         let mesh_agent_id = proc_id.actor_id(crate::proc_agent::PROC_AGENT_ACTOR_NAME, 0);
-        let agent_port =
-            hyperactor_reference::PortRef::<IntrospectMessage>::attest_message_port(&mesh_agent_id);
-        let (reply_handle, reply_rx) = open_once_port::<NodePayload>(cx);
-        agent_port.send(
+        let result = query_child_introspect(
             cx,
-            IntrospectMessage::QueryChild {
-                child_ref: hyperactor_reference::Reference::Proc(proc_id.clone()),
-                reply: reply_handle.bind(),
-            },
-        )?;
+            &mesh_agent_id,
+            hyperactor_reference::Reference::Proc(proc_id.clone()),
+            SINGLE_HOST_TIMEOUT,
+            "querying proc mesh agent",
+        )
+        .await?;
 
-        let mut payload = tokio::time::timeout(SINGLE_HOST_TIMEOUT, reply_rx.recv())
-            .await
-            .map_err(|_| anyhow::anyhow!("timed out querying proc mesh agent"))?
-            .map_err(|e| {
-                anyhow::anyhow!("failed to receive proc mesh agent introspection: {}", e)
-            })?;
-
-        // The ProcAgent sets identity to its own ActorId, but the
-        // caller asked for the proc by ProcId. Override so the
-        // payload matches the reference the TUI navigated to.
-        payload.identity = proc_id.to_string();
-        // Set parent to the host reference (host:<actor_id>).
-        let host_ref = HostId(agent.actor_id().clone()).to_string();
-        payload.parent = Some(host_ref);
-        Ok(payload)
+        Ok(crate::introspect::to_node_payload_with(
+            result,
+            proc_id.to_string(),
+            Some(HostId(agent.actor_id().clone()).to_string()),
+        ))
     }
 
     /// Resolve a standalone proc into a proc-level `NodePayload`.
@@ -1071,24 +1088,16 @@ impl MeshAdminAgent {
             (vec![self_ref.clone()], vec![self_ref])
         } else {
             // Query the anchor actor for its supervision children.
-            let introspect_port =
-                hyperactor_reference::PortRef::<IntrospectMessage>::attest_message_port(actor_id);
-            let (reply_handle, reply_rx) = open_once_port::<NodePayload>(cx);
-            introspect_port.send(
+            let actor_result = query_introspect(
                 cx,
-                IntrospectMessage::Query {
-                    view: hyperactor::introspect::IntrospectView::Actor,
-                    reply: reply_handle.bind(),
-                },
-            )?;
-
-            let actor_payload = tokio::time::timeout(SINGLE_HOST_TIMEOUT, reply_rx.recv())
-                .await
-                .map_err(|_| anyhow::anyhow!("timed out querying anchor actor on {}", proc_id))?
-                .map_err(|e| {
-                    anyhow::anyhow!("failed to receive anchor actor introspection: {}", e)
-                })?;
-
+                actor_id,
+                hyperactor::introspect::IntrospectView::Actor,
+                SINGLE_HOST_TIMEOUT,
+                &format!("querying anchor actor on {}", proc_id),
+            )
+            .await?;
+            // No identity/parent normalization — only reading properties for is_system check.
+            let actor_payload = to_node_payload(actor_result);
             // Check if anchor actor is system.
             let anchor_ref = actor_id.to_string();
             let anchor_is_system = matches!(
@@ -1108,28 +1117,22 @@ impl MeshAdminAgent {
             // Query each supervision child to check is_system.
             for child_ref in actor_payload.children {
                 if let Ok(child_actor_id) = child_ref.parse::<hyperactor_reference::ActorId>() {
-                    let child_port =
-                        hyperactor_reference::PortRef::<IntrospectMessage>::attest_message_port(
-                            &child_actor_id,
-                        );
-                    let (reply_handle, reply_rx) = open_once_port::<NodePayload>(cx);
-                    let child_is_system = if child_port
-                        .send(
-                            cx,
-                            IntrospectMessage::Query {
-                                view: hyperactor::introspect::IntrospectView::Actor,
-                                reply: reply_handle.bind(),
-                            },
-                        )
-                        .is_ok()
+                    let child_is_system = if let Ok(r) = query_introspect(
+                        cx,
+                        &child_actor_id,
+                        hyperactor::introspect::IntrospectView::Actor,
+                        SINGLE_HOST_TIMEOUT,
+                        "querying child actor is_system",
+                    )
+                    .await
                     {
+                        let p = to_node_payload(r);
                         matches!(
-                            tokio::time::timeout(SINGLE_HOST_TIMEOUT, reply_rx.recv()).await,
-                            Ok(Ok(p))
-                                if matches!(
-                                    &p.properties,
-                                    NodeProperties::Actor { is_system: true, .. }
-                                )
+                            &p.properties,
+                            NodeProperties::Actor {
+                                is_system: true,
+                                ..
+                            }
                         )
                     } else {
                         false
@@ -1145,7 +1148,7 @@ impl MeshAdminAgent {
 
         let proc_name = proc_id.name().to_string();
 
-        // IA-2: dual-write attrs for standalone proc.
+        // Build attrs for standalone proc.
         let mut attrs = hyperactor_config::Attrs::new();
         attrs.set(crate::introspect::NODE_TYPE, "proc".to_string());
         attrs.set(crate::introspect::PROC_NAME, proc_name.clone());
@@ -1155,18 +1158,9 @@ impl MeshAdminAgent {
 
         Ok(NodePayload {
             identity: proc_id.to_string(),
-            properties: NodeProperties::Proc {
-                proc_name,
-                num_actors: children.len(),
-                system_children,
-                stopped_children: vec![],
-                stopped_retention_cap: 0,
-                is_poisoned: false,
-                failed_actor_count: 0,
-            },
-            attrs: attrs_json,
+            properties: crate::introspect::derive_properties(&attrs_json),
             children,
-            as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now()).to_string(),
+            as_of: hyperactor::introspect::format_timestamp(std::time::SystemTime::now()),
             parent: Some("root".to_string()),
         })
     }
@@ -1193,78 +1187,52 @@ impl MeshAdminAgent {
         // own actor loop while handling a resolve request (deadlock).
         // Use introspect_payload() to snapshot our own state
         // directly.
-        let mut payload = if self.self_actor_id.as_ref() == Some(actor_id) {
+        let result = if self.self_actor_id.as_ref() == Some(actor_id) {
             cx.introspect_payload()
         } else if self.is_standalone_proc_actor(actor_id) {
-            // Standalone procs (e.g. the admin proc itself) have no
-            // ProcAgent at agent[0], so skip the QueryChild
-            // terminated-snapshot check and query the actor directly.
-            let introspect_port =
-                hyperactor_reference::PortRef::<IntrospectMessage>::attest_message_port(actor_id);
-            let (reply_handle, reply_rx) = open_once_port::<NodePayload>(cx);
-            introspect_port.send(
+            // Standalone procs have no ProcAgent — query directly.
+            query_introspect(
                 cx,
-                IntrospectMessage::Query {
-                    view: hyperactor::introspect::IntrospectView::Actor,
-                    reply: reply_handle.bind(),
-                },
-            )?;
-            tokio::time::timeout(SINGLE_HOST_TIMEOUT, reply_rx.recv())
-                .await
-                .map_err(|_| anyhow::anyhow!("timed out querying actor {}", actor_id))?
-                .map_err(|e| anyhow::anyhow!("failed to receive actor introspection: {}", e))?
+                actor_id,
+                hyperactor::introspect::IntrospectView::Actor,
+                SINGLE_HOST_TIMEOUT,
+                &format!("querying actor {}", actor_id),
+            )
+            .await?
         } else {
             // Check terminated snapshots first — fast, no ambiguity.
-            // If found, the actor is definitively dead.
-            let terminated = {
-                let proc_id = actor_id.proc_id();
-                let mesh_agent_id = proc_id.actor_id(crate::proc_agent::PROC_AGENT_ACTOR_NAME, 0);
-                let agent_port =
-                    hyperactor_reference::PortRef::<IntrospectMessage>::attest_message_port(
-                        &mesh_agent_id,
-                    );
-                let child_ref = hyperactor_reference::Reference::Actor(actor_id.clone());
-                let (reply_handle, reply_rx) = open_once_port::<NodePayload>(cx);
-                agent_port.send(
-                    cx,
-                    IntrospectMessage::QueryChild {
-                        child_ref,
-                        reply: reply_handle.bind(),
-                    },
-                )?;
-                tokio::time::timeout(QUERY_CHILD_TIMEOUT, reply_rx.recv())
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .filter(|p| !matches!(p.properties, NodeProperties::Error { .. }))
-            };
+            let proc_id = actor_id.proc_id();
+            let mesh_agent_id = proc_id.actor_id(crate::proc_agent::PROC_AGENT_ACTOR_NAME, 0);
+            let terminated = query_child_introspect(
+                cx,
+                &mesh_agent_id,
+                hyperactor_reference::Reference::Actor(actor_id.clone()),
+                QUERY_CHILD_TIMEOUT,
+                "querying terminated snapshot",
+            )
+            .await
+            .ok()
+            .filter(|r| {
+                let p = crate::introspect::derive_properties(&r.attrs);
+                !matches!(p, NodeProperties::Error { .. })
+            });
 
             match terminated {
                 Some(snapshot) => snapshot,
                 None => {
-                    // Not terminated — query the live actor with
-                    // the full timeout.
-                    let introspect_port =
-                        hyperactor_reference::PortRef::<IntrospectMessage>::attest_message_port(
-                            actor_id,
-                        );
-                    let (reply_handle, reply_rx) = open_once_port::<NodePayload>(cx);
-                    introspect_port.send(
+                    // Not terminated — query the live actor.
+                    query_introspect(
                         cx,
-                        IntrospectMessage::Query {
-                            view: hyperactor::introspect::IntrospectView::Actor,
-                            reply: reply_handle.bind(),
-                        },
-                    )?;
-                    tokio::time::timeout(SINGLE_HOST_TIMEOUT, reply_rx.recv())
-                        .await
-                        .map_err(|_| anyhow::anyhow!("timed out querying actor {}", actor_id))?
-                        .map_err(|e| {
-                            anyhow::anyhow!("failed to receive actor introspection: {}", e)
-                        })?
+                        actor_id,
+                        hyperactor::introspect::IntrospectView::Actor,
+                        SINGLE_HOST_TIMEOUT,
+                        &format!("querying actor {}", actor_id),
+                    )
+                    .await?
                 }
             }
         };
+        let mut payload = to_node_payload(result);
 
         // Actors on standalone procs: parent is the proc.
         if self.is_standalone_proc_actor(actor_id) {
@@ -1290,8 +1258,6 @@ impl MeshAdminAgent {
                 // system proc ref format if the proc is a known
                 // system/local proc, otherwise the ProcAgent
                 // ActorId.
-                let _host_addr = proc_id.addr().to_string();
-
                 // Parent is the proc node, whose identity is the
                 // ProcId string (same for system and user procs).
                 payload.parent = Some(proc_id.to_string());
@@ -1903,26 +1869,17 @@ mod tests {
                 .contains(&HostId(actor_id2.clone()).to_string())
         );
 
-        // IA-1, IA-2: root attrs populated.
-        {
-            use crate::introspect::*;
-            let attrs: serde_json::Value =
-                serde_json::from_str(&payload.attrs).expect("IA-1: root attrs must be valid JSON");
-            assert!(attrs.is_object(), "IA-1: root attrs must be a JSON object");
-            assert_eq!(
-                attrs.get(NODE_TYPE.name()).and_then(|v| v.as_str()),
-                Some("root"),
-                "root attrs must contain node_type=root"
-            );
-            assert_eq!(
-                attrs.get(NUM_HOSTS.name()).and_then(|v| v.as_u64()),
-                Some(2),
-                "root attrs must contain num_hosts=2"
-            );
-            assert!(
-                attrs.get(STARTED_BY.name()).is_some(),
-                "root attrs must contain started_by"
-            );
+        // Verify root properties derived from attrs.
+        match &payload.properties {
+            NodeProperties::Root {
+                num_hosts,
+                started_by,
+                ..
+            } => {
+                assert_eq!(*num_hosts, 2);
+                assert!(!started_by.is_empty());
+            }
+            other => panic!("expected Root, got {:?}", other),
         }
     }
 
@@ -2186,14 +2143,7 @@ mod tests {
                 } else {
                     found_system = true;
                 }
-                // IA-1: attrs is valid JSON.
-                let attrs: serde_json::Value =
-                    serde_json::from_str(&node.attrs).expect("IA-1: proc attrs must be valid JSON");
-                assert!(attrs.is_object(), "IA-1: proc attrs must be a JSON object");
-                // Note: IA-2 (mesh-topology keys in attrs) is not yet
-                // verified here — user procs are resolved via
-                // MeshAdminAgent::resolve_proc_node which doesn't read
-                // ProcAgent's published attrs yet (Task 8).
+                // Properties derived from attrs — verified by derive_properties tests.
             } else {
                 // Host agent cross-reference — skip.
             }
@@ -2502,7 +2452,7 @@ mod tests {
         );
     }
 
-    // Exercises SP-1..SP-4 plus IA-1/IA-2 for host/proc payloads.
+    // Exercises SP-1..SP-4 for host/proc payloads.
     #[tokio::test]
     async fn test_system_proc_identity() {
         use hyperactor::Proc;
@@ -2579,33 +2529,11 @@ mod tests {
             "host system_children should be empty (procs are never system), got {:?}",
             system_children
         );
-        // -- 5b. Verify host node attrs (IA-1, IA-2) --
-        {
-            use crate::introspect::*;
-
-            let host_attrs: serde_json::Value = serde_json::from_str(&host_node.attrs)
-                .expect("IA-1: host attrs must be valid JSON");
-            assert!(
-                host_attrs.is_object(),
-                "IA-1: host attrs must be a JSON object"
-            );
-            assert_eq!(
-                host_attrs.get(NODE_TYPE.name()).and_then(|v| v.as_str()),
-                Some("host"),
-                "host attrs must contain node_type=host"
-            );
-            assert!(
-                host_attrs
-                    .get(ADDR.name())
-                    .and_then(|v| v.as_str())
-                    .is_some(),
-                "host attrs must contain addr"
-            );
-            assert!(
-                host_attrs.get(NUM_PROCS.name()).is_some(),
-                "host attrs must contain num_procs"
-            );
-        }
+        // Verify host properties derived from attrs.
+        assert!(
+            matches!(&host_node.properties, NodeProperties::Host { .. }),
+            "expected Host properties"
+        );
 
         // -- 6. Verify host children contain the system proc --
         let expected_system_ref = system_proc_id.to_string();
@@ -2646,32 +2574,11 @@ mod tests {
             "as_of should be present and non-empty"
         );
 
-        // -- 8. Verify proc node attrs (IA-1, IA-2) --
-        {
-            use crate::introspect::*;
-            let proc_attrs: serde_json::Value = serde_json::from_str(&proc_node.attrs)
-                .expect("IA-1: proc attrs must be valid JSON");
-            assert!(
-                proc_attrs.is_object(),
-                "IA-1: proc attrs must be a JSON object"
-            );
-            assert_eq!(
-                proc_attrs.get(NODE_TYPE.name()).and_then(|v| v.as_str()),
-                Some("proc"),
-                "proc attrs must contain node_type=proc"
-            );
-            assert!(
-                proc_attrs
-                    .get(PROC_NAME.name())
-                    .and_then(|v| v.as_str())
-                    .is_some(),
-                "proc attrs must contain proc_name"
-            );
-            assert!(
-                proc_attrs.get(NUM_ACTORS.name()).is_some(),
-                "proc attrs must contain num_actors"
-            );
-        }
+        // Verify proc properties derived from attrs.
+        assert!(
+            matches!(&proc_node.properties, NodeProperties::Proc { .. }),
+            "expected Proc properties"
+        );
     }
 
     // -- MAST CLI resolver tests --
