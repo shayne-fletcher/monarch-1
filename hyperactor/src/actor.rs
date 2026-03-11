@@ -1692,6 +1692,63 @@ mod tests {
         handle.await;
     }
 
+    /// Helper: look up an attr in the attrs JSON by short name.
+    fn attrs_get(attrs_json: &str, short_name: &str) -> Option<serde_json::Value> {
+        use hyperactor_config::INTROSPECT;
+        use hyperactor_config::attrs::AttrKeyInfo;
+        let fq_name = inventory::iter::<AttrKeyInfo>()
+            .find(|info| {
+                info.meta
+                    .get(INTROSPECT)
+                    .is_some_and(|ia| ia.name == short_name)
+            })
+            .map(|info| info.name)?;
+        let obj: serde_json::Value = serde_json::from_str(attrs_json).ok()?;
+        obj.get(fq_name).cloned()
+    }
+
+    /// Establishes IA-1 (attrs-json), IA-4 (status-shape), and
+    /// IA-5 (failure-shape) for the running-actor path only.
+    /// Stopped/failed paths need separate tests (see proc.rs
+    /// terminated snapshot tests).
+    #[tokio::test]
+    async fn test_ia1_ia4_running_actor_attrs() {
+        let proc = Proc::local();
+        let (client, _) = proc.instance("client").unwrap();
+        let (tx, _rx) = client.open_port::<u64>();
+        let actor = EchoActor(tx.bind());
+        let handle = proc.spawn::<EchoActor>("ia_test", actor).unwrap();
+
+        let payload = crate::introspect::live_actor_payload(handle.cell());
+
+        // IA-1: attrs is valid JSON object.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload.attrs).expect("IA-1: attrs must be valid JSON");
+        assert!(parsed.is_object(), "IA-1: attrs must be a JSON object");
+
+        // IA-4: live actor has a status, no status_reason.
+        let status = attrs_get(&payload.attrs, "status")
+            .and_then(|v| v.as_str().map(String::from))
+            .expect("attrs must contain status");
+        assert!(
+            !status.contains(':'),
+            "non-terminal status must not contain a colon: {status}"
+        );
+        assert!(
+            attrs_get(&payload.attrs, "status_reason").is_none(),
+            "IA-4: running actor must not have status_reason"
+        );
+
+        // IA-5: no failure attrs for running actor.
+        assert!(
+            attrs_get(&payload.attrs, "failure_error_message").is_none(),
+            "IA-5: running actor must not have failure attrs"
+        );
+
+        handle.drain_and_stop("test").unwrap();
+        handle.await;
+    }
+
     // Verifies that QueryChild returns an error for actors without
     // a registered query_child_handler callback. The runtime
     // introspect task responds with the error sentinel payload
@@ -2159,6 +2216,7 @@ mod tests {
                     is_poisoned: false,
                     failed_actor_count: 0,
                 },
+                attrs: "{}".to_string(),
                 children: Vec::new(),
                 parent: None,
                 as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now()).to_string(),
