@@ -32,8 +32,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use hyperactor::host::LOCAL_PROC_NAME;
-use hyperactor::introspect::NodeProperties;
 use hyperactor_mesh::host_mesh::host_agent::HOST_MESH_AGENT_ACTOR_NAME;
+use hyperactor_mesh::introspect::NodeProperties;
 use hyperactor_mesh::mesh_admin::MESH_ADMIN_ACTOR_NAME;
 use hyperactor_mesh::mesh_admin::MESH_ADMIN_BRIDGE_NAME;
 use hyperactor_mesh::proc_agent::PROC_AGENT_ACTOR_NAME;
@@ -195,7 +195,7 @@ async fn probe(
     label: impl Into<String>,
     reference: impl Into<String>,
     phase: DiagPhase,
-) -> (DiagResult, Option<hyperactor::introspect::NodePayload>) {
+) -> (DiagResult, Option<hyperactor_mesh::introspect::NodePayload>) {
     let label = label.into();
     let reference = reference.into();
     let t0 = Instant::now();
@@ -240,7 +240,10 @@ async fn probe(
 }
 
 /// Derive a short human-readable label from the resolved NodePayload.
-fn label_from_payload(reference: &str, payload: &hyperactor::introspect::NodePayload) -> String {
+fn label_from_payload(
+    reference: &str,
+    payload: &hyperactor_mesh::introspect::NodePayload,
+) -> String {
     match &payload.properties {
         NodeProperties::Root { .. } => "root".to_string(),
         NodeProperties::Host { addr, .. } => addr.clone(),
