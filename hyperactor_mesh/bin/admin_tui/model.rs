@@ -21,7 +21,7 @@ pub(crate) const MAX_TREE_DEPTH: usize = 4;
 
 /// Navigation cursor over a bounded list.
 ///
-/// Invariant: `pos < len` (or `pos == 0` when `len == 0`).
+/// See TUI-2 (cursor-bounds) in main.rs module doc.
 /// Movement methods return `true` when the position changes.
 #[derive(Debug, Clone)]
 pub(crate) struct Cursor {
