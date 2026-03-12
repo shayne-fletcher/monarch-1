@@ -6,10 +6,14 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-//! This module provides [`Proc`], which is the runtime used within a single
-//! proc.
-
-// TODO: define a set of proc errors and plumb these throughout
+//! [`Proc`] is an addressable actor-runtime boundary.
+//!
+//! It owns actor lifecycle (spawn, run, terminate), routes messages
+//! to local actors, forwards messages for remote destinations, and
+//! hosts supervision state.
+//!
+//! It also stores bounded snapshots of terminated actors for
+//! post-mortem introspection.
 
 use std::any::Any;
 use std::any::TypeId;
@@ -1249,6 +1253,55 @@ impl<A: Actor> Instance<A> {
         self.inner.cell.set_published_properties(kind);
     }
 
+    /// Publish a complete Attrs bag for introspection. Replaces any
+    /// previously published attrs.
+    ///
+    /// Debug builds assert that every key in the bag is tagged with
+    /// the `INTROSPECT` meta-attribute.
+    pub fn publish_attrs(&self, attrs: hyperactor_config::Attrs) {
+        #[cfg(debug_assertions)]
+        {
+            use std::collections::HashSet;
+            use std::sync::OnceLock;
+
+            use hyperactor_config::attrs::AttrKeyInfo;
+
+            static INTROSPECT_KEYS: OnceLock<HashSet<&'static str>> = OnceLock::new();
+            let allowed = INTROSPECT_KEYS.get_or_init(|| {
+                inventory::iter::<AttrKeyInfo>()
+                    .filter(|info| info.meta.get(hyperactor_config::INTROSPECT).is_some())
+                    .map(|info| info.name)
+                    .collect()
+            });
+            for (name, _) in attrs.iter() {
+                debug_assert!(
+                    allowed.contains(name),
+                    "publish_attrs: key {:?} is not tagged with INTROSPECT",
+                    name
+                );
+            }
+        }
+        self.inner.cell.set_published_attrs(attrs);
+    }
+
+    /// Publish a single attr key-value pair for introspection. Merges
+    /// into existing published attrs (insert or overwrite).
+    ///
+    /// Debug builds assert that the key is tagged with the
+    /// `INTROSPECT` meta-attribute.
+    pub fn publish_attr<T: hyperactor_config::AttrValue>(
+        &self,
+        key: hyperactor_config::Key<T>,
+        value: T,
+    ) {
+        debug_assert!(
+            key.attrs().get(hyperactor_config::INTROSPECT).is_some(),
+            "publish_attr called with non-introspection key: {}",
+            key.name()
+        );
+        self.inner.cell.merge_published_attr(key, value);
+    }
+
     /// Mark this actor as system/infrastructure. System actors are
     /// hidden by default in the TUI (toggled via `s`).
     pub fn set_system(&self) {
@@ -2085,6 +2138,16 @@ struct InstanceCellState {
     /// reads live state from `InstanceCell`.
     published_properties: RwLock<Option<crate::introspect::PublishedProperties>>,
 
+    /// Attrs-based introspection data published by the actor. Written
+    /// by the actor via `Instance::publish_attrs()` /
+    /// `Instance::publish_attr()`, and read by the introspection
+    /// runtime handler when building node payloads.
+    ///
+    /// This bag may contain both mesh-level keys (`node_type`,
+    /// `addr`, `num_procs`, ...) and actor-runtime keys (`status`,
+    /// `messages_processed`, ...).
+    published_attrs: RwLock<Option<hyperactor_config::Attrs>>,
+
     /// Optional callback for resolving non-addressable children
     /// (e.g., system procs). Registered by infrastructure actors
     /// like `HostAgent` in `Actor::init`. Invoked by the
@@ -2207,6 +2270,7 @@ impl InstanceCell {
                 total_processing_time_us: AtomicU64::new(0),
                 recording: hyperactor_telemetry::recorder().record(64),
                 published_properties: RwLock::new(None),
+                published_attrs: RwLock::new(None),
                 query_child_handler: RwLock::new(None),
                 supervision_event: std::sync::Mutex::new(None),
                 is_system: AtomicBool::new(false),
@@ -2419,6 +2483,31 @@ impl InstanceCell {
     /// Read the last-published domain-specific properties, if any.
     pub fn published_properties(&self) -> Option<PublishedProperties> {
         self.inner.published_properties.read().unwrap().clone()
+    }
+
+    /// Replace the published introspection attrs with a new bag.
+    pub fn set_published_attrs(&self, attrs: hyperactor_config::Attrs) {
+        *self.inner.published_attrs.write().unwrap() = Some(attrs);
+    }
+
+    /// Set a single introspection attr, merging into the existing bag
+    /// (or creating one if none exists).
+    pub fn merge_published_attr<T: hyperactor_config::AttrValue>(
+        &self,
+        key: hyperactor_config::Key<T>,
+        value: T,
+    ) {
+        self.inner
+            .published_attrs
+            .write()
+            .unwrap()
+            .get_or_insert_with(hyperactor_config::Attrs::new)
+            .set(key, value);
+    }
+
+    /// Read the published introspection attrs, if any.
+    pub fn published_attrs(&self) -> Option<hyperactor_config::Attrs> {
+        self.inner.published_attrs.read().unwrap().clone()
     }
 
     /// Register a callback for resolving non-addressable children
