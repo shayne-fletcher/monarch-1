@@ -411,13 +411,31 @@ impl ProcAgent {
             .publish_properties(PublishedPropertiesKind::Proc {
                 proc_name: self.proc.proc_id().to_string(),
                 num_actors: num_live,
-                children,
-                system_children,
-                stopped_children,
+                children: children.clone(),
+                system_children: system_children.clone(),
+                stopped_children: stopped_children.clone(),
                 stopped_retention_cap,
                 is_poisoned: failed_actor_count > 0,
                 failed_actor_count,
             });
+
+        // Attrs-based introspection (IA-2: dual-write).
+        let mut attrs = hyperactor_config::Attrs::new();
+        attrs.set(crate::introspect::NODE_TYPE, "proc".to_string());
+        attrs.set(
+            crate::introspect::PROC_NAME,
+            self.proc.proc_id().to_string(),
+        );
+        attrs.set(crate::introspect::NUM_ACTORS, num_live);
+        attrs.set(crate::introspect::SYSTEM_CHILDREN, system_children);
+        attrs.set(crate::introspect::STOPPED_CHILDREN, stopped_children);
+        attrs.set(
+            crate::introspect::STOPPED_RETENTION_CAP,
+            stopped_retention_cap,
+        );
+        attrs.set(crate::introspect::IS_POISONED, failed_actor_count > 0);
+        attrs.set(crate::introspect::FAILED_ACTOR_COUNT, failed_actor_count);
+        cx.instance().publish_attrs(attrs);
     }
 }
 
