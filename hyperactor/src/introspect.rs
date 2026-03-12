@@ -60,6 +60,10 @@
 //!   `store_terminated_snapshot` writes to the proc's snapshot map,
 //!   not the instances map. `resolve_actor_ref` checks terminal
 //!   status independently and is unaffected by snapshot storage.
+//! - **S12.** Introspection must not impair actor liveness --
+//!   introspection queries (including DashMap reads for actor
+//!   enumeration) must not cause convoy starvation or scheduling
+//!   delays that stall concurrent actor spawn/stop operations.
 //!
 //! ## Introspection key invariants (IK-*)
 //!

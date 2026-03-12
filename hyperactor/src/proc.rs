@@ -454,6 +454,13 @@ impl Proc {
     }
 
     /// Traverse all actor trees in this proc, starting from root actors (pid=0).
+    ///
+    /// **Caution:** This holds DashMap shard read locks while doing
+    /// `Weak::upgrade()` and recursively walking the actor tree per
+    /// entry. Under rapid actor churn, this causes convoy starvation
+    /// with concurrent `insert`/`remove` operations. Prefer
+    /// `all_instance_keys()` with point lookups if you only need
+    /// actor IDs. Currently unused in production code.
     pub fn traverse<F>(&self, f: &mut F)
     where
         F: FnMut(&InstanceCell, usize),
@@ -476,6 +483,13 @@ impl Proc {
     }
 
     /// Returns the ActorIds of all root actors (pid=0) in this proc.
+    ///
+    /// **Caution:** This iterates the full DashMap under shard read
+    /// locks. The per-entry work is lightweight (key filter + clone),
+    /// but under very rapid churn the iteration can still contend
+    /// with concurrent writes. Prefer `all_instance_keys()` with a
+    /// post-filter if this becomes a hot path. Currently unused in
+    /// production code.
     pub fn root_actor_ids(&self) -> Vec<reference::ActorId> {
         self.state()
             .instances
