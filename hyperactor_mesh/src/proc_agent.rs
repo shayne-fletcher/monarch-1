@@ -512,6 +512,7 @@ impl Actor for ProcAgent {
                             is_poisoned,
                             failed_actor_count,
                         },
+                        attrs: "{}".to_string(),
                         children,
                         parent: None,
                         as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now())
@@ -526,6 +527,7 @@ impl Actor for ProcAgent {
                     code: "not_found".into(),
                     message: format!("child {} not found", child_ref),
                 },
+                attrs: "{}".to_string(),
                 children: Vec::new(),
                 parent: None,
                 as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now()).to_string(),

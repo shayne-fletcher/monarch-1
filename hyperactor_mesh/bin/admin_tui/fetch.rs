@@ -535,6 +535,7 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "2026-01-01T00:00:00.000Z".to_string(),
+            attrs: "{}".to_string(),
         }
     }
 
