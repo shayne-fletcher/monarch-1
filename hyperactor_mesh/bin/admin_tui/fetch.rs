@@ -12,8 +12,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use algebra::JoinSemilattice;
-use hyperactor::introspect::NodePayload;
-use hyperactor::introspect::NodeProperties;
+use hyperactor_mesh::introspect::NodePayload;
+use hyperactor_mesh::introspect::NodeProperties;
 
 use crate::filter::is_failed_node;
 use crate::filter::is_stopped_node;
@@ -513,8 +513,8 @@ pub(crate) fn extract_trailing_index(s: &str) -> Option<(&str, u64)> {
 #[cfg(test)]
 mod tests {
     use algebra::JoinSemilattice;
-    use hyperactor::introspect::NodePayload;
-    use hyperactor::introspect::NodeProperties;
+    use hyperactor_mesh::introspect::NodePayload;
+    use hyperactor_mesh::introspect::NodeProperties;
 
     use super::*;
 
@@ -535,7 +535,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "2026-01-01T00:00:00.000Z".to_string(),
-            attrs: "{}".to_string(),
         }
     }
 

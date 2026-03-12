@@ -124,19 +124,256 @@ declare_attrs! {
     })
     pub attr NUM_HOSTS: usize = 0;
 
-    /// Error code for error nodes.
-    @meta(INTROSPECT = IntrospectAttr {
-        name: "error_code".into(),
-        desc: "Machine-readable error code (e.g. not_found)".into(),
-    })
-    pub attr ERROR_CODE: String;
+}
 
-    /// Error message for error nodes.
-    @meta(INTROSPECT = IntrospectAttr {
-        name: "error_message".into(),
-        desc: "Human-readable error message".into(),
-    })
-    pub attr ERROR_MESSAGE: String;
+// --- API / presentation types ---
+//
+// These types define the HTTP response shape for
+// GET /v1/{reference}. Derived from internal attrs at the
+// mesh boundary. Shared with the TUI.
+
+use serde::Deserialize;
+use serde::Serialize;
+use typeuri::Named;
+
+/// Uniform response for any node in the mesh topology.
+///
+/// Every addressable entity (root, host, proc, actor) is represented
+/// as a `NodePayload`. The client navigates the mesh by fetching a
+/// node and following its `children` references.
+///
+/// # Attrs Invariants
+///
+/// These invariants govern how `IntrospectResult.attrs` is built
+/// in `hyperactor::introspect` and how `properties` is derived
+/// from attrs via [`derive_properties`].
+///
+/// - **IA-1 (attrs-json):** `IntrospectResult.attrs` is always a
+///   valid JSON object string.
+/// - **IA-2 (runtime-precedence):** Runtime-owned introspection
+///   keys override any same-named keys in published attrs.
+/// - **IA-3 (status-shape):** `status_reason` is present in attrs
+///   iff the status string carries a reason (`stopped:*` or
+///   `failed:*`).
+/// - **IA-4 (failure-shape):** `failure_*` attrs are present iff
+///   effective status is `failed`.
+/// - **IA-5 (payload-totality):** Every `IntrospectResult` sets
+///   `attrs` — never omitted, never null.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+pub struct NodePayload {
+    /// Canonical reference string for this node.
+    pub identity: String,
+    /// Node-specific metadata (type, status, metrics, etc.).
+    pub properties: NodeProperties,
+    /// Reference strings the client can GET next to descend the tree.
+    pub children: Vec<String>,
+    /// Parent node reference for upward navigation.
+    pub parent: Option<String>,
+    /// ISO 8601 timestamp indicating when this data was captured.
+    pub as_of: String,
+}
+wirevalue::register_type!(NodePayload);
+
+/// Node-specific metadata. Externally-tagged enum — the JSON
+/// key is the variant name (Root, Host, Proc, Actor, Error).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+pub enum NodeProperties {
+    /// Synthetic mesh root node (not a real actor/proc).
+    Root {
+        num_hosts: usize,
+        started_at: String,
+        started_by: String,
+        system_children: Vec<String>,
+    },
+    /// A host in the mesh, represented by its `HostAgent`.
+    Host {
+        addr: String,
+        num_procs: usize,
+        system_children: Vec<String>,
+    },
+    /// Properties describing a proc running on a host.
+    Proc {
+        proc_name: String,
+        num_actors: usize,
+        system_children: Vec<String>,
+        stopped_children: Vec<String>,
+        stopped_retention_cap: usize,
+        is_poisoned: bool,
+        failed_actor_count: usize,
+    },
+    /// Runtime metadata for a single actor instance.
+    Actor {
+        actor_status: String,
+        actor_type: String,
+        messages_processed: u64,
+        created_at: String,
+        last_message_handler: Option<String>,
+        total_processing_time_us: u64,
+        flight_recorder: Option<String>,
+        is_system: bool,
+        failure_info: Option<FailureInfo>,
+    },
+    /// Error sentinel returned when a child reference cannot be resolved.
+    Error { code: String, message: String },
+}
+wirevalue::register_type!(NodeProperties);
+
+/// Structured failure information for failed actors.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+pub struct FailureInfo {
+    pub error_message: String,
+    pub root_cause_actor: String,
+    pub root_cause_name: Option<String>,
+    pub occurred_at: String,
+    pub is_propagated: bool,
+}
+wirevalue::register_type!(FailureInfo);
+
+/// Derive `NodeProperties` from a JSON-serialized attrs string.
+///
+/// Detection precedence (DP-1):
+/// 1. `node_type` = "root" / "host" / "proc" → corresponding variant
+/// 2. `error_code` present → Error
+/// 3. `STATUS` key present → Actor
+/// 4. none of the above → Error("unknown_node_type")
+pub fn derive_properties(attrs_json: &str) -> NodeProperties {
+    let attrs: hyperactor_config::Attrs = match serde_json::from_str(attrs_json) {
+        Ok(a) => a,
+        Err(_) => {
+            return NodeProperties::Error {
+                code: "parse_error".into(),
+                message: "failed to parse attrs JSON".into(),
+            };
+        }
+    };
+
+    let node_type = attrs.get(NODE_TYPE).cloned().unwrap_or_default();
+
+    match node_type.as_str() {
+        "root" => NodeProperties::Root {
+            num_hosts: attrs.get(NUM_HOSTS).copied().unwrap_or(0),
+            started_at: attrs
+                .get(STARTED_AT)
+                .map(|t| humantime::format_rfc3339_millis(*t).to_string())
+                .unwrap_or_default(),
+            started_by: attrs.get(STARTED_BY).cloned().unwrap_or_default(),
+            system_children: attrs.get(SYSTEM_CHILDREN).cloned().unwrap_or_default(),
+        },
+        "host" => NodeProperties::Host {
+            addr: attrs.get(ADDR).cloned().unwrap_or_default(),
+            num_procs: attrs.get(NUM_PROCS).copied().unwrap_or(0),
+            system_children: attrs.get(SYSTEM_CHILDREN).cloned().unwrap_or_default(),
+        },
+        "proc" => NodeProperties::Proc {
+            proc_name: attrs.get(PROC_NAME).cloned().unwrap_or_default(),
+            num_actors: attrs.get(NUM_ACTORS).copied().unwrap_or(0),
+            system_children: attrs.get(SYSTEM_CHILDREN).cloned().unwrap_or_default(),
+            stopped_children: attrs.get(STOPPED_CHILDREN).cloned().unwrap_or_default(),
+            stopped_retention_cap: attrs.get(STOPPED_RETENTION_CAP).copied().unwrap_or(0),
+            is_poisoned: attrs.get(IS_POISONED).copied().unwrap_or(false),
+            failed_actor_count: attrs.get(FAILED_ACTOR_COUNT).copied().unwrap_or(0),
+        },
+        _ => {
+            // DP-1: error_code → Error, STATUS present → Actor,
+            // else → Error("unknown_node_type")
+            use hyperactor::introspect::ERROR_CODE;
+            use hyperactor::introspect::ERROR_MESSAGE;
+            if let Some(code) = attrs.get(ERROR_CODE) {
+                return NodeProperties::Error {
+                    code: code.clone(),
+                    message: attrs.get(ERROR_MESSAGE).cloned().unwrap_or_default(),
+                };
+            }
+
+            use hyperactor::introspect::ACTOR_TYPE;
+            use hyperactor::introspect::CREATED_AT;
+            use hyperactor::introspect::FAILURE_ERROR_MESSAGE;
+            use hyperactor::introspect::FAILURE_IS_PROPAGATED;
+            use hyperactor::introspect::FAILURE_OCCURRED_AT;
+            use hyperactor::introspect::FAILURE_ROOT_CAUSE_ACTOR;
+            use hyperactor::introspect::FAILURE_ROOT_CAUSE_NAME;
+            use hyperactor::introspect::FLIGHT_RECORDER;
+            use hyperactor::introspect::IS_SYSTEM;
+            use hyperactor::introspect::LAST_HANDLER;
+            use hyperactor::introspect::MESSAGES_PROCESSED;
+            use hyperactor::introspect::STATUS;
+            use hyperactor::introspect::STATUS_REASON;
+            use hyperactor::introspect::TOTAL_PROCESSING_TIME_US;
+
+            if attrs.get(STATUS).is_none() {
+                return NodeProperties::Error {
+                    code: "unknown_node_type".into(),
+                    message: format!("unrecognized node_type: {:?}", node_type),
+                };
+            }
+
+            // Reconstruct actor_status from status + status_reason.
+            let status = attrs.get(STATUS).cloned().unwrap_or_default();
+            let actor_status = match attrs.get(STATUS_REASON) {
+                Some(reason) => format!("{}: {}", status, reason),
+                None => status,
+            };
+
+            let failure_info = attrs.get(FAILURE_ERROR_MESSAGE).map(|err_msg| FailureInfo {
+                error_message: err_msg.clone(),
+                root_cause_actor: attrs
+                    .get(FAILURE_ROOT_CAUSE_ACTOR)
+                    .cloned()
+                    .unwrap_or_default(),
+                root_cause_name: attrs.get(FAILURE_ROOT_CAUSE_NAME).cloned(),
+                occurred_at: attrs
+                    .get(FAILURE_OCCURRED_AT)
+                    .map(|t| humantime::format_rfc3339_millis(*t).to_string())
+                    .unwrap_or_default(),
+                is_propagated: attrs.get(FAILURE_IS_PROPAGATED).copied().unwrap_or(false),
+            });
+
+            NodeProperties::Actor {
+                actor_status,
+                actor_type: attrs.get(ACTOR_TYPE).cloned().unwrap_or_default(),
+                messages_processed: attrs.get(MESSAGES_PROCESSED).copied().unwrap_or(0),
+                created_at: attrs
+                    .get(CREATED_AT)
+                    .map(|t| humantime::format_rfc3339_millis(*t).to_string())
+                    .unwrap_or_default(),
+                last_message_handler: attrs.get(LAST_HANDLER).cloned(),
+                total_processing_time_us: attrs.get(TOTAL_PROCESSING_TIME_US).copied().unwrap_or(0),
+                flight_recorder: attrs.get(FLIGHT_RECORDER).cloned(),
+                is_system: attrs.get(IS_SYSTEM).copied().unwrap_or(false),
+                failure_info,
+            }
+        }
+    }
+}
+
+/// Convert an internal `IntrospectResult` into an API-facing
+/// `NodePayload` by deriving `properties` from attrs.
+/// Convert an `IntrospectResult` to a presentation `NodePayload`
+/// with `properties` derived from attrs.
+pub fn to_node_payload(result: hyperactor::introspect::IntrospectResult) -> NodePayload {
+    NodePayload {
+        identity: result.identity,
+        properties: derive_properties(&result.attrs),
+        children: result.children,
+        parent: result.parent,
+        as_of: result.as_of,
+    }
+}
+
+/// Convert an `IntrospectResult` to a `NodePayload`, overriding
+/// identity and parent for correct tree navigation.
+pub fn to_node_payload_with(
+    result: hyperactor::introspect::IntrospectResult,
+    identity: String,
+    parent: Option<String>,
+) -> NodePayload {
+    NodePayload {
+        identity,
+        properties: derive_properties(&result.attrs),
+        children: result.children,
+        parent,
+        as_of: result.as_of,
+    }
 }
 
 #[cfg(test)]
@@ -161,8 +398,6 @@ mod tests {
             ("started_at", STARTED_AT.attrs()),
             ("started_by", STARTED_BY.attrs()),
             ("num_hosts", NUM_HOSTS.attrs()),
-            ("error_code", ERROR_CODE.attrs()),
-            ("error_message", ERROR_MESSAGE.attrs()),
         ];
 
         for (expected_name, meta) in &cases {

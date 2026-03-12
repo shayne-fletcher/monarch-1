@@ -9,9 +9,9 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use hyperactor::introspect::NodePayload;
-use hyperactor::introspect::NodeProperties;
 use hyperactor::reference as hyperactor_reference;
+use hyperactor_mesh::introspect::NodePayload;
+use hyperactor_mesh::introspect::NodeProperties;
 use serde_json::Value;
 
 /// Derive a human-friendly label for a resolved node payload.
@@ -210,8 +210,8 @@ pub(crate) fn format_uptime(started_at: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use hyperactor::introspect::NodePayload;
-    use hyperactor::introspect::NodeProperties;
+    use hyperactor_mesh::introspect::NodePayload;
+    use hyperactor_mesh::introspect::NodeProperties;
     use serde_json::Value;
 
     use super::*;
@@ -229,7 +229,6 @@ mod tests {
             children: vec!["h1".into(), "h2".into(), "h3".into()],
             parent: None,
             as_of: "2026-01-01T00:00:00.000Z".to_string(),
-            attrs: "{}".to_string(),
         };
         assert_eq!(derive_label(&payload), "Mesh Root (3 hosts)");
     }
@@ -246,7 +245,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         assert_eq!(derive_label(&payload), "10.0.0.1:8000  (3 procs)");
     }
@@ -263,7 +261,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         assert_eq!(derive_label(&payload), "10.0.0.1:8000  (5 procs)");
     }
@@ -280,7 +277,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         assert_eq!(derive_label(&payload), "10.0.0.1:8000  (2 procs)");
     }
@@ -302,7 +298,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         assert_eq!(derive_label(&payload), "myproc  (4 actors: 4 user)");
     }
@@ -324,7 +319,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         assert_eq!(
             derive_label(&payload),
@@ -349,7 +343,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         assert_eq!(
             derive_label(&payload),
@@ -374,7 +367,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         assert!(derive_label(&payload).contains("3 stopped (max retained)"));
     }
@@ -396,7 +388,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         let label = derive_label(&payload);
         assert!(label.contains("1 stopped"));
@@ -420,7 +411,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         assert_eq!(
             derive_label(&payload),
@@ -445,7 +435,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         assert_eq!(derive_label(&payload), "myproc  (2 actors: 2 stopped)");
     }
@@ -467,7 +456,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         let label = derive_label(&payload);
         assert!(label.contains("3 system"));
@@ -491,7 +479,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         let label = derive_label(&payload);
         assert!(label.contains("[POISONED: 1 failed]"));
@@ -514,7 +501,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "".to_string(),
-            attrs: "{}".to_string(),
         };
         let label = derive_label(&payload);
         assert!(!label.contains("POISONED"));
@@ -538,7 +524,6 @@ mod tests {
             children: vec![],
             parent: Some("unix:@abc123,myworld".to_string()),
             as_of: "2026-01-01T00:00:00.000Z".to_string(),
-            attrs: "{}".to_string(),
         };
         assert_eq!(derive_label(&payload), "worker[3]");
     }
@@ -561,7 +546,6 @@ mod tests {
             children: vec![],
             parent: None,
             as_of: "2026-01-01T00:00:00.000Z".to_string(),
-            attrs: "{}".to_string(),
         };
         assert_eq!(derive_label(&payload), "not-a-valid-actor-id!!!");
     }
