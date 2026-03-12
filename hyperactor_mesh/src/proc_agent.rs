@@ -248,8 +248,7 @@ struct SelfCheck {}
 /// degrade to log-only behavior (events become undeliverable again or
 /// are dropped).
 ///
-/// See `global_context.rs` for the invariant and the forwarding path
-/// ("last sink wins").
+/// See GC-1 in `global_context` module doc.
 #[hyperactor::export(
     handlers=[
         MeshAgentMessage,
