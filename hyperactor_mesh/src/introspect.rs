@@ -989,17 +989,27 @@ mod tests {
     ///
     /// To update after intentional type changes:
     /// ```sh
-    /// buck run fbcode//monarch/hyperactor_mesh:generate_schema_snapshot \
+    /// buck run fbcode//monarch/hyperactor_mesh:generate_api_artifacts \
     ///   @fbcode//mode/dev-nosan -- \
     ///   fbcode/monarch/hyperactor_mesh/src/testdata
     /// ```
+    /// Strip the `$comment` field (containing the `@generated` marker)
+    /// from a JSON value so snapshot comparisons ignore it.
+    fn strip_comment(mut value: serde_json::Value) -> serde_json::Value {
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("$comment");
+        }
+        value
+    }
+
     #[test]
     fn test_node_payload_schema_snapshot() {
         let schema = schemars::schema_for!(NodePayload);
         let actual: serde_json::Value = serde_json::to_value(&schema).unwrap();
-        let expected: serde_json::Value =
+        let expected: serde_json::Value = strip_comment(
             serde_json::from_str(include_str!("testdata/node_payload_schema.json"))
-                .expect("snapshot must be valid JSON");
+                .expect("snapshot must be valid JSON"),
+        );
         assert_eq!(
             actual, expected,
             "schema changed — review and update snapshot if intentional"
@@ -1118,12 +1128,27 @@ mod tests {
 
         let schema = schemars::schema_for!(ApiErrorEnvelope);
         let actual: serde_json::Value = serde_json::to_value(&schema).unwrap();
-        let expected: serde_json::Value =
+        let expected: serde_json::Value = strip_comment(
             serde_json::from_str(include_str!("testdata/error_schema.json"))
-                .expect("error snapshot must be valid JSON");
+                .expect("error snapshot must be valid JSON"),
+        );
         assert_eq!(
             actual, expected,
             "error schema changed — review and update snapshot if intentional"
+        );
+    }
+
+    /// SC-2: OpenAPI spec matches checked-in snapshot.
+    #[test]
+    fn test_openapi_spec_snapshot() {
+        let actual = crate::mesh_admin::build_openapi_spec();
+        let expected: serde_json::Value = strip_comment(
+            serde_json::from_str(include_str!("testdata/openapi.json"))
+                .expect("OpenAPI snapshot must be valid JSON"),
+        );
+        assert_eq!(
+            actual, expected,
+            "OpenAPI spec changed — review and update snapshot if intentional"
         );
     }
 }

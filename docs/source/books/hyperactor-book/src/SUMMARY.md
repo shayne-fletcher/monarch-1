@@ -26,7 +26,6 @@
     - [TCP](channels/transports/tcp.md)
     - [Unix](channels/transports/unix.md)
     - [MetaTLS](channels/transports/metatls.md)
-    - [Sim](channels/transports/sim.md)
   - [Frames](channels/frames.md)
  - [Procs](procs/index.md)
    - [Proc](procs/proc.md)
