@@ -143,8 +143,17 @@ impl Handler<CudaActorMessage> for CudaActor {
                     prop.location.type_ = rdmaxcel_sys::CU_MEM_LOCATION_TYPE_DEVICE;
                     prop.location.id = device;
                     prop.allocFlags.gpuDirectRDMACapable = 1;
-                    prop.requestedHandleTypes =
-                        rdmaxcel_sys::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+                    // ROCm bindgen generates a different struct layout with anonymous union
+                    #[cfg(feature = "rocm")]
+                    {
+                        prop.__bindgen_anon_1.requestedHandleTypes =
+                            rdmaxcel_sys::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+                    }
+                    #[cfg(not(feature = "rocm"))]
+                    {
+                        prop.requestedHandleTypes =
+                            rdmaxcel_sys::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+                    }
 
                     cu_check!(rdmaxcel_sys::rdmaxcel_cuMemGetAllocationGranularity(
                         &mut granularity as *mut usize,
@@ -188,7 +197,7 @@ impl Handler<CudaActorMessage> for CudaActor {
                         1
                     ));
 
-                    (dptr, padded_size)
+                    (dptr as usize, padded_size)
                 };
 
                 // Register via RdmaManagerActor request_buffer; the ibverbs MR
