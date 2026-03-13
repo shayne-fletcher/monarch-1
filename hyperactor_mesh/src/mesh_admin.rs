@@ -22,6 +22,74 @@
 //! tree-shaped model (`NodeProperties` + children references)
 //! suitable for topology-agnostic clients such as the admin TUI.
 //!
+//! # Schema strategy
+//!
+//! The external API contract is schema-first: the JSON Schema
+//! (Draft 2020-12) served at `GET /v1/schema` is the
+//! authoritative definition of the response shape, derived
+//! directly from the Rust types (`NodePayload`,
+//! `NodeProperties`, `FailureInfo`) via `schemars::JsonSchema`.
+//! The error envelope schema is at `GET /v1/schema/error`.
+//!
+//! This follows the "Admin Gateway Pattern" RFC
+//! ([doc](https://fburl.com/1dvah88uutaiyesebojouen2)):
+//! schema is the product; transports and tooling are projections.
+//!
+//! ## Schema generation pipeline
+//!
+//! 1. `#[derive(JsonSchema)]` on `NodePayload`, `NodeProperties`,
+//!    `FailureInfo`, `ApiError`, `ApiErrorEnvelope`.
+//! 2. `schemars::schema_for!(T)` produces a `Schema` value at
+//!    runtime (Draft 2020-12).
+//! 3. The `serve_schema` / `serve_error_schema` handlers inject a
+//!    `$id` field (SC-4) and serve the result as JSON.
+//! 4. Snapshot tests in `introspect::tests` compare the raw
+//!    schemars output (without `$id`) against checked-in golden
+//!    files to detect drift (SC-2).
+//! 5. Validation tests confirm that real `NodePayload` samples
+//!    pass schema validation (SC-3).
+//!
+//! ## Regenerating snapshots
+//!
+//! After intentional type changes to `NodePayload`,
+//! `NodeProperties`, `FailureInfo`, `ApiError`, or
+//! `ApiErrorEnvelope`, regenerate the golden files:
+//!
+//! ```sh
+//! buck run fbcode//monarch/hyperactor_mesh:generate_schema_snapshot \
+//!   @fbcode//mode/dev-nosan -- \
+//!   fbcode/monarch/hyperactor_mesh/src/testdata
+//! ```
+//!
+//! Or via cargo:
+//!
+//! ```sh
+//! cargo run -p hyperactor_mesh --bin generate_schema_snapshot -- \
+//!   hyperactor_mesh/src/testdata
+//! ```
+//!
+//! Then re-run tests to confirm the new snapshot passes.
+//!
+//! ## Schema invariants (SC-*)
+//!
+//! - **SC-1 (schema-derived):** Schema is derived from Rust
+//!   types via `schemars::JsonSchema`, not hand-written.
+//! - **SC-2 (schema-snapshot-stability):** Schema changes must
+//!   be explicit — a snapshot test catches unintentional drift.
+//! - **SC-3 (schema-payload-conformance):** Real `NodePayload`
+//!   instances validate against the generated schema.
+//! - **SC-4 (schema-version-identity):** Served schemas carry a
+//!   `$id` tied to the API version (e.g.
+//!   `https://monarch.meta.com/schemas/v1/node_payload`).
+//! - **SC-5 (route-precedence):** Literal schema routes are
+//!   matched by specificity before the `{*reference}` wildcard
+//!   (axum 0.8 specificity-based routing).
+//!
+//! Note on `ApiError.details`: the derived schema is maximally
+//! permissive for `details` (any valid JSON). This is intentional
+//! for v1 — `details` is a domain-specific escape hatch.
+//! Consumers must not assume a fixed shape.
+//!
 //! # Introspection visibility policy
 //!
 //! Admin tooling only displays **introspectable** nodes: entities
@@ -318,19 +386,21 @@ fn max_concurrent_resolves() -> usize {
 
 /// Structured error response following the gateway RFC envelope
 /// pattern.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApiError {
     /// Machine-readable error code (e.g. "not_found", "bad_request").
     pub code: String,
     /// Human-readable error message.
     pub message: String,
-    /// Additional context about the error.
+    /// Additional context about the error. Schema is permissive
+    /// (any valid JSON) — `details` is a domain-specific escape
+    /// hatch. Do not assume a fixed shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
 }
 
 /// Wrapper for the structured error envelope.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApiErrorEnvelope {
     pub error: ApiError,
 }
@@ -1279,8 +1349,9 @@ impl MeshAdminAgent {
 
 /// Build the Axum router for the mesh admin HTTP server.
 ///
-/// Serves two routes, both backed by the introspection-based
-/// resolver:
+/// Routes:
+/// - `GET /v1/schema` — JSON Schema (Draft 2020-12) for `NodePayload`.
+/// - `GET /v1/schema/error` — JSON Schema for `ApiErrorEnvelope`.
 /// - `GET /v1/tree` — ASCII topology dump (walks the reference graph
 ///   and formats the result as a human-readable tree; intended for
 ///   quick `curl` inspection).
@@ -1291,8 +1362,10 @@ impl MeshAdminAgent {
 fn create_mesh_admin_router(bridge_state: Arc<BridgeState>) -> Router {
     Router::new()
         .route("/SKILL.md", get(serve_skill_md))
-        // `/v1/tree` is more specific than the wildcard and takes
-        // precedence in Axum's router.
+        // Schema routes use literal paths; axum matches these
+        // before the wildcard by specificity (SC-5).
+        .route("/v1/schema", get(serve_schema))
+        .route("/v1/schema/error", get(serve_error_schema))
         .route("/v1/tree", get(tree_dump))
         .route("/v1/{*reference}", get(resolve_reference_bridge))
         .with_state(bridge_state)
@@ -1321,6 +1394,36 @@ async fn serve_skill_md(headers: axum::http::HeaderMap) -> impl axum::response::
         )],
         body,
     )
+}
+
+/// Build a JSON Schema value with a `$id` field.
+fn schema_with_id<T: schemars::JsonSchema>(id: &str) -> Result<serde_json::Value, ApiError> {
+    let schema = schemars::schema_for!(T);
+    let mut value = serde_json::to_value(schema).map_err(|e| ApiError {
+        code: "internal_error".to_string(),
+        message: format!("failed to serialize schema: {e}"),
+        details: None,
+    })?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("$id".into(), serde_json::Value::String(id.into()));
+    }
+    Ok(value)
+}
+
+/// JSON Schema for the `NodePayload` response type.
+async fn serve_schema() -> Result<axum::response::Json<serde_json::Value>, ApiError> {
+    Ok(axum::response::Json(schema_with_id::<
+        crate::introspect::NodePayload,
+    >(
+        "https://monarch.meta.com/schemas/v1/node_payload",
+    )?))
+}
+
+/// JSON Schema for the `ApiErrorEnvelope` error response.
+async fn serve_error_schema() -> Result<axum::response::Json<serde_json::Value>, ApiError> {
+    Ok(axum::response::Json(schema_with_id::<ApiErrorEnvelope>(
+        "https://monarch.meta.com/schemas/v1/error",
+    )?))
 }
 
 /// Resolve an opaque reference string to a `NodePayload` via the
