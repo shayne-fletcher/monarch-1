@@ -27,6 +27,7 @@
     - [Unix](channels/transports/unix.md)
     - [MetaTLS](channels/transports/metatls.md)
   - [Frames](channels/frames.md)
+  - [Network Internals](channels/net_internals.md)
  - [Procs](procs/index.md)
    - [Proc](procs/proc.md)
    - [Host](procs/host.md)
