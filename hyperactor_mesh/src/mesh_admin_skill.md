@@ -20,8 +20,9 @@ The base URL may show `http://` but the server listens on
 
 The authoritative API contract is machine-readable:
 
-- `GET {base}/v1/schema` — JSON Schema for `NodePayload` responses.
-- `GET {base}/v1/schema/error` — JSON Schema for error responses.
+- `GET {base}/v1/openapi.json` — OpenAPI 3.1 spec
+- `GET {base}/v1/schema` — JSON Schema for `NodePayload` responses
+- `GET {base}/v1/schema/error` — JSON Schema for error responses
 
 Schema is authoritative over prose in this document. Fetch schema
 first when building against this API.
@@ -75,6 +76,9 @@ except `/SKILL.md` (`text/markdown`).
 
 - `GET {base}/v1/schema/error`
   JSON Schema for error envelope.
+
+- `GET {base}/v1/openapi.json`
+  OpenAPI 3.1 spec (embeds JSON Schemas, full response mapping).
 
 - `GET {base}/v1/root`
   Returns the synthetic root `NodePayload`.
