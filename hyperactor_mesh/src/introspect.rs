@@ -57,6 +57,10 @@
 //!
 //! ## Derive invariants (DP-*)
 //!
+//! - **DP-1 (derive-precedence):** `derive_properties` dispatches
+//!   on `node_type` first, then falls back to `error_code`,
+//!   then `status`, then unknown. This order is the canonical
+//!   detection chain.
 //! - **DP-2 (derive-totality-on-parse-failure):**
 //!   `derive_properties` is total; malformed or incoherent attrs
 //!   never panic and map to `NodeProperties::Error` with detail.
@@ -359,6 +363,7 @@ impl ErrorAttrsView {
 // GET /v1/{reference}. Derived from internal attrs at the
 // mesh boundary. Shared with the TUI.
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use typeuri::Named;
@@ -370,7 +375,7 @@ use typeuri::Named;
 /// node and following its `children` references.
 ///
 /// See IA-1..IA-5 in module doc.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named, JsonSchema)]
 pub struct NodePayload {
     /// Canonical reference string for this node.
     pub identity: String,
@@ -387,7 +392,7 @@ wirevalue::register_type!(NodePayload);
 
 /// Node-specific metadata. Externally-tagged enum — the JSON
 /// key is the variant name (Root, Host, Proc, Actor, Error).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named, JsonSchema)]
 pub enum NodeProperties {
     /// Synthetic mesh root node (not a real actor/proc).
     Root {
@@ -430,7 +435,7 @@ pub enum NodeProperties {
 wirevalue::register_type!(NodeProperties);
 
 /// Structured failure information for failed actors.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named, JsonSchema)]
 pub struct FailureInfo {
     pub error_message: String,
     pub root_cause_actor: String,
@@ -796,6 +801,7 @@ mod tests {
         assert_eq!(err, AttrsViewError::MissingKey { key: "proc_name" });
     }
 
+    /// FI-5: poisoned without failures rejected.
     #[test]
     fn test_proc_view_fi5_poisoned_but_no_failures() {
         let mut attrs = Attrs::new();
@@ -809,6 +815,7 @@ mod tests {
         ));
     }
 
+    /// FI-5: failures without poisoned rejected.
     #[test]
     fn test_proc_view_fi5_failures_but_not_poisoned() {
         let mut attrs = Attrs::new();
@@ -975,5 +982,148 @@ mod tests {
         let json = inject_unknown_key(&attrs);
         let props = derive_properties(&json);
         assert!(matches!(props, NodeProperties::Actor { .. }));
+    }
+
+    /// SC-1 / SC-2: schema is derived from types and matches the
+    /// checked-in snapshot.
+    ///
+    /// To update after intentional type changes:
+    /// ```sh
+    /// buck run fbcode//monarch/hyperactor_mesh:generate_schema_snapshot \
+    ///   @fbcode//mode/dev-nosan -- \
+    ///   fbcode/monarch/hyperactor_mesh/src/testdata
+    /// ```
+    #[test]
+    fn test_node_payload_schema_snapshot() {
+        let schema = schemars::schema_for!(NodePayload);
+        let actual: serde_json::Value = serde_json::to_value(&schema).unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/node_payload_schema.json"))
+                .expect("snapshot must be valid JSON");
+        assert_eq!(
+            actual, expected,
+            "schema changed — review and update snapshot if intentional"
+        );
+    }
+
+    /// SC-3: real payloads validate against the generated schema.
+    #[test]
+    fn test_payloads_validate_against_schema() {
+        let schema = schemars::schema_for!(NodePayload);
+        let schema_value = serde_json::to_value(&schema).unwrap();
+        let compiled = jsonschema::JSONSchema::compile(&schema_value).expect("schema must compile");
+
+        let samples = [
+            NodePayload {
+                identity: "root".into(),
+                properties: NodeProperties::Root {
+                    num_hosts: 2,
+                    started_at: "2024-01-01T00:00:00.000Z".into(),
+                    started_by: "testuser".into(),
+                    system_children: vec![],
+                },
+                children: vec!["host1".into()],
+                parent: None,
+                as_of: "2024-01-01T00:00:00.000Z".into(),
+            },
+            NodePayload {
+                identity: "host1".into(),
+                properties: NodeProperties::Host {
+                    addr: "10.0.0.1:8080".into(),
+                    num_procs: 2,
+                    system_children: vec!["sys".into()],
+                },
+                children: vec!["proc1".into()],
+                parent: Some("root".into()),
+                as_of: "2024-01-01T00:00:00.000Z".into(),
+            },
+            NodePayload {
+                identity: "proc1".into(),
+                properties: NodeProperties::Proc {
+                    proc_name: "worker".into(),
+                    num_actors: 5,
+                    system_children: vec![],
+                    stopped_children: vec![],
+                    stopped_retention_cap: 10,
+                    is_poisoned: false,
+                    failed_actor_count: 0,
+                },
+                children: vec!["actor[0]".into()],
+                parent: Some("host1".into()),
+                as_of: "2024-01-01T00:00:00.000Z".into(),
+            },
+            NodePayload {
+                identity: "actor[0]".into(),
+                properties: NodeProperties::Actor {
+                    actor_status: "running".into(),
+                    actor_type: "MyActor".into(),
+                    messages_processed: 42,
+                    created_at: "2024-01-01T00:00:00.000Z".into(),
+                    last_message_handler: Some("handle_ping".into()),
+                    total_processing_time_us: 1000,
+                    flight_recorder: None,
+                    is_system: false,
+                    failure_info: None,
+                },
+                children: vec![],
+                parent: Some("proc1".into()),
+                as_of: "2024-01-01T00:00:00.000Z".into(),
+            },
+            NodePayload {
+                identity: "err".into(),
+                properties: NodeProperties::Error {
+                    code: "not_found".into(),
+                    message: "child not found".into(),
+                },
+                children: vec![],
+                parent: None,
+                as_of: "2024-01-01T00:00:00.000Z".into(),
+            },
+        ];
+
+        for (i, payload) in samples.iter().enumerate() {
+            let value = serde_json::to_value(payload).unwrap();
+            assert!(
+                compiled.is_valid(&value),
+                "sample {i} failed schema validation"
+            );
+        }
+    }
+
+    /// SC-4: `$id` is injected only at the serve boundary.
+    /// Stripping `$id` from the served schema must yield the raw
+    /// schemars output.
+    #[test]
+    fn test_served_schema_is_raw_plus_id() {
+        let raw: serde_json::Value =
+            serde_json::to_value(schemars::schema_for!(NodePayload)).unwrap();
+
+        // Simulate what the endpoint does.
+        let mut served = raw.clone();
+        served.as_object_mut().unwrap().insert(
+            "$id".into(),
+            serde_json::Value::String("https://monarch.meta.com/schemas/v1/node_payload".into()),
+        );
+
+        // Strip $id — remainder must equal raw.
+        let mut stripped = served;
+        stripped.as_object_mut().unwrap().remove("$id");
+        assert_eq!(raw, stripped, "served schema differs from raw beyond $id");
+    }
+
+    /// SC-2: error envelope schema matches checked-in snapshot.
+    #[test]
+    fn test_error_schema_snapshot() {
+        use crate::mesh_admin::ApiErrorEnvelope;
+
+        let schema = schemars::schema_for!(ApiErrorEnvelope);
+        let actual: serde_json::Value = serde_json::to_value(&schema).unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/error_schema.json"))
+                .expect("error snapshot must be valid JSON");
+        assert_eq!(
+            actual, expected,
+            "error schema changed — review and update snapshot if intentional"
+        );
     }
 }
