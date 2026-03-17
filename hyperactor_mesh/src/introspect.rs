@@ -41,6 +41,9 @@
 //!   effective status is `failed`.
 //! - **IA-5 (payload-totality):** Every `IntrospectResult` sets
 //!   `attrs` -- never omitted, never null.
+//! - **IA-6 (open-row-forward-compat):** View decoders ignore
+//!   unknown attrs keys; only required known keys and local
+//!   invariants affect decoding outcome. Concretized by AV-3.
 //!
 //! ## Attrs view invariants (AV-*)
 //!
@@ -72,11 +75,25 @@
 //!   `NodeProperties::Error` with a `malformed_*` code family,
 //!   without panic.
 //!
-//! ## Open-row invariant (IA-6)
+//! ## py-spy integration (PS-*)
 //!
-//! - **IA-6 (open-row-forward-compat):** View decoders ignore
-//!   unknown attrs keys; only required known keys and local
-//!   invariants affect decoding outcome. Concretized by AV-3.
+//! - **PS-1 (target locality):** `PySpyDump` always targets
+//!   `std::process::id()` of the handling ProcAgent process. No
+//!   caller-supplied PID exists in the API.
+//! - **PS-2 (deterministic failure shape):** Execution failures are
+//!   classified into `BinaryNotFound { searched }` vs
+//!   `Failed { pid, binary, exit_code, stderr }`, never collapsed.
+//! - **PS-3 (binary resolution order):** Resolution order is exactly:
+//!   `PYSPY_BIN` (if set and non-empty) then `"py-spy"` on PATH.
+//!   If the first attempt is not found, the fallback attempt is
+//!   required.
+//! - **PS-4 (raw output passthrough):** On success, `stack` is raw
+//!   py-spy stdout text; no parsing, no transformation.
+//! - **PS-5 (subprocess timeout):** `try_exec` bounds subprocess
+//!   execution to `SUBPROCESS_TIMEOUT`. On expiry, the child is
+//!   killed and reaped, and the handler returns
+//!   `Failed { stderr: "py-spy subprocess timed out after Ns" }`
+//!   rather than blocking the ProcAgent indefinitely.
 
 use hyperactor_config::Attrs;
 use hyperactor_config::INTROSPECT;
