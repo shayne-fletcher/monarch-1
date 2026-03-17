@@ -89,11 +89,26 @@
 //!   required.
 //! - **PS-4 (raw output passthrough):** On success, `stack` is raw
 //!   py-spy stdout text; no parsing, no transformation.
-//! - **PS-5 (subprocess timeout):** `try_exec` bounds subprocess
-//!   execution to `SUBPROCESS_TIMEOUT`. On expiry, the child is
-//!   killed and reaped, and the handler returns
-//!   `Failed { stderr: "py-spy subprocess timed out after Ns" }`
+//! - **PS-5 (subprocess timeout):** `try_exec` kills and reaps the
+//!   py-spy child after `MESH_ADMIN_PYSPY_TIMEOUT`, returning `Failed`
 //!   rather than blocking the ProcAgent indefinitely.
+//! - **PS-6 (bridge timeout):** The HTTP bridge uses a separate
+//!   `MESH_ADMIN_PYSPY_BRIDGE_TIMEOUT` (default 7s), which must
+//!   exceed `MESH_ADMIN_PYSPY_TIMEOUT` so the subprocess kill/reap
+//!   and reply can arrive before the bridge declares
+//!   `gateway_timeout`. Independent of
+//!   `MESH_ADMIN_SINGLE_HOST_TIMEOUT`.
+//!
+//! v1 contract note: the current py-spy bridge expects a ProcId-form
+//! reference and rejects other forms as `bad_request`. This may be
+//! broadened in future versions.
+//!
+//! ## Mesh-admin config (MA-*)
+//!
+//! - **MA-C1 (timeout config centralization):** Mesh-admin timeout
+//!   budgets are read from config attrs at call-time, with defaults
+//!   in `config.rs`. No hardcoded timeout constants in
+//!   `mesh_admin.rs`.
 
 use hyperactor_config::Attrs;
 use hyperactor_config::INTROSPECT;
@@ -1010,7 +1025,7 @@ mod tests {
     ///   @fbcode//mode/dev-nosan -- \
     ///   fbcode/monarch/hyperactor_mesh/src/testdata
     /// ```
-    /// Strip the `$comment` field (containing the `@generated` marker)
+    /// Strip the `$comment` field (containing the @\u{200B}generated marker)
     /// from a JSON value so snapshot comparisons ignore it.
     fn strip_comment(mut value: serde_json::Value) -> serde_json::Value {
         if let Some(obj) = value.as_object_mut() {
