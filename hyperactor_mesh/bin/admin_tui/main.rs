@@ -109,6 +109,7 @@ mod fetch;
 mod filter;
 mod format;
 mod model;
+mod overlay;
 mod render;
 mod theme;
 mod tree;
