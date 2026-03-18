@@ -33,30 +33,6 @@ pub(crate) struct Overlay {
 }
 
 impl Overlay {
-    /// Create a new overlay in loading state.
-    pub fn loading(title: impl Into<Line<'static>>) -> Self {
-        Self {
-            title: title.into(),
-            status_line: None,
-            lines: vec![],
-            loading: true,
-            scroll: Cell::new(0),
-            max_scroll: Cell::new(u16::MAX),
-        }
-    }
-
-    /// Create a new overlay with content ready.
-    pub fn ready(title: impl Into<Line<'static>>, lines: Vec<Line<'static>>) -> Self {
-        Self {
-            title: title.into(),
-            status_line: None,
-            lines,
-            loading: false,
-            scroll: Cell::new(0),
-            max_scroll: Cell::new(u16::MAX),
-        }
-    }
-
     /// Scroll up by one line.
     pub fn scroll_up(&self) {
         self.scroll.set(self.scroll.get().saturating_sub(1));
