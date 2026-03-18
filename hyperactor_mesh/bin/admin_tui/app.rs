@@ -22,9 +22,15 @@ use hyperactor_mesh::introspect::NodePayload;
 use hyperactor_mesh::introspect::NodeProperties;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::style::Modifier;
+use ratatui::style::Style;
+use ratatui::text::Line;
+use ratatui::text::Span;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 use crate::Args;
+use crate::ColorScheme;
 use crate::Cursor;
 use crate::FetchState;
 use crate::KeyResult;
@@ -127,6 +133,14 @@ pub(crate) struct App {
     /// Local time at which the last diagnostic run completed
     /// (`HH:MM:SS`). `None` while running or before any run.
     pub(crate) diag_completed_at: Option<String>,
+    /// In-flight py-spy oneshot receiver. `None` when idle or when
+    /// the active overlay is not a py-spy overlay (PY-2).
+    pub(crate) pyspy_rx: Option<oneshot::Receiver<Vec<Line<'static>>>>,
+    /// Short proc label for the active py-spy overlay title.
+    /// Mirrors `diag_completed_at` in purpose: retained so the
+    /// `recv_pyspy` arm can rebuild a fully-styled title on result
+    /// arrival without re-parsing the existing title string.
+    pub(crate) pyspy_short: Option<String>,
     /// Active overlay (py-spy, config, or diagnostics content).
     /// When `Some`, the detail pane renders the overlay instead of
     /// node details. Dismissed with Esc, scrolled with j/k.
@@ -169,6 +183,8 @@ impl App {
             diag_running: false,
             diag_rx: None,
             diag_completed_at: None,
+            pyspy_rx: None,
+            pyspy_short: None,
             overlay: None,
         }
     }
@@ -595,6 +611,82 @@ impl App {
         // Otherwise, cursor is visible - keep offset unchanged.
     }
 
+    /// Return the proc reference to use for a py-spy request given the
+    /// current cursor position.
+    ///
+    /// - Proc selected → proc's own reference.
+    /// - Actor selected → owning proc from `detail.parent`.
+    /// - Root/Host selected → `None` (PY-4).
+    pub(crate) fn pyspy_proc_ref(&self) -> Option<String> {
+        let rows = self.visible_rows();
+        let row = rows.get(&self.cursor)?;
+        match row.node.node_type {
+            NodeType::Proc => Some(row.node.reference.clone()),
+            NodeType::Actor => self.detail.as_ref().and_then(|p| p.parent.clone()),
+            _ => None,
+        }
+    }
+
+    /// Open a py-spy loading overlay and spawn the one-shot HTTP fetch.
+    ///
+    /// Assigns `self.pyspy_rx = Some(rx)`, which drops any prior
+    /// receiver and cancels any prior in-flight fetch (PY-1/PY-2).
+    pub(crate) fn start_pyspy(&mut self, proc_ref: String) {
+        let short = proc_ref
+            .split(',')
+            .next_back()
+            .unwrap_or(&proc_ref)
+            .to_string();
+        let sep = self.theme.labels.separator;
+        let scheme = self.theme.scheme; // ColorScheme: Copy
+        // Mirror the diagnostics overlay structure: bold name + info "Running…"
+        // in the title, and a pinned status line showing "Running… • fetching
+        // stack trace" (PY-3).
+        self.pyspy_short = Some(short.clone());
+        self.overlay = Some(Overlay {
+            title: Line::from(vec![
+                Span::styled(
+                    format!("py-spy: {short}"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{sep}{}", self.theme.labels.diag_running),
+                    scheme.info,
+                ),
+            ]),
+            status_line: Some(Line::from(vec![
+                Span::styled(self.theme.labels.diag_running, scheme.info),
+                Span::styled(format!("{sep}fetching stack trace"), scheme.detail_label),
+            ])),
+            lines: vec![],
+            loading: true,
+            scroll: std::cell::Cell::new(0),
+            max_scroll: std::cell::Cell::new(u16::MAX),
+        });
+        let client = self.client.clone();
+        let base_url = self.base_url.clone();
+        let (tx, rx) = oneshot::channel();
+        self.pyspy_rx = Some(rx);
+        tokio::spawn(async move {
+            let url = format!("{}/v1/pyspy/{}", base_url, urlencoding::encode(&proc_ref));
+            let lines: Vec<Line<'static>> = match client.get(&url).send().await {
+                Err(e) => vec![Line::from(format!("request failed: {e}"))],
+                Ok(resp) if !resp.status().is_success() => {
+                    let status = resp.status();
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(json) => parse_error_envelope(&json),
+                        Err(_) => vec![Line::from(format!("HTTP {status}"))],
+                    }
+                }
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Err(e) => vec![Line::from(format!("parse error: {e}"))],
+                    Ok(json) => pyspy_json_to_lines(&json, &scheme),
+                },
+            };
+            let _ = tx.send(lines);
+        });
+    }
+
     /// Handle a single keypress and update in-memory UI state.
     ///
     /// Returns a `KeyResult` describing whether only the
@@ -611,6 +703,8 @@ impl App {
                     self.diag_running = false;
                     self.diag_rx = None;
                     self.diag_completed_at = None;
+                    self.pyspy_rx = None; // PY-5
+                    self.pyspy_short = None;
                     self.overlay = None;
                 }
                 KeyCode::Char('q') => {
@@ -642,6 +736,8 @@ impl App {
         if let Some(overlay) = &self.overlay {
             match key.code {
                 KeyCode::Esc => {
+                    self.pyspy_rx = None; // PY-2/PY-5
+                    self.pyspy_short = None;
                     self.overlay = None;
                 }
                 KeyCode::Char('q') => {
@@ -655,6 +751,11 @@ impl App {
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     overlay.scroll_down();
+                }
+                KeyCode::Char('p') => {
+                    if let Some(proc_ref) = self.pyspy_proc_ref() {
+                        return KeyResult::RunPySpy(proc_ref);
+                    }
                 }
                 _ => {}
             }
@@ -785,6 +886,13 @@ impl App {
                 // Open diagnostics pane (Esc to close, j/k to scroll).
                 KeyResult::RunDiagnostics
             }
+            KeyCode::Char('p') => {
+                if let Some(proc_ref) = self.pyspy_proc_ref() {
+                    KeyResult::RunPySpy(proc_ref)
+                } else {
+                    KeyResult::None
+                }
+            }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 // Page up (Ctrl+U, vi-style)
                 if self.cursor.page_up(10) {
@@ -817,6 +925,142 @@ impl App {
     }
 }
 
+/// Parse an `ApiErrorEnvelope` JSON body into a single display line.
+///
+/// Renders `"code: message"` from `{ "error": { "code": ..., "message": ... } }`.
+/// Falls back to `"unknown: "` when either field is absent.
+pub(crate) fn parse_error_envelope(json: &serde_json::Value) -> Vec<Line<'static>> {
+    let code = json
+        .get("error")
+        .and_then(|e| e.get("code"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("unknown");
+    let msg = json
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    vec![Line::from(format!("{code}: {msg}"))]
+}
+
+/// Format a py-spy JSON response into styled display lines.
+///
+/// ## Ok variant
+/// Renders a two-field metadata header (`pid` / `binary` basename),
+/// a blank separator, then the stack with thread-header lines styled
+/// using `scheme.node_proc` and indented frame lines styled using
+/// `scheme.node_actor`. `Process N: ...` banner lines emitted by
+/// py-spy are suppressed because the metadata header already contains
+/// that information.
+pub(crate) fn pyspy_json_to_lines(
+    json: &serde_json::Value,
+    scheme: &ColorScheme,
+) -> Vec<Line<'static>> {
+    if let Some(ok) = json.get("Ok") {
+        let pid = ok.get("pid").and_then(|v| v.as_u64());
+        let binary = ok
+            .get("binary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("py-spy");
+        // Show only the basename to avoid dominating the overlay with a long
+        // absolute path (the full path is accessible via the node detail pane).
+        let binary_name = std::path::Path::new(binary)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(binary)
+            .to_owned();
+        let stack = ok.get("stack").and_then(|s| s.as_str()).unwrap_or("");
+
+        let mut lines: Vec<Line<'static>> = vec![];
+
+        // Metadata header: "pid: N  binary: name"
+        let mut header: Vec<Span<'static>> = vec![];
+        if let Some(p) = pid {
+            header.push(Span::styled("pid: ", scheme.detail_label));
+            header.push(Span::raw(p.to_string()));
+            header.push(Span::raw("  "));
+        }
+        header.push(Span::styled("binary: ", scheme.detail_label));
+        header.push(Span::raw(binary_name));
+        lines.push(Line::from(header));
+        lines.push(Line::from("")); // blank separator
+
+        if stack.is_empty() {
+            lines.push(Line::from("(empty stack)"));
+            return lines;
+        }
+
+        for l in stack.lines() {
+            // Suppress the "Process N: /very/long/path ..." banner that
+            // py-spy emits at the top of the output — pid and binary are
+            // already shown in the metadata header above.
+            if l.starts_with("Process ") {
+                continue;
+            }
+            if l.starts_with(|c: char| c.is_whitespace()) {
+                // Indented stack frame line
+                lines.push(Line::from(Span::styled(l.to_owned(), scheme.node_actor)));
+            } else {
+                // Thread header or other top-level line
+                lines.push(Line::from(Span::styled(l.to_owned(), scheme.node_proc)));
+            }
+        }
+        return lines;
+    }
+    if let Some(nf) = json.get("BinaryNotFound") {
+        let mut lines = vec![Line::from(Span::styled(
+            "py-spy binary not found",
+            scheme.error,
+        ))];
+        if let Some(arr) = nf.get("searched").and_then(|s| s.as_array()) {
+            for p in arr {
+                if let Some(s) = p.as_str() {
+                    lines.push(Line::from(vec![
+                        Span::styled("  searched: ", scheme.detail_label),
+                        Span::raw(s.to_owned()),
+                    ]));
+                }
+            }
+        }
+        return lines;
+    }
+    if let Some(failed) = json.get("Failed") {
+        let mut lines = vec![];
+        if let Some(pid) = failed.get("pid").and_then(|v| v.as_u64()) {
+            lines.push(Line::from(vec![
+                Span::styled("pid: ", scheme.detail_label),
+                Span::raw(pid.to_string()),
+            ]));
+        }
+        if let Some(binary) = failed.get("binary").and_then(|v| v.as_str()) {
+            lines.push(Line::from(vec![
+                Span::styled("binary: ", scheme.detail_label),
+                Span::raw(binary.to_owned()),
+            ]));
+        }
+        match failed.get("exit_code") {
+            Some(v) if v.is_null() => lines.push(Line::from(vec![
+                Span::styled("exit_code: ", scheme.detail_label),
+                Span::styled("(killed/timeout)", scheme.detail_status_warn),
+            ])),
+            Some(v) => lines.push(Line::from(vec![
+                Span::styled("exit_code: ", scheme.detail_label),
+                Span::styled(v.to_string(), scheme.error),
+            ])),
+            None => {}
+        }
+        let stderr = failed.get("stderr").and_then(|s| s.as_str()).unwrap_or("");
+        for l in stderr.lines() {
+            lines.push(Line::from(l.to_owned()));
+        }
+        if lines.is_empty() {
+            lines.push(Line::from("(py-spy failed, no output)"));
+        }
+        return lines;
+    }
+    vec![Line::from(format!("unexpected response: {json}"))]
+}
+
 /// Receive the next diagnostic result if a run is in progress.
 ///
 /// Returns `std::future::pending()` when `rx` is `None` so the
@@ -825,6 +1069,19 @@ impl App {
 async fn recv_diag(rx: &mut Option<mpsc::Receiver<DiagResult>>) -> Option<DiagResult> {
     match rx {
         Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Receive the py-spy result when an in-flight fetch completes.
+///
+/// Returns `std::future::pending()` when `rx` is `None` (PY-5).
+async fn recv_pyspy(rx: &mut Option<oneshot::Receiver<Vec<Line<'static>>>>) -> Vec<Line<'static>> {
+    match rx {
+        Some(inner) => match inner.await {
+            Ok(lines) => lines,
+            Err(_) => vec![Line::from("(fetch task dropped)")],
+        },
         None => std::future::pending().await,
     }
 }
@@ -884,11 +1141,15 @@ pub(crate) async fn run_app(
                                 app.diag_running = true;
                                 app.diag_results.clear();
                                 app.diag_completed_at = None;
+                                app.pyspy_rx = None; // PY-5
                                 app.diag_rx = Some(run_diagnostics(
                                     app.client.clone(),
                                     app.base_url.clone(),
                                 ));
                                 app.overlay = Some(crate::render::detail_pane::build_diag_overlay(&app));
+                            }
+                            KeyResult::RunPySpy(proc_ref) => {
+                                app.start_pyspy(proc_ref);
                             }
                             KeyResult::None => {}
                         }
@@ -911,6 +1172,34 @@ pub(crate) async fn run_app(
                         );
                         app.overlay = Some(crate::render::detail_pane::build_diag_overlay(&app));
                     }
+                }
+            }
+            lines = recv_pyspy(&mut app.pyspy_rx) => {
+                app.pyspy_rx = None;
+                if let Some(ov) = &mut app.overlay {
+                    // Rebuild the title with the capture timestamp and clear
+                    // the "Running…" status line — mirrors the diagnostics
+                    // overlay's completed-at presentation (PY-3).
+                    let ts = Local::now().format("%H:%M:%S").to_string();
+                    let short = app.pyspy_short.as_deref().unwrap_or("proc");
+                    let sep = app.theme.labels.separator;
+                    let scheme = app.theme.scheme;
+                    ov.title = Line::from(vec![
+                        Span::styled(
+                            format!("py-spy: {short}"),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{sep}{}", app.theme.labels.diag_completed_at),
+                            scheme.detail_label,
+                        ),
+                        Span::raw(" "),
+                        Span::styled(ts, scheme.stat_timing),
+                    ]);
+                    ov.status_line = None;
+                    ov.lines = lines;
+                    ov.loading = false;
+                    ov.scroll.set(0);
                 }
             }
         }
