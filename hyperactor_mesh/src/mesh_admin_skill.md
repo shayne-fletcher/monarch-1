@@ -240,3 +240,36 @@ Compare across sessions. A score regression after a SKILL.md
 change means the edit made the document harder to follow. A
 score regression after a server change means the API or schema
 drifted. Use the schema `$id` to correlate.
+
+## py-spy validation
+
+Automated integration test (runs all three modes — cpu, block,
+mixed — sequentially):
+
+```
+buck2 test fbcode//monarch/hyperactor_mesh:pyspy_integration_test
+```
+
+Manual verification against a live mesh:
+
+1. Start the py-spy workload:
+
+```
+buck2 run fbcode//monarch/python/examples:pyspy_workload -- \
+  --mode cpu --work-ms 500 --concurrency 3
+```
+
+2. Run the verification script (exit codes: 0 PASS, 1 FAIL,
+   2 SKIP when py-spy is unavailable):
+
+```
+buck2 run fbcode//monarch/python/examples:verify_pyspy -- \
+  --admin-url <url> --mode cpu --samples 10 \
+  --cacert /var/facebook/rootcanal/ca.pem \
+  --cert /var/facebook/x509_identities/server.pem \
+  --key /var/facebook/x509_identities/server.pem
+```
+
+Modes: `cpu` (iterative CPU burn), `block` (blocking sleep),
+`mixed` (alternating CPU + async). The verifier checks for
+mode-specific evidence frames in py-spy stacks.
