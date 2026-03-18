@@ -26,6 +26,7 @@ use ratatui::widgets::Borders;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 
+use crate::ActiveJob;
 use crate::App;
 use crate::diagnostics::DiagNodeRole;
 use crate::diagnostics::DiagOutcome;
@@ -448,23 +449,37 @@ fn render_actor_detail(
     frame.render_widget(recorder, chunks[1]);
 }
 
-/// Render the live self-diagnostic pane.
-///
-/// Shows phase-separated probe results as they stream in. While the
-/// run is still in progress a "Running…" indicator is shown; once
-/// complete a summary line reports overall health.
 /// Build an `Overlay` from the current diagnostics state.
 ///
 /// Called after each diagnostic result arrives and when diagnostics
-/// completes, to keep `app.overlay` in sync with `app.diag_results`.
+/// completes, to keep `app.overlay` in sync with `ActiveJob::Diagnostics`.
 pub(crate) fn build_diag_overlay(app: &App) -> crate::overlay::Overlay {
+    let (results, running, completed_at) = match &app.active_job {
+        Some(ActiveJob::Diagnostics {
+            results,
+            running,
+            completed_at,
+            ..
+        }) => (results.as_slice(), *running, completed_at.as_deref()),
+        _ => {
+            // Should not happen (TUI-21), but return an empty overlay as fallback.
+            return crate::overlay::Overlay {
+                title: Line::from("Diagnostics"),
+                status_line: None,
+                lines: vec![],
+                loading: false,
+                scroll: std::cell::Cell::new(0),
+                max_scroll: std::cell::Cell::new(0),
+            };
+        }
+    };
+
     let scheme = &app.theme.scheme;
     let labels = &app.theme.labels;
-    let results = &app.diag_results;
     let sep = labels.separator;
 
     // Title line.
-    let title = if app.diag_running {
+    let title = if running {
         Line::from(vec![
             Span::styled(
                 labels.pane_diagnostics,
@@ -472,7 +487,7 @@ pub(crate) fn build_diag_overlay(app: &App) -> crate::overlay::Overlay {
             ),
             Span::styled(format!("{}{}", sep, labels.diag_running), scheme.info),
         ])
-    } else if let Some(t) = &app.diag_completed_at {
+    } else if let Some(t) = completed_at {
         Line::from(vec![
             Span::styled(
                 labels.pane_diagnostics,
@@ -483,7 +498,7 @@ pub(crate) fn build_diag_overlay(app: &App) -> crate::overlay::Overlay {
                 scheme.detail_label,
             ),
             Span::raw(" "),
-            Span::styled(t.clone(), scheme.stat_timing),
+            Span::styled(t.to_string(), scheme.stat_timing),
             Span::styled(
                 format!("{}{}", sep, labels.diag_static_snapshot),
                 scheme.detail_stopped,
@@ -494,7 +509,7 @@ pub(crate) fn build_diag_overlay(app: &App) -> crate::overlay::Overlay {
     };
 
     // Pinned status line.
-    let status_line = if app.diag_running {
+    let status_line = if running {
         Line::from(vec![
             Span::styled(labels.diag_running, scheme.info),
             Span::styled(
@@ -576,7 +591,7 @@ pub(crate) fn build_diag_overlay(app: &App) -> crate::overlay::Overlay {
         title,
         status_line: Some(status_line),
         lines,
-        loading: app.diag_running,
+        loading: running,
         scroll: std::cell::Cell::new(0),
         max_scroll: std::cell::Cell::new(u16::MAX),
     };

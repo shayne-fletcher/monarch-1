@@ -84,19 +84,21 @@
 //! - **TUI-T3 (scheme-inclusive-url):** `base_url` always starts
 //!   with `http://` or `https://`; bare `host:port` is resolved to
 //!   a scheme during client construction, never stored schemeless.
+//! - **TUI-21 (job-overlay-coherence):** `active_job.is_some() ↔
+//!   overlay.is_some()`. Both are set and cleared together. Makes it
+//!   structurally impossible to have an orphaned overlay or a running
+//!   job with no display surface.
 //!
 //! Py-spy overlay invariants:
 //!
 //! - **PY-1 (fresh-trace):** Every `p` press issues a new HTTP
 //!   fetch; no cached py-spy result is ever reused.
 //! - **PY-2 (overlay-ownership):** A py-spy result may only populate
-//!   a still-valid active py-spy overlay. Stale in-flight results are
-//!   invalidated by dropping `pyspy_rx` on dismissal or replacement.
-//!   Correctness depends entirely on `pyspy_rx` being `None` whenever
-//!   the active overlay is not a py-spy overlay. This is enforced at
-//!   three explicit cancellation sites and implicitly by
-//!   `start_pyspy` itself: assigning `pyspy_rx = Some(rx)` drops any
-//!   prior receiver, canceling the previous in-flight fetch.
+//!   a still-valid active py-spy overlay. Stale results are
+//!   invalidated structurally: `active_job` carries the receiver
+//!   inside the `PySpy` variant, so replacing or clearing `active_job`
+//!   drops the receiver and cancels any in-flight fetch. TUI-21
+//!   guarantees `active_job` is always `None` when `overlay` is `None`.
 //! - **PY-3 (replacement):** Opening or refreshing py-spy replaces
 //!   prior overlay content and resets scroll to zero on result
 //!   arrival.
@@ -104,10 +106,10 @@
 //!   targets the proc ref directly on Proc; targets the owning proc
 //!   via `detail.parent` on Actor.
 //! - **PY-5 (overlay-isolation):** Diagnostics and py-spy overlays
-//!   must not write into each other's display surface. Enforced by:
-//!   `RunDiagnostics` handler clears `pyspy_rx` before setting the
-//!   diag overlay; Esc in both overlay guards clears `pyspy_rx`;
-//!   `recv_pyspy` fires only while `pyspy_rx` is `Some`.
+//!   must not write into each other's display surface. Enforced by
+//!   `active_job`: `RunDiagnostics` assigns the `Diagnostics` variant
+//!   (dropping any live `PySpy` receiver); Esc clears `active_job`;
+//!   `recv_active_job` fires only for the variant currently stored.
 //!
 //! Laziness + recursion benefits:
 //! - **Lazy expansion**: proc/actor children are placeholders until
@@ -132,6 +134,7 @@ mod diagnostics;
 mod fetch;
 mod filter;
 mod format;
+mod job;
 mod model;
 mod overlay;
 mod render;
@@ -165,6 +168,7 @@ pub(crate) use hyperactor_mesh::introspect::NodePayload;
 pub(crate) use hyperactor_mesh::introspect::NodeProperties;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
+pub(crate) use job::*;
 pub(crate) use model::*;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
