@@ -58,7 +58,14 @@ impl PySpyRunner {
 
         for (binary, label) in &candidates {
             searched.push(label.clone());
-            if let Some(result) = try_exec(binary, pid, threads, SUBPROCESS_TIMEOUT).await {
+            if let Some(result) = try_exec(
+                binary,
+                pid,
+                threads,
+                hyperactor_config::global::get(crate::config::MESH_ADMIN_PYSPY_TIMEOUT),
+            )
+            .await
+            {
                 return result;
             }
         }
@@ -113,11 +120,6 @@ fn map_output(output: std::process::Output, pid: u32, binary: &str) -> PySpyResu
         }
     }
 }
-
-/// Subprocess timeout for py-spy execution. Ensures a hung py-spy
-/// child is killed rather than blocking the ProcAgent handler
-/// indefinitely.
-const SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Try to execute py-spy with the given binary path. Returns `None`
 /// if the binary was not found (NotFound error), allowing the caller

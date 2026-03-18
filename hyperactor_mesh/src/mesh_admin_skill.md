@@ -89,6 +89,19 @@ except `/SKILL.md` (`text/markdown`).
 - `GET {base}/v1/tree`
   Human-readable ASCII topology dump (convenience endpoint).
 
+- `GET {base}/v1/pyspy/{proc_reference}`
+  Requests a py-spy stack dump from the process hosting
+  `{proc_reference}`. The reference must be a valid ProcId
+  (percent-encoded in the URL path). Requires py-spy in the
+  target environment and ptrace permissions.
+
+  Success returns a `PySpyResult` JSON variant:
+  - `{"Ok": {"pid": N, "binary": "...", "stack": "..."}}` — stack dump
+  - `{"BinaryNotFound": {"searched": [...]}}` — py-spy not available
+  - `{"Failed": {"pid": N, "binary": "...", "exit_code": N, "stderr": "..."}}` — py-spy error
+
+  Timeout returns the standard `gateway_timeout` error envelope.
+
 - `GET {base}/SKILL.md`
   This document.
 
