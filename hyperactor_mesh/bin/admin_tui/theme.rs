@@ -393,6 +393,7 @@ impl Labels {
 /// - **States**: Error, warning, success, stopped
 /// - **Header stats**: Timing, topology counts, selection, config
 /// - **Detail pane**: Labels, status indicators
+#[derive(Clone, Copy)]
 pub(crate) struct ColorScheme {
     // UI chrome
     pub(crate) app_name: Style,

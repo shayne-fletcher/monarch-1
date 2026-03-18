@@ -572,7 +572,7 @@ pub(crate) fn build_diag_overlay(app: &App) -> crate::overlay::Overlay {
         lines.push(diag_result_line(r, scheme, labels));
     }
 
-    let mut overlay = crate::overlay::Overlay {
+    let overlay = crate::overlay::Overlay {
         title,
         status_line: Some(status_line),
         lines,
@@ -655,7 +655,15 @@ fn render_overlay(
         inner
     };
 
-    let lines: Vec<Line<'static>> = overlay.lines.clone();
+    // Show "fetching…" only when loading with no lines AND no status line.
+    // When a status_line is present it already communicates the loading state
+    // (e.g. "Running… • fetching stack trace"), so the placeholder is redundant.
+    let lines: Vec<Line<'static>> =
+        if overlay.loading && overlay.lines.is_empty() && overlay.status_line.is_none() {
+            vec![Line::from("fetching…")]
+        } else {
+            overlay.lines.clone()
+        };
 
     let max_scroll = (lines.len() as u16).saturating_sub(content_area.height);
     overlay.max_scroll.set(max_scroll);
