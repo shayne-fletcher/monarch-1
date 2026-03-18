@@ -6,7 +6,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
@@ -50,6 +49,7 @@ use crate::get_cached_payload;
 use crate::is_failed_node;
 use crate::is_stopped_node;
 use crate::is_system_node;
+use crate::overlay::Overlay;
 use crate::render::ui;
 use crate::sorted_children;
 
@@ -127,12 +127,10 @@ pub(crate) struct App {
     /// Local time at which the last diagnostic run completed
     /// (`HH:MM:SS`). `None` while running or before any run.
     pub(crate) diag_completed_at: Option<String>,
-    /// Vertical scroll offset for the diagnostics pane.
-    pub(crate) diag_scroll: Cell<u16>,
-    /// Cached max-scroll for the diagnostics pane, written each render
-    /// frame. `Cell` allows the render function (`&App`) to write back
-    /// without changing its signature.
-    pub(crate) diag_max_scroll: Cell<u16>,
+    /// Active overlay (py-spy, config, or diagnostics content).
+    /// When `Some`, the detail pane renders the overlay instead of
+    /// node details. Dismissed with Esc, scrolled with j/k.
+    pub(crate) overlay: Option<Overlay>,
 }
 
 impl App {
@@ -171,8 +169,7 @@ impl App {
             diag_running: false,
             diag_rx: None,
             diag_completed_at: None,
-            diag_scroll: Cell::new(0),
-            diag_max_scroll: Cell::new(u16::MAX),
+            overlay: None,
         }
     }
 
@@ -614,8 +611,7 @@ impl App {
                     self.diag_running = false;
                     self.diag_rx = None;
                     self.diag_completed_at = None;
-                    self.diag_scroll.set(0);
-                    self.diag_max_scroll.set(u16::MAX);
+                    self.overlay = None;
                 }
                 KeyCode::Char('q') => {
                     self.should_quit = true;
@@ -627,16 +623,38 @@ impl App {
                     return KeyResult::RunDiagnostics;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    self.diag_scroll
-                        .set(self.diag_scroll.get().saturating_sub(1));
+                    if let Some(overlay) = &self.overlay {
+                        overlay.scroll_up();
+                    }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    self.diag_scroll.set(
-                        self.diag_scroll
-                            .get()
-                            .saturating_add(1)
-                            .min(self.diag_max_scroll.get()),
-                    );
+                    if let Some(overlay) = &self.overlay {
+                        overlay.scroll_down();
+                    }
+                }
+                _ => {}
+            }
+            return KeyResult::None;
+        }
+
+        // When a generic overlay (py-spy, config, etc.) is active,
+        // intercept navigation keys.
+        if let Some(overlay) = &self.overlay {
+            match key.code {
+                KeyCode::Esc => {
+                    self.overlay = None;
+                }
+                KeyCode::Char('q') => {
+                    self.should_quit = true;
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.should_quit = true;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    overlay.scroll_up();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    overlay.scroll_down();
                 }
                 _ => {}
             }
@@ -866,12 +884,11 @@ pub(crate) async fn run_app(
                                 app.diag_running = true;
                                 app.diag_results.clear();
                                 app.diag_completed_at = None;
-                                app.diag_scroll.set(0);
-                                app.diag_max_scroll.set(u16::MAX);
                                 app.diag_rx = Some(run_diagnostics(
                                     app.client.clone(),
                                     app.base_url.clone(),
                                 ));
+                                app.overlay = Some(crate::render::detail_pane::build_diag_overlay(&app));
                             }
                             KeyResult::None => {}
                         }
@@ -882,13 +899,17 @@ pub(crate) async fn run_app(
             }
             result = recv_diag(&mut app.diag_rx) => {
                 match result {
-                    Some(r) => app.diag_results.push(r),
+                    Some(r) => {
+                        app.diag_results.push(r);
+                        app.overlay = Some(crate::render::detail_pane::build_diag_overlay(&app));
+                    }
                     None => {
                         app.diag_running = false;
                         app.diag_rx = None;
                         app.diag_completed_at = Some(
                             Local::now().format("%H:%M:%S").to_string(),
                         );
+                        app.overlay = Some(crate::render::detail_pane::build_diag_overlay(&app));
                     }
                 }
             }

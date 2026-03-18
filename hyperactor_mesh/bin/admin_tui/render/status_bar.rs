@@ -190,6 +190,8 @@ pub(crate) fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &Ap
         app.theme.labels.footer_diag_running_help_text
     } else if !app.diag_results.is_empty() {
         app.theme.labels.footer_diag_help_text
+    } else if app.overlay.is_some() {
+        app.theme.labels.footer_overlay_help_text
     } else {
         app.theme.labels.footer_help_text
     };
