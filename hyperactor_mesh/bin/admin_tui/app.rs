@@ -26,9 +26,9 @@ use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
-use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
+use crate::ActiveJob;
 use crate::Args;
 use crate::ColorScheme;
 use crate::Cursor;
@@ -124,23 +124,9 @@ pub(crate) struct App {
     /// Active language (for display in header).
     pub(crate) lang_name: LangName,
 
-    /// Accumulated results from the running/completed diagnostic suite.
-    pub(crate) diag_results: Vec<DiagResult>,
-    /// True while the diagnostic task is still sending results.
-    pub(crate) diag_running: bool,
-    /// Live channel from `run_diagnostics`; `None` when idle.
-    pub(crate) diag_rx: Option<mpsc::Receiver<DiagResult>>,
-    /// Local time at which the last diagnostic run completed
-    /// (`HH:MM:SS`). `None` while running or before any run.
-    pub(crate) diag_completed_at: Option<String>,
-    /// In-flight py-spy oneshot receiver. `None` when idle or when
-    /// the active overlay is not a py-spy overlay (PY-2).
-    pub(crate) pyspy_rx: Option<oneshot::Receiver<Vec<Line<'static>>>>,
-    /// Short proc label for the active py-spy overlay title.
-    /// Mirrors `diag_completed_at` in purpose: retained so the
-    /// `recv_pyspy` arm can rebuild a fully-styled title on result
-    /// arrival without re-parsing the existing title string.
-    pub(crate) pyspy_short: Option<String>,
+    /// The running or completed overlay-producing async job (TUI-21).
+    /// `None` iff `overlay` is also `None`.
+    pub(crate) active_job: Option<ActiveJob>,
     /// Active overlay (py-spy, config, or diagnostics content).
     /// When `Some`, the detail pane renders the overlay instead of
     /// node details. Dismissed with Esc, scrolled with j/k.
@@ -179,12 +165,7 @@ impl App {
             theme: Theme::new(theme_name, lang_name),
             theme_name,
             lang_name,
-            diag_results: Vec::new(),
-            diag_running: false,
-            diag_rx: None,
-            diag_completed_at: None,
-            pyspy_rx: None,
-            pyspy_short: None,
+            active_job: None,
             overlay: None,
         }
     }
@@ -629,8 +610,9 @@ impl App {
 
     /// Open a py-spy loading overlay and spawn the one-shot HTTP fetch.
     ///
-    /// Assigns `self.pyspy_rx = Some(rx)`, which drops any prior
-    /// receiver and cancels any prior in-flight fetch (PY-1/PY-2).
+    /// Assigns `self.active_job = Some(PySpy { rx, .. })`, which drops
+    /// any prior variant and its receiver, cancelling any in-flight
+    /// fetch (PY-1/PY-2).
     pub(crate) fn start_pyspy(&mut self, proc_ref: String) {
         let short = proc_ref
             .split(',')
@@ -642,7 +624,6 @@ impl App {
         // Mirror the diagnostics overlay structure: bold name + info "Running…"
         // in the title, and a pinned status line showing "Running… • fetching
         // stack trace" (PY-3).
-        self.pyspy_short = Some(short.clone());
         self.overlay = Some(Overlay {
             title: Line::from(vec![
                 Span::styled(
@@ -666,7 +647,10 @@ impl App {
         let client = self.client.clone();
         let base_url = self.base_url.clone();
         let (tx, rx) = oneshot::channel();
-        self.pyspy_rx = Some(rx);
+        self.active_job = Some(ActiveJob::PySpy {
+            rx: Some(rx),
+            short: short.clone(),
+        });
         tokio::spawn(async move {
             let url = format!("{}/v1/pyspy/{}", base_url, urlencoding::encode(&proc_ref));
             let lines: Vec<Line<'static>> = match client.get(&url).send().await {
@@ -696,15 +680,10 @@ impl App {
     /// visibility).
     pub(crate) fn on_key(&mut self, key: KeyEvent) -> KeyResult {
         // When the diagnostics pane is showing, intercept navigation keys.
-        if self.diag_running || !self.diag_results.is_empty() {
+        if matches!(&self.active_job, Some(ActiveJob::Diagnostics { .. })) {
             match key.code {
                 KeyCode::Esc => {
-                    self.diag_results.clear();
-                    self.diag_running = false;
-                    self.diag_rx = None;
-                    self.diag_completed_at = None;
-                    self.pyspy_rx = None; // PY-5
-                    self.pyspy_short = None;
+                    self.active_job = None;
                     self.overlay = None;
                 }
                 KeyCode::Char('q') => {
@@ -733,11 +712,10 @@ impl App {
 
         // When a generic overlay (py-spy, config, etc.) is active,
         // intercept navigation keys.
-        if let Some(overlay) = &self.overlay {
+        if self.overlay.is_some() {
             match key.code {
                 KeyCode::Esc => {
-                    self.pyspy_rx = None; // PY-2/PY-5
-                    self.pyspy_short = None;
+                    self.active_job = None; // TUI-21 / PY-2
                     self.overlay = None;
                 }
                 KeyCode::Char('q') => {
@@ -747,10 +725,14 @@ impl App {
                     self.should_quit = true;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    overlay.scroll_up();
+                    if let Some(ov) = &self.overlay {
+                        ov.scroll_up();
+                    }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    overlay.scroll_down();
+                    if let Some(ov) = &self.overlay {
+                        ov.scroll_down();
+                    }
                 }
                 KeyCode::Char('p') => {
                     if let Some(proc_ref) = self.pyspy_proc_ref() {
@@ -1061,28 +1043,36 @@ pub(crate) fn pyspy_json_to_lines(
     vec![Line::from(format!("unexpected response: {json}"))]
 }
 
-/// Receive the next diagnostic result if a run is in progress.
-///
-/// Returns `std::future::pending()` when `rx` is `None` so the
-/// `tokio::select!` arm is never woken — equivalent to disabling
-/// the arm without requiring conditional compilation.
-async fn recv_diag(rx: &mut Option<mpsc::Receiver<DiagResult>>) -> Option<DiagResult> {
-    match rx {
-        Some(rx) => rx.recv().await,
-        None => std::future::pending().await,
-    }
+/// Result of the active overlay-producing job completing one event.
+enum ActiveJobEvent {
+    DiagResult(Option<DiagResult>),
+    PySpyResult(Vec<Line<'static>>),
 }
 
-/// Receive the py-spy result when an in-flight fetch completes.
+/// Await the next event from whichever overlay-producing job is currently live.
 ///
-/// Returns `std::future::pending()` when `rx` is `None` (PY-5).
-async fn recv_pyspy(rx: &mut Option<oneshot::Receiver<Vec<Line<'static>>>>) -> Vec<Line<'static>> {
-    match rx {
-        Some(inner) => match inner.await {
-            Ok(lines) => lines,
-            Err(_) => vec![Line::from("(fetch task dropped)")],
-        },
-        None => std::future::pending().await,
+/// Returns `std::future::pending()` when `active_job` is `None` or when
+/// neither receiver is ready, so the `tokio::select!` arm is never woken —
+/// equivalent to disabling the arm without requiring conditional compilation.
+///
+/// A single function (rather than two separate `recv_diag`/`recv_pyspy` calls)
+/// is necessary so that `tokio::select!` holds only one `&mut active_job` borrow
+/// at a time.
+async fn recv_active_job(job: &mut Option<ActiveJob>) -> ActiveJobEvent {
+    match job {
+        Some(ActiveJob::Diagnostics { rx: Some(rx), .. }) => {
+            ActiveJobEvent::DiagResult(rx.recv().await)
+        }
+        Some(ActiveJob::PySpy {
+            rx: Some(inner), ..
+        }) => {
+            let lines = match inner.await {
+                Ok(l) => l,
+                Err(_) => vec![Line::from("(fetch task dropped)")],
+            };
+            ActiveJobEvent::PySpyResult(lines)
+        }
+        _ => std::future::pending().await,
     }
 }
 
@@ -1138,14 +1128,17 @@ pub(crate) async fn run_app(
                                 app.update_selected_detail().await;
                             }
                             KeyResult::RunDiagnostics => {
-                                app.diag_running = true;
-                                app.diag_results.clear();
-                                app.diag_completed_at = None;
-                                app.pyspy_rx = None; // PY-5
-                                app.diag_rx = Some(run_diagnostics(
+                                let rx = run_diagnostics(
                                     app.client.clone(),
                                     app.base_url.clone(),
-                                ));
+                                );
+                                // PY-5: assigning Diagnostics drops any prior PySpy variant.
+                                app.active_job = Some(ActiveJob::Diagnostics {
+                                    results: Vec::new(),
+                                    running: true,
+                                    rx: Some(rx),
+                                    completed_at: None,
+                                });
                                 app.overlay = Some(crate::render::detail_pane::build_diag_overlay(&app));
                             }
                             KeyResult::RunPySpy(proc_ref) => {
@@ -1158,48 +1151,63 @@ pub(crate) async fn run_app(
                     _ => {}
                 }
             }
-            result = recv_diag(&mut app.diag_rx) => {
-                match result {
-                    Some(r) => {
-                        app.diag_results.push(r);
-                        app.overlay = Some(crate::render::detail_pane::build_diag_overlay(&app));
+            job_event = recv_active_job(&mut app.active_job) => {
+                match job_event {
+                    ActiveJobEvent::DiagResult(result) => {
+                        match result {
+                            Some(r) => {
+                                if let Some(ActiveJob::Diagnostics { results, .. }) = &mut app.active_job {
+                                    results.push(r);
+                                }
+                                app.overlay = Some(crate::render::detail_pane::build_diag_overlay(&app));
+                            }
+                            None => {
+                                if let Some(ActiveJob::Diagnostics { running, rx, completed_at, .. })
+                                    = &mut app.active_job
+                                {
+                                    *running = false;
+                                    *rx = None;
+                                    *completed_at = Some(
+                                        Local::now().format("%H:%M:%S").to_string(),
+                                    );
+                                }
+                                app.overlay = Some(crate::render::detail_pane::build_diag_overlay(&app));
+                            }
+                        }
                     }
-                    None => {
-                        app.diag_running = false;
-                        app.diag_rx = None;
-                        app.diag_completed_at = Some(
-                            Local::now().format("%H:%M:%S").to_string(),
-                        );
-                        app.overlay = Some(crate::render::detail_pane::build_diag_overlay(&app));
+                    ActiveJobEvent::PySpyResult(lines) => {
+                        // Extract short label via shared borrow before mutable borrows below.
+                        let short = match &app.active_job {
+                            Some(ActiveJob::PySpy { short, .. }) => short.clone(),
+                            _ => "proc".to_string(),
+                        };
+                        // Mark receiver as spent.
+                        if let Some(ActiveJob::PySpy { rx, .. }) = &mut app.active_job {
+                            *rx = None;
+                        }
+                        // Rebuild overlay title and populate lines (PY-3).
+                        if let Some(ov) = &mut app.overlay {
+                            let ts = Local::now().format("%H:%M:%S").to_string();
+                            let sep = app.theme.labels.separator;
+                            let scheme = app.theme.scheme;
+                            ov.title = Line::from(vec![
+                                Span::styled(
+                                    format!("py-spy: {short}"),
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(
+                                    format!("{sep}{}", app.theme.labels.diag_completed_at),
+                                    scheme.detail_label,
+                                ),
+                                Span::raw(" "),
+                                Span::styled(ts, scheme.stat_timing),
+                            ]);
+                            ov.status_line = None;
+                            ov.lines = lines;
+                            ov.loading = false;
+                            ov.scroll.set(0);
+                        }
                     }
-                }
-            }
-            lines = recv_pyspy(&mut app.pyspy_rx) => {
-                app.pyspy_rx = None;
-                if let Some(ov) = &mut app.overlay {
-                    // Rebuild the title with the capture timestamp and clear
-                    // the "Running…" status line — mirrors the diagnostics
-                    // overlay's completed-at presentation (PY-3).
-                    let ts = Local::now().format("%H:%M:%S").to_string();
-                    let short = app.pyspy_short.as_deref().unwrap_or("proc");
-                    let sep = app.theme.labels.separator;
-                    let scheme = app.theme.scheme;
-                    ov.title = Line::from(vec![
-                        Span::styled(
-                            format!("py-spy: {short}"),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("{sep}{}", app.theme.labels.diag_completed_at),
-                            scheme.detail_label,
-                        ),
-                        Span::raw(" "),
-                        Span::styled(ts, scheme.stat_timing),
-                    ]);
-                    ov.status_line = None;
-                    ov.lines = lines;
-                    ov.loading = false;
-                    ov.scroll.set(0);
                 }
             }
         }

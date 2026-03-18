@@ -208,7 +208,7 @@ pub(crate) struct Labels {
     pub(crate) footer_help_text: &'static str,
     pub(crate) footer_diag_running_help_text: &'static str,
     pub(crate) footer_diag_help_text: &'static str,
-    pub(crate) footer_overlay_help_text: &'static str,
+    pub(crate) footer_pyspy_help_text: &'static str,
 }
 
 impl Labels {
@@ -282,10 +282,10 @@ impl Labels {
             pane_actor_details: "Actor Details",
             pane_flight_recorder: "Flight Recorder",
             pane_diagnostics: "Diagnostics",
-            footer_help_text: "q: quit | j/k: navigate | g/G: top/bottom | Tab: expand/collapse | c: collapse all | s: system procs | h: stopped actors | d: diag",
+            footer_help_text: "q: quit | j/k: navigate | g/G: top/bottom | Tab: expand/collapse | c: collapse all | s: system procs | h: stopped actors | d: diag | p: py-spy",
             footer_diag_running_help_text: "q: quit | Esc: cancel | j/k: scroll",
             footer_diag_help_text: "q: quit | Esc: back to topology | j/k: scroll | r: rerun",
-            footer_overlay_help_text: "q: quit | Esc: back to topology | j/k: scroll",
+            footer_pyspy_help_text: "q: quit | Esc: back to topology | j/k: scroll | p: refresh",
         }
     }
 
@@ -359,10 +359,10 @@ impl Labels {
             pane_actor_details: "执行器详情",
             pane_flight_recorder: "飞行记录器",
             pane_diagnostics: "诊断",
-            footer_help_text: "q: 退出 | j/k: 导航 | g/G: 顶部/底部 | Tab: 展开/折叠 | c: 全部折叠 | s: 系统进程 | h: 已停止 | d: 诊断",
+            footer_help_text: "q: 退出 | j/k: 导航 | g/G: 顶部/底部 | Tab: 展开/折叠 | c: 全部折叠 | s: 系统进程 | h: 已停止 | d: 诊断 | p: py-spy",
             footer_diag_running_help_text: "q: 退出 | Esc: 取消 | j/k: 滚动",
             footer_diag_help_text: "q: 退出 | Esc: 返回拓扑 | j/k: 滚动 | r: 重新运行",
-            footer_overlay_help_text: "q: 退出 | Esc: 返回拓扑 | j/k: 滚动",
+            footer_pyspy_help_text: "q: 退出 | Esc: 返回拓扑 | j/k: 滚动 | p: 刷新",
         }
     }
 }

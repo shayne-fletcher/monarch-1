@@ -11,6 +11,9 @@
 //! module's own `#[cfg(test)] mod tests` block.
 
 use super::*;
+use crate::diagnostics::DiagOutcome;
+use crate::diagnostics::DiagPhase;
+use crate::diagnostics::DiagResult;
 
 // Empty tree all operations are noops.
 #[test]
@@ -1463,9 +1466,9 @@ fn test_mast_resolver_explicit_thrift_choice() {
 //
 // PY-1 (fresh-trace): enforced by start_pyspy always constructing a new
 //   oneshot channel; no automated test (requires mock HTTP server).
-// PY-2 (overlay-ownership): enforced by pyspy_rx = None at three
-//   explicit cancellation sites; no automated test — manual-verification
-//   only until an async event-loop test is added.
+// PY-2 (overlay-ownership): TUI-21 now provides structural coverage —
+//   replacing `active_job` atomically drops the old receiver, making
+//   "stale result reaches wrong overlay" structurally impossible.
 // PY-3 (replacement): covered by pyspy_json_to_lines_* tests below.
 // PY-4 (selection-totality): covered by pyspy_proc_ref_* tests below.
 // PY-5 (overlay-isolation): covered by parse_error_envelope_* tests and
@@ -1769,4 +1772,107 @@ fn pyspy_json_to_lines_ok_strips_process_banner() {
     assert_eq!(line_text(&lines[1]), "");
     assert_eq!(line_text(&lines[2]), "Thread 0");
     assert_eq!(line_text(&lines[3]), "  foo.py:1");
+}
+
+// ── TUI-21 build_diag_overlay tests ────────────────────────────────────────
+
+// TUI-21: running diagnostics produces a loading overlay with status line.
+#[test]
+fn build_diag_overlay_running() {
+    let mut app = App::new(
+        "http://localhost:8080".to_string(),
+        reqwest::Client::new(),
+        ThemeName::Nord,
+        LangName::En,
+    );
+    app.active_job = Some(ActiveJob::Diagnostics {
+        results: Vec::new(),
+        running: true,
+        rx: None,
+        completed_at: None,
+    });
+    let overlay = crate::render::detail_pane::build_diag_overlay(&app);
+    assert!(overlay.loading, "overlay should be loading while running");
+    assert!(
+        overlay.status_line.is_some(),
+        "running overlay needs a status line"
+    );
+    let title_text = line_text(&overlay.title);
+    assert!(
+        title_text.contains("Diagnostics"),
+        "title should contain 'Diagnostics', got: {title_text}"
+    );
+    assert!(
+        title_text.contains("Running"),
+        "title should contain running indicator, got: {title_text}"
+    );
+}
+
+// TUI-21: completed diagnostics with one pass result produces a non-loading
+// overlay whose status line summarises the pass count.
+#[test]
+fn build_diag_overlay_one_result() {
+    let mut app = App::new(
+        "http://localhost:8080".to_string(),
+        reqwest::Client::new(),
+        ThemeName::Nord,
+        LangName::En,
+    );
+    app.active_job = Some(ActiveJob::Diagnostics {
+        results: vec![DiagResult {
+            label: "root".into(),
+            reference: "root_ref".into(),
+            note: None,
+            phase: DiagPhase::AdminInfra,
+            outcome: DiagOutcome::Pass { elapsed_ms: 5 },
+        }],
+        running: false,
+        rx: None,
+        completed_at: Some("12:00:00".into()),
+    });
+    let overlay = crate::render::detail_pane::build_diag_overlay(&app);
+    assert!(
+        !overlay.loading,
+        "overlay should not be loading when completed"
+    );
+    assert!(
+        !overlay.lines.is_empty(),
+        "overlay should have result lines"
+    );
+    let status_text = overlay
+        .status_line
+        .as_ref()
+        .map(line_text)
+        .unwrap_or_default();
+    assert!(
+        status_text.contains("All 1 checks passed"),
+        "status line should mention pass count, got: {status_text}"
+    );
+}
+
+// TUI-21: no active job returns a fallback empty overlay without panicking.
+#[test]
+fn build_diag_overlay_no_active_job() {
+    let app = App::new(
+        "http://localhost:8080".to_string(),
+        reqwest::Client::new(),
+        ThemeName::Nord,
+        LangName::En,
+    );
+    assert!(app.active_job.is_none());
+    let overlay = crate::render::detail_pane::build_diag_overlay(&app);
+    assert!(!overlay.loading, "fallback overlay should not be loading");
+    assert!(
+        overlay.status_line.is_none(),
+        "fallback overlay should have no status line"
+    );
+    assert!(
+        overlay.lines.is_empty(),
+        "fallback overlay should have no lines"
+    );
+    let title_text = line_text(&overlay.title);
+    assert!(
+        title_text.contains("Diagnostics"),
+        "fallback title should contain 'Diagnostics', got: {title_text}"
+    );
 }
