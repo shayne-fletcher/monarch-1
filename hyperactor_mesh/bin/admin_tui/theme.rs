@@ -208,6 +208,7 @@ pub(crate) struct Labels {
     pub(crate) footer_help_text: &'static str,
     pub(crate) footer_diag_running_help_text: &'static str,
     pub(crate) footer_diag_help_text: &'static str,
+    pub(crate) footer_overlay_help_text: &'static str,
 }
 
 impl Labels {
@@ -284,6 +285,7 @@ impl Labels {
             footer_help_text: "q: quit | j/k: navigate | g/G: top/bottom | Tab: expand/collapse | c: collapse all | s: system procs | h: stopped actors | d: diag",
             footer_diag_running_help_text: "q: quit | Esc: cancel | j/k: scroll",
             footer_diag_help_text: "q: quit | Esc: back to topology | j/k: scroll | r: rerun",
+            footer_overlay_help_text: "q: quit | Esc: back to topology | j/k: scroll",
         }
     }
 
@@ -360,6 +362,7 @@ impl Labels {
             footer_help_text: "q: 退出 | j/k: 导航 | g/G: 顶部/底部 | Tab: 展开/折叠 | c: 全部折叠 | s: 系统进程 | h: 已停止 | d: 诊断",
             footer_diag_running_help_text: "q: 退出 | Esc: 取消 | j/k: 滚动",
             footer_diag_help_text: "q: 退出 | Esc: 返回拓扑 | j/k: 滚动 | r: 重新运行",
+            footer_overlay_help_text: "q: 退出 | Esc: 返回拓扑 | j/k: 滚动",
         }
     }
 }
