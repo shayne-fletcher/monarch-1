@@ -84,7 +84,11 @@ def build_ssl_context(args: argparse.Namespace) -> Optional[ssl.SSLContext]:
 def fetch_json(url: str, ctx: Optional[ssl.SSLContext]) -> dict:
     """GET a URL and parse JSON response."""
     req = urllib.request.Request(url)
-    resp = urllib.request.urlopen(req, context=ctx, timeout=10)
+    # Matches MESH_ADMIN_PYSPY_CLIENT_TIMEOUT (default 20s). Must
+    # exceed MESH_ADMIN_PYSPY_BRIDGE_TIMEOUT (default 13s) so we
+    # receive a structured PySpyResult even when py-spy uses the
+    # full subprocess budget with native stack unwinding.
+    resp = urllib.request.urlopen(req, context=ctx, timeout=20)
     return json.loads(resp.read())
 
 

@@ -48,8 +48,6 @@
 //! handshake. In OSS, the server falls back to plain HTTP when no
 //! certs are available, so the client's HTTP fallback still works.
 
-use std::time::Duration;
-
 use crate::theme::Args;
 
 // -- MAST resolution dispatch (MR-1) --
@@ -343,10 +341,9 @@ fn add_tls_from_bundle(
 pub(crate) fn build_client(args: &Args) -> (String, reqwest::Client) {
     let (explicit_scheme, host) = parse_addr(&args.addr);
 
-    // Must exceed the server-side MESH_ADMIN_PYSPY_BRIDGE_TIMEOUT
-    // (13s) so py-spy dumps with --native can complete before the
-    // client gives up.
-    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(15));
+    let client_timeout =
+        hyperactor_config::global::get(hyperactor_mesh::config::MESH_ADMIN_PYSPY_CLIENT_TIMEOUT);
+    let mut builder = reqwest::Client::builder().timeout(client_timeout);
     let mut use_tls = explicit_scheme == Some("https");
 
     // 1. Explicit CLI cert paths.

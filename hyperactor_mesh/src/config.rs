@@ -220,4 +220,27 @@ declare_attrs! {
         Some("mesh_admin_pyspy_bridge_timeout".to_string()),
     ))
     pub attr MESH_ADMIN_PYSPY_BRIDGE_TIMEOUT: Duration = Duration::from_secs(13);
+
+    /// Client-side timeout for py-spy requests. Must exceed
+    /// `MESH_ADMIN_PYSPY_BRIDGE_TIMEOUT` so the server can return a
+    /// structured `PySpyResult` even when the subprocess uses the
+    /// full budget. See PS-6 in `introspect` module doc.
+    @meta(CONFIG = ConfigAttr::new(
+        Some("HYPERACTOR_MESH_ADMIN_PYSPY_CLIENT_TIMEOUT".to_string()),
+        Some("mesh_admin_pyspy_client_timeout".to_string()),
+    ))
+    pub attr MESH_ADMIN_PYSPY_CLIENT_TIMEOUT: Duration = Duration::from_secs(20);
+
+    /// Path to the py-spy binary. When non-empty, tried before
+    /// the fallback `"py-spy"` PATH lookup. See PS-3 in
+    /// `introspect` module doc.
+    ///
+    /// Note: env var is `PYSPY_BIN` (not `HYPERACTOR_MESH_PYSPY_BIN`)
+    /// to preserve backward compatibility with existing deployments
+    /// that already set `PYSPY_BIN`.
+    @meta(CONFIG = ConfigAttr::new(
+        Some("PYSPY_BIN".to_string()),
+        Some("pyspy_bin".to_string()),
+    ))
+    pub attr PYSPY_BIN: String = String::new();
 }
