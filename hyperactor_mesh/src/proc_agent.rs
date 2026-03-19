@@ -58,6 +58,9 @@ use serde::Serialize;
 use typeuri::Named;
 
 use crate::Name;
+use crate::pyspy::PySpyResult;
+use crate::pyspy::PySpyWorker;
+use crate::pyspy::RunPySpyDump;
 use crate::resource;
 
 /// Actor name used when spawning the proc agent on user procs.
@@ -911,9 +914,37 @@ impl Handler<PySpyDump> for ProcAgent {
         cx: &Context<Self>,
         message: PySpyDump,
     ) -> Result<(), anyhow::Error> {
-        let runner = crate::pyspy::PySpyRunner;
-        let result = runner.dump_self(message.threads).await;
-        message.result.send(cx, result)?;
+        // Spawn a short-lived child actor to run py-spy without
+        // blocking the ProcAgent message loop. The worker replies
+        // directly to the original caller and self-terminates.
+        let worker = match PySpyWorker.spawn(cx) {
+            Ok(handle) => handle,
+            Err(e) => {
+                message.result.send(
+                    cx,
+                    PySpyResult::Failed {
+                        pid: std::process::id(),
+                        binary: String::new(),
+                        exit_code: None,
+                        stderr: format!("failed to spawn pyspy worker: {}", e),
+                    },
+                )?;
+                return Ok(());
+            }
+        };
+        // Once message.result moves into RunPySpyDump, we lose the
+        // reply port. MailboxSenderError does not carry the unsent
+        // message, so on send failure the caller will observe a
+        // timeout rather than an explicit Failed reply.
+        if let Err(e) = worker.send(
+            cx,
+            RunPySpyDump {
+                threads: message.threads,
+                reply_port: message.result,
+            },
+        ) {
+            tracing::error!("failed to send to pyspy worker: {}", e);
+        }
         Ok(())
     }
 }
