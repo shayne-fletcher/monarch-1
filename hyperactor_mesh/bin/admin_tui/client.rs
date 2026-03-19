@@ -343,7 +343,10 @@ fn add_tls_from_bundle(
 pub(crate) fn build_client(args: &Args) -> (String, reqwest::Client) {
     let (explicit_scheme, host) = parse_addr(&args.addr);
 
-    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(5));
+    // Must exceed the server-side MESH_ADMIN_PYSPY_BRIDGE_TIMEOUT
+    // (13s) so py-spy dumps with --native can complete before the
+    // client gives up.
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(15));
     let mut use_tls = explicit_scheme == Some("https");
 
     // 1. Explicit CLI cert paths.
