@@ -10,6 +10,10 @@
 //!
 //! See PS-* invariants in `introspect` module doc.
 
+use async_trait::async_trait;
+use hyperactor::Actor;
+use hyperactor::Context;
+use hyperactor::Handler;
 use serde::Deserialize;
 use serde::Serialize;
 use typeuri::Named;
@@ -71,6 +75,40 @@ impl PySpyRunner {
         }
 
         PySpyResult::BinaryNotFound { searched }
+    }
+}
+
+/// Internal message from ProcAgent to a spawned PySpyWorker.
+/// Carries the original caller's reply port so the worker
+/// responds directly without routing back through ProcAgent.
+#[derive(Debug, Serialize, Deserialize, Named)]
+pub struct RunPySpyDump {
+    pub threads: bool,
+    /// The original caller's reply port, forwarded from PySpyDump.
+    pub reply_port: hyperactor::reference::OncePortRef<PySpyResult>,
+}
+wirevalue::register_type!(RunPySpyDump);
+
+/// Short-lived child actor that runs py-spy off the ProcAgent
+/// handler path. Spawned per-request; self-terminates after reply.
+/// Concurrent instances are permitted — py-spy attaches read-only
+/// via `process_vm_readv` and multiple concurrent dumps are safe.
+#[hyperactor::export(handlers = [RunPySpyDump])]
+pub struct PySpyWorker;
+
+impl Actor for PySpyWorker {}
+
+#[async_trait]
+impl Handler<RunPySpyDump> for PySpyWorker {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        message: RunPySpyDump,
+    ) -> Result<(), anyhow::Error> {
+        let result = PySpyRunner.dump_self(message.threads).await;
+        message.reply_port.send(cx, result)?;
+        cx.stop("pyspy dump complete")?;
+        Ok(())
     }
 }
 
