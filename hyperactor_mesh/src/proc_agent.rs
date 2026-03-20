@@ -491,8 +491,16 @@ impl ProcAgent {
         let has_errors = self.actor_states.values().any(|state| state.has_errors());
         let exit_code = if has_errors { 1 } else { 0 };
 
-        if let Err(err) = self.proc.flush().await {
-            tracing::warn!("failed to flush forwarder during shutdown: {}", err);
+        let flush_timeout =
+            hyperactor_config::global::get(hyperactor::config::FORWARDER_FLUSH_TIMEOUT);
+        match tokio::time::timeout(flush_timeout, self.proc.flush()).await {
+            Ok(Err(err)) => {
+                tracing::warn!("forwarder flush failed during shutdown: {}", err);
+            }
+            Err(_elapsed) => {
+                tracing::warn!("forwarder flush timed out during shutdown");
+            }
+            Ok(Ok(())) => {}
         }
 
         tracing::info!(
