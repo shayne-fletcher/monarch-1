@@ -87,14 +87,18 @@
 //!   `PYSPY_BIN` (if set and non-empty) then `"py-spy"` on PATH.
 //!   If the first attempt is not found, the fallback attempt is
 //!   required.
-//! - **PS-4 (raw output passthrough):** On success, `stack` is raw
-//!   py-spy stdout text; no parsing, no transformation.
+//! - **PS-4 (structured JSON output):** py-spy runs with `--json`;
+//!   output is parsed into `Vec<PySpyStackTrace>`. Parse failure
+//!   maps to `PySpyResult::Failed`.
 //! - **PS-5 (subprocess timeout):** `try_exec` bounds the py-spy
-//!   subprocess inside the worker to `MESH_ADMIN_PYSPY_TIMEOUT`.
-//!   On expiry the child is killed and reaped, and the worker
-//!   returns `Failed { stderr: "…timed out…" }`.
+//!   subprocess inside the worker to `MESH_ADMIN_PYSPY_TIMEOUT`
+//!   (default 10s). The budget is sized for `--native --native-all`
+//!   which unwinds native stacks via libunwind — significantly
+//!   slower than Python-only capture on loaded hosts. On expiry the
+//!   child is killed and reaped, and the worker returns
+//!   `Failed { stderr: "…timed out…" }`.
 //! - **PS-6 (bridge timeout):** The HTTP bridge uses a separate
-//!   `MESH_ADMIN_PYSPY_BRIDGE_TIMEOUT` (default 7s), which must
+//!   `MESH_ADMIN_PYSPY_BRIDGE_TIMEOUT` (default 13s), which must
 //!   exceed `MESH_ADMIN_PYSPY_TIMEOUT` so the subprocess kill/reap
 //!   and reply can arrive before the bridge declares
 //!   `gateway_timeout`. Independent of
@@ -109,6 +113,16 @@
 //! - **PS-9 (concurrent dumps):** py-spy is spawn-per-request, so
 //!   overlapping dumps on the same proc are allowed. Each worker
 //!   runs independently.
+//! - **PS-10 (nonblocking retry):** In nonblocking mode, `try_exec`
+//!   retries up to 3 times with 100ms backoff on failure, because
+//!   py-spy can segfault reading mutating process memory. All
+//!   attempts share a single deadline bounded by
+//!   `MESH_ADMIN_PYSPY_TIMEOUT` (PS-5).
+//! - **PS-11 (native-all fallback):** If `native_all` is requested
+//!   but the py-spy binary rejects `--native-all` (exit code 2,
+//!   stderr mentions the flag), `try_exec` drops the flag and
+//!   retries automatically. This handles version skew where deployed
+//!   py-spy predates `--native-all` support.
 //!
 //! v1 contract notes:
 //! - The current py-spy bridge expects a ProcId-form reference and
