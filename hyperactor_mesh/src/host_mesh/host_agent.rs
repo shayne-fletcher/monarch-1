@@ -57,6 +57,9 @@ use crate::bootstrap::BootstrapProcConfig;
 use crate::bootstrap::BootstrapProcManager;
 use crate::mesh_admin::MeshAdminMessageClient;
 use crate::proc_agent::ProcAgent;
+use crate::proc_agent::PySpyDump;
+use crate::pyspy::PySpyOpts;
+use crate::pyspy::PySpyWorker;
 use crate::resource;
 use crate::resource::ProcSpec;
 
@@ -234,6 +237,7 @@ struct ProcStatusChanged {
         SpawnMeshAdmin,
         SetClientConfig,
         ProcStatusChanged,
+        PySpyDump,
     ]
 )]
 pub struct HostAgent {
@@ -1085,6 +1089,23 @@ impl Handler<GetLocalProc> for HostAgent {
         };
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<PySpyDump> for HostAgent {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        message: PySpyDump,
+    ) -> Result<(), anyhow::Error> {
+        let opts = PySpyOpts {
+            threads: message.threads,
+            native: message.native,
+            native_all: message.native_all,
+            nonblocking: message.nonblocking,
+        };
+        PySpyWorker::spawn_and_forward(cx, opts, message.result)
     }
 }
 
