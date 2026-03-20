@@ -84,7 +84,9 @@
 //!   classified into `BinaryNotFound { searched }` vs
 //!   `Failed { pid, binary, exit_code, stderr }`, never collapsed.
 //! - **PS-3 (binary resolution order):** Resolution order is exactly:
-//!   `PYSPY_BIN` (if set and non-empty) then `"py-spy"` on PATH.
+//!   `PYSPY_BIN` config attr (if non-empty) then `"py-spy"` on PATH.
+//!   The attr is read via `hyperactor_config::global::get_cloned`;
+//!   env var `PYSPY_BIN` feeds in through the config layer.
 //!   If the first attempt is not found, the fallback attempt is
 //!   required.
 //! - **PS-4 (structured JSON output):** py-spy runs with `--json`;
@@ -133,6 +135,11 @@
 //!   `PySpyResult::Failed` — they observe a timeout.
 //!   `MailboxSenderError` does not carry the unsent message, so the
 //!   port is irrecoverable on this path.
+//! - **Contract change (D96756537 follow-up):** `PySpyResult::Ok`
+//!   replaced `stack: String` (raw py-spy text) with
+//!   `stack_traces: Vec<PySpyStackTrace>` (structured JSON) and
+//!   added `warnings: Vec<String>`. Clients reading the old `stack`
+//!   field will see it absent; they must migrate to `stack_traces`.
 //!
 //! ## Mesh-admin config (MA-*)
 //!

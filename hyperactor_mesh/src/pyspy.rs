@@ -18,6 +18,9 @@ use serde::Deserialize;
 use serde::Serialize;
 use typeuri::Named;
 
+use crate::config::MESH_ADMIN_PYSPY_TIMEOUT;
+use crate::config::PYSPY_BIN;
+
 /// Result of a py-spy stack dump request.
 ///
 /// See PS-2, PS-4 in `introspect` module doc.
@@ -138,7 +141,12 @@ impl PySpyRunner {
     /// is no code path that could substitute a different PID.
     pub async fn dump_self(&self, opts: &PySpyOpts) -> PySpyResult {
         let pid = std::process::id();
-        let candidates = resolve_candidates(std::env::var("PYSPY_BIN").ok());
+        let pyspy_bin: String = hyperactor_config::global::get_cloned(PYSPY_BIN);
+        let candidates = resolve_candidates(if pyspy_bin.is_empty() {
+            None
+        } else {
+            Some(pyspy_bin)
+        });
         let mut searched = vec![];
 
         for (binary, label) in &candidates {
@@ -147,7 +155,7 @@ impl PySpyRunner {
                 binary,
                 pid,
                 opts,
-                hyperactor_config::global::get(crate::config::MESH_ADMIN_PYSPY_TIMEOUT),
+                hyperactor_config::global::get(MESH_ADMIN_PYSPY_TIMEOUT),
             )
             .await
             {
