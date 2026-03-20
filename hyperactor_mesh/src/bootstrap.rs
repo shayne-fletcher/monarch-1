@@ -3507,6 +3507,15 @@ mod tests {
         // messages.
         let instance = testing::instance();
 
+        // Set an absurdly high flush timeout to prove the flush
+        // completes naturally (host networking stays alive during
+        // worker teardown) and never relies on the timeout.
+        let config = hyperactor_config::global::lock();
+        let _flush_guard = config.override_key(
+            hyperactor::config::FORWARDER_FLUSH_TIMEOUT,
+            std::time::Duration::from_secs(600),
+        );
+
         // Configure a ProcessAllocator with the bootstrap binary.
         let mut allocator = ProcessAllocator::new(Command::new(crate::testresource::get(
             "monarch/hyperactor_mesh/bootstrap",
