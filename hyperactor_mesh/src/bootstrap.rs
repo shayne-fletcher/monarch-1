@@ -3503,10 +3503,6 @@ mod tests {
     #[tokio::test]
     #[cfg(all(fbcode_build, target_os = "linux"))]
     async fn bootstrap_canonical_simple_systemd_launcher() {
-        // Acquire exclusive config lock and select systemd launcher.
-        let config = hyperactor_config::global::lock();
-        let _guard = config.override_key(MESH_PROC_LAUNCHER_KIND, "systemd".to_string());
-
         // Create an actor instance we'll use to send and receive
         // messages.
         let instance = testing::instance();
