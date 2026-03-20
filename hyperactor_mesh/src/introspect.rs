@@ -89,19 +89,36 @@
 //!   required.
 //! - **PS-4 (raw output passthrough):** On success, `stack` is raw
 //!   py-spy stdout text; no parsing, no transformation.
-//! - **PS-5 (subprocess timeout):** `try_exec` kills and reaps the
-//!   py-spy child after `MESH_ADMIN_PYSPY_TIMEOUT`, returning `Failed`
-//!   rather than blocking the ProcAgent indefinitely.
+//! - **PS-5 (subprocess timeout):** `try_exec` bounds the py-spy
+//!   subprocess inside the worker to `MESH_ADMIN_PYSPY_TIMEOUT`.
+//!   On expiry the child is killed and reaped, and the worker
+//!   returns `Failed { stderr: "…timed out…" }`.
 //! - **PS-6 (bridge timeout):** The HTTP bridge uses a separate
 //!   `MESH_ADMIN_PYSPY_BRIDGE_TIMEOUT` (default 7s), which must
 //!   exceed `MESH_ADMIN_PYSPY_TIMEOUT` so the subprocess kill/reap
 //!   and reply can arrive before the bridge declares
 //!   `gateway_timeout`. Independent of
 //!   `MESH_ADMIN_SINGLE_HOST_TIMEOUT`.
+//! - **PS-7 (non-blocking delegation):** ProcAgent never awaits
+//!   py-spy execution inline. On `PySpyDump` it spawns a child
+//!   `PySpyWorker`, forwards the request, and returns immediately.
+//! - **PS-8 (worker lifecycle):** Each `PySpyWorker` handles
+//!   exactly one forwarded `RunPySpyDump`, replies directly to the
+//!   forwarded `OncePortRef`, then self-terminates via
+//!   `cx.stop()`. Clean exit, no supervision event.
+//! - **PS-9 (concurrent dumps):** py-spy is spawn-per-request, so
+//!   overlapping dumps on the same proc are allowed. Each worker
+//!   runs independently.
 //!
-//! v1 contract note: the current py-spy bridge expects a ProcId-form
-//! reference and rejects other forms as `bad_request`. This may be
-//! broadened in future versions.
+//! v1 contract notes:
+//! - The current py-spy bridge expects a ProcId-form reference and
+//!   rejects other forms as `bad_request`. This may be broadened in
+//!   future versions.
+//! - If `worker.send()` fails after the reply port has moved into
+//!   `RunPySpyDump`, the caller receives no explicit
+//!   `PySpyResult::Failed` — they observe a timeout.
+//!   `MailboxSenderError` does not carry the unsent message, so the
+//!   port is irrecoverable on this path.
 //!
 //! ## Mesh-admin config (MA-*)
 //!
