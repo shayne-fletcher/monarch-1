@@ -113,34 +113,137 @@
 //!   logged as warnings, not failures. Mixed mode is a
 //!   startup/topology smoke test and does not enforce evidence or
 //!   threshold checks.
+//!
+//! ### /v1/{ref} traversal
+//!
+//! - **MIT-20 (round-trip):** Child references returned by a parent
+//!   node are fetchable via `/v1/{ref}`.
+//! - **MIT-21 (node-kind-typing):** Root returns `Root`, host returns
+//!   `Host`, proc returns `Proc`, actor returns `Actor` variant.
+//! - **MIT-22 (identity-consistency):** `node.identity` matches the
+//!   reference string used to fetch it.
+//! - **MIT-23 (child-link-consistency):** Root, first host, classified
+//!   service proc, classified worker proc, and known actor refs are
+//!   fetchable.
+//! - **MIT-24 (known-actors):** Among each proc node's children,
+//!   actors named `host_agent` or `proc_agent` are present and
+//!   fetchable, returning `Actor` variant.
+//!
+//! ### Malformed/encoded ref edge cases
+//!
+//! - **MIT-25 (empty-ref):** `/v1/` returns a non-success status.
+//! - **MIT-26 (garbage-ref):** Random garbage strings return
+//!   `not_found` error envelope.
+//! - **MIT-27 (truncated-ref):** Prefix of a valid reference returns
+//!   a non-success status.
+//! - **MIT-28 (double-encoded-ref):** A double-encoded valid reference
+//!   resolves correctly (Axum decodes once, handler decodes once).
+//! - **MIT-29 (long-ref):** A 10KB string returns a structured error,
+//!   not a crash or timeout.
+//! - **MIT-30 (unreachable-socket-ref):** Valid transport address with
+//!   nonexistent socket returns `not_found` or `gateway_timeout`.
+//! - **MIT-31 (url-encoded-round-trip):** A valid reference containing
+//!   commas/brackets (which all hyperactor refs do) round-trips
+//!   correctly through URL encoding.
+//!
+//! ### Auth failure cases
+//!
+//! - **MIT-32 (no-client-cert):** Unauthenticated client is rejected
+//!   across all 4 endpoints (`/v1/root`, `/v1/tree`,
+//!   `/v1/config/{ref}`, `/v1/pyspy/{ref}`).
+//! - **MIT-33 (wrong-ca-cert):** Client presents a cert signed by an
+//!   independent CA → TLS-level failure.
+//! - **MIT-34 (wrong-client-ca):** Client trusts a different CA than
+//!   the server's → TLS-level failure.
+//! - **MIT-35 (corrupt-pem):** Passing corrupt PEM material to
+//!   `add_tls` → TLS setup rejects invalid CA PEM deterministically
+//!   (returns `ok == false`).
+//! - **MIT-36 (auth-vs-app-error):** Auth failures are TLS-level
+//!   (`result.is_err()`), not HTTP-level 4xx/5xx.
 
+mod auth;
 mod config;
 mod dining;
 mod harness;
 mod pyspy;
+mod ref_check;
+mod ref_edge;
 mod tree;
 
+// --- dining family ---
+
+/// MIT-9, MIT-10, MIT-11, MIT-12, MIT-13, MIT-14, MIT-15: dining-based
+/// endpoint assertions — Rust binary.
 #[tokio::test]
 async fn test_dining_endpoints_rust() {
     dining::run_dining_endpoints_rust().await;
 }
 
+/// MIT-9, MIT-10, MIT-11, MIT-12, MIT-13, MIT-14, MIT-15: dining-based
+/// endpoint assertions — Python binary.
 #[tokio::test]
 async fn test_dining_endpoints_python() {
     dining::run_dining_endpoints_python().await;
 }
 
+// --- pyspy family ---
+
+/// MIT-16, MIT-17, MIT-18, MIT-19: py-spy integration — cpu mode.
 #[tokio::test]
 async fn test_pyspy_integration_cpu() {
     pyspy::run_pyspy_integration_cpu().await;
 }
 
+/// MIT-16, MIT-17, MIT-18, MIT-19: py-spy integration — block mode.
 #[tokio::test]
 async fn test_pyspy_integration_block() {
     pyspy::run_pyspy_integration_block().await;
 }
 
+/// MIT-16, MIT-18, MIT-19: py-spy integration — mixed mode (smoke
+/// test, no evidence check).
 #[tokio::test]
 async fn test_pyspy_integration_mixed() {
     pyspy::run_pyspy_integration_mixed().await;
+}
+
+// --- traversal family ---
+
+/// MIT-20, MIT-21, MIT-22, MIT-23, MIT-24: /v1/{ref} topology
+/// traversal — Rust binary.
+#[tokio::test]
+async fn test_ref_traversal_rust() {
+    dining::run_ref_traversal_rust().await;
+}
+
+/// MIT-20, MIT-21, MIT-22, MIT-23, MIT-24: /v1/{ref} topology
+/// traversal — Python binary.
+#[tokio::test]
+async fn test_ref_traversal_python() {
+    dining::run_ref_traversal_python().await;
+}
+
+// --- malformed-ref family ---
+
+/// MIT-25, MIT-26, MIT-27, MIT-28, MIT-29, MIT-30, MIT-31:
+/// malformed/encoded reference edge cases — Rust binary.
+#[tokio::test]
+async fn test_ref_edge_cases_rust() {
+    dining::run_ref_edge_cases_rust().await;
+}
+
+/// MIT-25, MIT-26, MIT-27, MIT-28, MIT-29, MIT-30, MIT-31:
+/// malformed/encoded reference edge cases — Python binary.
+#[tokio::test]
+async fn test_ref_edge_cases_python() {
+    dining::run_ref_edge_cases_python().await;
+}
+
+// --- auth family ---
+
+/// MIT-32, MIT-33, MIT-34, MIT-35, MIT-36: auth failure coverage —
+/// Rust binary.
+#[tokio::test]
+async fn test_auth_failures_rust() {
+    dining::run_auth_failures_rust().await;
 }
