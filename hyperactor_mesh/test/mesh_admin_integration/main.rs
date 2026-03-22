@@ -160,11 +160,71 @@
 //!   (returns `ok == false`).
 //! - **MIT-36 (auth-vs-app-error):** Auth failures are TLS-level
 //!   (`result.is_err()`), not HTTP-level 4xx/5xx.
+//!
+//! ### OpenAPI conformance
+//!
+//! #### OpenAPI document — static
+//!
+//! - **MIT-37 (openapi-valid):** `/v1/openapi.json` returns parseable
+//!   JSON with `openapi: "3.1.0"`, `info`, `paths`,
+//!   `components.schemas`.
+//! - **MIT-38 (openapi-resolvable):** All `$ref` targets resolve to
+//!   definitions that exist within the document.
+//! - **MIT-39 (openapi-routes-covered):** Every client-facing route
+//!   (`/v1/root`, `/v1/{reference}`, `/v1/config/{proc_reference}`,
+//!   `/v1/tree`, `/v1/schema`, `/v1/schema/error`) is present in
+//!   `paths`. The spec-serving endpoint `/v1/openapi.json` is also
+//!   verified to be live, though it is not required to appear in
+//!   `paths` since it is a meta-endpoint.
+//! - **MIT-40 (schemas-compile):** Every `components/schemas` entry
+//!   compiles via `jsonschema::JSONSchema::compile` when embedded in
+//!   a synthetic document that includes the full component set as
+//!   `$defs`.
+//!
+//! #### Success responses
+//!
+//! - **MIT-41 (success-status-documented):** Success responses return
+//!   a status code declared by the operation.
+//! - **MIT-42 (success-body-validates):** Success bodies validate
+//!   against the operation's response schema. Covers `/v1/root`
+//!   (Root), `/v1/{ref}` (Host, Proc, Actor), `/v1/config/{proc}`.
+//! - **MIT-45 (no-undocumented-fields):** Enforced where the
+//!   published schemas forbid additional properties (the
+//!   NodeProperties variant wrappers do); otherwise subsumed by
+//!   MIT-42.
+//! - **MIT-51 (success-content-type):** Successful responses use a
+//!   media type matching the declared type (`application/json` or
+//!   `text/plain`). Matching is by media type, not exact header
+//!   string.
+//!
+//! #### Error responses
+//!
+//! - **MIT-43 (error-status-documented):** Error responses return a
+//!   status code declared by the operation.
+//! - **MIT-44 (error-body-validates):** Error bodies validate against
+//!   the `ApiErrorEnvelope` schema.
+//! - **MIT-46 (error-envelope-shape):** `error.code` (string) and
+//!   `error.message` (string) present per schema.
+//! - **MIT-47 (error-code-enum-conformance):** Vacuously true today
+//!   (schema doesn't constrain `error.code` to an enum). Automatic if
+//!   the schema adds one later.
+//! - **MIT-52 (error-content-type):** Error responses use a media
+//!   type matching `application/json`.
+//!
+//! #### Parameters and encoding
+//!
+//! - **MIT-48 (path-param-conformance):** Parameters match the
+//!   declared contract (type: string, required: true).
+//! - **MIT-49 (encoded-param-conformance):** URL-encoded references
+//!   produce responses conforming to the same schema.
+//! - **MIT-50 (invalid-param-error-conformance):** Invalid params
+//!   fail with documented status codes and error body shapes.
 
 mod auth;
 mod config;
 mod dining;
 mod harness;
+mod openapi;
 mod pyspy;
 mod ref_check;
 mod ref_edge;
@@ -246,4 +306,14 @@ async fn test_ref_edge_cases_python() {
 #[tokio::test]
 async fn test_auth_failures_rust() {
     dining::run_auth_failures_rust().await;
+}
+
+// --- openapi conformance family ---
+
+/// MIT-37, MIT-38, MIT-39, MIT-40, MIT-41, MIT-42, MIT-43, MIT-44,
+/// MIT-45, MIT-46, MIT-47, MIT-48, MIT-49, MIT-50, MIT-51, MIT-52:
+/// OpenAPI conformance — Rust binary.
+#[tokio::test]
+async fn test_openapi_conformance_rust() {
+    dining::run_openapi_conformance_rust().await;
 }
