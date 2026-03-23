@@ -1480,14 +1480,18 @@ pub fn build_openapi_spec() -> serde_json::Value {
             .expect("NodePayload schema must be serializable");
     let mut error_schema = serde_json::to_value(schemars::schema_for!(ApiErrorEnvelope))
         .expect("ApiErrorEnvelope schema must be serializable");
+    let mut pyspy_schema = serde_json::to_value(schemars::schema_for!(crate::pyspy::PySpyResult))
+        .expect("PySpyResult schema must be serializable");
 
     // Hoist $defs into a shared components/schemas map so
     // OpenAPI tools can resolve references.
     let mut shared_schemas = serde_json::Map::new();
     hoist_defs(&mut node_schema, &mut shared_schemas);
     hoist_defs(&mut error_schema, &mut shared_schemas);
+    hoist_defs(&mut pyspy_schema, &mut shared_schemas);
     shared_schemas.insert("NodePayload".into(), node_schema);
     shared_schemas.insert("ApiErrorEnvelope".into(), error_schema);
+    shared_schemas.insert("PySpyResult".into(), pyspy_schema);
 
     // Rewrite any remaining $defs refs in the hoisted component schemas.
     for value in shared_schemas.values_mut() {
@@ -1630,6 +1634,34 @@ pub fn build_openapi_spec() -> serde_json::Value {
                                 }
                             }
                         },
+                        "404": error_response("Proc not found or handler not reachable"),
+                        "500": error_response("Internal error"),
+                        "504": error_response("Gateway timeout")
+                    }
+                }
+            },
+            "/v1/pyspy/{proc_reference}": {
+                "get": {
+                    "summary": "Py-spy stack dump for a proc",
+                    "operationId": "getPyspy",
+                    "description": "Runs py-spy against the target process and returns structured stack traces. Routes to ProcAgent (worker procs) or HostAgent (service proc).",
+                    "parameters": [{
+                        "name": "proc_reference",
+                        "in": "path",
+                        "required": true,
+                        "description": "URL-encoded proc reference (ProcId)",
+                        "schema": { "type": "string" }
+                    }],
+                    "responses": {
+                        "200": {
+                            "description": "PySpyResult — one of Ok, BinaryNotFound, or Failed",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/PySpyResult" }
+                                }
+                            }
+                        },
+                        "400": error_response("Bad request (malformed proc reference)"),
                         "404": error_response("Proc not found or handler not reachable"),
                         "500": error_response("Internal error"),
                         "504": error_response("Gateway timeout")
