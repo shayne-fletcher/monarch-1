@@ -255,7 +255,7 @@
                   "failure_info": {
                     "anyOf": [
                       {
-                        "$ref": "#/$defs/FailureInfo"
+                        "$ref": "#/components/schemas/FailureInfo"
                       },
                       {
                         "type": "null"
