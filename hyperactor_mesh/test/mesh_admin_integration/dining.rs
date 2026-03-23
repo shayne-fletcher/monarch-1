@@ -219,6 +219,19 @@ pub async fn run_ref_edge_cases_python() {
     .await;
 }
 
+// --- openapi conformance family ---
+
+/// MIT-37 through MIT-52: OpenAPI conformance — Rust binary.
+pub async fn run_openapi_conformance_rust() {
+    let bin = harness::dining_philosophers_rust_binary();
+    DiningScenario::run(&bin, |s| {
+        Box::pin(async move {
+            crate::openapi::check(s).await;
+        })
+    })
+    .await;
+}
+
 // --- auth family ---
 
 /// MIT-32, MIT-33, MIT-34, MIT-35, MIT-36: auth failure coverage —
