@@ -13,7 +13,10 @@
 use async_trait::async_trait;
 use hyperactor::Actor;
 use hyperactor::Context;
+use hyperactor::HandleClient;
 use hyperactor::Handler;
+use hyperactor::RefClient;
+use hyperactor::reference as hyperactor_reference;
 use serde::Deserialize;
 use serde::Serialize;
 use typeuri::Named;
@@ -131,6 +134,23 @@ pub struct PySpyOpts {
     /// target process (`--nonblocking`). Enables retry logic (PS-10).
     pub nonblocking: bool,
 }
+
+/// Request a py-spy stack dump from this process.
+///
+/// Both ProcAgent and HostAgent handle this message. The handler
+/// delegates to [`PySpyWorker::spawn_and_forward`] which runs py-spy
+/// against `std::process::id()`.
+///
+/// See PS-1 in `introspect` module doc.
+#[derive(Debug, Serialize, Deserialize, Named, Handler, HandleClient, RefClient)]
+pub struct PySpyDump {
+    /// Capture options (threads, native frames, nonblocking mode).
+    pub opts: PySpyOpts,
+    /// Reply port for the result.
+    #[reply]
+    pub result: hyperactor_reference::OncePortRef<PySpyResult>,
+}
+wirevalue::register_type!(PySpyDump);
 
 /// Runs py-spy against the current process.
 ///

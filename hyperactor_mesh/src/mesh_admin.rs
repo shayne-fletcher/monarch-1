@@ -291,7 +291,8 @@ use crate::introspect::NodePayload;
 use crate::introspect::NodeProperties;
 use crate::introspect::to_node_payload;
 use crate::proc_agent::PROC_AGENT_ACTOR_NAME;
-use crate::proc_agent::PySpyDump;
+use crate::pyspy::PySpyDump;
+use crate::pyspy::PySpyOpts;
 use crate::pyspy::PySpyResult;
 
 /// Send an `IntrospectMessage` to an actor and receive the reply.
@@ -1480,7 +1481,7 @@ pub fn build_openapi_spec() -> serde_json::Value {
             .expect("NodePayload schema must be serializable");
     let mut error_schema = serde_json::to_value(schemars::schema_for!(ApiErrorEnvelope))
         .expect("ApiErrorEnvelope schema must be serializable");
-    let mut pyspy_schema = serde_json::to_value(schemars::schema_for!(crate::pyspy::PySpyResult))
+    let mut pyspy_schema = serde_json::to_value(schemars::schema_for!(PySpyResult))
         .expect("PySpyResult schema must be serializable");
 
     // Hoist $defs into a shared components/schemas map so
@@ -1807,10 +1808,12 @@ async fn pyspy_bridge(
     port.send(
         cx,
         PySpyDump {
-            threads: false,
-            native: true,
-            native_all: true,
-            nonblocking: false,
+            opts: PySpyOpts {
+                threads: false,
+                native: true,
+                native_all: true,
+                nonblocking: false,
+            },
             result: reply_ref,
         },
     )
