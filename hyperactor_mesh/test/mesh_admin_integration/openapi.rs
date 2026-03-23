@@ -68,6 +68,7 @@ impl OpenApiValidator {
             "/v1/root",
             "/v1/{reference}",
             "/v1/config/{proc_reference}",
+            "/v1/pyspy/{proc_reference}",
             "/v1/tree",
             "/v1/schema",
             "/v1/schema/error",
@@ -99,7 +100,11 @@ impl OpenApiValidator {
     /// MIT-48: path parameters match declared contract (type: string,
     /// required: true).
     fn check_path_params(&self) {
-        for path in ["/v1/{reference}", "/v1/config/{proc_reference}"] {
+        for path in [
+            "/v1/{reference}",
+            "/v1/config/{proc_reference}",
+            "/v1/pyspy/{proc_reference}",
+        ] {
             let params = self
                 .doc
                 .pointer(&format!(
@@ -478,4 +483,70 @@ pub(crate) async fn check(s: &DiningScenario) {
     let body: Value = serde_json::from_str(&body_text)
         .unwrap_or_else(|e| panic!("MIT-44: not JSON: {e}: {body_text}"));
     v.validate_error("/v1/{reference}", status, &body);
+
+    // --- py-spy endpoint conformance (MIT-55 through MIT-62) ---
+
+    // MIT-55, MIT-56, MIT-62: live-response conformance on a valid
+    // proc reference. The dining_philosophers worker is a Rust
+    // process, so py-spy will return BinaryNotFound or Failed, both
+    // valid PySpyResult variants at HTTP 200. If the endpoint returns
+    // a documented non-success instead (e.g., 504 timeout), we
+    // validate it as an error response.
+    let encoded = urlencoding::encode(&s.worker);
+    let resp = s
+        .fixture
+        .get(&format!("/v1/pyspy/{encoded}"))
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let ct = content_type(&resp);
+    if resp.status().is_success() {
+        assert_content_type(&ct, "application/json", "MIT-62", "/v1/pyspy success");
+        v.check_status_documented("/v1/pyspy/{proc_reference}", status, "MIT-55");
+        let body: Value = resp.json().await.unwrap();
+        v.validate_success("/v1/pyspy/{proc_reference}", status, &body);
+    } else {
+        assert_content_type(
+            &ct,
+            "application/json",
+            "MIT-62",
+            "/v1/pyspy error-fallback",
+        );
+        v.check_status_documented("/v1/pyspy/{proc_reference}", status, "MIT-57");
+        let body_text = resp.text().await.unwrap();
+        let body: Value = serde_json::from_str(&body_text)
+            .unwrap_or_else(|e| panic!("MIT-58: not JSON: {e}: {body_text}"));
+        v.validate_error("/v1/pyspy/{proc_reference}", status, &body);
+    }
+
+    // MIT-57, MIT-58, MIT-59, MIT-61, MIT-62: error path — bogus proc
+    // ref.
+    let bogus = "unix:@nonexistent_bogus_socket_xyz,bogus-ffffffffffffffff";
+    let encoded = urlencoding::encode(bogus);
+    let resp = s
+        .fixture
+        .get(&format!("/v1/pyspy/{encoded}"))
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    assert!(!resp.status().is_success());
+    assert_content_type(
+        &content_type(&resp),
+        "application/json",
+        "MIT-62",
+        "/v1/pyspy error",
+    );
+    v.check_status_documented("/v1/pyspy/{proc_reference}", status, "MIT-57");
+    let body_text = resp.text().await.unwrap();
+    let body: Value = serde_json::from_str(&body_text)
+        .unwrap_or_else(|e| panic!("MIT-58: not JSON: {e}: {body_text}"));
+    v.validate_error("/v1/pyspy/{proc_reference}", status, &body);
+    assert!(
+        body["error"]["code"].is_string(),
+        "MIT-59: error.code must be string"
+    );
+    assert!(
+        body["error"]["message"].is_string(),
+        "MIT-59: error.message must be string"
+    );
 }

@@ -217,6 +217,44 @@
 //!   produce responses conforming to the same schema.
 //! - **MIT-50 (invalid-param-error-conformance):** Invalid params
 //!   fail with documented status codes and error body shapes.
+//!
+//! ### Py-spy OpenAPI conformance
+//!
+//! #### Py-spy route in spec — static
+//!
+//! - **MIT-53 (pyspy-route-documented):**
+//!   `/v1/pyspy/{proc_reference}` is present in `paths`.
+//! - **MIT-54 (pyspy-schemas-compile):** `PySpyResult` (and its
+//!   transitive types) in `components/schemas` compile via
+//!   `jsonschema::JSONSchema::compile`.
+//!
+//! #### Py-spy success responses
+//!
+//! - **MIT-55 (pyspy-success-status-documented):** Success responses
+//!   return a status code declared by the operation.
+//! - **MIT-56 (pyspy-success-body-validates):** Success body
+//!   validates against the operation's `PySpyResult` response schema.
+//!
+//! #### Py-spy error responses
+//!
+//! - **MIT-57 (pyspy-error-status-documented):** Error responses
+//!   return a status code declared by the operation.
+//! - **MIT-58 (pyspy-error-body-validates):** Error body validates
+//!   against `ApiErrorEnvelope` schema.
+//! - **MIT-59 (pyspy-error-envelope-shape):** `error.code` and
+//!   `error.message` present.
+//!
+//! #### Py-spy parameters
+//!
+//! - **MIT-60 (pyspy-path-param-conformance):** `proc_reference`
+//!   parameter matches contract (type: string, required: true).
+//! - **MIT-61 (pyspy-invalid-param-error-conformance):** Bogus proc
+//!   ref fails with documented status code and error body shape.
+//!
+//! #### Py-spy content-type
+//!
+//! - **MIT-62 (pyspy-content-type):** Both success and error
+//!   responses use `application/json` media type.
 
 mod auth;
 mod config;
@@ -309,8 +347,9 @@ async fn test_auth_failures_rust() {
 // --- openapi conformance family ---
 
 /// MIT-37, MIT-38, MIT-39, MIT-40, MIT-41, MIT-42, MIT-43, MIT-44,
-/// MIT-45, MIT-46, MIT-47, MIT-48, MIT-49, MIT-50, MIT-51, MIT-52:
-/// OpenAPI conformance — Rust binary.
+/// MIT-45, MIT-46, MIT-47, MIT-48, MIT-49, MIT-50, MIT-51, MIT-52,
+/// MIT-53, MIT-54, MIT-55, MIT-56, MIT-57, MIT-58, MIT-59, MIT-60,
+/// MIT-61, MIT-62: OpenAPI conformance — Rust binary.
 #[tokio::test]
 async fn test_openapi_conformance_rust() {
     dining::run_openapi_conformance_rust().await;
