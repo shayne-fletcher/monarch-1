@@ -1489,6 +1489,11 @@ pub fn build_openapi_spec() -> serde_json::Value {
     shared_schemas.insert("NodePayload".into(), node_schema);
     shared_schemas.insert("ApiErrorEnvelope".into(), error_schema);
 
+    // Rewrite any remaining $defs refs in the hoisted component schemas.
+    for value in shared_schemas.values_mut() {
+        rewrite_refs(value);
+    }
+
     let error_response = |desc: &str| -> serde_json::Value {
         serde_json::json!({
             "description": desc,
