@@ -24,7 +24,15 @@ use crate::config::PYSPY_BIN;
 /// Result of a py-spy stack dump request.
 ///
 /// See PS-2, PS-4 in `introspect` module doc.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    Named,
+    schemars::JsonSchema
+)]
 pub enum PySpyResult {
     /// Successful stack dump with structured traces.
     Ok {
@@ -59,7 +67,7 @@ pub enum PySpyResult {
 wirevalue::register_type!(PySpyResult);
 
 /// A single thread's stack trace from py-spy `--json` output.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PySpyStackTrace {
     /// OS process ID that owns this thread.
     pub pid: i32,
@@ -78,7 +86,7 @@ pub struct PySpyStackTrace {
 }
 
 /// A single frame in a py-spy stack trace.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PySpyFrame {
     /// Function or method name.
     pub name: String,
@@ -97,7 +105,7 @@ pub struct PySpyFrame {
 }
 
 /// A local variable captured in a py-spy frame.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PySpyLocalVariable {
     /// Variable name.
     pub name: String,
