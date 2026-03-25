@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable, Dict, Literal, Optional, Tuple
 
 from monarch._rust_bindings.monarch_hyperactor.alloc import AllocConstraints, AllocSpec
 from monarch._rust_bindings.monarch_hyperactor.host_mesh import (
+    _spawn_admin as _hy_spawn_admin,
     BootstrapCommand,
     HostMesh as HyHostMesh,
 )
@@ -170,34 +171,6 @@ class HostMesh(MeshTrait):
             True,
             proc_bind,
         )
-
-    def _spawn_admin(self, admin_addr: Optional[str] = None) -> "Future[str]":
-        """
-        Spawn a MeshAdminAgent on the head host's system proc and
-        return its HTTP address.
-
-        The admin agent aggregates topology across all hosts and serves
-        an HTTP API. Use the returned address to connect an admin client::
-
-            head = host_mesh.slice(hosts=0)
-            addr = head._spawn_admin(admin_addr="[::]:1729").get()
-
-        Args:
-            admin_addr: Optional socket address for the admin HTTP server
-                (e.g. ``"[::]:1729"``). When ``None``, reads
-                ``MESH_ADMIN_ADDR`` from config.
-
-        Returns:
-            Future[str]: The admin HTTP URL (e.g. ``"https://myhost.facebook.com:1729"``).
-        """
-
-        async def task() -> str:
-            hy_mesh = await self._hy_host_mesh
-            return await hy_mesh._spawn_admin(
-                context().actor_instance._as_rust(), admin_addr
-            )
-
-        return Future(coro=task())
 
     def _spawn_nonblocking(
         self,
@@ -459,6 +432,47 @@ class HostMesh(MeshTrait):
         if self._inner_host_mesh is None:
             raise RuntimeError("HostMesh has already been shut down")
         return self._inner_host_mesh
+
+
+def _spawn_admin(
+    host_meshes: list["HostMesh"],
+    admin_addr: Optional[str] = None,
+) -> "Future[str]":
+    """
+    Spawn a MeshAdminAgent aggregating topology across one or more HostMeshes.
+
+    The admin runs on the first mesh's head host system proc and serves the
+    mesh-admin HTTP API.
+
+    Use a single-element list for the degenerate single-mesh case::
+
+        host = this_host()
+        admin_url = await _spawn_admin([host], admin_addr="[::]:1729")
+
+    Args:
+        host_meshes: One or more HostMeshes. The first element is the
+            placement mesh (the admin is spawned on its head host).
+            Must not be empty.
+        admin_addr: Optional socket address for the admin HTTP server.
+            When ``None``, reads ``MESH_ADMIN_ADDR`` from config.
+
+    Returns:
+        Future[str]: The admin HTTP URL (for example
+            ``"https://myhost.facebook.com:1729"``).
+
+    Raises:
+        ValueError: If host_meshes is empty.
+    """
+    if not host_meshes:
+        raise ValueError("_spawn_admin requires at least one HostMesh")
+
+    async def task() -> str:
+        hy_meshes = [await m._hy_host_mesh for m in host_meshes]
+        return await _hy_spawn_admin(
+            hy_meshes, context().actor_instance._as_rust(), admin_addr
+        )
+
+    return Future(coro=task())
 
 
 def hosts_from_config(name: str) -> HostMesh:

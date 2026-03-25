@@ -198,10 +198,12 @@
 //!
 //! ## Client host invariants (CH-*)
 //!
-//! Let **A** denote the observed host mesh (the host mesh for which
-//! this `MeshAdminAgent` was spawned), and let **C** denote the
-//! process-global singleton client host mesh in the caller process
-//! (whose local proc hosts the root client actor).
+//! Let **A** denote the aggregated host set (the union of hosts
+//! from all meshes passed to [`host_mesh::spawn_admin`],
+//! deduplicated by `HostAgent` `ActorId` — see SA-3), and let
+//! **C** denote the process-global singleton client host mesh in
+//! the caller process (whose local proc hosts the root client
+//! actor).
 //!
 //! - **CH-1 (deduplication):** When C ∈ A, the client host appears
 //!   exactly once in the admin host list (deduplicated by `HostAgent`
@@ -212,17 +214,52 @@
 //! - **CH-2 (reachability):** In both cases, the root client actor
 //!   is reachable through the standard host → proc → actor walk.
 //!
-//! - **CH-3 (ordering):** `spawn_admin` requires `cx: &impl
-//!   context::Actor` (the caller's root client instance). Constructing
-//!   that instance initializes C. Therefore C is available when
-//!   `spawn_admin` executes. Any refactor must preserve this ordering.
+//! - **CH-3 (ordering):** C must be initialized before
+//!   `spawn_admin` executes. In Rust, calling `context()` /
+//!   `this_host()` / `this_proc()` triggers `GLOBAL_CONTEXT`
+//!   bootstrap, which initializes C. In Python, `bootstrap_host()`
+//!   calls `register_client_host()` before any actor code runs.
+//!   Either path ensures C is available by the time `spawn_admin`
+//!   reads it via `try_this_host()`. Any refactor must preserve
+//!   this ordering.
 //!
-//! **Mechanism:** [`HostMeshRef::spawn_admin`] reads C from the
-//! caller process (via `try_this_host()`), merges it with A's host
-//! list, deduplicates by `HostAgent` `ActorId`, and sends the merged
+//! - **CH-4 (runtime-agnostic client-host discovery):** `spawn_admin`
+//!   discovers C via `try_this_host()`, which checks two sources
+//!   in order: the Rust `GLOBAL_CONTEXT` (initialized via
+//!   `context()` / `this_host()` / `this_proc()`) and the
+//!   externally registered client host (set by
+//!   `register_client_host()` from Python's `bootstrap_host()`).
+//!   Aggregation logic must not branch on which source provided C.
+//!
+//! **Mechanism:** [`host_mesh::spawn_admin`] aggregates hosts from
+//! all input meshes (SA-3), reads C from the caller process (via
+//! `try_this_host()`), merges it with the aggregated set (SA-6),
+//! deduplicates by `HostAgent` `ActorId`, and sends the merged
 //! list in `SpawnMeshAdmin`. This works for same-process and
-//! cross-process setups because merge+dedeup happens in the caller
+//! cross-process setups because merge+dedup happens in the caller
 //! process before sending the spawn request.
+//!
+//! ## Spawn/aggregation invariants (SA-*)
+//!
+//! [`host_mesh::spawn_admin`] aggregates hosts from one or more
+//! meshes into a single admin host set.
+//!
+//! - **SA-1 (non-empty mesh set):** The input must yield at least
+//!   one mesh.
+//! - **SA-2 (non-empty hosts):** Every input mesh must contain at
+//!   least one host.
+//! - **SA-3 (host-agent identity dedup):** The admin host set is
+//!   the ordered union of host agents from all input meshes,
+//!   deduplicated by `HostAgent` `ActorId` in first-seen order.
+//! - **SA-4 (single-mesh degeneracy):** `spawn_admin([mesh], ...)`
+//!   is behaviorally equivalent to the former `mesh.spawn_admin(...)`.
+//!   Established by existing single-mesh integration tests (e.g.
+//!   `dining_philosophers`); no dedicated unit test.
+//! - **SA-5 (placement determinism):** The admin is spawned on the
+//!   first input mesh's first host.
+//! - **SA-6 (client-host merge after aggregation):** Client-host
+//!   inclusion/dedup (CH-1) operates on the already-aggregated host
+//!   set, not per-mesh independently.
 //!
 //! ## MAST resolution invariants (MC-*)
 //!

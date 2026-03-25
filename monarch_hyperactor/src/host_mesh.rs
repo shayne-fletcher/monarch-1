@@ -19,6 +19,7 @@ use hyperactor_mesh::ProcMeshRef;
 use hyperactor_mesh::bootstrap::BootstrapCommand;
 use hyperactor_mesh::bootstrap::ProcBind;
 use hyperactor_mesh::bootstrap::host;
+use hyperactor_mesh::host_mesh;
 use hyperactor_mesh::host_mesh::HostMesh;
 use hyperactor_mesh::host_mesh::HostMeshRef;
 use hyperactor_mesh::host_mesh::host_agent::GetLocalProcClient;
@@ -190,34 +191,6 @@ impl PyHostMesh {
         Ok(Self::new_ref(
             self.mesh_ref()?.with_bootstrap(bootstrap_command.to_rust()),
         ))
-    }
-
-    /// Spawn a MeshAdminAgent on the head host's system proc and
-    /// return its HTTP address as a string.
-    ///
-    /// When `admin_addr` is provided (as a `"host:port"` string), the
-    /// HTTP server binds to that address; otherwise it reads
-    /// `MESH_ADMIN_ADDR` from config.
-    fn _spawn_admin(
-        &self,
-        instance: &PyInstance,
-        admin_addr: Option<String>,
-    ) -> PyResult<PyPythonTask> {
-        let admin_addr = admin_addr
-            .map(|s| {
-                s.parse::<std::net::SocketAddr>()
-                    .map_err(|e| PyException::new_err(format!("invalid admin_addr '{}': {}", s, e)))
-            })
-            .transpose()?;
-        let host_mesh = self.mesh_ref()?.clone();
-        let instance = instance.clone();
-        PyPythonTask::new(async move {
-            let addr = host_mesh
-                .spawn_admin(instance.deref(), admin_addr)
-                .await
-                .map_err(|e| PyException::new_err(e.to_string()))?;
-            Ok(addr)
-        })
     }
 
     fn sliced(&self, region: &PyRegion) -> PyResult<Self> {
@@ -527,6 +500,46 @@ fn shutdown_local_host_mesh() -> PyResult<PyPythonTask> {
     })
 }
 
+/// Spawn a MeshAdminAgent aggregating topology across one or more meshes.
+///
+/// The admin runs on the first mesh's head host system proc and serves
+/// the mesh-admin HTTP API. Returns the admin HTTP URL. When
+/// `admin_addr` is `None`, the bind address is read from
+/// `MESH_ADMIN_ADDR` config.
+///
+/// Python-facing wrapper around
+/// [`hyperactor_mesh::host_mesh::spawn_admin`].
+#[pyfunction]
+fn _spawn_admin(
+    host_meshes: Vec<PyRef<'_, PyHostMesh>>,
+    instance: &PyInstance,
+    admin_addr: Option<String>,
+) -> PyResult<PyPythonTask> {
+    if host_meshes.is_empty() {
+        return Err(PyException::new_err("at least one mesh is required"));
+    }
+
+    let admin_addr = admin_addr
+        .map(|s| {
+            s.parse::<std::net::SocketAddr>()
+                .map_err(|e| PyException::new_err(format!("invalid admin_addr '{}': {}", s, e)))
+        })
+        .transpose()?;
+
+    let mesh_refs = host_meshes
+        .iter()
+        .map(|m| -> PyResult<HostMeshRef> { Ok(m.mesh_ref()?.clone()) })
+        .collect::<PyResult<Vec<HostMeshRef>>>()?;
+
+    let instance = instance.clone();
+    PyPythonTask::new(async move {
+        let addr = host_mesh::spawn_admin(&mesh_refs, instance.deref(), admin_addr)
+            .await
+            .map_err(|e| PyException::new_err(e.to_string()))?;
+        Ok(addr)
+    })
+}
+
 pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     let f = wrap_pyfunction!(py_host_mesh_from_bytes, hyperactor_mod)?;
     f.setattr(
@@ -548,6 +561,13 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
         "monarch._rust_bindings.monarch_hyperactor.host_mesh",
     )?;
     hyperactor_mod.add_function(f3)?;
+
+    let f4 = wrap_pyfunction!(_spawn_admin, hyperactor_mod)?;
+    f4.setattr(
+        "__module__",
+        "monarch._rust_bindings.monarch_hyperactor.host_mesh",
+    )?;
+    hyperactor_mod.add_function(f4)?;
 
     hyperactor_mod.add_class::<PyHostMesh>()?;
     hyperactor_mod.add_class::<PyBootstrapCommand>()?;

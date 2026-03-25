@@ -37,6 +37,7 @@ import asyncio
 import sys
 
 import monarch.actor
+from monarch._src.actor.host_mesh import _spawn_admin
 from monarch.actor import Actor, current_rank, endpoint, this_host
 
 
@@ -84,7 +85,7 @@ class Worker(Actor):
 async def async_main(num_procs: int) -> None:
     host = this_host()
 
-    admin_url = await host._spawn_admin()
+    admin_url = await _spawn_admin([host])
     mtls_flags = (
         "--cacert /var/facebook/rootcanal/ca.pem "
         "--cert /var/facebook/x509_identities/server.pem "
