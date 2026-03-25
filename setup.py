@@ -355,7 +355,7 @@ rust_extensions.append(
 rust_extensions.append(
     RustBin(
         {"hyperactor_mesh_admin_tui": "monarch-tui"},
-        path="hyperactor_mesh/Cargo.toml",
+        path="hyperactor_mesh_admin_tui/Cargo.toml",
         debug=False,
     )
 )
