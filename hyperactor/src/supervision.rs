@@ -7,6 +7,15 @@
  */
 
 //! Messages used in supervision.
+//!
+//! ## Supervision invariants (SV-*)
+//!
+//! - **SV-1 (root-cause attribution):** For an
+//!   `UnhandledSupervisionEvent` chain, `actually_failing_actor()`
+//!   returns the event that should be treated as the root cause
+//!   for structured failure attribution. In particular, if a
+//!   failed parent wraps a stopped child event, the stopped child
+//!   remains the root cause.
 
 use std::fmt;
 use std::fmt::Debug;
@@ -150,5 +159,47 @@ impl fmt::Display for ActorSupervisionEvent {
             fmt::Display::fmt(event, f)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::channel::ChannelAddr;
+    use crate::reference::ProcId;
+
+    /// Exercises SV-1 (see module doc): for a parent wrapping a
+    /// stopped child in `UnhandledSupervisionEvent`,
+    /// `actually_failing_actor()` returns the stopped child as
+    /// root cause for structured failure attribution.
+    #[test]
+    fn test_sv1_actually_failing_actor_returns_stopped_child() {
+        let proc_id = ProcId::with_name(ChannelAddr::Local(0), "test_proc");
+        let child_id = proc_id.actor_id("proc_agent", 0);
+        let parent_id = proc_id.actor_id("controller", 0);
+
+        let child_event = ActorSupervisionEvent::new(
+            child_id.clone(),
+            Some("proc_agent".into()),
+            ActorStatus::Stopped("host died".into()),
+            None,
+        );
+        let parent_event = ActorSupervisionEvent::new(
+            parent_id,
+            Some("controller".into()),
+            ActorStatus::Failed(ActorErrorKind::UnhandledSupervisionEvent(Box::new(
+                child_event,
+            ))),
+            None,
+        );
+
+        // SV-1: root cause is the stopped child, not the parent.
+        let root = parent_event.actually_failing_actor();
+        assert_eq!(root.actor_id, child_id);
+        assert!(
+            matches!(root.actor_status, ActorStatus::Stopped(_)),
+            "root cause should be the stopped child, got: {:?}",
+            root.actor_status,
+        );
     }
 }
