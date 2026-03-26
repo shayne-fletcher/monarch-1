@@ -45,6 +45,7 @@ from enum import auto, Enum
 from typing import Any, cast
 
 from monarch._src.actor.actor_mesh import ActorMesh
+from monarch._src.actor.host_mesh import _spawn_admin
 from monarch.actor import Actor, current_rank, endpoint, this_host
 from monarch.distributed_telemetry.actor import start_telemetry
 
@@ -164,7 +165,7 @@ async def async_main(
     host = this_host()
 
     # Spawn the admin agent so the TUI can attach.
-    admin_url = await host._spawn_admin()
+    admin_url = await _spawn_admin([host])
     mtls_flags = (
         "--cacert /var/facebook/rootcanal/ca.pem "
         "--cert /var/facebook/x509_identities/server.pem "
