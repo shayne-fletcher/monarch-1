@@ -77,7 +77,7 @@ tokio-rustls = { version = "0.26.4", features = ["logging", "ring", "tls12"], de
 tokio-stream = { version = "0.1.18", features = ["fs", "io-util", "net", "signal", "sync", "time"] }
 tokio-util = { version = "0.7.18", features = ["full"] }
 tracing = { version = "0.1.41", features = ["attributes", "valuable"] }
-tracing-subscriber = { version = "0.3.20", features = ["chrono", "env-filter", "json", "local-time", "parking_lot", "registry"] }
+tracing-subscriber = { version = "0.3.23", features = ["chrono", "env-filter", "json", "local-time", "parking_lot", "registry"] }
 typeuri = { version = "0.0.0", path = "../typeuri" }
 urlencoding = "2.1.0"
 uuid = { version = "1.22.0", features = ["rng-getrandom", "serde", "v4", "v5", "v6", "v7", "v8"] }
