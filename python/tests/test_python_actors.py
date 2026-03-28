@@ -1446,10 +1446,10 @@ def test_config_propagates_to_host_agent():
 
     Sets mesh_admin_addr on the client, attaches to workers (which
     pushes config to host agents via SetClientConfig), then spawns
-    MeshAdminAgent on the host's system proc. MeshAdminAgent reads
-    MESH_ADMIN_ADDR from the host agent process's global config to
-    decide its bind address. If the client's config was propagated,
-    it binds to :9999 instead of the default :1729.
+    MeshAdminAgent on the caller's local proc. MeshAdminAgent reads
+    MESH_ADMIN_ADDR from global config to decide its bind address.
+    If the client's config was propagated, it binds to :9999 instead
+    of the default :1729.
 
     This specifically tests the host agent's own process config, NOT
     child procs (which already receive config via ProcSpec/Bootstrap).
@@ -1481,9 +1481,8 @@ def test_config_propagates_to_host_agent():
 
         hosts = attach_to_workers(ca="trust_all_connections", workers=workers)
 
-        # _spawn_admin() sends SpawnMeshAdmin to the host agent, which
-        # spawns MeshAdminAgent on the host's system proc. The admin
-        # agent reads MESH_ADMIN_ADDR from the host process's config.
+        # _spawn_admin() spawns MeshAdminAgent on the caller's local
+        # proc. The admin agent reads MESH_ADMIN_ADDR from config.
         head = hosts.slice(hosts=0)
         admin_addr = _spawn_admin([head]).get()
 

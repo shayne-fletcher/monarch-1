@@ -11,15 +11,16 @@ use crate::MastResolver;
 /// CLI arguments for resolving a `mast_conda:///` job handle into a
 /// mesh admin base URL.
 ///
-/// `handle` is the MAST job handle to resolve. `port` optionally
-/// overrides the port used in the resolved URL; when not provided,
-/// the port is derived from `MESH_ADMIN_ADDR`.
+/// **Currently disabled.** Mesh admin placement has moved to the
+/// caller's local proc, making topology-based resolution incorrect.
+/// This command will return an error until a publication-based
+/// discovery mechanism replaces it.
 #[derive(clap::Args, Debug)]
 pub struct ResolveCommand {
     /// MAST job handle (e.g. mast_conda:///monarch-abc123)
     handle: String,
 
-    /// Override the port (default: from MESH_ADMIN_ADDR config)
+    /// Override the port (currently unused — resolution is disabled)
     #[arg(long)]
     port: Option<u16>,
 }

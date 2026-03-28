@@ -60,8 +60,8 @@ use crate::host_mesh::host_agent::ProcManagerSpawnFn;
 use crate::host_mesh::host_agent::ProcState;
 use crate::host_mesh::host_agent::SetClientConfigClient;
 use crate::host_mesh::host_agent::ShutdownHostClient;
-use crate::host_mesh::host_agent::SpawnMeshAdminClient;
 use crate::host_mesh::host_agent::StopHostClient;
+use crate::mesh_admin::MeshAdminMessageClient;
 use crate::mesh_controller::HostMeshController;
 use crate::mesh_controller::ProcMeshController;
 use crate::proc_agent::ProcAgent;
@@ -579,8 +579,8 @@ impl HostMesh {
         // Spawn a unique mesh controller for each proc mesh, so the type of the
         // mesh can be preserved.
         let controller = HostMeshController::new(mesh.deref().clone());
-        // AI-3: controller name must include mesh identity for
-        // proc-wide ActorId uniqueness.
+        // hyperactor::proc AI-3: controller name must include mesh
+        // identity for proc-wide ActorId uniqueness.
         let controller_name = format!("{}_{}", HOST_MESH_CONTROLLER_NAME, mesh.name());
         let controller_handle = controller
             .spawn_with_name(cx, &controller_name)
@@ -630,9 +630,7 @@ impl HostMesh {
     ///    with a barrier to confirm installation.
     /// 4. Returns the owned `HostMesh`.
     ///
-    /// After this returns, host agents have the client's config and any
-    /// subsequent operations on the host's system proc (e.g.
-    /// SpawnMeshAdmin) will see it.
+    /// After this returns, host agents have the client's config.
     pub async fn attach(
         cx: &impl context::Actor,
         name: Name,
@@ -1368,8 +1366,8 @@ impl HostMeshRef {
             // Spawn a unique mesh controller for each proc mesh, so the type of the
             // mesh can be preserved.
             let controller = ProcMeshController::new(mesh.deref().clone());
-            // AI-3: controller name must include mesh identity for
-            // proc-wide ActorId uniqueness.
+            // hyperactor::proc AI-3: controller name must include mesh
+            // identity for proc-wide ActorId uniqueness.
             let controller_name = format!("{}_{}", PROC_MESH_CONTROLLER_NAME, mesh.name());
             let controller_handle = controller
                 .spawn_with_name(cx, &controller_name)
@@ -1646,11 +1644,12 @@ fn aggregate_hosts(
 /// Spawn a [`MeshAdminAgent`] that aggregates hosts from multiple
 /// meshes.
 ///
-/// The admin agent runs on the first mesh's `hosts()[0]`'s system
-/// proc. Hosts are deduplicated by actor ID across all meshes.
+/// The admin agent runs on the caller's local proc — the `Proc` of
+/// the actor context `cx`. Hosts are deduplicated by actor ID across
+/// all meshes.
 ///
-/// See the `mesh_admin` module doc for the SA-* (spawn/aggregation)
-/// and CH-* (client host) invariants.
+/// See the `mesh_admin` module doc for the SA-* (spawn/aggregation),
+/// CH-* (client host), and AI-* (admin identity) invariants.
 pub async fn spawn_admin(
     meshes: impl IntoIterator<Item = impl AsRef<HostMeshRef>>,
     cx: &impl hyperactor::context::Actor,
@@ -1672,10 +1671,23 @@ pub async fn spawn_admin(
     let hosts = aggregate_hosts(&meshes, client_entries);
 
     let root_client_id = cx.mailbox().actor_id().clone();
-    let head_agent = meshes[0].as_ref().hosts()[0].mesh_agent();
-    let addr = head_agent
-        .spawn_mesh_admin(cx, hosts, Some(root_client_id), admin_addr, telemetry_url)
-        .await?;
+
+    // Spawn the admin on the caller's local proc. Placement now
+    // follows the caller context rather than mesh topology.
+    let local_proc = cx.instance().proc();
+    let agent_handle = local_proc.spawn(
+        crate::mesh_admin::MESH_ADMIN_ACTOR_NAME,
+        crate::mesh_admin::MeshAdminAgent::new(
+            hosts,
+            Some(root_client_id),
+            admin_addr,
+            telemetry_url,
+        ),
+    )?;
+    let response = agent_handle.get_admin_addr(cx).await?;
+    let addr = response
+        .addr
+        .ok_or_else(|| anyhow::anyhow!("mesh admin agent did not report an address"))?;
 
     Ok(addr)
 }

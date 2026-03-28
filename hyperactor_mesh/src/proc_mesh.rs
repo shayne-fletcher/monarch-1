@@ -1161,8 +1161,8 @@ impl ProcMeshRef {
                 Some(cx.instance().port().bind()),
                 statuses,
             );
-            // AI-3: controller name must include mesh identity for
-            // proc-wide ActorId uniqueness. A fixed base name alone
+            // hyperactor::proc AI-3: controller name must include mesh
+            // identity for proc-wide ActorId uniqueness. A fixed base name alone
             // collides across parents because pid allocation is
             // parent-scoped.
             let controller_name = format!(

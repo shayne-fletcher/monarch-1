@@ -442,7 +442,7 @@ def _spawn_admin(
     """
     Spawn a MeshAdminAgent aggregating topology across one or more HostMeshes.
 
-    The admin runs on the first mesh's head host system proc and serves the
+    The admin runs on the caller's local proc and serves the
     mesh-admin HTTP API.
 
     Use a single-element list for the degenerate single-mesh case::
@@ -451,9 +451,8 @@ def _spawn_admin(
         admin_url = await _spawn_admin([host], admin_addr="[::]:1729")
 
     Args:
-        host_meshes: One or more HostMeshes. The first element is the
-            placement mesh (the admin is spawned on its head host).
-            Must not be empty.
+        host_meshes: One or more HostMeshes whose hosts the admin
+            will aggregate for introspection. Must not be empty.
         admin_addr: Optional socket address for the admin HTTP server.
             When ``None``, reads ``MESH_ADMIN_ADDR`` from config.
         telemetry_url: Optional base URL of the Monarch telemetry dashboard.

@@ -24,14 +24,14 @@ use hyperactor_mesh_admin_tui_lib::TuiConfig;
 struct Args {
     /// Admin server address.
     ///
-    /// Accepts `host:port` (scheme auto-detected), an explicit URL
-    /// like `https://host:port`, or a MAST job handle like
-    /// `mast_conda:///<job-name>` (Meta-internal only).
+    /// Accepts `host:port` (scheme auto-detected) or an explicit URL
+    /// like `https://host:port`. `mast_conda:///<job-name>` handles
+    /// are currently disabled (returns an error).
     #[arg(long, short)]
     addr: String,
 
-    /// Admin port override for MAST job resolution. When not set,
-    /// reads from `MESH_ADMIN_ADDR` config.
+    /// Admin port override (currently unused — `mast_conda:///`
+    /// resolution is disabled).
     #[arg(long)]
     admin_port: Option<u16>,
 
