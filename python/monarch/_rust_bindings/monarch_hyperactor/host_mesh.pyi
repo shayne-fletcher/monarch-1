@@ -157,12 +157,12 @@ def _spawn_admin(
     """
     Spawn a MeshAdminAgent aggregating topology across one or more meshes.
 
-    The admin runs on the first mesh's head host system proc and serves
-    the mesh-admin HTTP API. Returns the admin HTTP URL.
+    The admin runs on the caller's local proc and serves the mesh-admin
+    HTTP API. Returns the admin HTTP URL.
 
     Arguments:
-    - `host_meshes`: One or more HostMeshes. The first element is the
-      placement mesh. Must not be empty.
+    - `host_meshes`: One or more HostMeshes whose hosts the admin will
+      aggregate for introspection. Must not be empty.
     - `instance`: The actor instance used to spawn the admin agent.
     - `admin_addr`: Optional socket address (e.g. ``"[::]:1729"``).
       When ``None``, reads ``MESH_ADMIN_ADDR`` from config.

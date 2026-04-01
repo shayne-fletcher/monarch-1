@@ -22,6 +22,7 @@ The authoritative API contract is machine-readable:
 
 - `GET {base}/v1/openapi.json` — OpenAPI 3.1 spec
 - `GET {base}/v1/schema` — JSON Schema for `NodePayload` responses
+- `GET {base}/v1/schema/admin` — JSON Schema for `AdminInfo` responses
 - `GET {base}/v1/schema/error` — JSON Schema for error responses
 
 Schema is authoritative over prose in this document. Fetch schema
@@ -73,8 +74,16 @@ Most endpoints are read-only (`GET`). Two endpoints accept `POST`:
 (dump-and-store). All endpoints return `application/json` except
 `/SKILL.md` (`text/markdown`).
 
+- `GET {base}/v1/admin`
+  Admin self-identification: returns `AdminInfo` with `actor_id`,
+  `proc_id`, `host`, and `url`. Use to verify placement and discover
+  the admin's identity.
+
 - `GET {base}/v1/schema`
   JSON Schema for `NodePayload` (authoritative contract).
+
+- `GET {base}/v1/schema/admin`
+  JSON Schema for `AdminInfo`.
 
 - `GET {base}/v1/schema/error`
   JSON Schema for error envelope.

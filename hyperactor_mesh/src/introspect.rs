@@ -1245,6 +1245,23 @@ mod tests {
         );
     }
 
+    /// SC-2: AdminInfo schema matches checked-in snapshot.
+    #[test]
+    fn test_admin_info_schema_snapshot() {
+        use crate::mesh_admin::AdminInfo;
+
+        let schema = schemars::schema_for!(AdminInfo);
+        let actual: serde_json::Value = serde_json::to_value(&schema).unwrap();
+        let expected: serde_json::Value = strip_comment(
+            serde_json::from_str(include_str!("testdata/admin_info_schema.json"))
+                .expect("admin info snapshot must be valid JSON"),
+        );
+        assert_eq!(
+            actual, expected,
+            "AdminInfo schema changed — review and update snapshot if intentional"
+        );
+    }
+
     /// SC-2: OpenAPI spec matches checked-in snapshot.
     #[test]
     fn test_openapi_spec_snapshot() {

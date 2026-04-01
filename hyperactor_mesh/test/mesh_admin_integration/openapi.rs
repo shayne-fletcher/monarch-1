@@ -65,6 +65,7 @@ impl OpenApiValidator {
     fn check_routes_covered(&self) {
         let paths = self.doc.get("paths").and_then(|v| v.as_object()).unwrap();
         for route in [
+            "/v1/admin",
             "/v1/root",
             "/v1/{reference}",
             "/v1/config/{proc_reference}",
@@ -73,6 +74,7 @@ impl OpenApiValidator {
             "/v1/pyspy_dump/{proc_reference}",
             "/v1/tree",
             "/v1/schema",
+            "/v1/schema/admin",
             "/v1/schema/error",
         ] {
             assert!(paths.contains_key(route), "MIT-39: missing path: {route}");
