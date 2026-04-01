@@ -209,33 +209,33 @@ impl WorkloadFixture {
             };
 
             for host_ref in &root.children {
-                let encoded = urlencoding::encode(host_ref);
+                let host_str = host_ref.to_string();
+                let encoded = urlencoding::encode(&host_str);
                 let host: NodePayload = match self.get_json(&format!("/v1/{encoded}")).await {
                     Ok(h) => h,
                     Err(_) => continue,
                 };
 
                 for proc_ref in &host.children {
-                    let encoded = urlencoding::encode(proc_ref);
+                    let proc_str = proc_ref.to_string();
+                    let encoded = urlencoding::encode(&proc_str);
                     let proc_node: NodePayload =
                         match self.get_json(&format!("/v1/{encoded}")).await {
                             Ok(p) => p,
                             Err(_) => continue,
                         };
 
-                    let actor_names: Vec<String> = proc_node
-                        .children
-                        .iter()
-                        .map(|r| {
-                            let name = r.rsplit(',').next().unwrap_or(r);
-                            name.split('[').next().unwrap_or(name).to_string()
+                    let has_actor = |name: &str| {
+                        proc_node.children.iter().any(|r| match r {
+                            hyperactor_mesh::introspect::NodeRef::Actor(id) => id.name() == name,
+                            _ => false,
                         })
-                        .collect();
+                    };
 
-                    if actor_names.iter().any(|n| n == "host_agent") {
-                        service = Some(proc_ref.clone());
-                    } else if actor_names.iter().any(|n| n == "proc_agent") && worker.is_none() {
-                        worker = Some(proc_ref.clone());
+                    if has_actor("host_agent") {
+                        service = Some(proc_str.clone());
+                    } else if has_actor("proc_agent") && worker.is_none() {
+                        worker = Some(proc_str.clone());
                     }
                 }
             }

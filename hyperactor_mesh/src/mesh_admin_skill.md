@@ -221,7 +221,7 @@ Most endpoints are read-only (`GET`). Two endpoints accept `POST`:
 
 Successful resolves return a JSON object:
 
-- `identity` — the resolved reference string
+- `identity` — the resolved reference string (opaque; round-trip it exactly)
 - `properties` — externally-tagged variant, one of:
   `{"Root": {...}}`, `{"Host": {...}}`, `{"Proc": {...}}`,
   `{"Actor": {...}}`, `{"Error": {...}}`
@@ -229,7 +229,8 @@ Successful resolves return a JSON object:
 - `parent` — optional parent reference (navigation context)
 - `as_of` — ISO 8601 timestamp of when this data was captured
 
-Each child reference can be resolved via `/v1/{reference}`.
+Each child reference can be resolved via `/v1/{reference}` (URL-encode first).
+Clients should treat reference strings as opaque tokens.
 
 ## Key fields
 
