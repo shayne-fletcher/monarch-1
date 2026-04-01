@@ -27,6 +27,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use hyperactor_mesh::introspect::NodePayload;
+use hyperactor_mesh::introspect::dto::NodePayloadDto;
 use reqwest::Client;
 use reqwest::Response;
 use serde::Serialize;
@@ -130,6 +131,13 @@ impl WorkloadFixture {
             .with_context(|| format!("deserialize response from GET {url} (HTTP {status}): {body}"))
     }
 
+    /// GET a path and deserialize as `NodePayloadDto`, converting to
+    /// the domain `NodePayload`.
+    pub(crate) async fn get_node_payload(&self, path: &str) -> Result<NodePayload> {
+        let dto: NodePayloadDto = self.get_json(path).await?;
+        NodePayload::try_from(dto).context("DTO → NodePayload conversion")
+    }
+
     /// POST a path with a JSON body relative to the admin URL.
     pub(crate) async fn post(&self, path: &str, body: &impl Serialize) -> Result<Response> {
         let url = format!("{}{}", self.admin_url, path);
@@ -200,7 +208,7 @@ impl WorkloadFixture {
         let mut worker = None;
 
         for _attempt in 1..=15 {
-            let root: NodePayload = match self.get_json("/v1/root").await {
+            let root: NodePayload = match self.get_node_payload("/v1/root").await {
                 Ok(r) => r,
                 Err(_) => {
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -211,7 +219,8 @@ impl WorkloadFixture {
             for host_ref in &root.children {
                 let host_str = host_ref.to_string();
                 let encoded = urlencoding::encode(&host_str);
-                let host: NodePayload = match self.get_json(&format!("/v1/{encoded}")).await {
+                let host: NodePayload = match self.get_node_payload(&format!("/v1/{encoded}")).await
+                {
                     Ok(h) => h,
                     Err(_) => continue,
                 };
@@ -220,7 +229,7 @@ impl WorkloadFixture {
                     let proc_str = proc_ref.to_string();
                     let encoded = urlencoding::encode(&proc_str);
                     let proc_node: NodePayload =
-                        match self.get_json(&format!("/v1/{encoded}")).await {
+                        match self.get_node_payload(&format!("/v1/{encoded}")).await {
                             Ok(p) => p,
                             Err(_) => continue,
                         };

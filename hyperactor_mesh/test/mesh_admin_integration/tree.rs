@@ -39,23 +39,30 @@ fn enc(r: &NodeRef) -> String {
 }
 
 async fn topology_has_dining_actors(s: &DiningScenario) -> bool {
-    let root: NodePayload = match s.fixture.get_json("/v1/root").await {
+    let root: NodePayload = match s.fixture.get_node_payload("/v1/root").await {
         Ok(root) => root,
         Err(_) => return false,
     };
 
     for host_ref in &root.children {
-        let host: NodePayload = match s.fixture.get_json(&format!("/v1/{}", enc(host_ref))).await {
+        let host: NodePayload = match s
+            .fixture
+            .get_node_payload(&format!("/v1/{}", enc(host_ref)))
+            .await
+        {
             Ok(host) => host,
             Err(_) => continue,
         };
 
         for proc_ref in &host.children {
-            let proc_node: NodePayload =
-                match s.fixture.get_json(&format!("/v1/{}", enc(proc_ref))).await {
-                    Ok(proc) => proc,
-                    Err(_) => continue,
-                };
+            let proc_node: NodePayload = match s
+                .fixture
+                .get_node_payload(&format!("/v1/{}", enc(proc_ref)))
+                .await
+            {
+                Ok(proc) => proc,
+                Err(_) => continue,
+            };
 
             if proc_node.children.iter().any(|actor_ref| {
                 let name = actor_name(actor_ref);
@@ -74,7 +81,7 @@ pub(crate) async fn check(s: &DiningScenario) {
     // --- MIT-13: /v1/root contract ---
     let root: NodePayload = s
         .fixture
-        .get_json("/v1/root")
+        .get_node_payload("/v1/root")
         .await
         .unwrap_or_else(|e| panic!("MIT-13: /v1/root failed: {e:#}"));
     assert_eq!(

@@ -6,12 +6,22 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-//! Introspection attr keys — mesh-topology concepts.
+//! Mesh-topology introspection types and attrs.
+//!
+//! This module owns the typed internal model used by mesh-admin and the
+//! TUI: mesh-topology attr keys, typed attrs views, `NodeRef`, and the
+//! domain `NodePayload` / `NodeProperties` / `FailureInfo` values derived
+//! from `hyperactor::introspect::IntrospectResult`.
 //!
 //! These keys are published by `HostMeshAgent`, `ProcAgent`, and
 //! `MeshAdminAgent` to describe mesh topology (hosts, procs, root).
-//! Actor-runtime keys (status, actor_type, messages_processed, etc.)
-//! are declared in `hyperactor::introspect`.
+//! Actor-runtime keys (status, actor_type, messages_processed, etc.) are
+//! declared in `hyperactor::introspect`.
+//!
+//! The HTTP wire representations live in [`dto`]. That submodule owns the
+//! curl-friendly JSON contract, schema/OpenAPI generation, and boundary
+//! invariants for string-encoded references and timestamps. This module
+//! keeps the internal typed invariants.
 //!
 //! See `hyperactor::introspect` for naming convention, invariant
 //! labels, and the `IntrospectAttr` meta-attribute pattern.
@@ -27,20 +37,21 @@
 //!
 //! ## HTTP boundary invariants (HB-*)
 //!
-//! - **HB-1 (typed-internal, string-external):** `NodeRef`,
-//!   `ActorId`, `ProcId`, and `SystemTime` are typed Rust values
-//!   internally. At the HTTP JSON boundary they are serialized as
-//!   opaque canonical strings for client round-tripping and curl
-//!   usability. Conversion happens via explicit `serde` adapters
-//!   on `NodePayload`, `NodeProperties`, and `FailureInfo`.
-//! - **HB-2 (round-trip):** The string form used at the HTTP
-//!   boundary is canonical and round-trips through the internal
-//!   typed parser (`NodeRef::from_str`, `ActorId::from_str`,
-//!   `humantime::parse_rfc3339`).
-//! - **HB-3 (schema-honesty):** `#[schemars(with = "String")]`
-//!   on HTTP-boundary fields reflects the actual serde output
-//!   (string), not the Rust type. This is not a disguise — the
-//!   serde adapters genuinely emit strings.
+//! These govern the HTTP DTO layer in [`dto`].
+//!
+//! - **HB-1 (typed-internal, string-external):** `NodeRef`, `ActorId`,
+//!   `ProcId`, and `SystemTime` are typed Rust values internally. At the
+//!   HTTP JSON boundary, [`dto::NodePayloadDto`],
+//!   [`dto::NodePropertiesDto`], and [`dto::FailureInfoDto`] encode them
+//!   as canonical strings.
+//! - **HB-2 (round-trip):** The HTTP string forms round-trip through the
+//!   internal typed parsers (`NodeRef::from_str`, `ActorId::from_str`,
+//!   `humantime::parse_rfc3339`). Timestamps are formatted at
+//!   millisecond precision; sub-millisecond values are truncated at
+//!   the boundary.
+//! - **HB-3 (schema-honesty):** Schema/OpenAPI are generated from the DTO
+//!   types, so the published schema reflects the actual wire format rather
+//!   than the internal domain representation.
 //!
 //! ## Attrs invariants (IA-*)
 //!
@@ -202,11 +213,12 @@
 //!   in `config.rs`. No hardcoded timeout constants in
 //!   `mesh_admin.rs`.
 
+pub mod dto;
+
 use hyperactor_config::Attrs;
 use hyperactor_config::INTROSPECT;
 use hyperactor_config::IntrospectAttr;
 use hyperactor_config::declare_attrs;
-use schemars::JsonSchema;
 
 // See MK-1, MK-2, IA-1..IA-5 in module doc.
 declare_attrs! {
@@ -569,193 +581,56 @@ impl From<hyperactor::introspect::IntrospectRef> for NodeRef {
     }
 }
 
-/// Serde helper: serialize `ActorId` as its Display string.
-mod actorid_serde {
-    use hyperactor::reference::ActorId;
-    use serde::Deserialize;
-
-    pub fn serialize<S: serde::Serializer>(v: &ActorId, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&v.to_string())
-    }
-
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ActorId, D::Error> {
-        let s = String::deserialize(d)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
-/// Serde helper: serialize `SystemTime` as ISO 8601 string.
-mod systemtime_serde {
-    use std::time::SystemTime;
-
-    use serde::Deserialize;
-
-    pub fn serialize<S: serde::Serializer>(v: &SystemTime, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&humantime::format_rfc3339_millis(*v).to_string())
-    }
-
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<SystemTime, D::Error> {
-        let s = String::deserialize(d)?;
-        humantime::parse_rfc3339(&s).map_err(serde::de::Error::custom)
-    }
-
-    pub mod option {
-        use std::time::SystemTime;
-
-        use serde::Deserialize;
-
-        pub fn serialize<S: serde::Serializer>(
-            v: &Option<SystemTime>,
-            s: S,
-        ) -> Result<S::Ok, S::Error> {
-            match v {
-                Some(t) => s.serialize_some(&humantime::format_rfc3339_millis(*t).to_string()),
-                None => s.serialize_none(),
-            }
-        }
-
-        pub fn deserialize<'de, D: serde::Deserializer<'de>>(
-            d: D,
-        ) -> Result<Option<SystemTime>, D::Error> {
-            let opt: Option<String> = Option::<String>::deserialize(d)?;
-            opt.map(|s| humantime::parse_rfc3339(&s).map_err(serde::de::Error::custom))
-                .transpose()
-        }
-    }
-}
-
-/// Serde helpers that serialize `NodeRef` as its Display string and
-/// deserialize via FromStr. This keeps the HTTP JSON API curl-friendly:
-/// `identity`, `children`, and `parent` appear as plain strings in JSON,
-/// while remaining typed `NodeRef` values in Rust.
-mod noderef_serde {
-    use serde::Deserialize;
-
-    use super::NodeRef;
-
-    pub fn serialize<S: serde::Serializer>(v: &NodeRef, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&v.to_string())
-    }
-
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<NodeRef, D::Error> {
-        let s = String::deserialize(d)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-
-    pub mod vec {
-        use super::NodeRef;
-
-        pub fn serialize<S: serde::Serializer>(v: &[NodeRef], s: S) -> Result<S::Ok, S::Error> {
-            use serde::ser::SerializeSeq;
-            let mut seq = s.serialize_seq(Some(v.len()))?;
-            for r in v {
-                seq.serialize_element(&r.to_string())?;
-            }
-            seq.end()
-        }
-
-        pub fn deserialize<'de, D: serde::Deserializer<'de>>(
-            d: D,
-        ) -> Result<Vec<NodeRef>, D::Error> {
-            let strings: Vec<String> = serde::Deserialize::deserialize(d)?;
-            strings
-                .into_iter()
-                .map(|s| s.parse().map_err(serde::de::Error::custom))
-                .collect()
-        }
-    }
-
-    pub mod option {
-        use super::NodeRef;
-
-        pub fn serialize<S: serde::Serializer>(
-            v: &Option<NodeRef>,
-            s: S,
-        ) -> Result<S::Ok, S::Error> {
-            match v {
-                Some(r) => s.serialize_some(&r.to_string()),
-                None => s.serialize_none(),
-            }
-        }
-
-        pub fn deserialize<'de, D: serde::Deserializer<'de>>(
-            d: D,
-        ) -> Result<Option<NodeRef>, D::Error> {
-            let opt: Option<String> = serde::Deserialize::deserialize(d)?;
-            opt.map(|s| s.parse().map_err(serde::de::Error::custom))
-                .transpose()
-        }
-    }
-}
-
 /// Uniform response for any node in the mesh topology.
 ///
 /// Every addressable entity (root, host, proc, actor) is represented
 /// as a `NodePayload`. The client navigates the mesh by fetching a
 /// node and following its `children` references.
 ///
-/// Over the HTTP JSON API, `identity`, `children`, and `parent` are
-/// serialized as plain reference strings (curl-friendly). In Rust
-/// they are typed `NodeRef` values.
-///
 /// See IA-1..IA-5 in module doc.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named, JsonSchema)]
+// Serialize/Deserialize required by wirevalue::register_type! and
+// ResolveReferenceResponse actor messaging. HTTP serialization uses
+// dto::NodePayloadDto, not these derives.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
 pub struct NodePayload {
     /// Canonical node reference identifying this node.
-    /// Serialized as a string in JSON (e.g. `"root"`, `"host:actor_id"`).
-    #[serde(with = "noderef_serde")]
-    #[schemars(with = "String")]
     pub identity: NodeRef,
     /// Node-specific metadata (type, status, metrics, etc.).
     pub properties: NodeProperties,
-    /// Child node reference strings the client can URL-encode and
-    /// fetch via `GET /v1/{reference}`.
-    #[serde(with = "noderef_serde::vec")]
-    #[schemars(with = "Vec<String>")]
+    /// Child node references for downward navigation.
     pub children: Vec<NodeRef>,
     /// Parent node reference for upward navigation.
-    #[serde(with = "noderef_serde::option")]
-    #[schemars(with = "Option<String>")]
     pub parent: Option<NodeRef>,
-    /// When this payload was captured (ISO 8601 string in JSON).
-    #[serde(with = "systemtime_serde")]
-    #[schemars(with = "String")]
+    /// When this payload was captured.
     pub as_of: SystemTime,
 }
 wirevalue::register_type!(NodePayload);
 
-/// Node-specific metadata. Externally-tagged enum — the JSON
-/// key is the variant name (Root, Host, Proc, Actor, Error).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named, JsonSchema)]
+/// Node-specific metadata. Externally-tagged enum — the variant
+/// name is the discriminator (Root, Host, Proc, Actor, Error).
+// Serialize/Deserialize required by wirevalue::register_type! and
+// ResolveReferenceResponse actor messaging. HTTP serialization uses
+// dto::NodePropertiesDto, not these derives.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
 pub enum NodeProperties {
     /// Synthetic mesh root node (not a real actor/proc).
     Root {
         num_hosts: usize,
-        #[serde(with = "systemtime_serde")]
-        #[schemars(with = "String")]
         started_at: SystemTime,
         started_by: String,
-        #[serde(with = "noderef_serde::vec")]
-        #[schemars(with = "Vec<String>")]
         system_children: Vec<NodeRef>,
     },
     /// A host in the mesh, represented by its `HostAgent`.
     Host {
         addr: String,
         num_procs: usize,
-        #[serde(with = "noderef_serde::vec")]
-        #[schemars(with = "Vec<String>")]
         system_children: Vec<NodeRef>,
     },
     /// Properties describing a proc running on a host.
     Proc {
         proc_name: String,
         num_actors: usize,
-        #[serde(with = "noderef_serde::vec")]
-        #[schemars(with = "Vec<String>")]
         system_children: Vec<NodeRef>,
-        #[serde(with = "noderef_serde::vec")]
-        #[schemars(with = "Vec<String>")]
         stopped_children: Vec<NodeRef>,
         stopped_retention_cap: usize,
         is_poisoned: bool,
@@ -766,8 +641,6 @@ pub enum NodeProperties {
         actor_status: String,
         actor_type: String,
         messages_processed: u64,
-        #[serde(with = "systemtime_serde::option")]
-        #[schemars(with = "Option<String>")]
         created_at: Option<SystemTime>,
         last_message_handler: Option<String>,
         total_processing_time_us: u64,
@@ -781,27 +654,18 @@ pub enum NodeProperties {
 wirevalue::register_type!(NodeProperties);
 
 /// Structured failure information for failed actors.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named, JsonSchema)]
+// Serialize/Deserialize required by wirevalue::register_type! and
+// ResolveReferenceResponse actor messaging. HTTP serialization uses
+// dto::FailureInfoDto, not these derives.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
 pub struct FailureInfo {
     /// Error message describing the failure.
     pub error_message: String,
     /// Actor that caused the failure (root cause).
-    /// Serialized as its Display string in JSON for curl-friendliness.
-    #[serde(
-        serialize_with = "actorid_serde::serialize",
-        deserialize_with = "actorid_serde::deserialize"
-    )]
-    #[schemars(with = "String")]
     pub root_cause_actor: hyperactor::reference::ActorId,
     /// Display name of the root-cause actor, if available.
     pub root_cause_name: Option<String>,
     /// When the failure occurred.
-    /// Serialized as ISO 8601 string in JSON for curl-friendliness.
-    #[serde(
-        serialize_with = "systemtime_serde::serialize",
-        deserialize_with = "systemtime_serde::deserialize"
-    )]
-    #[schemars(with = "String")]
     pub occurred_at: SystemTime,
     /// Whether this failure was propagated from a child.
     pub is_propagated: bool,
@@ -1369,7 +1233,7 @@ mod tests {
 
     #[test]
     fn test_node_payload_schema_snapshot() {
-        let schema = schemars::schema_for!(NodePayload);
+        let schema = schemars::schema_for!(dto::NodePayloadDto);
         let actual: serde_json::Value = serde_json::to_value(&schema).unwrap();
         let expected: serde_json::Value = strip_comment(
             serde_json::from_str(include_str!("testdata/node_payload_schema.json"))
@@ -1387,7 +1251,7 @@ mod tests {
         use hyperactor::channel::ChannelAddr;
         use hyperactor::reference::ProcId;
 
-        let schema = schemars::schema_for!(NodePayload);
+        let schema = schemars::schema_for!(dto::NodePayloadDto);
         let schema_value = serde_json::to_value(&schema).unwrap();
         let compiled = jsonschema::JSONSchema::compile(&schema_value).expect("schema must compile");
 
@@ -1464,7 +1328,8 @@ mod tests {
         ];
 
         for (i, payload) in samples.iter().enumerate() {
-            let value = serde_json::to_value(payload).unwrap();
+            let dto = dto::NodePayloadDto::from(payload.clone());
+            let value = serde_json::to_value(&dto).unwrap();
             assert!(
                 compiled.is_valid(&value),
                 "sample {i} failed schema validation"
@@ -1478,7 +1343,7 @@ mod tests {
     #[test]
     fn test_served_schema_is_raw_plus_id() {
         let raw: serde_json::Value =
-            serde_json::to_value(schemars::schema_for!(NodePayload)).unwrap();
+            serde_json::to_value(schemars::schema_for!(dto::NodePayloadDto)).unwrap();
 
         // Simulate what the endpoint does.
         let mut served = raw.clone();

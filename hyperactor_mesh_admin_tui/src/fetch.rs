@@ -15,6 +15,7 @@ use algebra::JoinSemilattice;
 use hyperactor_mesh::introspect::NodePayload;
 use hyperactor_mesh::introspect::NodeProperties;
 use hyperactor_mesh::introspect::NodeRef;
+use hyperactor_mesh::introspect::dto::NodePayloadDto;
 
 use crate::filter::is_failed_node;
 use crate::filter::is_stopped_node;
@@ -184,9 +185,12 @@ pub(crate) async fn fetch_node_raw(
         .await
         .map_err(|e| format!("Request failed: {}", e))?;
     if resp.status().is_success() {
-        resp.json::<NodePayload>()
+        resp.json::<NodePayloadDto>()
             .await
             .map_err(|e| format!("Parse error: {}", e))
+            .and_then(|dto| {
+                NodePayload::try_from(dto).map_err(|e| format!("Conversion error: {}", e))
+            })
     } else {
         Err(format!("HTTP {}", resp.status()))
     }
