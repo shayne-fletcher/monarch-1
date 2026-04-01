@@ -55,7 +55,6 @@ use crate::bootstrap::BootstrapProcConfig;
 use crate::bootstrap::BootstrapProcManager;
 use crate::config_dump::ConfigDump;
 use crate::config_dump::ConfigDumpResult;
-use crate::mesh_admin::MeshAdminMessageClient;
 use crate::proc_agent::ProcAgent;
 use crate::pyspy::PySpyDump;
 use crate::pyspy::PySpyWorker;
@@ -309,7 +308,6 @@ impl fmt::Debug for DrainWorker {
         resource::List,
         ShutdownHost,
         DrainHost,
-        SpawnMeshAdmin,
         SetClientConfig,
         ProcStatusChanged,
         PySpyDump,
@@ -1152,67 +1150,6 @@ impl Handler<resource::List> for HostAgent {
     async fn handle(&mut self, cx: &Context<Self>, list: resource::List) -> anyhow::Result<()> {
         list.reply
             .send(cx, self.created.keys().cloned().collect())?;
-        Ok(())
-    }
-}
-
-/// Message to spawn a [`MeshAdminAgent`] on this host's system proc.
-///
-/// The handler spawns the admin agent, queries its HTTP address via
-/// `GetAdminAddr`, and replies with the address string.
-#[derive(Serialize, Deserialize, Debug, Named, Handler, RefClient, HandleClient)]
-pub struct SpawnMeshAdmin {
-    /// All hosts in the mesh as `(address, agent_ref)` pairs. Passed
-    /// through to [`MeshAdminAgent::new`] so the admin can fan out
-    /// introspection queries to every host.
-    pub hosts: Vec<(String, hyperactor_reference::ActorRef<HostAgent>)>,
-
-    /// `ActorId` of the process-global root client, exposed as a
-    /// child node in the admin introspection tree. `None` if no root
-    /// client is available.
-    pub root_client_actor_id: Option<hyperactor_reference::ActorId>,
-
-    /// Explicit bind address for the admin HTTP server. When `None`,
-    /// the server reads `MESH_ADMIN_ADDR` from config.
-    pub admin_addr: Option<std::net::SocketAddr>,
-
-    /// Base URL of the Monarch dashboard for proxy routes. `None` if
-    /// the dashboard is not running.
-    pub telemetry_url: Option<String>,
-
-    /// Reply port for the admin HTTP address string (e.g.
-    /// `"myhost.facebook.com:8080"`).
-    #[reply]
-    pub addr: hyperactor::reference::PortRef<String>,
-}
-wirevalue::register_type!(SpawnMeshAdmin);
-
-#[async_trait]
-impl Handler<SpawnMeshAdmin> for HostAgent {
-    /// Spawns a [`MeshAdminAgent`] on this host's system proc, waits
-    /// for its HTTP server to bind, and replies with the listen
-    /// address.
-    async fn handle(&mut self, cx: &Context<Self>, msg: SpawnMeshAdmin) -> anyhow::Result<()> {
-        let proc = self
-            .host()
-            .ok_or_else(|| anyhow::anyhow!("host is not available"))?
-            .system_proc();
-
-        let agent_handle = proc.spawn(
-            crate::mesh_admin::MESH_ADMIN_ACTOR_NAME,
-            crate::mesh_admin::MeshAdminAgent::new(
-                msg.hosts,
-                msg.root_client_actor_id,
-                msg.admin_addr,
-                msg.telemetry_url,
-            ),
-        )?;
-        let response = agent_handle.get_admin_addr(cx).await?;
-        let addr_str = response
-            .addr
-            .ok_or_else(|| anyhow::anyhow!("mesh admin agent did not report an address"))?;
-
-        msg.addr.send(cx, addr_str)?;
         Ok(())
     }
 }

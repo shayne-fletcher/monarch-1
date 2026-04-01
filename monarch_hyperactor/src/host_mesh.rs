@@ -502,8 +502,8 @@ fn shutdown_local_host_mesh() -> PyResult<PyPythonTask> {
 
 /// Spawn a MeshAdminAgent aggregating topology across one or more meshes.
 ///
-/// The admin runs on the first mesh's head host system proc and serves
-/// the mesh-admin HTTP API. Returns the admin HTTP URL. When
+/// The admin runs on the caller's local proc and serves the
+/// mesh-admin HTTP API. Returns the admin HTTP URL. When
 /// `admin_addr` is `None`, the bind address is read from
 /// `MESH_ADMIN_ADDR` config.
 ///

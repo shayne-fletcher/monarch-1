@@ -169,11 +169,12 @@
 //! - **MIT-38 (openapi-resolvable):** All `$ref` targets resolve to
 //!   definitions that exist within the document.
 //! - **MIT-39 (openapi-routes-covered):** Every client-facing route
-//!   (`/v1/root`, `/v1/{reference}`, `/v1/config/{proc_reference}`,
-//!   `/v1/tree`, `/v1/schema`, `/v1/schema/error`) is present in
-//!   `paths`. The spec-serving endpoint `/v1/openapi.json` is also
-//!   verified to be live, though it is not required to appear in
-//!   `paths` since it is a meta-endpoint.
+//!   (`/v1/admin`, `/v1/root`, `/v1/{reference}`,
+//!   `/v1/config/{proc_reference}`, `/v1/tree`, `/v1/schema`,
+//!   `/v1/schema/admin`, `/v1/schema/error`) is present in `paths`.
+//!   The spec-serving endpoint `/v1/openapi.json` is also verified
+//!   to be live, though it is not required to appear in `paths`
+//!   since it is a meta-endpoint.
 //! - **MIT-40 (schemas-compile):** Every `components/schemas` entry
 //!   compiles via `jsonschema::JSONSchema::compile` when embedded in
 //!   a synthetic document that includes the full component set as
@@ -279,6 +280,7 @@
 //!   malformed JSON body (missing required `sql` field) returns a
 //!   non-success status.
 
+mod admin;
 mod auth;
 mod config;
 mod dining;
