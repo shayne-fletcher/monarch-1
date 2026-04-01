@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::pin::Pin;
-use std::str::FromStr;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
@@ -60,40 +59,6 @@ use crate::pyspy::PySpyDump;
 use crate::pyspy::PySpyWorker;
 use crate::resource;
 use crate::resource::ProcSpec;
-
-/// Typed host-node identifier for mesh admin navigation.
-///
-/// Wraps an [`ActorId`] (the `HostAgent`'s actor id) and
-/// serializes with a `host:` prefix so that the admin resolver can
-/// distinguish host-level references from plain actor references.
-/// The same `HostAgent` `ActorId` can appear as both a host
-/// (from root's children) and as an actor (from a proc's children);
-/// `HostId` makes the host case unambiguous.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HostId(pub hyperactor_reference::ActorId);
-
-/// Prefix used by [`HostId`] for display/parse round-tripping.
-const HOST_ID_PREFIX: &str = "host:";
-
-impl fmt::Display for HostId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{HOST_ID_PREFIX}{}", self.0)
-    }
-}
-
-impl FromStr for HostId {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let inner = s
-            .strip_prefix(HOST_ID_PREFIX)
-            .ok_or_else(|| anyhow::anyhow!("not a host reference: {}", s))?;
-        let actor_id: hyperactor_reference::ActorId = inner
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid actor id in host ref '{}': {}", s, e))?;
-        Ok(HostId(actor_id))
-    }
-}
 
 pub(crate) type ProcManagerSpawnFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<ActorHandle<ProcAgent>>> + Send>>;
@@ -422,21 +387,23 @@ impl HostAgent {
         };
 
         let addr = host.addr().to_string();
-        let mut children = Vec::new();
-        let system_children = Vec::new();
+        let mut children: Vec<hyperactor::introspect::IntrospectRef> = Vec::new();
+        let system_children: Vec<crate::introspect::NodeRef> = Vec::new();
 
         // Procs are not system — only actors are. Both service and
         // local appear as regular children; 's' in the TUI toggles
         // actor visibility, not proc visibility.
-        let sys_ref = host.system_proc().proc_id().to_string();
-        let local_ref = host.local_proc().proc_id().to_string();
-        children.push(sys_ref);
-        children.push(local_ref);
+        children.push(hyperactor::introspect::IntrospectRef::Proc(
+            host.system_proc().proc_id().clone(),
+        ));
+        children.push(hyperactor::introspect::IntrospectRef::Proc(
+            host.local_proc().proc_id().clone(),
+        ));
 
         // User procs.
         for state in self.created.values() {
             if let Ok((proc_id, _agent_ref)) = &state.created {
-                children.push(proc_id.to_string());
+                children.push(hyperactor::introspect::IntrospectRef::Proc(proc_id.clone()));
             }
         }
 
@@ -518,16 +485,15 @@ impl Actor for HostAgent {
                     // actors) may appear but are harmless — the TUI
                     // handles "not found" gracefully.
                     let all_keys = proc.all_instance_keys();
-                    let mut actors = Vec::with_capacity(all_keys.len());
-                    let mut system_actors = Vec::new();
+                    let mut actors: Vec<hyperactor::introspect::IntrospectRef> =
+                        Vec::with_capacity(all_keys.len());
+                    let mut system_actors: Vec<crate::introspect::NodeRef> = Vec::new();
                     for id in all_keys {
-                        let ref_str = id.to_string();
                         if proc.get_instance(&id).is_some_and(|cell| cell.is_system()) {
-                            system_actors.push(ref_str.clone());
+                            system_actors.push(crate::introspect::NodeRef::Actor(id.clone()));
                         }
-                        actors.push(ref_str);
+                        actors.push(hyperactor::introspect::IntrospectRef::Actor(id));
                     }
-                    // Build attrs for this proc node.
                     let mut attrs = hyperactor_config::Attrs::new();
                     attrs.set(crate::introspect::NODE_TYPE, "proc".to_string());
                     attrs.set(crate::introspect::PROC_NAME, label.to_string());
@@ -537,12 +503,15 @@ impl Actor for HostAgent {
                         serde_json::to_string(&attrs).unwrap_or_else(|_| "{}".to_string());
 
                     IntrospectResult {
-                        identity: proc.proc_id().to_string(),
+                        identity: hyperactor::introspect::IntrospectRef::Proc(
+                            proc.proc_id().clone(),
+                        ),
                         attrs: attrs_json,
                         children: actors,
-                        parent: Some(HostId(self_id.clone()).to_string()),
-                        as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now())
-                            .to_string(),
+                        parent: Some(hyperactor::introspect::IntrospectRef::Actor(
+                            self_id.clone(),
+                        )),
+                        as_of: std::time::SystemTime::now(),
                     }
                 }
                 None => {
@@ -552,14 +521,24 @@ impl Actor for HostAgent {
                         hyperactor::introspect::ERROR_MESSAGE,
                         format!("child {} not found", child_ref),
                     );
+                    let identity = match child_ref {
+                        hyperactor::reference::Reference::Proc(id) => {
+                            hyperactor::introspect::IntrospectRef::Proc(id.clone())
+                        }
+                        hyperactor::reference::Reference::Actor(id) => {
+                            hyperactor::introspect::IntrospectRef::Actor(id.clone())
+                        }
+                        hyperactor::reference::Reference::Port(id) => {
+                            hyperactor::introspect::IntrospectRef::Actor(id.actor_id().clone())
+                        }
+                    };
                     IntrospectResult {
-                        identity: String::new(),
+                        identity,
                         attrs: serde_json::to_string(&error_attrs)
                             .unwrap_or_else(|_| "{}".to_string()),
                         children: Vec::new(),
                         parent: None,
-                        as_of: humantime::format_rfc3339_millis(std::time::SystemTime::now())
-                            .to_string(),
+                        as_of: std::time::SystemTime::now(),
                     }
                 }
             }

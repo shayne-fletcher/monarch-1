@@ -79,7 +79,7 @@
 //! ### Tree endpoint
 //!
 //! - **MIT-13 (root-contract):** `/v1/root` returns `Root` variant
-//!   with `identity == "root"`, `num_hosts >= 1`, non-empty
+//!   with `identity == NodeRef::Root`, `num_hosts >= 1`, non-empty
 //!   `children`.
 //! - **MIT-14 (tree-format):** `/v1/tree` contains box-drawing
 //!   characters (`├──`/`└──`), clickable URLs, and workload-specific
@@ -120,8 +120,9 @@
 //!   node are fetchable via `/v1/{ref}`.
 //! - **MIT-21 (node-kind-typing):** Root returns `Root`, host returns
 //!   `Host`, proc returns `Proc`, actor returns `Actor` variant.
-//! - **MIT-22 (identity-consistency):** `node.identity` matches the
-//!   reference string used to fetch it.
+//! - **MIT-22 (identity-consistency):** `node.identity` (a typed
+//!   `NodeRef`) round-trips through its Display/FromStr to match
+//!   the HTTP path reference used to fetch it.
 //! - **MIT-23 (child-link-consistency):** Root, first host, classified
 //!   service proc, classified worker proc, and known actor refs are
 //!   fetchable.
