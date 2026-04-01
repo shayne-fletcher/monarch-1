@@ -234,10 +234,10 @@
 //! **Mechanism:** [`host_mesh::spawn_admin`] aggregates hosts from
 //! all input meshes (SA-3), reads C from the caller process (via
 //! `try_this_host()`), merges it with the aggregated set (SA-6),
-//! deduplicates by `HostAgent` `ActorId`, and sends the merged
-//! list in `SpawnMeshAdmin`. This works for same-process and
-//! cross-process setups because merge+dedup happens in the caller
-//! process before sending the spawn request.
+//! deduplicates by `HostAgent` `ActorId`, and spawns the
+//! `MeshAdminAgent` on the caller's local proc via
+//! `cx.instance().proc().spawn(...)`. Placement now follows the
+//! caller context rather than mesh topology.
 //!
 //! ## Spawn/aggregation invariants (SA-*)
 //!
@@ -255,35 +255,36 @@
 //!   is behaviorally equivalent to the former `mesh.spawn_admin(...)`.
 //!   Established by existing single-mesh integration tests (e.g.
 //!   `dining_philosophers`); no dedicated unit test.
-//! - **SA-5 (placement determinism):** The admin is spawned on the
-//!   first input mesh's first host.
+//! - **SA-5 (caller-local placement):** The admin is spawned on the
+//!   caller's local proc — the `Proc` of the actor context passed to
+//!   `spawn_admin()`. In common remote launch flows, the caller is
+//!   typically the root client/control process.
 //! - **SA-6 (client-host merge after aggregation):** Client-host
 //!   inclusion/dedup (CH-1) operates on the already-aggregated host
 //!   set, not per-mesh independently.
 //!
-//! ## MAST resolution invariants (MC-*)
+//! ## MAST resolution (disabled)
 //!
-//! CLI-based `mast_conda:///` resolution (OSS-compatible fallback):
+//! `mast_conda:///` resolution is disabled. The old topology-based
+//! resolution assumed the admin lived on the first mesh head host,
+//! which is no longer true after SA-5 changed to caller-local
+//! placement. All resolution paths now return explicit errors.
+//! A publication-based discovery mechanism will replace this in a
+//! future change. Until then, discover the admin URL from
+//! startup output or another launch-time publication.
 //!
-//! - **MC-1 (cli-contract):** `mast get-status --json <job>` must
-//!   exit 0 and produce valid JSON. Missing binary → distinct error.
-//!   Non-zero exit → includes exit code and stderr. Malformed JSON →
-//!   parse error.
-//! - **MC-2 (head-hostname):** `head_hostname` extracts the first
-//!   hostname by ascending task index from the last attempt of each
-//!   task group.
-//! - **MC-3 (fqdn-idempotent):** `qualify_fqdn` passes through
-//!   hostnames containing a dot. Short hostnames are qualified via
-//!   `getaddrinfo(AI_CANONNAME)`. Failure falls back to the raw
-//!   hostname.
-//! - **MC-4 (fqdn-nonblocking):** `qualify_fqdn` runs the blocking
-//!   `getaddrinfo` syscall via `spawn_blocking`.
-//! - **MC-5 (admin-port):** `resolve_admin_port` uses the explicit
-//!   override when provided, otherwise reads the port from
-//!   `MESH_ADMIN_ADDR` config.
+//! ## Admin self-identification invariants (AI-*)
 //!
-//! Enforced by `test_head_hostname_*`, `test_qualify_fqdn_*`,
-//! `test_resolve_mast_*`, `test_resolve_admin_port_*`.
+//! - **AI-1 (live identity):** `GET /v1/admin` returns the live
+//!   admin actor identity as `AdminInfo`.
+//! - **AI-2 (reported proc):** `proc_id` reports the hosting proc.
+//!   Placement equality (SA-5) is proved by unit tests; integration
+//!   tests validate that `proc_id` is populated and well-formed.
+//! - **AI-3 (url consistency):** `url` matches `GetAdminAddr`.
+//!
+//! The relationship between `host` and `url` (formerly AI-4) is
+//! now a constructor guarantee of [`AdminInfo::new`] rather than a
+//! live invariant. It is not in this registry.
 
 use std::collections::HashMap;
 use std::io;
@@ -616,9 +617,9 @@ pub struct MeshAdminAgent {
     /// for the admin HTTP server. Returned via `GetAdminAddr`.
     admin_host: Option<String>,
 
-    /// Base URL of the Monarch dashboard. Passed explicitly via
-    /// `SpawnMeshAdmin`. Used by proxy routes that forward requests
-    /// to the dashboard's `/api/*` endpoints.
+    /// Base URL of the Monarch dashboard. Passed at construction.
+    /// Used by proxy routes that forward requests to the dashboard's
+    /// `/api/*` endpoints.
     telemetry_url: Option<String>,
 
     /// When the mesh was started (ISO-8601 timestamp).
@@ -693,6 +694,47 @@ impl std::fmt::Debug for MeshAdminAgent {
     }
 }
 
+/// Self-identification payload returned by `GET /v1/admin`.
+///
+/// Construct via [`AdminInfo::new`]. AI-1, AI-2, AI-3 are live
+/// invariants. The relationship between `host` and `url` is a
+/// constructor guarantee — `AdminInfo::new()` rejects URLs with no
+/// host, so `host` always derives from `url` at construction.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AdminInfo {
+    /// Stringified `ActorId` of the `MeshAdminAgent`.
+    pub actor_id: String,
+    /// Stringified `ProcId` of the proc hosting `MeshAdminAgent`.
+    pub proc_id: String,
+    /// Hostname the admin HTTP server bound on (derived from `url`).
+    pub host: String,
+    /// Full admin URL (e.g. `"https://myhost.facebook.com:1729"`).
+    pub url: String,
+}
+
+impl AdminInfo {
+    /// Construct from identity components and a full admin URL.
+    ///
+    /// Parses `url` strictly using the `url` crate. Returns an error
+    /// if the URL is invalid or has no host component. `host` is
+    /// derived from the parsed URL — the relationship between `host`
+    /// and `url` holds by construction, not by test.
+    pub fn new(actor_id: String, proc_id: String, url: String) -> anyhow::Result<Self> {
+        let parsed = url::Url::parse(&url)
+            .map_err(|e| anyhow::anyhow!("invalid admin URL '{}': {}", url, e))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("admin URL '{}' has no host", url))?
+            .to_string();
+        Ok(Self {
+            actor_id,
+            proc_id,
+            host,
+            url,
+        })
+    }
+}
+
 /// Shared state for the reference-based `/v1/{*reference}` bridge
 /// route.
 ///
@@ -727,6 +769,8 @@ struct BridgeState {
     /// Shared HTTP client for outbound proxy requests to the
     /// dashboard. Reuses connection pool across requests.
     http_client: reqwest::Client,
+    /// Self-identification metadata, populated during admin init.
+    admin_info: AdminInfo,
 }
 
 /// A TCP listener that performs a TLS handshake on each accepted
@@ -844,6 +888,10 @@ impl Actor for MeshAdminAgent {
             .proc()
             .introspectable_instance(MESH_ADMIN_BRIDGE_NAME)?;
         bridge_cx.set_system();
+        let admin_url = self
+            .admin_host
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
         let bridge_state = Arc::new(BridgeState {
             admin_ref: hyperactor_reference::ActorRef::attest(this.self_id().clone()),
             bridge_cx,
@@ -853,6 +901,11 @@ impl Actor for MeshAdminAgent {
             _bridge_handle: bridge_handle,
             telemetry_url: self.telemetry_url.clone(),
             http_client: reqwest::Client::new(),
+            admin_info: AdminInfo::new(
+                this.self_id().to_string(),
+                this.self_id().proc_id().to_string(),
+                admin_url,
+            )?,
         });
         let router = create_mesh_admin_router(bridge_state);
 
@@ -1404,13 +1457,16 @@ impl MeshAdminAgent {
 /// - `GET /v1/pyspy/{*proc_reference}` — py-spy stack dump for a proc.
 /// - `POST /v1/pyspy_dump/{*proc_reference}` — py-spy dump + store in Datafusion.
 /// - `GET /v1/config/{*proc_reference}` — config snapshot for a proc.
+/// - `GET /v1/admin` — admin self-identification (`AdminInfo`).
 /// - `GET /v1/{*reference}` — JSON `NodePayload` for a single reference.
 /// - `GET /SKILL.md` — agent-facing API documentation (markdown).
 fn create_mesh_admin_router(bridge_state: Arc<BridgeState>) -> Router {
     Router::new()
         .route("/SKILL.md", get(serve_skill_md))
         // Literal paths matched by specificity before wildcard (SC-5).
+        .route("/v1/admin", get(serve_admin_info))
         .route("/v1/schema", get(serve_schema))
+        .route("/v1/schema/admin", get(serve_admin_schema))
         .route("/v1/schema/error", get(serve_error_schema))
         .route("/v1/openapi.json", get(serve_openapi))
         .route("/v1/tree", get(tree_dump))
@@ -1443,6 +1499,21 @@ fn extract_base_url(headers: &axum::http::HeaderMap) -> String {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("https");
     format!("{scheme}://{host}")
+}
+
+/// Self-identification endpoint: returns `AdminInfo` (AI-1..AI-3;
+/// AI-4 is a constructor guarantee of `AdminInfo::new()`).
+async fn serve_admin_info(
+    State(state): State<Arc<BridgeState>>,
+) -> axum::response::Json<AdminInfo> {
+    axum::response::Json(state.admin_info.clone())
+}
+
+/// JSON Schema for `AdminInfo`.
+async fn serve_admin_schema() -> Result<axum::response::Json<serde_json::Value>, ApiError> {
+    Ok(axum::response::Json(schema_with_id::<AdminInfo>(
+        "https://monarch.meta.com/schemas/v1/admin_info",
+    )?))
 }
 
 /// Serves the self-describing API document with the base URL
@@ -1552,6 +1623,8 @@ pub fn build_openapi_spec() -> serde_json::Value {
     let mut pyspy_dump_response_schema =
         serde_json::to_value(schemars::schema_for!(PyspyDumpAndStoreResponse))
             .expect("PyspyDumpAndStoreResponse schema must be serializable");
+    let mut admin_info_schema = serde_json::to_value(schemars::schema_for!(AdminInfo))
+        .expect("AdminInfo schema must be serializable");
 
     // Hoist $defs into a shared components/schemas map so
     // OpenAPI tools can resolve references.
@@ -1562,6 +1635,7 @@ pub fn build_openapi_spec() -> serde_json::Value {
     hoist_defs(&mut query_request_schema, &mut shared_schemas);
     hoist_defs(&mut query_response_schema, &mut shared_schemas);
     hoist_defs(&mut pyspy_dump_response_schema, &mut shared_schemas);
+    hoist_defs(&mut admin_info_schema, &mut shared_schemas);
     shared_schemas.insert("NodePayload".into(), node_schema);
     shared_schemas.insert("ApiErrorEnvelope".into(), error_schema);
     shared_schemas.insert("PySpyResult".into(), pyspy_schema);
@@ -1571,6 +1645,7 @@ pub fn build_openapi_spec() -> serde_json::Value {
         "PyspyDumpAndStoreResponse".into(),
         pyspy_dump_response_schema,
     );
+    shared_schemas.insert("AdminInfo".into(), admin_info_schema);
 
     // Rewrite any remaining $defs refs in the hoisted component schemas.
     for value in shared_schemas.values_mut() {
@@ -1597,7 +1672,7 @@ pub fn build_openapi_spec() -> serde_json::Value {
         }
     });
 
-    serde_json::json!({
+    let mut spec = serde_json::json!({
         "openapi": "3.1.0",
         "info": {
             "title": "Monarch Mesh Admin API",
@@ -1658,6 +1733,23 @@ pub fn build_openapi_spec() -> serde_json::Value {
                         "200": {
                             "description": "JSON Schema document",
                             "content": { "application/json": {} }
+                        }
+                    }
+                }
+            },
+            "/v1/admin": {
+                "get": {
+                    "summary": "Admin self-identification (placement, identity, URL)",
+                    "operationId": "getAdminInfo",
+                    "description": "Returns the admin actor's identity, proc placement, hostname, and URL. Used for placement verification and operational discovery.",
+                    "responses": {
+                        "200": {
+                            "description": "AdminInfo — admin actor placement metadata",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/AdminInfo" }
+                                }
+                            }
                         }
                     }
                 }
@@ -1808,7 +1900,29 @@ pub fn build_openapi_spec() -> serde_json::Value {
         "components": {
             "schemas": serde_json::Value::Object(shared_schemas)
         }
-    })
+    });
+
+    // Insert /v1/schema/admin outside the json! macro to avoid
+    // hitting the serde_json recursion limit.
+    if let Some(paths) = spec.pointer_mut("/paths").and_then(|v| v.as_object_mut()) {
+        paths.insert(
+            "/v1/schema/admin".into(),
+            serde_json::json!({
+                "get": {
+                    "summary": "JSON Schema for AdminInfo (Draft 2020-12)",
+                    "operationId": "getAdminSchema",
+                    "responses": {
+                        "200": {
+                            "description": "JSON Schema document",
+                            "content": { "application/json": {} }
+                        }
+                    }
+                }
+            }),
+        );
+    }
+
+    spec
 }
 
 /// OpenAPI 3.1 spec for the mesh admin API.
@@ -2520,216 +2634,109 @@ fn derive_actor_label(reference: &str) -> String {
     }
 }
 
-// -- CLI-based mast_conda:/// resolution --
-//
-// See module doc for MC-1..MC-5 invariants.
+// -- Admin handle type discrimination --
 
-/// Top-level response from `mast get-status --json`.
-#[derive(serde::Deserialize)]
-struct MastStatusResponse {
-    #[serde(rename = "latestAttempt")]
-    latest_attempt: MastAttempt,
-}
-
-/// A single execution attempt containing task groups.
-#[derive(serde::Deserialize)]
-struct MastAttempt {
-    #[serde(rename = "taskGroupExecutionAttempts")]
-    task_groups: std::collections::HashMap<String, Vec<MastTaskGroup>>,
-}
-
-/// A task group execution attempt containing per-task attempts.
-#[derive(serde::Deserialize)]
-struct MastTaskGroup {
-    #[serde(rename = "taskExecutionAttempts")]
-    tasks: std::collections::HashMap<String, Vec<MastTaskAttempt>>,
-}
-
-/// A single task execution attempt with an optional hostname.
-#[derive(serde::Deserialize)]
-struct MastTaskAttempt {
-    hostname: Option<String>,
-}
-
-/// Extract the head node hostname from a parsed MAST status response
-/// (MC-2).
+/// A handle scheme that requires a publication-based lookup to resolve
+/// to a concrete admin URL.
 ///
-/// For each task group, the last attempt is selected. Within that
-/// attempt, each task's last execution attempt provides the hostname.
-/// Task indices (the map keys) are parsed as integers and sorted
-/// ascending; the first hostname is the head node.
-fn head_hostname(response: &MastStatusResponse) -> Result<String, String> {
-    let mut hosts: Vec<(i64, String)> = Vec::new();
-    for attempts in response.latest_attempt.task_groups.values() {
-        let group = match attempts.last() {
-            Some(g) => g,
-            None => continue,
-        };
-        for (index_str, task_attempts) in &group.tasks {
-            let attempt = match task_attempts.last() {
-                Some(a) => a,
-                None => continue,
-            };
-            if let Some(ref hostname) = attempt.hostname {
-                let index = index_str.parse::<i64>().unwrap_or(i64::MAX);
-                hosts.push((index, hostname.clone()));
+/// Only `Mast` is defined today. The nested-enum shape allows future
+/// scheduler-specific variants (Slurm, K8s, etc.) to be added without
+/// changing `AdminHandle`.
+#[non_exhaustive]
+pub enum PublishedHandle {
+    /// `mast_conda:///<job-name>` — requires publication-based discovery.
+    Mast(String),
+}
+
+impl PublishedHandle {
+    /// Resolve a published handle to a concrete admin URL.
+    ///
+    /// All published-handle schemes return an explicit error today.
+    /// When real publication lookup is implemented, dispatch by variant here.
+    pub async fn resolve(self, _port_override: Option<u16>) -> anyhow::Result<String> {
+        anyhow::bail!(
+            "publication-based admin handle resolution is not yet implemented: \
+             mesh admin placement has moved to the caller's local proc. \
+             Discover the admin URL from startup output or another \
+             launch-time publication instead."
+        )
+    }
+}
+
+/// A handle for locating the mesh admin server.
+///
+/// Parse a user-supplied address string with [`AdminHandle::parse`]
+/// and resolve it to a concrete URL with [`AdminHandle::resolve`].
+#[non_exhaustive]
+pub enum AdminHandle {
+    /// Already-resolved URL (e.g. `https://host:1729`).
+    Url(String),
+    /// Handle that requires a publication lookup. Currently unresolvable.
+    Published(PublishedHandle),
+    /// Scheme or format that is not recognized.
+    Unsupported(String),
+}
+
+impl AdminHandle {
+    /// Parse an address string into an `AdminHandle`.
+    ///
+    /// Uses `url` crate parsing. Known publication-handle prefixes
+    /// (`mast_conda:///`) are classified as `Published`. `http`/`https`
+    /// scheme URLs are `Url`. Bare `host:port` inputs (no scheme) are
+    /// inferred as `https://host:port` and classified as `Url` — this
+    /// preserves existing TUI behavior where `--addr myhost:1729` is a
+    /// valid input. Everything else is `Unsupported`.
+    pub fn parse(addr: &str) -> Self {
+        // Check known publication handle prefixes first.
+        if addr.starts_with("mast_conda:///") {
+            return AdminHandle::Published(PublishedHandle::Mast(addr.to_string()));
+        }
+        // Strict URL parse — only http/https accepted.
+        if let Ok(parsed) = url::Url::parse(addr) {
+            if matches!(parsed.scheme(), "http" | "https") {
+                return AdminHandle::Url(addr.to_string());
             }
         }
-    }
-    hosts.sort_by_key(|(idx, _)| *idx);
-    hosts
-        .into_iter()
-        .next()
-        .map(|(_, h)| h)
-        .ok_or_else(|| "no hostnames found in MAST response".to_string())
-}
-
-/// Qualify a short hostname to an FQDN via
-/// `getaddrinfo(AI_CANONNAME)` (MC-3,
-/// MC-4).
-///
-/// Called via `spawn_blocking` to avoid blocking tokio workers. Falls
-/// back to the raw hostname on any failure.
-async fn qualify_fqdn(hostname: &str) -> String {
-    if hostname.contains('.') {
-        return hostname.to_string();
-    }
-    let owned = hostname.to_string();
-    let fallback = owned.clone();
-    tokio::task::spawn_blocking(move || qualify_fqdn_blocking(&owned))
-        .await
-        .unwrap_or(fallback)
-}
-
-fn qualify_fqdn_blocking(hostname: &str) -> String {
-    use std::ffi::CStr;
-    use std::ffi::CString;
-    use std::ptr;
-
-    let c_host = match CString::new(hostname) {
-        Ok(c) => c,
-        Err(_) => return hostname.to_string(),
-    };
-    // SAFETY: zeroed addrinfo is a valid hints struct (all-zero is
-    // AF_UNSPEC with no flags, which we then override).
-    let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
-    hints.ai_flags = libc::AI_CANONNAME;
-    hints.ai_family = libc::AF_UNSPEC;
-
-    let mut result: *mut libc::addrinfo = ptr::null_mut();
-    // SAFETY: c_host is a valid NUL-terminated string, hints is
-    // initialized, and result is a valid out-pointer.
-    let rc = unsafe { libc::getaddrinfo(c_host.as_ptr(), ptr::null(), &hints, &mut result) };
-    if rc != 0 || result.is_null() {
-        return hostname.to_string();
-    }
-
-    // RAII guard ensures freeaddrinfo is called.
-    struct AddrInfoGuard(*mut libc::addrinfo);
-    impl Drop for AddrInfoGuard {
-        fn drop(&mut self) {
-            // SAFETY: self.0 was returned by a successful getaddrinfo.
-            unsafe { libc::freeaddrinfo(self.0) }
+        // Infer https:// for bare host:port inputs (e.g. "myhost:1729").
+        // This preserves the TUI's documented --addr behavior.
+        let with_scheme = format!("https://{}", addr);
+        if let Ok(parsed) = url::Url::parse(&with_scheme) {
+            if parsed.host_str().is_some() && parsed.port().is_some() {
+                return AdminHandle::Url(with_scheme);
+            }
         }
+        AdminHandle::Unsupported(addr.to_string())
     }
-    let _guard = AddrInfoGuard(result);
 
-    // SAFETY: result is non-null and was returned by getaddrinfo.
-    let canon = unsafe { (*result).ai_canonname };
-    if canon.is_null() {
-        return hostname.to_string();
-    }
-    // SAFETY: canon is non-null and NUL-terminated per getaddrinfo
-    // contract.
-    unsafe { CStr::from_ptr(canon) }
-        .to_str()
-        .unwrap_or(hostname)
-        .to_string()
-}
-
-/// Resolve admin port from an explicit override or `MESH_ADMIN_ADDR`
-/// config (MC-5).
-///
-/// When `port_override` is `Some`, that port is used directly. When
-/// `None`, the port is read from the `MESH_ADMIN_ADDR` configuration
-/// attribute (parsed as a `SocketAddr`).
-fn resolve_admin_port(port_override: Option<u16>) -> Result<u16, anyhow::Error> {
-    match port_override {
-        Some(p) => Ok(p),
-        None => {
-            let config_addr = hyperactor_config::global::get_cloned(crate::config::MESH_ADMIN_ADDR);
-            Ok(config_addr
-                .parse_socket_addr()
-                .map_err(|e| anyhow::anyhow!("invalid MESH_ADMIN_ADDR config: {}", e))?
-                .port())
+    /// Resolve to a concrete admin base URL.
+    ///
+    /// `port_override` is retained to preserve existing call surfaces
+    /// but is intentionally unused until real publication lookup is
+    /// implemented.
+    pub async fn resolve(self, port_override: Option<u16>) -> anyhow::Result<String> {
+        match self {
+            AdminHandle::Url(url) => Ok(url),
+            AdminHandle::Published(h) => h.resolve(port_override).await,
+            AdminHandle::Unsupported(s) => anyhow::bail!(
+                "unrecognized admin handle '{}': expected https://host:port or mast_conda:///job",
+                s
+            ),
         }
     }
 }
 
-/// Resolve a `mast_conda:///<job-name>` handle into an
-/// `https://<fqdn>:<port>` base URL by shelling out to the `mast` CLI
-/// (MC-1).
+/// Resolve a `mast_conda:///<job-name>` handle into an admin base URL.
 ///
-/// This is the OSS-compatible counterpart to
-/// `hyperactor_meta::mesh_admin::resolve_mast_handle`. The `cmd`
-/// parameter names the CLI binary; production passes `"mast"`, tests
-/// substitute a synthetic command.
-async fn try_resolve_mast_handle(
-    handle: &str,
-    port_override: Option<u16>,
-    cmd: &str,
-) -> anyhow::Result<String> {
-    let port = resolve_admin_port(port_override)?;
-    let job_name = handle
-        .strip_prefix("mast_conda:///")
-        .ok_or_else(|| anyhow::anyhow!("expected mast_conda:/// prefix, got '{}'", handle))?;
-
-    let output = match tokio::process::Command::new(cmd)
-        .args(["get-status", "--json", job_name])
-        .output()
-        .await
-    {
-        Ok(o) => o,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            anyhow::bail!(
-                "MAST CLI not found; install via `sudo feature install --persist mast_cli`"
-            );
-        }
-        Err(e) => {
-            anyhow::bail!("failed to run '{}': {}", cmd, e);
-        }
-    };
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "'mast get-status' exited with {}: {}",
-            output.status,
-            stderr.trim()
-        );
-    }
-
-    let response: MastStatusResponse = serde_json::from_slice(&output.stdout)
-        .map_err(|e| anyhow::anyhow!("failed to parse mast JSON output: {}", e))?;
-
-    let hostname =
-        head_hostname(&response).map_err(|e| anyhow::anyhow!("MAST job '{}': {}", job_name, e))?;
-
-    let fqdn = qualify_fqdn(&hostname).await;
-    Ok(format!("https://{}:{}", fqdn, port))
-}
-
-/// Resolve a `mast_conda:///<job-name>` handle into an
-/// `https://<fqdn>:<port>` base URL using the `mast` CLI.
-///
-/// This is the CLI/OSS path. The thrift-based equivalent lives in
-/// `hyperactor_meta::mesh_admin::resolve_mast_handle`. Binaries
-/// match on `MastResolver` to select which to call.
+/// **Disabled.** Mesh admin placement has moved to the caller's local
+/// proc. Delegates to [`AdminHandle::Published`] + [`PublishedHandle::resolve`].
+/// Kept as a stable API shim; do not remove.
 pub async fn resolve_mast_handle(
     handle: &str,
     port_override: Option<u16>,
 ) -> anyhow::Result<String> {
-    try_resolve_mast_handle(handle, port_override, "mast").await
+    AdminHandle::Published(PublishedHandle::Mast(handle.to_string()))
+        .resolve(port_override)
+        .await
 }
 
 #[cfg(test)]
@@ -2854,7 +2861,10 @@ mod tests {
         let host_agent_ref: hyperactor_reference::ActorRef<HostAgent> = host_agent_handle.bind();
         let host_addr_str = host_addr.to_string();
 
-        // -- 2. Spawn MeshAdminAgent on a separate proc --
+        // -- 2. Spawn MeshAdminAgent on a dedicated test proc --
+        // NOTE: This does not conform to SA-5 (caller-local placement).
+        // Production uses host_mesh::spawn_admin(). This is a white-box
+        // test of admin behavior, not placement.
         let admin_proc = Proc::direct(ChannelTransport::Unix.any(), "admin".to_string()).unwrap();
         // The admin proc has no supervision coordinator by default.
         // Without one, actor teardown triggers std::process::exit(1).
@@ -3013,7 +3023,9 @@ mod tests {
         let host_agent_ref: hyperactor_reference::ActorRef<HostAgent> = host_agent_handle.bind();
         let host_addr_str = host_addr.to_string();
 
-        // Spawn MeshAdminAgent on a separate proc.
+        // Spawn MeshAdminAgent on a dedicated test proc.
+        // NOTE: Does not conform to SA-5 (caller-local placement).
+        // Production uses host_mesh::spawn_admin(). White-box test setup.
         let admin_proc = Proc::direct(ChannelTransport::Unix.any(), "admin".to_string()).unwrap();
         use hyperactor::testing::proc_supervison::ProcSupervisionCoordinator;
         let _supervision = ProcSupervisionCoordinator::set(&admin_proc).await.unwrap();
@@ -3169,7 +3181,10 @@ mod tests {
         let host_agent_ref: hyperactor_reference::ActorRef<HostAgent> = host_agent_handle.bind();
         let host_addr_str = host_addr.to_string();
 
-        // Spawn MeshAdminAgent with the root client ActorId.
+        // Spawn MeshAdminAgent on a dedicated test proc with the root
+        // client ActorId. NOTE: Does not conform to SA-5 (caller-local
+        // placement). Production uses host_mesh::spawn_admin().
+        // White-box test of root-client visibility, not placement.
         let admin_proc =
             hyperactor::Proc::direct(ChannelTransport::Unix.any(), "admin".to_string()).unwrap();
         use hyperactor::testing::proc_supervison::ProcSupervisionCoordinator;
@@ -3324,7 +3339,9 @@ mod tests {
         let host_agent_ref: hyperactor_reference::ActorRef<HostAgent> = host_agent_handle.bind();
         let host_addr_str = host_addr.to_string();
 
-        // Spawn MeshAdminAgent on a separate proc.
+        // Spawn MeshAdminAgent on a dedicated test proc.
+        // NOTE: Does not conform to SA-5 (caller-local placement).
+        // Production uses host_mesh::spawn_admin(). White-box test setup.
         let admin_proc = Proc::direct(ChannelTransport::Unix.any(), "admin".to_string()).unwrap();
         use hyperactor::testing::proc_supervison::ProcSupervisionCoordinator;
         let _supervision = ProcSupervisionCoordinator::set(&admin_proc).await.unwrap();
@@ -3423,7 +3440,10 @@ mod tests {
         let host_agent_ref: hyperactor_reference::ActorRef<HostAgent> = host_agent_handle.bind();
         let host_addr_str = host_addr.to_string();
 
-        // -- 2. Spawn MeshAdminAgent on a separate proc --
+        // -- 2. Spawn MeshAdminAgent on a dedicated test proc --
+        // NOTE: This does not conform to SA-5 (caller-local placement).
+        // Production uses host_mesh::spawn_admin(). This is a white-box
+        // test of admin behavior, not placement.
         let admin_proc = Proc::direct(ChannelTransport::Unix.any(), "admin".to_string()).unwrap();
         use hyperactor::testing::proc_supervison::ProcSupervisionCoordinator;
         let _supervision = ProcSupervisionCoordinator::set(&admin_proc).await.unwrap();
@@ -3521,311 +3541,176 @@ mod tests {
         );
     }
 
-    // -- MAST CLI resolver tests --
-    //
-    // These tests exercise the invariants introduced by the CLI-based
-    // MAST handle resolution. Each test names the invariant it
-    // establishes.
+    // -- AdminHandle / PublishedHandle tests --
 
-    /// Helper: build a `MastStatusResponse` from a list of
-    /// `(task_index, hostname)` pairs in one task group.
-    fn mast_response_from_hosts(hosts: &[(i64, &str)]) -> super::MastStatusResponse {
-        let mut tasks = std::collections::HashMap::new();
-        for (idx, host) in hosts {
-            tasks.insert(
-                idx.to_string(),
-                vec![super::MastTaskAttempt {
-                    hostname: Some(host.to_string()),
-                }],
-            );
-        }
-        super::MastStatusResponse {
-            latest_attempt: super::MastAttempt {
-                task_groups: std::collections::HashMap::from([(
-                    "trainers".to_string(),
-                    vec![super::MastTaskGroup { tasks }],
-                )]),
-            },
-        }
-    }
-
-    // MC-2: single group, tasks sorted by ascending index.
+    // AdminHandle::parse — all four cases.
     #[test]
-    fn test_head_hostname_single_group() {
-        let response = mast_response_from_hosts(&[(2, "host2"), (0, "host0"), (1, "host1")]);
-        let head = super::head_hostname(&response).unwrap();
-        assert_eq!(head, "host0");
+    fn test_admin_handle_parse_https_url() {
+        let h = super::AdminHandle::parse("https://myhost:1729");
+        assert!(matches!(h, super::AdminHandle::Url(u) if u == "https://myhost:1729"));
     }
 
-    // MC-2: last attempt selected per task.
     #[test]
-    fn test_head_hostname_last_attempt_wins() {
-        let mut tasks = std::collections::HashMap::new();
-        tasks.insert(
-            "0".to_string(),
-            vec![
-                super::MastTaskAttempt {
-                    hostname: Some("old_host".to_string()),
-                },
-                super::MastTaskAttempt {
-                    hostname: Some("new_host".to_string()),
-                },
-            ],
+    fn test_admin_handle_parse_bare_host_port() {
+        // Bare host:port → inferred as https://host:port.
+        let h = super::AdminHandle::parse("myhost:1729");
+        assert!(
+            matches!(h, super::AdminHandle::Url(ref u) if u == "https://myhost:1729"),
+            "bare host:port should become https://host:port, got: {:?}",
+            matches!(h, super::AdminHandle::Url(_))
         );
-        let response = super::MastStatusResponse {
-            latest_attempt: super::MastAttempt {
-                task_groups: std::collections::HashMap::from([(
-                    "trainers".to_string(),
-                    vec![super::MastTaskGroup { tasks }],
-                )]),
-            },
-        };
-        let head = super::head_hostname(&response).unwrap();
-        assert_eq!(head, "new_host");
     }
 
-    // MC-2: multiple groups merged and sorted.
     #[test]
-    fn test_head_hostname_multiple_groups() {
-        let mut tasks_a = std::collections::HashMap::new();
-        tasks_a.insert(
-            "1".to_string(),
-            vec![super::MastTaskAttempt {
-                hostname: Some("host_a1".to_string()),
-            }],
-        );
-        let mut tasks_b = std::collections::HashMap::new();
-        tasks_b.insert(
-            "0".to_string(),
-            vec![super::MastTaskAttempt {
-                hostname: Some("host_b0".to_string()),
-            }],
-        );
-        let response = super::MastStatusResponse {
-            latest_attempt: super::MastAttempt {
-                task_groups: std::collections::HashMap::from([
-                    (
-                        "group_a".to_string(),
-                        vec![super::MastTaskGroup { tasks: tasks_a }],
-                    ),
-                    (
-                        "group_b".to_string(),
-                        vec![super::MastTaskGroup { tasks: tasks_b }],
-                    ),
-                ]),
-            },
-        };
-        let head = super::head_hostname(&response).unwrap();
-        assert_eq!(head, "host_b0");
+    fn test_admin_handle_parse_mast() {
+        let h = super::AdminHandle::parse("mast_conda:///my-job");
+        assert!(matches!(
+            h,
+            super::AdminHandle::Published(super::PublishedHandle::Mast(_))
+        ));
     }
 
-    // MC-2: no hostnames → error.
     #[test]
-    fn test_head_hostname_empty() {
-        let response = super::MastStatusResponse {
-            latest_attempt: super::MastAttempt {
-                task_groups: std::collections::HashMap::new(),
-            },
-        };
-        assert!(super::head_hostname(&response).is_err());
+    fn test_admin_handle_parse_unsupported() {
+        // Bare hostname with no port → Unsupported (no port, scheme inference fails).
+        let h = super::AdminHandle::parse("junk_hostname_no_port");
+        assert!(matches!(h, super::AdminHandle::Unsupported(_)));
     }
 
-    // MC-2: hostname field is None (task not yet
-    // allocated) → skipped.
-    #[test]
-    fn test_head_hostname_skips_unallocated() {
-        let mut tasks = std::collections::HashMap::new();
-        tasks.insert(
-            "0".to_string(),
-            vec![super::MastTaskAttempt { hostname: None }],
-        );
-        tasks.insert(
-            "1".to_string(),
-            vec![super::MastTaskAttempt {
-                hostname: Some("allocated_host".to_string()),
-            }],
-        );
-        let response = super::MastStatusResponse {
-            latest_attempt: super::MastAttempt {
-                task_groups: std::collections::HashMap::from([(
-                    "trainers".to_string(),
-                    vec![super::MastTaskGroup { tasks }],
-                )]),
-            },
-        };
-        let head = super::head_hostname(&response).unwrap();
-        assert_eq!(head, "allocated_host");
-    }
-
-    // MC-3: hostname with dot passes through
-    // unchanged (no DNS lookup).
     #[tokio::test]
-    async fn test_qualify_fqdn_already_qualified() {
-        let fqdn = super::qualify_fqdn("fake.nonexistent.tld").await;
-        assert_eq!(fqdn, "fake.nonexistent.tld");
+    async fn test_admin_handle_resolve_url_returns_url() {
+        let h = super::AdminHandle::parse("https://myhost:1729");
+        let result = h.resolve(None).await.unwrap();
+        assert_eq!(result, "https://myhost:1729");
     }
 
-    // MC-3, MC-4: short hostname
-    // goes through getaddrinfo via spawn_blocking. The result is
-    // environment-dependent, but must be non-empty and the call
-    // must complete without hanging.
     #[tokio::test]
-    async fn test_qualify_fqdn_short_hostname() {
-        let fqdn = super::qualify_fqdn("localhost").await;
-        assert!(!fqdn.is_empty(), "qualify_fqdn returned empty string");
+    async fn test_admin_handle_resolve_published_returns_error() {
+        let h = super::AdminHandle::parse("mast_conda:///test-job");
+        let err = format!("{:#}", h.resolve(Some(1729)).await.unwrap_err());
+        assert!(
+            err.contains("not yet implemented"),
+            "expected 'not yet implemented' in error, got: {}",
+            err
+        );
     }
 
-    // MC-3: nonexistent short hostname falls back
-    // to the raw input.
     #[tokio::test]
-    async fn test_qualify_fqdn_nonexistent_fallback() {
-        let input = "__nonexistent_host_for_test";
-        let fqdn = super::qualify_fqdn(input).await;
-        assert_eq!(fqdn, input);
+    async fn test_admin_handle_resolve_unsupported_returns_error() {
+        let h = super::AdminHandle::parse("junk_hostname_no_port");
+        let err = format!("{:#}", h.resolve(None).await.unwrap_err());
+        assert!(
+            err.contains("unrecognized admin handle"),
+            "expected 'unrecognized admin handle' in error, got: {}",
+            err
+        );
     }
 
-    // MC-5: explicit override is used directly.
+    // resolve_mast_handle delegates to PublishedHandle::resolve.
+    // Error text changed from "disabled" to "not yet implemented".
+    #[tokio::test]
+    async fn test_resolve_mast_handle_returns_not_yet_implemented_error() {
+        let result = super::resolve_mast_handle("mast_conda:///test-job", Some(1729)).await;
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("not yet implemented"),
+            "expected 'not yet implemented' in error, got: {}",
+            err
+        );
+    }
+
+    // -- AdminInfo::new() constructor tests --
+
+    // Constructor guarantee: valid https URL produces correct host.
     #[test]
-    fn test_resolve_admin_port_override() {
-        assert_eq!(super::resolve_admin_port(Some(8080)).unwrap(), 8080);
-    }
-
-    // MC-5: falls back to MESH_ADMIN_ADDR config
-    // (default [::]:1729).
-    #[test]
-    fn test_resolve_admin_port_from_config() {
-        let port = super::resolve_admin_port(None).unwrap();
-        assert_eq!(port, 1729);
-    }
-
-    // MC-1: missing binary produces a "not found" error.
-    #[tokio::test]
-    async fn test_cli_missing_binary() {
-        let result = super::try_resolve_mast_handle(
-            "mast_conda:///test-job",
-            Some(1729),
-            "__nonexistent_mast_test_bin",
+    fn test_admin_info_new_derives_host_from_url() {
+        let info = super::AdminInfo::new(
+            "actor".to_string(),
+            "proc".to_string(),
+            "https://myhost.example.com:1729".to_string(),
         )
-        .await;
-        let err = format!("{:#}", result.unwrap_err());
-        assert!(
-            err.contains("not found"),
-            "expected 'not found' in error, got: {}",
-            err
-        );
+        .unwrap();
+        assert_eq!(info.host, "myhost.example.com");
+        assert_eq!(info.url, "https://myhost.example.com:1729");
     }
 
-    /// Write a shell script to a temp directory and return the
-    /// directory guard and script path.
-    fn write_test_script(content: &str) -> (tempfile::TempDir, String) {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let script_path = dir.path().join("mast_stub.sh");
-        std::fs::write(&script_path, content).unwrap();
-        std::fs::set_permissions(&script_path, PermissionsExt::from_mode(0o755)).unwrap();
-        let path_str = script_path.to_str().unwrap().to_string();
-        (dir, path_str)
-    }
-
-    // MC-1: valid JSON, happy path end-to-end.
-    #[tokio::test]
-    async fn test_cli_happy_path() {
-        let json = r#"{"latestAttempt":{"taskGroupExecutionAttempts":{"trainers":[{"taskExecutionAttempts":{"0":[{"hostname":"devgpu042"}]}}]}}}"#;
-        let (_dir, script_path) = write_test_script(&format!("#!/bin/sh\necho '{}'\n", json));
-        let url =
-            super::try_resolve_mast_handle("mast_conda:///test-job", Some(1729), &script_path)
-                .await
-                .unwrap();
-        assert!(url.starts_with("https://"), "url: {}", url);
-        assert!(url.ends_with(":1729"), "url: {}", url);
-    }
-
-    // MC-1: malformed JSON produces a parse error.
-    #[tokio::test]
-    async fn test_cli_malformed_json() {
-        let (_dir, script_path) = write_test_script("#!/bin/sh\necho 'not json'\n");
-        let result =
-            super::try_resolve_mast_handle("mast_conda:///test-job", Some(1729), &script_path)
-                .await;
-        let err = format!("{:#}", result.unwrap_err());
-        assert!(
-            err.contains("failed to parse"),
-            "expected parse error, got: {}",
-            err
-        );
-    }
-
-    // MC-1: non-zero exit includes code + stderr.
-    #[tokio::test]
-    async fn test_cli_nonzero_exit() {
-        let (_dir, script_path) =
-            write_test_script("#!/bin/sh\necho >&2 'job not found'\nexit 42\n");
-        let result =
-            super::try_resolve_mast_handle("mast_conda:///test-job", Some(1729), &script_path)
-                .await;
-        let err = format!("{:#}", result.unwrap_err());
-        assert!(
-            err.contains("job not found"),
-            "expected stderr in error, got: {}",
-            err
-        );
-    }
-
-    // MC-1: handle without mast_conda:/// prefix is
-    // rejected with a clear error.
-    #[tokio::test]
-    async fn test_cli_missing_prefix() {
-        let result = super::try_resolve_mast_handle("bad_handle", Some(1729), "mast").await;
-        let err = format!("{:#}", result.unwrap_err());
-        assert!(
-            err.contains("expected mast_conda:/// prefix"),
-            "expected prefix error, got: {}",
-            err
-        );
-    }
-
-    // MC-2: a task group with zero attempts is skipped.
+    // Constructor guarantee: invalid URL is rejected.
     #[test]
-    fn test_head_hostname_empty_attempts_vec() {
-        let response = super::MastStatusResponse {
-            latest_attempt: super::MastAttempt {
-                task_groups: std::collections::HashMap::from([(
-                    "trainers".to_string(),
-                    vec![], // no attempts in this group
-                )]),
-            },
-        };
-        assert!(super::head_hostname(&response).is_err());
+    fn test_admin_info_new_rejects_invalid_url() {
+        let result = super::AdminInfo::new(
+            "actor".to_string(),
+            "proc".to_string(),
+            "not a url".to_string(),
+        );
+        assert!(result.is_err(), "invalid URL must be rejected");
     }
 
-    // MC-2: non-numeric task index keys sort last
-    // (i64::MAX fallback).
+    // Constructor guarantee: URL with no host is rejected.
     #[test]
-    fn test_head_hostname_non_numeric_index() {
-        let mut tasks = std::collections::HashMap::new();
-        tasks.insert(
-            "abc".to_string(),
-            vec![super::MastTaskAttempt {
-                hostname: Some("host_abc".to_string()),
-            }],
+    fn test_admin_info_new_rejects_url_without_host() {
+        // data: URLs have no host component.
+        let result = super::AdminInfo::new(
+            "actor".to_string(),
+            "proc".to_string(),
+            "data:text/plain,hello".to_string(),
         );
-        tasks.insert(
-            "0".to_string(),
-            vec![super::MastTaskAttempt {
-                hostname: Some("host_0".to_string()),
-            }],
-        );
-        let response = super::MastStatusResponse {
-            latest_attempt: super::MastAttempt {
-                task_groups: std::collections::HashMap::from([(
-                    "trainers".to_string(),
-                    vec![super::MastTaskGroup { tasks }],
-                )]),
-            },
-        };
-        let head = super::head_hostname(&response).unwrap();
-        assert_eq!(head, "host_0");
+        assert!(result.is_err(), "URL without host must be rejected");
     }
+
+    // -- Placement test (SA-5) --
+
+    // Exercises the real public entrypoint and checks SA-5 via
+    // ActorRef reachability on the caller proc.
+    #[tokio::test]
+    async fn test_spawn_admin_places_on_caller_proc() {
+        use hyperactor::Proc;
+        use hyperactor::channel::ChannelTransport;
+        use hyperactor::testing::proc_supervison::ProcSupervisionCoordinator;
+
+        use crate::host_mesh::HostMesh;
+
+        // 1. Stand up a local in-process host mesh.
+        let host_mesh = HostMesh::local().await.unwrap();
+
+        // 2. Create a separate caller proc with an actor instance.
+        let caller_proc = Proc::direct(ChannelTransport::Unix.any(), "caller".to_string()).unwrap();
+        let _supervision = ProcSupervisionCoordinator::set(&caller_proc).await.unwrap();
+        let (caller_cx, _caller_handle) = caller_proc.instance("caller").unwrap();
+
+        // 3. Call the real public entrypoint.
+        let admin_url = crate::host_mesh::spawn_admin(
+            [&host_mesh],
+            &caller_cx,
+            Some("[::]:0".parse().unwrap()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(!admin_url.is_empty(), "spawn_admin must return a URL");
+
+        // 4. Prove the admin is on caller_proc: construct an ActorRef
+        //    targeting "mesh_admin[0]" on caller_proc and send it a
+        //    GetAdminAddr message. If the admin were on a different
+        //    proc, this message would be undeliverable.
+        let admin_ref: hyperactor_reference::ActorRef<MeshAdminAgent> =
+            hyperactor_reference::ActorRef::attest(
+                caller_proc.proc_id().actor_id(MESH_ADMIN_ACTOR_NAME, 0),
+            );
+        let probe_proc = Proc::direct(ChannelTransport::Unix.any(), "probe".to_string()).unwrap();
+        let (probe_cx, _probe_handle) = probe_proc.instance("probe").unwrap();
+        let resp = admin_ref.get_admin_addr(&probe_cx).await.unwrap();
+        assert_eq!(
+            resp.addr.as_deref(),
+            Some(admin_url.as_str()),
+            "SA-5: admin on caller_proc must respond to GetAdminAddr"
+        );
+    }
+
+    // AI-1..AI-3: GET /v1/admin HTTP route test requires TLS certs
+    // (fbcode_build enforces mTLS). Covered by integration tests in
+    // fbcode//monarch/hyperactor_mesh/test/mesh_admin_integration.
+    // AI-4 is a constructor guarantee tested via AdminInfo::new() above.
 
     // Verifies that GET /v1/{proc_id} reflects actors spawned directly
     // on a proc — bypassing ProcAgent's gspawn message and therefore
@@ -3892,6 +3777,8 @@ mod tests {
         // MeshAdminAgent: register the user proc's addr as a "host"
         // pointing to host_agent_ref. That agent doesn't know the
         // user proc, so QueryChild → Error → fallback to proc_agent.
+        // NOTE: Does not conform to SA-5 (caller-local placement).
+        // White-box test of proc-agent fallback, not placement.
         let admin_proc = Proc::direct(ChannelTransport::Unix.any(), "admin".to_string()).unwrap();
         let _supervision = ProcSupervisionCoordinator::set(&admin_proc).await.unwrap();
         let admin_handle = admin_proc

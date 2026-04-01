@@ -1417,8 +1417,8 @@ fn refresh_churn_large_differential() {
     assert_eq!(rows_after.len(), 100);
 }
 
-// NOTE: MastResolver tests (MR-1) live in bin/admin_tui.rs —
-// MastResolver is owned by each binary, not the library.
+// NOTE: AdminHandle parse/resolve tests live in
+// hyperactor_mesh::mesh_admin::tests — the shared type is owned there.
 
 // ── Py-spy invariant coverage ──────────────────────────────────────────────
 //

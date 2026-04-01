@@ -61,7 +61,7 @@ use crate::host_mesh::host_agent::ProcManagerSpawnFn;
 use crate::host_mesh::host_agent::ProcState;
 use crate::host_mesh::host_agent::SetClientConfigClient;
 use crate::host_mesh::host_agent::ShutdownHostClient;
-use crate::host_mesh::host_agent::SpawnMeshAdminClient;
+use crate::mesh_admin::MeshAdminMessageClient;
 use crate::mesh_controller::HostMeshController;
 use crate::mesh_controller::ProcMeshController;
 use crate::proc_agent::ProcAgent;
@@ -580,8 +580,8 @@ impl HostMesh {
         // Spawn a unique mesh controller for each proc mesh, so the type of the
         // mesh can be preserved.
         let controller = HostMeshController::new(mesh.deref().clone());
-        // AI-3: controller name must include mesh identity for
-        // proc-wide ActorId uniqueness.
+        // hyperactor::proc AI-3: controller name must include mesh
+        // identity for proc-wide ActorId uniqueness.
         let controller_name = format!("{}_{}", HOST_MESH_CONTROLLER_NAME, mesh.name());
         let controller_handle = controller
             .spawn_with_name(cx, &controller_name)
@@ -631,9 +631,7 @@ impl HostMesh {
     ///    with a barrier to confirm installation.
     /// 4. Returns the owned `HostMesh`.
     ///
-    /// After this returns, host agents have the client's config and any
-    /// subsequent operations on the host's system proc (e.g.
-    /// SpawnMeshAdmin) will see it.
+    /// After this returns, host agents have the client's config.
     pub async fn attach(
         cx: &impl context::Actor,
         name: Name,
@@ -1419,8 +1417,8 @@ impl HostMeshRef {
             // Spawn a unique mesh controller for each proc mesh, so the type of the
             // mesh can be preserved.
             let controller = ProcMeshController::new(mesh.deref().clone());
-            // AI-3: controller name must include mesh identity for
-            // proc-wide ActorId uniqueness.
+            // hyperactor::proc AI-3: controller name must include mesh
+            // identity for proc-wide ActorId uniqueness.
             let controller_name = format!("{}_{}", PROC_MESH_CONTROLLER_NAME, mesh.name());
             let controller_handle = controller
                 .spawn_with_name(cx, &controller_name)
@@ -1661,47 +1659,82 @@ impl HostMeshRef {
     }
 }
 
+/// An ordered set of host entries, deduplicated by `HostAgent` `ActorId`
+/// in first-seen order.
+///
+/// Insertion is idempotent by construction — SA-3 (dedup by ActorId)
+/// is a property of this type, not a comment on careful control flow.
+/// First-seen order is preserved: the first occurrence of a given
+/// ActorId wins; subsequent duplicates are silently dropped.
+struct HostSet {
+    seen: HashSet<hyperactor_reference::ActorId>,
+    entries: Vec<(String, hyperactor_reference::ActorRef<HostAgent>)>,
+}
+
+impl HostSet {
+    fn new() -> Self {
+        Self {
+            seen: HashSet::new(),
+            entries: Vec::new(),
+        }
+    }
+
+    /// Insert a host entry. No-op if `ActorId` already present (SA-3).
+    /// First-seen order is preserved.
+    fn insert(&mut self, addr: String, agent_ref: hyperactor_reference::ActorRef<HostAgent>) {
+        if self.seen.insert(agent_ref.actor_id().clone()) {
+            self.entries.push((addr, agent_ref));
+        }
+    }
+
+    /// Extend from a `HostMeshRef`. SA-3 applies per entry.
+    fn extend_from_mesh(&mut self, mesh: &HostMeshRef) {
+        for h in mesh.hosts() {
+            self.insert(h.0.to_string(), h.mesh_agent());
+        }
+    }
+
+    fn into_vec(self) -> Vec<(String, hyperactor_reference::ActorRef<HostAgent>)> {
+        self.entries
+    }
+}
+
 /// Ordered union of hosts from meshes and optional client host
 /// entries, deduplicated by `HostAgent` `ActorId` in first-seen
 /// order.
 ///
-/// This is the SA-3 aggregation step, extracted for testability.
+/// SA-3 dedup and SA-6 client-host merge are structural properties
+/// of [`HostSet`], not invariants on this function's control flow.
 fn aggregate_hosts(
     meshes: &[impl AsRef<HostMeshRef>],
     client_host_entries: Option<Vec<(String, hyperactor_reference::ActorRef<HostAgent>)>>,
 ) -> Vec<(String, hyperactor_reference::ActorRef<HostAgent>)> {
-    let mut seen = HashSet::new();
-    let mut hosts = Vec::new();
+    let mut set = HostSet::new();
 
+    // SA-3: dedup across all mesh hosts in first-seen order.
     for mesh in meshes {
-        for h in mesh.as_ref().hosts() {
-            let agent_ref = h.mesh_agent();
-            if seen.insert(agent_ref.actor_id().clone()) {
-                hosts.push((h.0.to_string(), agent_ref));
-            }
-        }
+        set.extend_from_mesh(mesh.as_ref());
     }
 
-    // CH-1 / SA-6: client host dedup against the aggregated set.
+    // CH-1 / SA-6: client host entries merged after mesh aggregation.
     if let Some(entries) = client_host_entries {
         for (addr, agent_ref) in entries {
-            if seen.insert(agent_ref.actor_id().clone()) {
-                hosts.push((addr, agent_ref));
-            }
+            set.insert(addr, agent_ref);
         }
     }
 
-    hosts
+    set.into_vec()
 }
 
 /// Spawn a [`MeshAdminAgent`] that aggregates hosts from multiple
 /// meshes.
 ///
-/// The admin agent runs on the first mesh's `hosts()[0]`'s system
-/// proc. Hosts are deduplicated by actor ID across all meshes.
+/// The admin agent runs on the caller's local proc — the `Proc` of
+/// the actor context `cx`. Hosts are deduplicated by actor ID across
+/// all meshes.
 ///
-/// See the `mesh_admin` module doc for the SA-* (spawn/aggregation)
-/// and CH-* (client host) invariants.
+/// See the `mesh_admin` module doc for the SA-* (spawn/aggregation),
+/// CH-* (client host), and AI-* (admin identity) invariants.
 pub async fn spawn_admin(
     meshes: impl IntoIterator<Item = impl AsRef<HostMeshRef>>,
     cx: &impl hyperactor::context::Actor,
@@ -1723,10 +1756,23 @@ pub async fn spawn_admin(
     let hosts = aggregate_hosts(&meshes, client_entries);
 
     let root_client_id = cx.mailbox().actor_id().clone();
-    let head_agent = meshes[0].as_ref().hosts()[0].mesh_agent();
-    let addr = head_agent
-        .spawn_mesh_admin(cx, hosts, Some(root_client_id), admin_addr, telemetry_url)
-        .await?;
+
+    // Spawn the admin on the caller's local proc. Placement now
+    // follows the caller context rather than mesh topology.
+    let local_proc = cx.instance().proc();
+    let agent_handle = local_proc.spawn(
+        crate::mesh_admin::MESH_ADMIN_ACTOR_NAME,
+        crate::mesh_admin::MeshAdminAgent::new(
+            hosts,
+            Some(root_client_id),
+            admin_addr,
+            telemetry_url,
+        ),
+    )?;
+    let response = agent_handle.get_admin_addr(cx).await?;
+    let addr = response
+        .addr
+        .ok_or_else(|| anyhow::anyhow!("mesh admin agent did not report an address"))?;
 
     Ok(addr)
 }
@@ -2251,6 +2297,42 @@ mod tests {
         let result = spawn_admin([&mesh], instance, None, None).await;
         let err = result.unwrap_err().to_string();
         assert!(err.contains("SA-2"), "expected SA-2 error, got: {err}");
+    }
+
+    /// SA-3: `HostSet::insert` is idempotent — inserting the same
+    /// `ActorId` twice does not add a duplicate entry, and first-seen
+    /// order is preserved. This is a structural property of `HostSet`,
+    /// not an invariant on `aggregate_hosts` control flow.
+    #[test]
+    fn test_sa3_host_set_insert_idempotent() {
+        let addr_a: ChannelAddr = "tcp:127.0.0.1:2001".parse().unwrap();
+        let addr_b: ChannelAddr = "tcp:127.0.0.1:2002".parse().unwrap();
+
+        let ref_a = HostRef(addr_a.clone()).mesh_agent();
+        let ref_b = HostRef(addr_b.clone()).mesh_agent();
+
+        let mut set = HostSet::new();
+        set.insert(addr_a.to_string(), ref_a.clone());
+        set.insert(addr_b.to_string(), ref_b.clone());
+        // Insert ref_a again — should be a no-op (SA-3).
+        set.insert("duplicate_addr".to_string(), ref_a.clone());
+
+        let result = set.into_vec();
+        assert_eq!(
+            result.len(),
+            2,
+            "SA-3: duplicate ActorId must not add entry"
+        );
+        assert_eq!(
+            result[0].0,
+            addr_a.to_string(),
+            "SA-3: first-seen order preserved"
+        );
+        assert_eq!(
+            result[1].0,
+            addr_b.to_string(),
+            "SA-3: first-seen order preserved"
+        );
     }
 
     #[test]
