@@ -50,8 +50,11 @@
 //! - **TUI-11 (selection-semantics):** Cursor restoration prefers
 //!   `(reference, depth)` to disambiguate; falls back to
 //!   reference-only if depth changes.
-//! - **TUI-12 (serial-fetches):** HTTP fetches are scheduled
-//!   serially; join semantics handle retries and reordering.
+//! - **TUI-12 (serial-topology-fetches):** Topology cache fetches
+//!   (via `fetch_with_join` / `build_tree_node`) are serial within
+//!   a refresh cycle; join semantics handle retries and reordering.
+//!   Overlay fetches (py-spy, config, diagnostics) are concurrent
+//!   via `tokio::spawn` and do not participate in the topology cache.
 //! - **TUI-13 (stopped-detection):** `is_stopped_node` matches
 //!   `Actor` variants whose `actor_status` starts with `"stopped:"`
 //!   or `"failed:"`. All other variants return false.

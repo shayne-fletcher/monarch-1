@@ -12,7 +12,8 @@
 //! This module defines `MeshAdminAgent`, an actor that exposes a
 //! uniform, reference-based HTTP API over an entire host mesh. Every
 //! addressable entity in the mesh is represented as a `NodePayload`
-//! and resolved via an opaque reference string.
+//! and resolved via typed `NodeRef` references (parsed from HTTP
+//! path strings at the request boundary).
 //!
 //! Incoming HTTP requests are bridged into the actor message loop
 //! using `ResolveReferenceMessage`, ensuring that all topology
@@ -139,13 +140,13 @@
 //!
 //! Every `NodePayload` in the topology tree satisfies:
 //!
-//! - **NI-1 (identity = reference):** A node's `identity` field must
-//!   equal the reference string used to resolve it. If the TUI asks
-//!   for reference `R`, `payload.identity == R`.
+//! - **NI-1 (identity = reference):** A node's `identity: NodeRef`
+//!   must correspond to the reference used to resolve it. The
+//!   display form of `identity` round-trips through `NodeRef::from_str`.
 //!
-//! - **NI-2 (parent coherence):** A node's `parent` field must equal
-//!   the `identity` of the node it appears under. If node `P` lists
-//!   `R` in its `children`, then `R.parent == Some(P.identity)`.
+//! - **NI-2 (parent coherence):** A node's `parent: Option<NodeRef>`
+//!   must equal the `identity` of the node it appears under. If node
+//!   `P` lists `R` in its `children`, then `R.parent == Some(P.identity)`.
 //!
 //! Together these ensure that the TUI can correlate responses to tree
 //! nodes, and that upward/downward navigation is consistent.
@@ -158,9 +159,10 @@
 //! - **SP-1 (identity):** The identity matches the ProcId reference
 //!   from the parent's children list.
 //! - **SP-2 (properties):** The properties are `NodeProperties::Proc`.
-//! - **SP-3 (parent):** The parent is set to the HostId format
-//!   (`"host:<actor_id>"`).
-//! - **SP-4 (as_of):** The `as_of` field is present and non-empty.
+//! - **SP-3 (parent):** The parent is `NodeRef::Host(actor_id)`.
+//! - **SP-4 (as_of):** The `as_of` field is present and valid
+//!   (internally `SystemTime`; serialized as ISO 8601 string over
+//!   the HTTP JSON API per HB-1).
 //!
 //! Enforced by `test_system_proc_identity`.
 //!
@@ -325,7 +327,6 @@ use crate::config_dump::ConfigDump;
 use crate::config_dump::ConfigDumpResult;
 use crate::host_mesh::host_agent::HOST_MESH_AGENT_ACTOR_NAME;
 use crate::host_mesh::host_agent::HostAgent;
-use crate::host_mesh::host_agent::HostId;
 use crate::introspect::NodePayload;
 use crate::introspect::NodeProperties;
 use crate::introspect::to_node_payload;
@@ -507,7 +508,7 @@ wirevalue::register_type!(MeshAdminMessage);
 pub struct ResolveReferenceResponse(pub Result<NodePayload, String>);
 wirevalue::register_type!(ResolveReferenceResponse);
 
-/// Message for resolving an opaque reference string into a
+/// Message for resolving a reference (string from HTTP path) into a
 /// `NodePayload`.
 ///
 /// This is the primary “navigation” request used by the admin HTTP
@@ -540,8 +541,8 @@ pub enum ResolveReferenceMessage {
     /// On success the reply contains `payload=Some(..), error=None`; on failure
     /// it contains `payload=None, error=Some(..)`.
     Resolve {
-        /// Opaque reference string identifying a root/host/proc/actor
-        /// node.
+        /// Reference string from the HTTP path, parsed into a typed
+        /// `NodeRef` at the resolve boundary.
         reference_string: String,
         /// Reply port receiving the resolution result.
         #[reply]
@@ -560,7 +561,7 @@ wirevalue::register_type!(ResolveReferenceMessage);
 ///
 /// The agent also exposes an HTTP server (spawned from `init`) and
 /// supports reference-based navigation (`GET /v1/{reference}`) by
-/// resolving opaque reference strings into typed `NodeProperties`
+/// resolving HTTP path references into typed `NodePayload` values
 /// plus child references.
 #[hyperactor::export(handlers = [MeshAdminMessage, ResolveReferenceMessage])]
 pub struct MeshAdminAgent {
@@ -1051,27 +1052,16 @@ impl MeshAdminAgent {
         cx: &Context<'_, Self>,
         reference_string: &str,
     ) -> Result<NodePayload, anyhow::Error> {
-        if reference_string == "root" {
-            return Ok(self.build_root_payload());
-        }
-
-        // Host refs use the "host:<actor_id>" format so they are
-        // unambiguous from plain actor references. The same
-        // HostAgent ActorId can appear both as a host (from root)
-        // and as an actor (from a proc's children list).
-        if let Ok(host_id) = reference_string.parse::<HostId>() {
-            return self.resolve_host_node(cx, &host_id.0).await;
-        }
-
-        let reference: hyperactor_reference::Reference = reference_string
+        let node_ref: crate::introspect::NodeRef = reference_string
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid reference '{}': {}", reference_string, e))?;
 
-        match &reference {
-            hyperactor_reference::Reference::Proc(proc_id) => {
-                // Try the host-managed path first (uses ProcAgent,
-                // sees all actors). Fall back to the standalone
-                // anchor path for procs truly off-mesh (A != C).
+        match &node_ref {
+            crate::introspect::NodeRef::Root => Ok(self.build_root_payload()),
+            crate::introspect::NodeRef::Host(actor_id) => {
+                self.resolve_host_node(cx, actor_id).await
+            }
+            crate::introspect::NodeRef::Proc(proc_id) => {
                 match self.resolve_proc_node(cx, proc_id).await {
                     Ok(payload) => Ok(payload),
                     Err(_) if self.standalone_proc_anchor(proc_id).is_some() => {
@@ -1080,13 +1070,9 @@ impl MeshAdminAgent {
                     Err(e) => Err(e),
                 }
             }
-            hyperactor_reference::Reference::Actor(actor_id) => {
+            crate::introspect::NodeRef::Actor(actor_id) => {
                 self.resolve_actor_node(cx, actor_id).await
             }
-            _ => Err(anyhow::anyhow!(
-                "unsupported reference type: {}",
-                reference_string
-            )),
         }
     }
 
@@ -1120,16 +1106,18 @@ impl MeshAdminAgent {
     /// Construct the synthetic root node for the reference tree.
     ///
     /// The root is not a real actor/proc; it's a convenience node
-    /// that anchors navigation. Its children are the configured
-    /// `HostAgent` actor IDs (as reference strings) plus any
-    /// standalone procs (root client proc, admin proc).
+    /// that anchors navigation. Its children are `NodeRef::Host`
+    /// entries for each configured `HostAgent` plus any standalone
+    /// procs (root client proc, admin proc).
     fn build_root_payload(&self) -> NodePayload {
-        let children: Vec<String> = self
+        use crate::introspect::NodeRef;
+
+        let children: Vec<NodeRef> = self
             .hosts
             .values()
-            .map(|agent| HostId(agent.actor_id().clone()).to_string())
+            .map(|agent| NodeRef::Host(agent.actor_id().clone()))
             .collect();
-        let system_children: Vec<String> = Vec::new();
+        let system_children: Vec<NodeRef> = Vec::new();
         let mut attrs = hyperactor_config::Attrs::new();
         attrs.set(crate::introspect::NODE_TYPE, "root".to_string());
         attrs.set(crate::introspect::NUM_HOSTS, self.hosts.len());
@@ -1140,11 +1128,11 @@ impl MeshAdminAgent {
         attrs.set(crate::introspect::SYSTEM_CHILDREN, system_children.clone());
         let attrs_json = serde_json::to_string(&attrs).unwrap_or_else(|_| "{}".to_string());
         NodePayload {
-            identity: "root".to_string(),
+            identity: NodeRef::Root,
             properties: crate::introspect::derive_properties(&attrs_json),
             children,
             parent: None,
-            as_of: hyperactor::introspect::format_timestamp(std::time::SystemTime::now()),
+            as_of: std::time::SystemTime::now(),
         }
     }
 
@@ -1171,8 +1159,8 @@ impl MeshAdminAgent {
         .await?;
         Ok(crate::introspect::to_node_payload_with(
             result,
-            HostId(actor_id.clone()).to_string(),
-            Some("root".to_string()),
+            crate::introspect::NodeRef::Host(actor_id.clone()),
+            Some(crate::introspect::NodeRef::Root),
         ))
     }
 
@@ -1208,9 +1196,14 @@ impl MeshAdminAgent {
         )
         .await?;
 
-        // If the host recognized the proc, use its response directly.
-        // No identity/parent normalization — QueryChild sets them correctly.
-        let payload = to_node_payload(result);
+        // If the host recognized the proc, normalize identity and parent.
+        // The host's QueryChild returns IntrospectRef::Actor(self_id) as
+        // parent, which lifts to NodeRef::Actor. We need NodeRef::Host.
+        let payload = crate::introspect::to_node_payload_with(
+            result,
+            crate::introspect::NodeRef::Proc(proc_id.clone()),
+            Some(crate::introspect::NodeRef::Host(agent.actor_id().clone())),
+        );
         if !matches!(payload.properties, NodeProperties::Error { .. }) {
             return Ok(payload);
         }
@@ -1228,8 +1221,8 @@ impl MeshAdminAgent {
 
         Ok(crate::introspect::to_node_payload_with(
             result,
-            proc_id.to_string(),
-            Some(HostId(agent.actor_id().clone()).to_string()),
+            crate::introspect::NodeRef::Proc(proc_id.clone()),
+            Some(crate::introspect::NodeRef::Host(agent.actor_id().clone())),
         ))
     }
 
@@ -1255,13 +1248,12 @@ impl MeshAdminAgent {
             .standalone_proc_anchor(proc_id)
             .ok_or_else(|| anyhow::anyhow!("no anchor actor for standalone proc {}", proc_id))?;
 
+        use crate::introspect::NodeRef;
+
         let (children, system_children) = if self.self_actor_id.as_ref() == Some(actor_id) {
-            // Self-proc: we are the only actor; no message needed.
-            // The admin agent is a system actor.
-            let self_ref = actor_id.to_string();
+            let self_ref = NodeRef::Actor(actor_id.clone());
             (vec![self_ref.clone()], vec![self_ref])
         } else {
-            // Query the anchor actor for its supervision children.
             let actor_result = query_introspect(
                 cx,
                 actor_id,
@@ -1270,10 +1262,8 @@ impl MeshAdminAgent {
                 &format!("querying anchor actor on {}", proc_id),
             )
             .await?;
-            // No identity/parent normalization — only reading properties for is_system check.
             let actor_payload = to_node_payload(actor_result);
-            // Check if anchor actor is system.
-            let anchor_ref = actor_id.to_string();
+            let anchor_ref = NodeRef::Actor(actor_id.clone());
             let anchor_is_system = matches!(
                 &actor_payload.properties,
                 NodeProperties::Actor {
@@ -1288,12 +1278,15 @@ impl MeshAdminAgent {
                 system_children.push(anchor_ref);
             }
 
-            // Query each supervision child to check is_system.
             for child_ref in actor_payload.children {
-                if let Ok(child_actor_id) = child_ref.parse::<hyperactor_reference::ActorId>() {
+                let child_actor_id = match &child_ref {
+                    NodeRef::Actor(id) => Some(id),
+                    _ => None,
+                };
+                if let Some(child_actor_id) = child_actor_id {
                     let child_is_system = if let Ok(r) = query_introspect(
                         cx,
-                        &child_actor_id,
+                        child_actor_id,
                         hyperactor::introspect::IntrospectView::Actor,
                         hyperactor_config::global::get(
                             crate::config::MESH_ADMIN_RESOLVE_ACTOR_TIMEOUT,
@@ -1324,7 +1317,6 @@ impl MeshAdminAgent {
 
         let proc_name = proc_id.name().to_string();
 
-        // Build attrs for standalone proc.
         let mut attrs = hyperactor_config::Attrs::new();
         attrs.set(crate::introspect::NODE_TYPE, "proc".to_string());
         attrs.set(crate::introspect::PROC_NAME, proc_name.clone());
@@ -1333,11 +1325,11 @@ impl MeshAdminAgent {
         let attrs_json = serde_json::to_string(&attrs).unwrap_or_else(|_| "{}".to_string());
 
         Ok(NodePayload {
-            identity: proc_id.to_string(),
+            identity: NodeRef::Proc(proc_id.clone()),
             properties: crate::introspect::derive_properties(&attrs_json),
             children,
-            as_of: hyperactor::introspect::format_timestamp(std::time::SystemTime::now()),
-            parent: Some("root".to_string()),
+            as_of: std::time::SystemTime::now(),
+            parent: Some(NodeRef::Root),
         })
     }
 
@@ -1412,33 +1404,22 @@ impl MeshAdminAgent {
         };
         let mut payload = to_node_payload(result);
 
-        // Actors on standalone procs: parent is the proc.
         if self.is_standalone_proc_actor(actor_id) {
-            payload.parent = Some(actor_id.proc_id().to_string());
+            payload.parent = Some(crate::introspect::NodeRef::Proc(actor_id.proc_id().clone()));
             return Ok(payload);
         }
 
-        // Set parent based on topology. If the actor returns Proc
-        // properties (ProcAgent override), its parent is the host
-        // agent. Otherwise, it's a regular actor and its parent is
-        // the proc.
         let proc_id = actor_id.proc_id();
         match &payload.properties {
             NodeProperties::Proc { .. } => {
-                // ProcAgent: parent is the host agent.
                 let host_addr = proc_id.addr().to_string();
                 if let Some(agent) = self.hosts.get(&host_addr) {
-                    payload.parent = Some(HostId(agent.actor_id().clone()).to_string());
+                    payload.parent =
+                        Some(crate::introspect::NodeRef::Host(agent.actor_id().clone()));
                 }
             }
             _ => {
-                // Regular actor: parent is the proc. We use the
-                // system proc ref format if the proc is a known
-                // system/local proc, otherwise the ProcAgent
-                // ActorId.
-                // Parent is the proc node, whose identity is the
-                // ProcId string (same for system and user procs).
-                payload.parent = Some(proc_id.to_string());
+                payload.parent = Some(crate::introspect::NodeRef::Proc(proc_id.clone()));
             }
         }
 
@@ -2480,9 +2461,10 @@ async fn tree_dump(
     // subtree; non-host children (e.g. the root client actor) are
     // rendered as single leaf lines.
     for child_ref in &root.children {
+        let child_ref_str = child_ref.to_string();
         let resp = tokio::time::timeout(
             hyperactor_config::global::get(crate::config::MESH_ADMIN_TREE_TIMEOUT),
-            state.admin_ref.resolve(cx, child_ref.clone()),
+            state.admin_ref.resolve(cx, child_ref_str.clone()),
         )
         .await;
 
@@ -2493,17 +2475,16 @@ async fn tree_dump(
 
         match payload {
             Some(node) if matches!(node.properties, NodeProperties::Host { .. }) => {
-                // Host header: show the addr from NodeProperties::Host.
                 let header = match &node.properties {
                     NodeProperties::Host { addr, .. } => addr.clone(),
-                    _ => child_ref.clone(),
+                    _ => child_ref_str.clone(),
                 };
-                let host_url = format!("{}/v1/{}", base_url, urlencoding::encode(child_ref));
+                let host_url = format!("{}/v1/{}", base_url, urlencoding::encode(&child_ref_str));
                 output.push_str(&format!("{}  ->  {}\n", header, host_url));
 
-                // Proc children with box-drawing connectors.
                 let num_procs = node.children.len();
                 for (i, proc_ref) in node.children.iter().enumerate() {
+                    let proc_ref_str = proc_ref.to_string();
                     let is_last_proc = i == num_procs - 1;
                     let proc_connector = if is_last_proc {
                         "└── "
@@ -2511,16 +2492,16 @@ async fn tree_dump(
                         "├── "
                     };
                     let proc_name = derive_tree_label(proc_ref);
-                    let proc_url = format!("{}/v1/{}", base_url, urlencoding::encode(proc_ref));
+                    let proc_url =
+                        format!("{}/v1/{}", base_url, urlencoding::encode(&proc_ref_str));
                     output.push_str(&format!(
                         "{}{}  ->  {}\n",
                         proc_connector, proc_name, proc_url
                     ));
 
-                    // Resolve the proc to get its actor children.
                     let proc_resp = tokio::time::timeout(
                         hyperactor_config::global::get(crate::config::MESH_ADMIN_TREE_TIMEOUT),
-                        state.admin_ref.resolve(cx, proc_ref.clone()),
+                        state.admin_ref.resolve(cx, proc_ref_str),
                     )
                     .await;
                     let proc_payload = match proc_resp {
@@ -2531,6 +2512,7 @@ async fn tree_dump(
                         let num_actors = proc_node.children.len();
                         let child_prefix = if is_last_proc { "    " } else { "│   " };
                         for (j, actor_ref) in proc_node.children.iter().enumerate() {
+                            let actor_ref_str = actor_ref.to_string();
                             let actor_connector = if j == num_actors - 1 {
                                 "└── "
                             } else {
@@ -2538,7 +2520,7 @@ async fn tree_dump(
                             };
                             let actor_label = derive_actor_label(actor_ref);
                             let actor_url =
-                                format!("{}/v1/{}", base_url, urlencoding::encode(actor_ref));
+                                format!("{}/v1/{}", base_url, urlencoding::encode(&actor_ref_str));
                             output.push_str(&format!(
                                 "{}{}{}  ->  {}\n",
                                 child_prefix, actor_connector, actor_label, actor_url
@@ -2549,24 +2531,24 @@ async fn tree_dump(
                 output.push('\n');
             }
             Some(node) if matches!(node.properties, NodeProperties::Proc { .. }) => {
-                // Non-host proc (e.g. root client proc). Render as a
-                // proc-level subtree with its actor children.
                 let proc_name = match &node.properties {
                     NodeProperties::Proc { proc_name, .. } => proc_name.clone(),
-                    _ => child_ref.clone(),
+                    _ => child_ref_str.clone(),
                 };
-                let proc_url = format!("{}/v1/{}", base_url, urlencoding::encode(child_ref));
+                let proc_url = format!("{}/v1/{}", base_url, urlencoding::encode(&child_ref_str));
                 output.push_str(&format!("{}  ->  {}\n", proc_name, proc_url));
 
                 let num_actors = node.children.len();
                 for (j, actor_ref) in node.children.iter().enumerate() {
+                    let actor_ref_str = actor_ref.to_string();
                     let actor_connector = if j == num_actors - 1 {
                         "└── "
                     } else {
                         "├── "
                     };
                     let actor_label = derive_actor_label(actor_ref);
-                    let actor_url = format!("{}/v1/{}", base_url, urlencoding::encode(actor_ref));
+                    let actor_url =
+                        format!("{}/v1/{}", base_url, urlencoding::encode(&actor_ref_str));
                     output.push_str(&format!(
                         "{}{}  ->  {}\n",
                         actor_connector, actor_label, actor_url
@@ -2575,10 +2557,8 @@ async fn tree_dump(
                 output.push('\n');
             }
             Some(_node) => {
-                // Non-host root child (e.g. root client actor).
-                // Render as a single leaf line.
                 let label = derive_actor_label(child_ref);
-                let url = format!("{}/v1/{}", base_url, urlencoding::encode(child_ref));
+                let url = format!("{}/v1/{}", base_url, urlencoding::encode(&child_ref_str));
                 output.push_str(&format!("{}  ->  {}\n\n", label, url));
             }
             _ => {
@@ -2603,34 +2583,25 @@ async fn tree_dump(
 ///
 /// Note: `ActorId::Display` for `ProcId` uses commas as
 /// separators (`proc_id,actor_name[idx]`), not slashes.
-fn derive_tree_label(reference: &str) -> String {
-    // ActorId (Direct): "transport!addr,proc_name,actor[idx]"
-    // ProcId (Direct): "transport!addr,proc_name"
-    // In both cases, split on ',' and take the second segment (the
-    // proc name).
-    let parts: Vec<&str> = reference.splitn(3, ',').collect();
-    match parts.len() {
-        // "addr,proc_name,actor[idx]" → proc_name
-        3 => parts[1].to_string(),
-        // "addr,proc_name" → proc_name
-        2 => parts[1].to_string(),
-        _ => reference.to_string(),
+fn derive_tree_label(node_ref: &crate::introspect::NodeRef) -> String {
+    match node_ref {
+        crate::introspect::NodeRef::Root => "root".to_string(),
+        crate::introspect::NodeRef::Host(id) => id.proc_id().name().to_string(),
+        crate::introspect::NodeRef::Proc(id) => id.name().to_string(),
+        crate::introspect::NodeRef::Actor(id) => {
+            format!("{}{}", id.name(), format_args!("[{}]", id.pid()))
+        }
     }
 }
 
-/// Derive a short display label for an actor reference.
-///
-/// Actor references are `ActorId` strings in the format
-/// `"transport!addr,proc_name,actor_name[idx]"`. This extracts the
-/// actor name with index (e.g. `"philosopher[0]"`).
-fn derive_actor_label(reference: &str) -> String {
-    let parts: Vec<&str> = reference.splitn(3, ',').collect();
-    match parts.len() {
-        // "addr,proc_name,actor[idx]" → actor[idx]
-        3 => parts[2].to_string(),
-        // "addr,name" → name
-        2 => parts[1].to_string(),
-        _ => reference.to_string(),
+fn derive_actor_label(node_ref: &crate::introspect::NodeRef) -> String {
+    match node_ref {
+        crate::introspect::NodeRef::Root => "root".to_string(),
+        crate::introspect::NodeRef::Host(id) => id.name().to_string(),
+        crate::introspect::NodeRef::Proc(id) => id.name().to_string(),
+        crate::introspect::NodeRef::Actor(id) => {
+            format!("{}[{}]", id.name(), id.pid())
+        }
     }
 }
 
@@ -2791,23 +2762,22 @@ mod tests {
         );
 
         let payload = agent.build_root_payload();
-        assert_eq!(payload.identity, "root");
+        assert_eq!(payload.identity, crate::introspect::NodeRef::Root);
         assert_eq!(payload.parent, None);
         assert!(matches!(
             payload.properties,
             NodeProperties::Root { num_hosts: 2, .. }
         ));
         assert_eq!(payload.children.len(), 2);
-        // Children should be host: reference strings.
         assert!(
             payload
                 .children
-                .contains(&HostId(actor_id1.clone()).to_string())
+                .contains(&crate::introspect::NodeRef::Host(actor_id1.clone()))
         );
         assert!(
             payload
                 .children
-                .contains(&HostId(actor_id2.clone()).to_string())
+                .contains(&crate::introspect::NodeRef::Host(actor_id2.clone()))
         );
 
         // Verify root properties derived from attrs.
@@ -2895,7 +2865,7 @@ mod tests {
             .await
             .unwrap();
         let root = root_resp.0.unwrap();
-        assert_eq!(root.identity, "root");
+        assert_eq!(root.identity, crate::introspect::NodeRef::Root);
         assert!(matches!(
             root.properties,
             NodeProperties::Root { num_hosts: 1, .. }
@@ -2904,46 +2874,38 @@ mod tests {
         assert_eq!(root.children.len(), 1); // host only (admin proc no longer standalone)
 
         // -- 5. Resolve the host child --
-        let _host_agent_id_str = host_agent_ref.actor_id().to_string();
-        let host_ref_str = HostId(host_agent_ref.actor_id().clone()).to_string();
-        let host_child_ref_str = root
+        let expected_host_ref = crate::introspect::NodeRef::Host(host_agent_ref.actor_id().clone());
+        let host_child_ref = root
             .children
             .iter()
-            .find(|c| **c == host_ref_str)
-            .expect("root children should contain the host agent (as host: ref)");
-        let host_resp = admin_ref
-            .resolve(&client, host_child_ref_str.clone())
-            .await
-            .unwrap();
+            .find(|c| **c == expected_host_ref)
+            .expect("root children should contain the host agent (as Host ref)");
+        let host_ref_string = host_child_ref.to_string();
+        let host_resp = admin_ref.resolve(&client, host_ref_string).await.unwrap();
         let host_node = host_resp.0.unwrap();
-        assert_eq!(host_node.identity, *host_child_ref_str);
+        assert_eq!(host_node.identity, expected_host_ref);
         assert!(
             matches!(host_node.properties, NodeProperties::Host { .. }),
             "expected Host properties, got {:?}",
             host_node.properties
         );
-        assert_eq!(host_node.parent, Some("root".to_string()));
-        // A local host always has at least the system and local procs.
+        assert_eq!(host_node.parent, Some(crate::introspect::NodeRef::Root));
         assert!(
             !host_node.children.is_empty(),
             "host should have at least one proc child"
         );
 
         // -- 6. Resolve a system proc child --
-        // System proc children are ProcId strings (the "[system] "
-        // prefix is stripped by resolve_host_node).
-        let proc_ref_str = &host_node.children[0];
-        let proc_resp = admin_ref
-            .resolve(&client, proc_ref_str.clone())
-            .await
-            .unwrap();
+        let proc_ref = &host_node.children[0];
+        let proc_ref_str = proc_ref.to_string();
+        let proc_resp = admin_ref.resolve(&client, proc_ref_str).await.unwrap();
         let proc_node = proc_resp.0.unwrap();
         assert!(
             matches!(proc_node.properties, NodeProperties::Proc { .. }),
             "expected Proc properties, got {:?}",
             proc_node.properties
         );
-        assert_eq!(proc_node.parent, Some(host_child_ref_str.clone()));
+        assert_eq!(proc_node.parent, Some(expected_host_ref.clone()));
         // The system proc should have at least the "host_agent" actor.
         assert!(
             !proc_node.children.is_empty(),
@@ -2953,23 +2915,24 @@ mod tests {
         // -- 7. Cross-reference: system proc child is the host agent --
         //
         // The service proc's actor (agent[0]) IS the HostAgent, so
-        // it appears both as a host node (from root, via HostId) and
-        // as an actor (from a proc's children list, via plain ActorId).
-        // HostId in root children makes resolution unambiguous: host
-        // refs get Entity view, plain actor refs get Actor view.
+        // it appears both as a host node (from root, via NodeRef::Host)
+        // and as an actor (from a proc's children list, via NodeRef::Actor).
+        // NodeRef::Host in root children makes resolution unambiguous:
+        // host refs get Entity view, plain actor refs get Actor view.
 
         // The system proc must list the host agent among its children.
-        let host_agent_id_str = host_agent_ref.actor_id().to_string();
+        let host_agent_node_ref =
+            crate::introspect::NodeRef::Actor(host_agent_ref.actor_id().clone());
         assert!(
-            proc_node.children.contains(&host_agent_id_str),
-            "system proc children {:?} should contain the host agent {}",
+            proc_node.children.contains(&host_agent_node_ref),
+            "system proc children {:?} should contain the host agent {:?}",
             proc_node.children,
-            host_agent_id_str
+            host_agent_node_ref
         );
 
         // Resolve that child reference as a plain actor (no host: prefix).
         let xref_resp = admin_ref
-            .resolve(&client, host_agent_id_str.clone())
+            .resolve(&client, host_agent_ref.actor_id().to_string())
             .await
             .unwrap();
         let xref_node = xref_resp.0.unwrap();
@@ -3063,7 +3026,8 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Resolve the host to get its children (system + user procs).
-        let host_ref_string = HostId(host_agent_ref.actor_id().clone()).to_string();
+        let host_ref_string =
+            crate::introspect::NodeRef::Host(host_agent_ref.actor_id().clone()).to_string();
         let host_resp = admin_ref.resolve(&client, host_ref_string).await.unwrap();
         let host_node = host_resp.0.unwrap();
 
@@ -3079,9 +3043,9 @@ mod tests {
         let user_proc_name_str = user_proc_name.to_string();
         let mut found_system = false;
         let mut found_user = false;
-        for child_ref_str in &host_node.children {
+        for child_ref in &host_node.children {
             let resp = admin_ref
-                .resolve(&client, child_ref_str.clone())
+                .resolve(&client, child_ref.to_string())
                 .await
                 .unwrap();
             let node = resp.0.unwrap();
@@ -3135,7 +3099,7 @@ mod tests {
         assert!(
             payload
                 .children
-                .contains(&HostId(actor_id1.clone()).to_string())
+                .contains(&crate::introspect::NodeRef::Host(actor_id1.clone()))
         );
     }
 
@@ -3213,31 +3177,31 @@ mod tests {
             .await
             .unwrap();
         let root = root_resp.0.unwrap();
-        let host_id_str = HostId(host_agent_ref.actor_id().clone()).to_string();
+        let host_node_ref = crate::introspect::NodeRef::Host(host_agent_ref.actor_id().clone());
         assert!(
-            root.children.contains(&host_id_str),
-            "root children {:?} should contain host {}",
+            root.children.contains(&host_node_ref),
+            "root children {:?} should contain host {:?}",
             root.children,
-            host_id_str
+            host_node_ref
         );
 
         // Resolve the host — should list the local proc in children.
         let host_resp = admin_ref
-            .resolve(&client, host_id_str.clone())
+            .resolve(&client, host_node_ref.to_string())
             .await
             .unwrap();
         let host_node = host_resp.0.unwrap();
-        let local_proc_str = local_proc_id.to_string();
+        let local_proc_node_ref = crate::introspect::NodeRef::Proc(local_proc_id.clone());
         assert!(
-            host_node.children.contains(&local_proc_str),
-            "host children {:?} should contain local proc {}",
+            host_node.children.contains(&local_proc_node_ref),
+            "host children {:?} should contain local proc {:?}",
             host_node.children,
-            local_proc_str
+            local_proc_node_ref
         );
 
         // Resolve the local proc — should contain the root client actor.
         let proc_resp = admin_ref
-            .resolve(&client, local_proc_str.clone())
+            .resolve(&client, local_proc_id.to_string())
             .await
             .unwrap();
         let proc_node = proc_resp.0.unwrap();
@@ -3246,13 +3210,12 @@ mod tests {
             "expected Proc properties, got {:?}",
             proc_node.properties
         );
+        let root_client_node_ref = crate::introspect::NodeRef::Actor(root_client_actor_id.clone());
         assert!(
-            proc_node
-                .children
-                .contains(&root_client_actor_id.to_string()),
-            "local proc children {:?} should contain root client actor {}",
+            proc_node.children.contains(&root_client_node_ref),
+            "local proc children {:?} should contain root client actor {:?}",
             proc_node.children,
-            root_client_actor_id
+            root_client_node_ref
         );
 
         // Resolve the root client actor — parent should be the local proc.
@@ -3268,7 +3231,7 @@ mod tests {
         );
         assert_eq!(
             client_node.parent,
-            Some(local_proc_str),
+            Some(local_proc_node_ref),
             "root client parent should be the local proc"
         );
     }
@@ -3363,7 +3326,7 @@ mod tests {
 
         // Walk the tree breadth-first, checking the invariant at every node.
         // Each entry is (reference_string, expected_parent_identity).
-        let mut queue: std::collections::VecDeque<(String, Option<String>)> =
+        let mut queue: std::collections::VecDeque<(String, Option<crate::introspect::NodeRef>)> =
             std::collections::VecDeque::new();
         queue.push_back(("root".to_string(), None));
 
@@ -3376,11 +3339,13 @@ mod tests {
             let resp = admin_ref.resolve(&client, ref_str.clone()).await.unwrap();
             let node = resp.0.unwrap();
 
-            // NI-1: identity matches the reference used.
+            // NI-1: identity display matches the reference used.
             assert_eq!(
-                node.identity, ref_str,
+                node.identity.to_string(),
+                ref_str,
                 "identity mismatch: resolved '{}' but payload.identity = '{}'",
-                ref_str, node.identity
+                ref_str,
+                node.identity
             );
 
             // NI-2: parent matches the parent node's identity.
@@ -3393,8 +3358,9 @@ mod tests {
             // Enqueue children with this node's identity as their
             // expected parent.
             for child_ref in &node.children {
-                if !visited.contains(child_ref) {
-                    queue.push_back((child_ref.clone(), Some(node.identity.clone())));
+                let child_str = child_ref.to_string();
+                if !visited.contains(&child_str) {
+                    queue.push_back((child_str, Some(node.identity.clone())));
                 }
             }
         }
@@ -3465,7 +3431,8 @@ mod tests {
         let (client, _handle) = client_proc.instance("client").unwrap();
 
         // -- 4. Resolve the host to get its children --
-        let host_ref_str = HostId(host_agent_ref.actor_id().clone()).to_string();
+        let host_ref_str =
+            crate::introspect::NodeRef::Host(host_agent_ref.actor_id().clone()).to_string();
         let host_resp = admin_ref
             .resolve(&client, host_ref_str.clone())
             .await
@@ -3496,10 +3463,10 @@ mod tests {
         );
 
         // -- 6. Verify host children contain the system proc --
-        let expected_system_ref = system_proc_id.to_string();
+        let expected_system_ref = crate::introspect::NodeRef::Proc(system_proc_id.clone());
         assert!(
             host_node.children.contains(&expected_system_ref),
-            "host children {:?} should contain the system proc ref '{}'",
+            "host children {:?} should contain the system proc ref {:?}",
             host_node.children,
             expected_system_ref
         );
@@ -3507,7 +3474,7 @@ mod tests {
         // -- 7. Resolve a proc child --
         let proc_child_ref = &host_node.children[0];
         let proc_resp = admin_ref
-            .resolve(&client, proc_child_ref.clone())
+            .resolve(&client, proc_child_ref.to_string())
             .await
             .unwrap();
         let proc_node = proc_resp.0.unwrap();
@@ -3523,15 +3490,17 @@ mod tests {
             proc_node.properties
         );
 
+        let host_node_ref = crate::introspect::NodeRef::Host(host_agent_ref.actor_id().clone());
         assert_eq!(
             proc_node.parent,
-            Some(host_ref_str.clone()),
-            "proc parent should be the host reference (host:<actor_id>)"
+            Some(host_node_ref),
+            "proc parent should be the host reference"
         );
 
+        // as_of is a SystemTime — just verify it's not the epoch.
         assert!(
-            !proc_node.as_of.is_empty(),
-            "as_of should be present and non-empty"
+            proc_node.as_of > std::time::UNIX_EPOCH,
+            "as_of should be after the epoch"
         );
 
         // Verify proc properties derived from attrs.
@@ -3815,7 +3784,7 @@ mod tests {
         assert!(
             node.children
                 .iter()
-                .any(|c| c.contains(PROC_AGENT_ACTOR_NAME)),
+                .any(|c| c.to_string().contains(PROC_AGENT_ACTOR_NAME)),
             "initial children {:?} should contain proc_agent",
             node.children
         );
@@ -3839,7 +3808,10 @@ mod tests {
             node2.properties
         );
         assert!(
-            node2.children.iter().any(|c| c.contains("extra_actor")),
+            node2
+                .children
+                .iter()
+                .any(|c| c.to_string().contains("extra_actor")),
             "after direct spawn, children {:?} should contain extra_actor",
             node2.children
         );
