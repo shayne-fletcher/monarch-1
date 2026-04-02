@@ -41,7 +41,7 @@ fn enc_str(s: &str) -> String {
 /// traversal (V1 scope).
 pub(crate) async fn check(s: &DiningScenario) {
     // MIT-20, MIT-21: root fetchable, typed correctly.
-    let root: NodePayload = s.fixture.get_json("/v1/root").await.unwrap();
+    let root: NodePayload = s.fixture.get_node_payload("/v1/root").await.unwrap();
     assert!(
         matches!(root.properties, NodeProperties::Root { .. }),
         "MIT-21: expected Root variant"
@@ -55,7 +55,7 @@ pub(crate) async fn check(s: &DiningScenario) {
         .expect("root should have at least one host child");
     let host: NodePayload = s
         .fixture
-        .get_json(&format!("/v1/{}", enc(host_ref)))
+        .get_node_payload(&format!("/v1/{}", enc(host_ref)))
         .await
         .unwrap();
     assert!(
@@ -67,7 +67,7 @@ pub(crate) async fn check(s: &DiningScenario) {
     // MIT-23 V1: classified service and worker procs fetchable.
     let service: NodePayload = s
         .fixture
-        .get_json(&format!("/v1/{}", enc_str(&s.service)))
+        .get_node_payload(&format!("/v1/{}", enc_str(&s.service)))
         .await
         .unwrap();
     assert!(
@@ -78,7 +78,7 @@ pub(crate) async fn check(s: &DiningScenario) {
 
     let worker: NodePayload = s
         .fixture
-        .get_json(&format!("/v1/{}", enc_str(&s.worker)))
+        .get_node_payload(&format!("/v1/{}", enc_str(&s.worker)))
         .await
         .unwrap();
     assert!(
@@ -102,7 +102,7 @@ async fn check_known_actors(
     let mut found = false;
     for actor_ref in &proc_node.children {
         let actor: NodePayload = fixture
-            .get_json(&format!("/v1/{}", enc(actor_ref)))
+            .get_node_payload(&format!("/v1/{}", enc(actor_ref)))
             .await
             .unwrap();
         assert!(

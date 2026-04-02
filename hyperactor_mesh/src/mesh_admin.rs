@@ -27,10 +27,16 @@
 //!
 //! The external API contract is schema-first: the JSON Schema
 //! (Draft 2020-12) served at `GET /v1/schema` is the
-//! authoritative definition of the response shape, derived
-//! directly from the Rust types (`NodePayload`,
-//! `NodeProperties`, `FailureInfo`) via `schemars::JsonSchema`.
-//! The error envelope schema is at `GET /v1/schema/error`.
+//! authoritative definition of the response shape. The error
+//! envelope schema is at `GET /v1/schema/error`.
+//!
+//! Schema and OpenAPI are derived from the HTTP boundary DTO types
+//! in [`crate::introspect::dto`] (`NodePayloadDto`,
+//! `NodePropertiesDto`, `FailureInfoDto`) via
+//! `schemars::JsonSchema`. The domain types (`NodePayload`,
+//! `NodeProperties`, `FailureInfo`) do not carry `JsonSchema` —
+//! they own the typed internal model; the DTOs own the wire
+//! contract.
 //!
 //! This follows the "Admin Gateway Pattern" RFC
 //! ([doc](https://fburl.com/1dvah88uutaiyesebojouen2)):
@@ -38,8 +44,9 @@
 //!
 //! ## Schema generation pipeline
 //!
-//! 1. `#[derive(JsonSchema)]` on `NodePayload`, `NodeProperties`,
-//!    `FailureInfo`, `ApiError`, `ApiErrorEnvelope`.
+//! 1. `#[derive(JsonSchema)]` on `NodePayloadDto`,
+//!    `NodePropertiesDto`, `FailureInfoDto`, `ApiError`,
+//!    `ApiErrorEnvelope`.
 //! 2. `schemars::schema_for!(T)` produces a `Schema` value at
 //!    runtime (Draft 2020-12).
 //! 3. The `serve_schema` / `serve_error_schema` handlers inject a
@@ -47,14 +54,16 @@
 //! 4. Snapshot tests in `introspect::tests` compare the raw
 //!    schemars output (without `$id`) against checked-in golden
 //!    files to detect drift (SC-2).
-//! 5. Validation tests confirm that real `NodePayload` samples
-//!    pass schema validation (SC-3).
+//! 5. Validation tests construct domain payloads, convert to DTOs,
+//!    and confirm the serialized DTOs pass schema validation
+//!    (SC-3).
 //!
 //! ## Regenerating snapshots
 //!
-//! After intentional type changes to `NodePayload`,
-//! `NodeProperties`, `FailureInfo`, `ApiError`, or
-//! `ApiErrorEnvelope`, regenerate the golden files:
+//! After intentional changes to the DTO types
+//! (`NodePayloadDto`, `NodePropertiesDto`, `FailureInfoDto`),
+//! `ApiError`, or `ApiErrorEnvelope`, regenerate the golden
+//! files:
 //!
 //! ```sh
 //! buck run fbcode//monarch/hyperactor_mesh:generate_api_artifacts \
@@ -73,12 +82,12 @@
 //!
 //! ## Schema invariants (SC-*)
 //!
-//! - **SC-1 (schema-derived):** Schema is derived from Rust
+//! - **SC-1 (schema-derived):** Schema is derived from the DTO
 //!   types via `schemars::JsonSchema`, not hand-written.
 //! - **SC-2 (schema-snapshot-stability):** Schema changes must
 //!   be explicit — a snapshot test catches unintentional drift.
-//! - **SC-3 (schema-payload-conformance):** Real `NodePayload`
-//!   instances validate against the generated schema.
+//! - **SC-3 (schema-payload-conformance):** Domain payloads
+//!   converted to DTOs validate against the generated schema.
 //! - **SC-4 (schema-version-identity):** Served schemas carry a
 //!   `$id` tied to the API version (e.g.
 //!   `https://monarch.meta.com/schemas/v1/node_payload`).
@@ -329,6 +338,7 @@ use crate::host_mesh::host_agent::HOST_MESH_AGENT_ACTOR_NAME;
 use crate::host_mesh::host_agent::HostAgent;
 use crate::introspect::NodePayload;
 use crate::introspect::NodeProperties;
+use crate::introspect::dto::NodePayloadDto;
 use crate::introspect::to_node_payload;
 use crate::proc_agent::PROC_AGENT_ACTOR_NAME;
 use crate::pyspy::PySpyDump;
@@ -1527,9 +1537,7 @@ fn schema_with_id<T: schemars::JsonSchema>(id: &str) -> Result<serde_json::Value
 
 /// JSON Schema for the `NodePayload` response type.
 async fn serve_schema() -> Result<axum::response::Json<serde_json::Value>, ApiError> {
-    Ok(axum::response::Json(schema_with_id::<
-        crate::introspect::NodePayload,
-    >(
+    Ok(axum::response::Json(schema_with_id::<NodePayloadDto>(
         "https://monarch.meta.com/schemas/v1/node_payload",
     )?))
 }
@@ -1590,9 +1598,8 @@ fn rewrite_refs(value: &mut serde_json::Value) {
 /// Build the OpenAPI 3.1 spec, embedding schemars-derived JSON
 /// Schemas into `components/schemas`.
 pub fn build_openapi_spec() -> serde_json::Value {
-    let mut node_schema =
-        serde_json::to_value(schemars::schema_for!(crate::introspect::NodePayload))
-            .expect("NodePayload schema must be serializable");
+    let mut node_schema = serde_json::to_value(schemars::schema_for!(NodePayloadDto))
+        .expect("NodePayload schema must be serializable");
     let mut error_schema = serde_json::to_value(schemars::schema_for!(ApiErrorEnvelope))
         .expect("ApiErrorEnvelope schema must be serializable");
     let mut pyspy_schema = serde_json::to_value(schemars::schema_for!(PySpyResult))
@@ -2322,7 +2329,7 @@ async fn config_bridge(
 async fn resolve_reference_bridge(
     State(state): State<Arc<BridgeState>>,
     AxumPath(reference): AxumPath<String>,
-) -> Result<Json<NodePayload>, ApiError> {
+) -> Result<Json<NodePayloadDto>, ApiError> {
     // Axum's wildcard may include a leading slash; strip it.
     let reference = reference.trim_start_matches('/');
     if reference.is_empty() {
@@ -2374,7 +2381,7 @@ async fn resolve_reference_bridge(
     })?;
 
     match response.0 {
-        Ok(payload) => Ok(Json(payload)),
+        Ok(payload) => Ok(Json(NodePayloadDto::from(payload))),
         Err(error) => Err(ApiError::not_found(error, None)),
     }
 }

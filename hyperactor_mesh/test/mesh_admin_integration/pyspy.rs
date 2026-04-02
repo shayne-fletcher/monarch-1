@@ -189,7 +189,7 @@ impl Drop for ShutdownGuard<'_> {
 /// (pyspy-worker-discovery).
 async fn discover_pyspy_workers(fixture: &WorkloadFixture, expected: usize) -> Result<Vec<String>> {
     for _attempt in 1..=60 {
-        let root: NodePayload = match fixture.get_json("/v1/root").await {
+        let root: NodePayload = match fixture.get_node_payload("/v1/root").await {
             Ok(r) => r,
             Err(_) => {
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -201,7 +201,8 @@ async fn discover_pyspy_workers(fixture: &WorkloadFixture, expected: usize) -> R
         for host_ref in &root.children {
             let host_str = host_ref.to_string();
             let encoded = urlencoding::encode(&host_str);
-            let host: NodePayload = match fixture.get_json(&format!("/v1/{encoded}")).await {
+            let host: NodePayload = match fixture.get_node_payload(&format!("/v1/{encoded}")).await
+            {
                 Ok(h) => h,
                 Err(_) => continue,
             };
@@ -209,11 +210,11 @@ async fn discover_pyspy_workers(fixture: &WorkloadFixture, expected: usize) -> R
             for proc_ref in &host.children {
                 let proc_str = proc_ref.to_string();
                 let encoded = urlencoding::encode(&proc_str);
-                let proc_node: NodePayload = match fixture.get_json(&format!("/v1/{encoded}")).await
-                {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
+                let proc_node: NodePayload =
+                    match fixture.get_node_payload(&format!("/v1/{encoded}")).await {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
 
                 let has_pyspy_worker = proc_node.children.iter().any(|actor_ref| match actor_ref {
                     hyperactor_mesh::introspect::NodeRef::Actor(id) => {

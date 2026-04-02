@@ -77,11 +77,11 @@
             "type": "boolean"
           },
           "occurred_at": {
-            "description": "When the failure occurred.\nSerialized as ISO 8601 string in JSON for curl-friendliness.",
+            "description": "When the failure occurred (ISO 8601 timestamp string).",
             "type": "string"
           },
           "root_cause_actor": {
-            "description": "Actor that caused the failure (root cause).\nSerialized as its Display string in JSON for curl-friendliness.",
+            "description": "Actor that caused the failure (root cause).",
             "type": "string"
           },
           "root_cause_name": {
@@ -101,10 +101,10 @@
         "type": "object"
       },
       "NodePayload": {
-        "description": "Uniform response for any node in the mesh topology.\n\nEvery addressable entity (root, host, proc, actor) is represented\nas a `NodePayload`. The client navigates the mesh by fetching a\nnode and following its `children` references.\n\nOver the HTTP JSON API, `identity`, `children`, and `parent` are\nserialized as plain reference strings (curl-friendly). In Rust\nthey are typed `NodeRef` values.\n\nSee IA-1..IA-5 in module doc.",
+        "description": "Uniform response for any node in the mesh topology.\n\nEvery addressable entity (root, host, proc, actor) is represented\nas a `NodePayload`. The client navigates the mesh by fetching a\nnode and following its `children` references.\n\n`identity`, `children`, and `parent` are plain reference strings.\n`as_of` is an ISO 8601 timestamp string.",
         "properties": {
           "as_of": {
-            "description": "When this payload was captured (ISO 8601 string in JSON).",
+            "description": "When this payload was captured (ISO 8601 timestamp string).",
             "type": "string"
           },
           "children": {
@@ -115,7 +115,7 @@
             "type": "array"
           },
           "identity": {
-            "description": "Canonical node reference identifying this node.\nSerialized as a string in JSON (e.g. `\"root\"`, `\"host:actor_id\"`).",
+            "description": "Canonical node reference identifying this node.",
             "type": "string"
           },
           "parent": {

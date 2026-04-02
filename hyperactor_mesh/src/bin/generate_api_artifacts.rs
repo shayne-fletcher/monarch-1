@@ -38,7 +38,7 @@
 //! - `error_schema.json` — `ApiErrorEnvelope` schema (SC-2)
 //! - `openapi.json` — OpenAPI 3.1 spec
 
-use hyperactor_mesh::introspect::NodePayload;
+use hyperactor_mesh::introspect::dto::NodePayloadDto;
 use hyperactor_mesh::mesh_admin::AdminInfo;
 use hyperactor_mesh::mesh_admin::ApiErrorEnvelope;
 
@@ -61,7 +61,7 @@ fn main() {
 
     std::fs::create_dir_all(&out_dir).expect("failed to create output directory");
 
-    write_schema::<NodePayload>(&out_dir, "node_payload_schema.json");
+    write_schema::<NodePayloadDto>(&out_dir, "node_payload_schema.json");
     write_schema::<AdminInfo>(&out_dir, "admin_info_schema.json");
     write_schema::<ApiErrorEnvelope>(&out_dir, "error_schema.json");
     write_openapi(&out_dir);
