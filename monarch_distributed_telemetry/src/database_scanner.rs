@@ -114,6 +114,71 @@ impl LiveTableData {
     }
 }
 
+/// Opaque handle to the shared table storage.
+///
+/// External crates receive this capability via
+/// [`DatabaseScanner::table_store()`]. The raw storage map is not
+/// part of the public API.
+///
+/// # Table-store invariants (TS-*)
+///
+/// - **TS-1 (opaque capability):** External crates do not receive
+///   the raw `Arc<StdMutex<HashMap<...>>>`.
+/// - **TS-2 (behavior parity):** [`TableStore::ingest_batch`]
+///   preserves existing ingestion semantics (ID-1 through ID-6).
+/// - **TS-3 (read capability minimality):** [`table_names`](Self::table_names)
+///   and [`table_provider`](Self::table_provider) expose only what
+///   downstream query setup needs. Callers receive
+///   `Arc<dyn TableProvider>`, not the backing `MemTable`.
+/// - **TS-4 (ownership preserved):** Storage ownership remains in
+///   `monarch_distributed_telemetry`. `TableStore` is a handle, not
+///   an independent store.
+#[derive(Clone)]
+pub struct TableStore {
+    inner: Arc<StdMutex<HashMap<String, Arc<LiveTableData>>>>,
+}
+
+impl TableStore {
+    /// Ingest a `RecordBatch` into a named table (TS-2).
+    ///
+    /// See the ID-* invariants on
+    /// `DatabaseScanner::push_batch_to_tables` for behavioral
+    /// guarantees.
+    pub fn ingest_batch(&self, table_name: &str, batch: RecordBatch) -> anyhow::Result<()> {
+        DatabaseScanner::ingest_batch(&self.inner, table_name, batch)
+    }
+
+    /// Return sorted table names currently in storage (TS-3).
+    pub fn table_names(&self) -> anyhow::Result<Vec<String>> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock poisoned"))?;
+        let mut names: Vec<String> = guard.keys().cloned().collect();
+        names.sort();
+        Ok(names)
+    }
+
+    /// Return a [`TableProvider`] for a named table, or `None` if
+    /// the table does not exist (TS-3).
+    ///
+    /// The returned provider can be registered directly with a
+    /// DataFusion `SessionContext`. Callers do not see the backing
+    /// storage type.
+    pub fn table_provider(
+        &self,
+        table_name: &str,
+    ) -> anyhow::Result<Option<Arc<dyn TableProvider>>> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock poisoned"))?;
+        Ok(guard
+            .get(table_name)
+            .map(|t| t.mem_table() as Arc<dyn TableProvider>))
+    }
+}
+
 /// Default retention duration: 10 minutes in seconds.
 const DEFAULT_RETENTION_SECS: u64 = 10 * 60;
 
@@ -314,8 +379,19 @@ impl DatabaseScanner {
 
 impl DatabaseScanner {
     /// Push a batch into the named table in `table_data`.
-    /// See [`ingest_batch`](Self::ingest_batch) for the public API
-    /// and ingestion invariant registry (ID-*).
+    ///
+    /// # Ingestion invariants (ID-*)
+    ///
+    /// - **ID-1 (create on first batch):** If `table_name` is absent,
+    ///   a new `LiveTableData` is created from `batch.schema()`.
+    /// - **ID-2 (empty batch registers schema):** An empty batch
+    ///   creates the table entry and preserves the schema —
+    ///   `LiveTableData::push` is a no-op for zero rows, but the
+    ///   `entry().or_insert_with()` runs unconditionally.
+    /// - **ID-3 (append on existing table):** A non-empty batch for
+    ///   an existing table appends rows.
+    /// - **ID-4 (error surface):** Lock poisoning propagates as
+    ///   `Err`. `push()` itself is infallible.
     fn push_batch_to_tables(
         table_data: &Arc<StdMutex<HashMap<String, Arc<LiveTableData>>>>,
         table_name: &str,
@@ -345,31 +421,10 @@ impl DatabaseScanner {
 
     /// Ingest a `RecordBatch` into a named table.
     ///
-    /// Public ingestion surface for external callers (e.g.,
-    /// `monarch_introspection_snapshot`). Delegates to the internal
-    /// `push_batch_to_tables`.
-    ///
-    /// # Ingestion invariants (ID-*)
-    ///
-    /// - **ID-1 (wrapper parity):** `ingest_batch` is semantically
-    ///   identical to `push_batch_to_tables`.
-    /// - **ID-2 (create on first batch):** If `table_name` is absent,
-    ///   a new `LiveTableData` is created from `batch.schema()`.
-    /// - **ID-3 (empty batch registers schema):** An empty batch
-    ///   creates the table entry and preserves the schema —
-    ///   `LiveTableData::push` is a no-op for zero rows, but the
-    ///   `entry().or_insert_with()` in `push_batch_to_tables` runs
-    ///   unconditionally.
-    /// - **ID-4 (append on existing table):** A non-empty batch for
-    ///   an existing table appends rows.
-    /// - **ID-5 (ownership boundary):** Callers provide only
-    ///   `(table_data, table_name, batch)`; they do not interact with
-    ///   `LiveTableData` construction logic directly.
-    /// - **ID-6 (error surface preserved):** `ingest_batch` preserves
-    ///   the existing error behavior of `push_batch_to_tables`,
-    ///   including lock-poisoning failures. It introduces no new
-    ///   ingestion semantics.
-    pub fn ingest_batch(
+    /// Internal implementation behind [`TableStore::ingest_batch`].
+    /// See the ID-* invariants on [`push_batch_to_tables`](Self::push_batch_to_tables)
+    /// for behavioral guarantees.
+    fn ingest_batch(
         table_data: &Arc<StdMutex<HashMap<String, Arc<LiveTableData>>>>,
         table_name: &str,
         batch: RecordBatch,
@@ -606,9 +661,11 @@ impl DatabaseScanner {
         Ok(())
     }
 
-    /// Get a clone of the table_data Arc for sharing with sinks.
-    pub fn table_data(&self) -> Arc<StdMutex<HashMap<String, Arc<LiveTableData>>>> {
-        self.table_data.clone()
+    /// Return an opaque [`TableStore`] handle for external callers.
+    pub fn table_store(&self) -> TableStore {
+        TableStore {
+            inner: self.table_data.clone(),
+        }
     }
 
     fn execute_scan_streaming(
@@ -1278,5 +1335,96 @@ mod tests {
         // Schema unchanged.
         let guard = table_data.lock().unwrap();
         assert_eq!(guard.get("t").unwrap().schema(), empty.schema());
+    }
+
+    // --- TableStore tests ---
+    // These reference the TS-* invariants defined on TableStore.
+
+    fn make_table_store() -> TableStore {
+        TableStore {
+            inner: Arc::new(StdMutex::new(HashMap::new())),
+        }
+    }
+
+    /// Register a provider in a fresh SessionContext and return the
+    /// row count from `SELECT * FROM {table_name}`.
+    fn query_row_count(table_name: &str, provider: Arc<dyn TableProvider>) -> usize {
+        get_tokio_runtime().block_on(async {
+            let ctx = SessionContext::new();
+            ctx.register_table(table_name, provider).unwrap();
+            let df = ctx
+                .sql(&format!("SELECT * FROM {table_name}"))
+                .await
+                .unwrap();
+            df.collect()
+                .await
+                .unwrap()
+                .iter()
+                .map(|b| b.num_rows())
+                .sum()
+        })
+    }
+
+    // TS-2, TS-3: ingest via TableStore, register the returned
+    // table_provider in a SessionContext, and query it. Proves the
+    // opaque handle is sufficient for downstream query setup.
+    #[test]
+    fn test_table_store_ingest_and_query() {
+        let store = make_table_store();
+
+        store.ingest_batch("t", make_batch(&[10, 20, 30])).unwrap();
+
+        let provider = store
+            .table_provider("t")
+            .unwrap()
+            .expect("TS-3: table_provider should return Some");
+
+        assert_eq!(
+            query_row_count("t", provider),
+            3,
+            "TS-3: query should return ingested rows"
+        );
+    }
+
+    // TS-3: table_names returns all ingested table names, sorted.
+    #[test]
+    fn test_table_store_table_names() {
+        let store = make_table_store();
+
+        store.ingest_batch("beta", make_batch(&[1])).unwrap();
+        store.ingest_batch("alpha", make_batch(&[2])).unwrap();
+
+        let names = store.table_names().unwrap();
+        assert_eq!(names, vec!["alpha", "beta"], "TS-3: names should be sorted");
+    }
+
+    // TS-2 (ID-2 passthrough): empty batch registers schema via
+    // TableStore. Proves the table is visible through table_names
+    // and table_provider without re-proving row-count internals.
+    #[test]
+    fn test_table_store_empty_batch_registers() {
+        let store = make_table_store();
+
+        store.ingest_batch("t", make_batch(&[])).unwrap();
+
+        assert!(
+            store.table_names().unwrap().contains(&"t".to_owned()),
+            "TS-2: empty batch should register table name"
+        );
+        assert!(
+            store.table_provider("t").unwrap().is_some(),
+            "TS-2: empty batch should make table_provider available"
+        );
+    }
+
+    // TS-3: table_provider for unknown table returns None.
+    #[test]
+    fn test_table_store_missing_table() {
+        let store = make_table_store();
+
+        assert!(
+            store.table_provider("missing").unwrap().is_none(),
+            "TS-3: unknown table should return None"
+        );
     }
 }
