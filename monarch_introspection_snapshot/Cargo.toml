@@ -15,3 +15,4 @@ monarch_record_batch = { version = "0.0.0", path = "../monarch_record_batch" }
 
 [dev-dependencies]
 hyperactor = { version = "0.0.0", path = "../hyperactor" }
+tokio = { version = "1.50.0", features = ["full", "test-util", "tracing"] }
