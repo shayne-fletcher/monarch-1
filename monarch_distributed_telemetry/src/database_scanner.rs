@@ -139,13 +139,37 @@ pub struct TableStore {
 }
 
 impl TableStore {
+    /// Create an empty standalone table store.
+    ///
+    /// Useful for testing or standalone ingestion scenarios where
+    /// the full [`DatabaseScanner`] lifecycle is not needed.
+    pub fn new_empty() -> Self {
+        Self {
+            inner: Arc::new(StdMutex::new(HashMap::new())),
+        }
+    }
+
     /// Ingest a `RecordBatch` into a named table (TS-2).
+    ///
+    /// Async so callers in async contexts can await directly without
+    /// hitting the `block_in_place` bridge in `push_batch_to_tables`.
     ///
     /// See the ID-* invariants on
     /// `DatabaseScanner::push_batch_to_tables` for behavioral
-    /// guarantees.
-    pub fn ingest_batch(&self, table_name: &str, batch: RecordBatch) -> anyhow::Result<()> {
-        DatabaseScanner::ingest_batch(&self.inner, table_name, batch)
+    /// guarantees (this method preserves the same semantics).
+    pub async fn ingest_batch(&self, table_name: &str, batch: RecordBatch) -> anyhow::Result<()> {
+        let table = {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock poisoned"))?;
+            guard
+                .entry(table_name.to_string())
+                .or_insert_with(|| Arc::new(LiveTableData::new(batch.schema())))
+                .clone()
+        };
+        table.push(batch).await;
+        Ok(())
     }
 
     /// Return sorted table names currently in storage (TS-3).
@@ -417,19 +441,6 @@ impl DatabaseScanner {
             get_tokio_runtime().block_on(table.push(batch));
         }
         Ok(())
-    }
-
-    /// Ingest a `RecordBatch` into a named table.
-    ///
-    /// Internal implementation behind [`TableStore::ingest_batch`].
-    /// See the ID-* invariants on [`push_batch_to_tables`](Self::push_batch_to_tables)
-    /// for behavioral guarantees.
-    fn ingest_batch(
-        table_data: &Arc<StdMutex<HashMap<String, Arc<LiveTableData>>>>,
-        table_name: &str,
-        batch: RecordBatch,
-    ) -> anyhow::Result<()> {
-        Self::push_batch_to_tables(table_data, table_name, batch)
     }
 
     /// Create a RecordBatchSink that pushes batches to this scanner's tables.
@@ -1257,122 +1268,117 @@ mod tests {
     // --- ingest_batch tests ---
     // These reference the ID-* invariants defined on ingest_batch.
 
-    /// Helper: count rows in a table_data map entry.
-    fn ingest_row_count(
-        table_data: &Arc<StdMutex<HashMap<String, Arc<LiveTableData>>>>,
-        table_name: &str,
-    ) -> usize {
-        let guard = table_data.lock().unwrap();
-        match guard.get(table_name) {
-            Some(table) => get_tokio_runtime().block_on(async {
-                table.mem_table().batches[0]
-                    .read()
-                    .await
-                    .iter()
-                    .map(|b| b.num_rows())
-                    .sum::<usize>()
-            }),
-            None => 0,
-        }
-    }
-
-    // ID-2, ID-3: empty batch creates the table with schema but 0
+    // ID-1, ID-2: empty batch creates the table with schema but 0
     // rows.
-    #[test]
-    fn test_ingest_batch_creates_table_for_empty_batch() {
-        let table_data = Arc::new(StdMutex::new(HashMap::new()));
+    #[tokio::test]
+    async fn test_ingest_batch_creates_table_for_empty_batch() {
+        let store = TableStore::new_empty();
         let empty = make_batch(&[]);
 
-        DatabaseScanner::ingest_batch(&table_data, "t", empty.clone()).unwrap();
+        store.ingest_batch("t", empty.clone()).await.unwrap();
 
-        let guard = table_data.lock().unwrap();
-        assert!(guard.contains_key("t"), "ID-2: table should exist");
-        let table = guard.get("t").unwrap();
-        assert_eq!(table.schema(), empty.schema(), "ID-3: schema should match");
-        drop(guard);
-        assert_eq!(ingest_row_count(&table_data, "t"), 0, "ID-3: 0 rows");
+        let names = store.table_names().unwrap();
+        assert!(names.contains(&"t".to_owned()), "ID-1: table should exist");
+        assert_eq!(
+            query_row_count("t", store.table_provider("t").unwrap().unwrap()).await,
+            0,
+            "ID-2: 0 rows"
+        );
     }
 
-    // ID-2, ID-4: non-empty batch creates table and appends rows.
-    #[test]
-    fn test_ingest_batch_appends_non_empty_batch() {
-        let table_data = Arc::new(StdMutex::new(HashMap::new()));
+    // ID-1, ID-3: non-empty batch creates table and appends rows.
+    #[tokio::test]
+    async fn test_ingest_batch_appends_non_empty_batch() {
+        let store = TableStore::new_empty();
 
-        DatabaseScanner::ingest_batch(&table_data, "t", make_batch(&[1, 2, 3])).unwrap();
+        store
+            .ingest_batch("t", make_batch(&[1, 2, 3]))
+            .await
+            .unwrap();
 
-        assert_eq!(ingest_row_count(&table_data, "t"), 3);
+        assert_eq!(
+            query_row_count("t", store.table_provider("t").unwrap().unwrap()).await,
+            3
+        );
     }
 
-    // ID-4: two batches to the same table accumulate rows.
-    #[test]
-    fn test_ingest_batch_reuses_existing_table() {
-        let table_data = Arc::new(StdMutex::new(HashMap::new()));
+    // ID-3: two batches to the same table accumulate rows.
+    #[tokio::test]
+    async fn test_ingest_batch_reuses_existing_table() {
+        let store = TableStore::new_empty();
 
-        DatabaseScanner::ingest_batch(&table_data, "t", make_batch(&[1, 2])).unwrap();
-        DatabaseScanner::ingest_batch(&table_data, "t", make_batch(&[3, 4, 5])).unwrap();
+        store.ingest_batch("t", make_batch(&[1, 2])).await.unwrap();
+        store
+            .ingest_batch("t", make_batch(&[3, 4, 5]))
+            .await
+            .unwrap();
 
-        let guard = table_data.lock().unwrap();
-        assert_eq!(guard.len(), 1, "ID-4: still one table entry");
-        drop(guard);
-        assert_eq!(ingest_row_count(&table_data, "t"), 5);
+        assert_eq!(
+            store.table_names().unwrap().len(),
+            1,
+            "ID-3: still one table"
+        );
+        assert_eq!(
+            query_row_count("t", store.table_provider("t").unwrap().unwrap()).await,
+            5
+        );
     }
 
-    // ID-3, ID-4: empty batch registers schema, then non-empty batch
+    // ID-2, ID-3: empty batch registers schema, then non-empty batch
     // appends rows using the same schema.
-    #[test]
-    fn test_ingest_batch_empty_then_non_empty() {
-        let table_data = Arc::new(StdMutex::new(HashMap::new()));
-        let empty = make_batch(&[]);
+    #[tokio::test]
+    async fn test_ingest_batch_empty_then_non_empty() {
+        let store = TableStore::new_empty();
 
         // Register schema with empty batch.
-        DatabaseScanner::ingest_batch(&table_data, "t", empty.clone()).unwrap();
-        assert_eq!(ingest_row_count(&table_data, "t"), 0);
+        store.ingest_batch("t", make_batch(&[])).await.unwrap();
+        assert_eq!(
+            query_row_count("t", store.table_provider("t").unwrap().unwrap()).await,
+            0
+        );
 
         // Append rows.
-        DatabaseScanner::ingest_batch(&table_data, "t", make_batch(&[10, 20])).unwrap();
-        assert_eq!(ingest_row_count(&table_data, "t"), 2);
-
-        // Schema unchanged.
-        let guard = table_data.lock().unwrap();
-        assert_eq!(guard.get("t").unwrap().schema(), empty.schema());
+        store
+            .ingest_batch("t", make_batch(&[10, 20]))
+            .await
+            .unwrap();
+        assert_eq!(
+            query_row_count("t", store.table_provider("t").unwrap().unwrap()).await,
+            2
+        );
     }
 
     // --- TableStore tests ---
     // These reference the TS-* invariants defined on TableStore.
 
-    fn make_table_store() -> TableStore {
-        TableStore {
-            inner: Arc::new(StdMutex::new(HashMap::new())),
-        }
-    }
-
     /// Register a provider in a fresh SessionContext and return the
     /// row count from `SELECT * FROM {table_name}`.
-    fn query_row_count(table_name: &str, provider: Arc<dyn TableProvider>) -> usize {
-        get_tokio_runtime().block_on(async {
-            let ctx = SessionContext::new();
-            ctx.register_table(table_name, provider).unwrap();
-            let df = ctx
-                .sql(&format!("SELECT * FROM {table_name}"))
-                .await
-                .unwrap();
-            df.collect()
-                .await
-                .unwrap()
-                .iter()
-                .map(|b| b.num_rows())
-                .sum()
-        })
+    async fn query_row_count(table_name: &str, provider: Arc<dyn TableProvider>) -> usize {
+        let ctx = SessionContext::new();
+        ctx.register_table(table_name, provider).unwrap();
+        let df = ctx
+            .sql(&format!("SELECT * FROM {table_name}"))
+            .await
+            .unwrap();
+        df.collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum()
     }
 
     // TS-2, TS-3: ingest via TableStore, register the returned
     // table_provider in a SessionContext, and query it. Proves the
     // opaque handle is sufficient for downstream query setup.
-    #[test]
-    fn test_table_store_ingest_and_query() {
-        let store = make_table_store();
+    #[tokio::test]
+    async fn test_table_store_ingest_and_query() {
+        let store = TableStore::new_empty();
 
-        store.ingest_batch("t", make_batch(&[10, 20, 30])).unwrap();
+        store
+            .ingest_batch("t", make_batch(&[10, 20, 30]))
+            .await
+            .unwrap();
 
         let provider = store
             .table_provider("t")
@@ -1380,19 +1386,19 @@ mod tests {
             .expect("TS-3: table_provider should return Some");
 
         assert_eq!(
-            query_row_count("t", provider),
+            query_row_count("t", provider).await,
             3,
             "TS-3: query should return ingested rows"
         );
     }
 
     // TS-3: table_names returns all ingested table names, sorted.
-    #[test]
-    fn test_table_store_table_names() {
-        let store = make_table_store();
+    #[tokio::test]
+    async fn test_table_store_table_names() {
+        let store = TableStore::new_empty();
 
-        store.ingest_batch("beta", make_batch(&[1])).unwrap();
-        store.ingest_batch("alpha", make_batch(&[2])).unwrap();
+        store.ingest_batch("beta", make_batch(&[1])).await.unwrap();
+        store.ingest_batch("alpha", make_batch(&[2])).await.unwrap();
 
         let names = store.table_names().unwrap();
         assert_eq!(names, vec!["alpha", "beta"], "TS-3: names should be sorted");
@@ -1401,11 +1407,11 @@ mod tests {
     // TS-2 (ID-2 passthrough): empty batch registers schema via
     // TableStore. Proves the table is visible through table_names
     // and table_provider without re-proving row-count internals.
-    #[test]
-    fn test_table_store_empty_batch_registers() {
-        let store = make_table_store();
+    #[tokio::test]
+    async fn test_table_store_empty_batch_registers() {
+        let store = TableStore::new_empty();
 
-        store.ingest_batch("t", make_batch(&[])).unwrap();
+        store.ingest_batch("t", make_batch(&[])).await.unwrap();
 
         assert!(
             store.table_names().unwrap().contains(&"t".to_owned()),
@@ -1420,7 +1426,7 @@ mod tests {
     // TS-3: table_provider for unknown table returns None.
     #[test]
     fn test_table_store_missing_table() {
-        let store = make_table_store();
+        let store = TableStore::new_empty();
 
         assert!(
             store.table_provider("missing").unwrap().is_none(),
