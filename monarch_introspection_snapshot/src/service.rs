@@ -19,7 +19,7 @@
 //! # Service invariants (SV-*)
 //!
 //! - **SV-1 (sink required):** `capture` returns `Err` when both
-//!   `table_store` and `export_dir` are `None`.
+//!   `table_store` and `export_root` are `None`.
 //! - **SV-2 (single capture):** Each `capture` call performs exactly
 //!   one BFS traversal and one `drain_to_batches`.
 //! - **SV-3 (table-store publication):** When `table_store` is
@@ -31,14 +31,21 @@
 //! - **SV-5 (metadata correctness):** [`CaptureResult`] contains the
 //!   snapshot ID generated for this capture, `snapshot_ts` from the
 //!   snapshot row produced by `capture_snapshot`, accurate node
-//!   counts, and non-negative wall-clock duration.
-//! - **SV-6 (unsupported sink rejection):** When `export_dir` is
-//!   `Some` but bundle export is not yet implemented, `capture`
-//!   returns `Err` before performing any BFS traversal or side
-//!   effects.
+//!   counts, non-negative wall-clock duration, and `bundle_path`
+//!   when a bundle was exported.
+//! - **SV-6 (bundle path derivation):** When `export_root` is `Some`,
+//!   the service derives the bundle directory as
+//!   `{export_root}/snapshot-{snapshot_id}/` after generating the
+//!   snapshot ID. The two cannot diverge (delegates to BN-7).
+//! - **SV-7 (cross-sink non-atomicity):** When both sinks are active,
+//!   the operation is not atomic across sinks. If `TableStore` ingest
+//!   succeeds and bundle writing fails (or vice versa), you have
+//!   partial success. The sinks are independent and the service
+//!   reports the error.
 
 use std::future::Future;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -50,6 +57,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::bundle::write_bundle;
 use crate::capture::SnapshotData;
 use crate::capture::capture_snapshot;
 use crate::push::drain_to_batches;
@@ -90,42 +98,38 @@ impl SnapshotService {
     /// Captures once via BFS, drains to `RecordBatch` pairs once,
     /// then publishes to whichever sinks are active:
     /// - If `self.table_store` is `Some`, ingest into live storage.
-    /// - If `export_dir` is `Some`, write a durable bundle to disk
-    ///   (not yet implemented).
+    /// - If `export_root` is `Some`, write a durable bundle to
+    ///   `{export_root}/snapshot-{snapshot_id}/`.
     ///
     /// At least one sink must be active (`table_store` or
-    /// `export_dir`), otherwise the capture has no destination and
-    /// returns an error.
+    /// `export_root`), otherwise the capture has no destination and
+    /// returns an error (SV-1).
     pub async fn capture<F, Fut>(
         &self,
         resolve: F,
-        export_dir: Option<&Path>,
+        export_root: Option<&Path>,
     ) -> anyhow::Result<CaptureResult>
     where
         F: Fn(&NodeRef) -> Fut,
         Fut: Future<Output = anyhow::Result<NodePayload>>,
     {
-        // No-sink guard: at least one destination must be active.
-        if self.table_store.is_none() && export_dir.is_none() {
+        // SV-1: at least one destination must be active.
+        if self.table_store.is_none() && export_root.is_none() {
             anyhow::bail!(
                 "snapshot capture requires at least one active sink \
-                 (table_store or export_dir)"
+                 (table_store or export_root)"
             );
-        }
-
-        // Bundle export is not yet implemented.
-        if export_dir.is_some() {
-            anyhow::bail!("bundle export is not yet implemented");
         }
 
         let snapshot_id = Uuid::new_v4().to_string();
         let t0 = Instant::now();
         let data = capture_snapshot(&snapshot_id, &resolve).await?;
+        // SV-4: counts computed before drain consumes data.
         let node_counts = NodeCounts::from_data(&data);
         let snapshot_ts = data.snapshot.snapshot_ts;
 
-        // Drain once, publish to all active sinks from the same
-        // batches.
+        // SV-2: drain once, publish to all active sinks from the
+        // same batches.
         let batches = drain_to_batches(data)?;
 
         if let Some(ref store) = self.table_store {
@@ -134,11 +138,22 @@ impl SnapshotService {
             }
         }
 
+        // SV-6: service owns snapshot_id and derives directory name.
+        let bundle_path = match export_root {
+            Some(root) => {
+                let dir = root.join(format!("snapshot-{}", snapshot_id));
+                write_bundle(&dir, &batches)?;
+                Some(dir)
+            }
+            None => None,
+        };
+
         Ok(CaptureResult {
             snapshot_id,
             snapshot_ts,
             node_counts,
             capture_duration_ms: t0.elapsed().as_secs_f64() * 1000.0,
+            bundle_path,
         })
     }
 }
@@ -154,6 +169,9 @@ pub struct CaptureResult {
     pub node_counts: NodeCounts,
     /// Wall-clock capture duration in milliseconds.
     pub capture_duration_ms: f64,
+    /// Filesystem path to the bundle directory, if a bundle was
+    /// exported. `None` when `export_root` was not provided.
+    pub bundle_path: Option<PathBuf>,
 }
 
 /// Summary counts of entities in a captured snapshot.
@@ -457,12 +475,14 @@ mod tests {
                 resolution_errors: 0,
             },
             capture_duration_ms: 42.5,
+            bundle_path: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"snapshot_id\":\"test-snap\""));
         assert!(json.contains("\"snapshot_ts\":1000000"));
         assert!(json.contains("\"capture_duration_ms\":42.5"));
         assert!(json.contains("\"node_counts\":{"));
+        assert!(json.contains("\"bundle_path\":null"));
     }
 
     // --- SnapshotService::capture tests ---
@@ -482,6 +502,7 @@ mod tests {
         assert!(!result.snapshot_id.is_empty());
         assert!(result.snapshot_ts > 0);
         assert!(result.capture_duration_ms >= 0.0);
+        assert!(result.bundle_path.is_none());
         assert_eq!(result.node_counts.nodes, 4); // root, host, proc, actor
         assert_eq!(result.node_counts.children, 3); // root→host, host→proc, proc→actor
         assert_eq!(result.node_counts.root_nodes, 1);
@@ -527,23 +548,49 @@ mod tests {
         );
     }
 
-    // SV-6: export_dir is accepted in the signature but not yet
-    // functional; errors before any traversal or side effects.
+    // SV-6, BN-7: capture with export_root creates a bundle directory
+    // named snapshot-{snapshot_id}.
     #[tokio::test]
-    async fn test_capture_export_dir_not_implemented() {
+    async fn test_capture_with_export_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let payloads = minimal_mesh_payloads();
+        let resolve = stub_resolver(payloads);
+        let service = SnapshotService::new(None);
+
+        let result = service.capture(resolve, Some(dir.path())).await.unwrap();
+
+        // BN-7: bundle_path derives from export_root + snapshot_id.
+        let bundle_path = result.bundle_path.as_ref().unwrap();
+        assert_eq!(
+            bundle_path.file_name().unwrap().to_str().unwrap(),
+            format!("snapshot-{}", result.snapshot_id),
+        );
+        assert!(bundle_path.exists());
+        assert!(bundle_path.join("manifest.json").exists());
+    }
+
+    // SV-7: both sinks active — table_store populated AND bundle
+    // written.
+    #[tokio::test]
+    async fn test_capture_both_sinks() {
+        let dir = tempfile::tempdir().unwrap();
         let payloads = minimal_mesh_payloads();
         let resolve = stub_resolver(payloads);
         let store = TableStore::new_empty();
-        let service = SnapshotService::new(Some(store));
+        let service = SnapshotService::new(Some(store.clone()));
 
-        let err = service
-            .capture(resolve, Some(Path::new("/tmp/test")))
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("not yet implemented"),
-            "unexpected error: {}",
-            err,
-        );
+        let result = service.capture(resolve, Some(dir.path())).await.unwrap();
+
+        // Table store populated.
+        assert_eq!(store.table_names().unwrap().len(), 9);
+
+        // Bundle written.
+        let bundle_path = result.bundle_path.as_ref().unwrap();
+        assert!(bundle_path.join("manifest.json").exists());
+
+        // Both agree on snapshot_id.
+        let raw = std::fs::read_to_string(bundle_path.join("manifest.json")).unwrap();
+        let manifest: crate::bundle::BundleManifest = serde_json::from_str(&raw).unwrap();
+        assert_eq!(manifest.snapshot_id, result.snapshot_id);
     }
 }
