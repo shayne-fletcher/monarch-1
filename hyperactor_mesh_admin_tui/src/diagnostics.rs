@@ -203,6 +203,7 @@ async fn probe(
     // Per-probe timeout. Set above the server's SINGLE_HOST_TIMEOUT
     // (3 s) so server-side 504s are surfaced as Fail(error) rather
     // than our own timeout (TP-8).
+    // TP-9: probe owns timeout semantics at the operation boundary.
     let result =
         tokio::time::timeout(probe_timeout, fetch_node_raw(client, base_url, reference)).await;
 

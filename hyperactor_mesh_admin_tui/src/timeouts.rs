@@ -18,25 +18,23 @@
 //!   exactly.
 //! - **TP-4:** Diagnostics thresholds are policy-backed, not
 //!   file-local.
-//! - **TP-5:** Phase 1 records timeout policy at operation
-//!   boundaries, even where enforcement still flows through the
-//!   shared client timeout.
-//! - **TP-6:** `TuiTimeoutPolicy::from_config` preserves current
-//!   effective values in Phase 1.
-//! - **TP-7:** `shared_client_timeout()` is derived only from
-//!   `RequestOp`. `ProbeOp` and `WorkflowOp` never contaminate the
-//!   client timeout. `build_client()` sources its timeout exclusively
-//!   from `TuiTimeoutPolicy`, not directly from mesh-admin config
-//!   attrs.
+//! - **TP-5:** Timeout policy is recorded at operation boundaries.
+//! - **TP-6:** `TuiTimeoutPolicy::from_config` produces
+//!   operation-specific request budgets.
+//! - **TP-7:** No client-level timeout. The `reqwest::Client` is
+//!   built without `.timeout()`. All timeout enforcement is
+//!   per-operation via `tokio::time::timeout` at the call boundary.
 //! - **TP-8:** Diagnostics uses only policy-provided thresholds and
 //!   budgets.
+//! - **TP-9:** Each request operation enforces its own budget via
+//!   `tokio::time::timeout` at the operation boundary.
 
 use std::time::Duration;
 
 use crate::TuiConfig;
 
-/// Request-level operations. Only these participate in
-/// [`TuiTimeoutPolicy::shared_client_timeout`].
+/// Request-level operations. Each has a per-operation timeout
+/// enforced via `tokio::time::timeout` at the call boundary (TP-9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequestOp {
     /// Topology refresh, node detail, expand.
@@ -47,8 +45,7 @@ pub(crate) enum RequestOp {
     PySpyDump,
 }
 
-/// All [`RequestOp`] variants, for iteration in laws and
-/// `shared_client_timeout`.
+/// All [`RequestOp`] variants, for iteration in law-based tests.
 pub(crate) const ALL_REQUEST_OPS: &[RequestOp] = &[
     RequestOp::InteractiveFetch,
     RequestOp::ConfigDump,
@@ -99,24 +96,21 @@ impl TuiTimeoutPolicy {
     ///
     /// `refresh_interval` comes from `TuiConfig.refresh_ms`.
     ///
-    /// Phase 1 intentionally preserves the current request-timeout
-    /// bug: interactive fetches, config dumps, and py-spy requests
-    /// all inherit the shared `MESH_ADMIN_PYSPY_CLIENT_TIMEOUT`
-    /// budget. Phase 2 splits these into operation-specific request
-    /// budgets.
+    /// Request budgets are operation-specific (TP-9). There is no
+    /// shared client-level timeout; all enforcement is per-operation
+    /// via `tokio::time::timeout` at the call boundary (TP-7).
     ///
     /// Diagnostics budgets preserve the existing effective values
     /// from the pre-policy implementation.
     pub fn from_config(config: &TuiConfig) -> Self {
-        let request_budget = hyperactor_config::global::get(
-            hyperactor_mesh::config::MESH_ADMIN_PYSPY_CLIENT_TIMEOUT,
-        );
         Self {
             refresh_interval: Duration::from_millis(config.refresh_ms),
             diagnostics_probe_slow: Duration::from_millis(500),
-            interactive_fetch: request_budget,
-            config_dump: request_budget,
-            pyspy_dump: request_budget,
+            interactive_fetch: Duration::from_secs(5),
+            config_dump: Duration::from_secs(8),
+            pyspy_dump: hyperactor_config::global::get(
+                hyperactor_mesh::config::MESH_ADMIN_PYSPY_CLIENT_TIMEOUT,
+            ),
             diagnostics_probe: Duration::from_secs(5),
             diagnostics_run: Duration::from_secs(120),
         }
@@ -144,21 +138,6 @@ impl TuiTimeoutPolicy {
             WorkflowOp::DiagnosticsRun => self.diagnostics_run,
         }
     }
-
-    /// Phase 1 compatibility shim: the shared `reqwest::Client`
-    /// timeout, derived from request ops only so probe/workflow
-    /// ceilings do not contaminate it (TP-7).
-    ///
-    /// Phase 2 is expected to eliminate or demote this by enforcing
-    /// operation-specific request budgets at the call boundary
-    /// instead of relying on one shared client timeout.
-    pub fn shared_client_timeout(&self) -> Duration {
-        ALL_REQUEST_OPS
-            .iter()
-            .map(|op| self.request_timeout(*op))
-            .max()
-            .unwrap()
-    }
 }
 
 #[cfg(test)]
@@ -178,23 +157,37 @@ mod tests {
         }
     }
 
-    // TP-3/TP-6: extensional preservation — each accessor returns
-    // today's effective timeout.
+    // TP-6/TP-9: per-operation request budgets.
     #[test]
-    fn from_config_preserves_request_timeouts() {
+    fn from_config_request_budget_interactive_fetch() {
+        let policy = TuiTimeoutPolicy::from_config(&default_config());
+        assert_eq!(
+            policy.request_timeout(RequestOp::InteractiveFetch),
+            Duration::from_secs(5),
+        );
+    }
+
+    // TP-6/TP-9: config dump budget.
+    #[test]
+    fn from_config_request_budget_config_dump() {
+        let policy = TuiTimeoutPolicy::from_config(&default_config());
+        assert_eq!(
+            policy.request_timeout(RequestOp::ConfigDump),
+            Duration::from_secs(8),
+        );
+    }
+
+    // TP-6/TP-9: py-spy budget preserves MESH_ADMIN_PYSPY_CLIENT_TIMEOUT.
+    #[test]
+    fn from_config_request_budget_pyspy_dump() {
         let policy = TuiTimeoutPolicy::from_config(&default_config());
         let expected = hyperactor_config::global::get(
             hyperactor_mesh::config::MESH_ADMIN_PYSPY_CLIENT_TIMEOUT,
         );
-        assert_eq!(
-            policy.request_timeout(RequestOp::InteractiveFetch),
-            expected
-        );
-        assert_eq!(policy.request_timeout(RequestOp::ConfigDump), expected);
         assert_eq!(policy.request_timeout(RequestOp::PySpyDump), expected);
     }
 
-    // TP-3/TP-6: extensional preservation — probe budget.
+    // TP-6: probe budget.
     #[test]
     fn from_config_preserves_probe_timeout() {
         let policy = TuiTimeoutPolicy::from_config(&default_config());
@@ -204,7 +197,7 @@ mod tests {
         );
     }
 
-    // TP-3/TP-6: extensional preservation — workflow ceiling.
+    // TP-6: workflow ceiling.
     #[test]
     fn from_config_preserves_workflow_timeout() {
         let policy = TuiTimeoutPolicy::from_config(&default_config());
@@ -214,40 +207,11 @@ mod tests {
         );
     }
 
-    // TP-3/TP-6: extensional preservation — slow classification threshold.
+    // TP-6: slow classification threshold.
     #[test]
     fn from_config_preserves_slow_threshold() {
         let policy = TuiTimeoutPolicy::from_config(&default_config());
         assert_eq!(policy.diagnostics_probe_slow, Duration::from_millis(500));
-    }
-
-    // TP-7: client law — shared_client_timeout derived only from
-    // RequestOp, never from ProbeOp or WorkflowOp.
-    #[test]
-    fn shared_client_timeout_ge_all_request_ops() {
-        let policy = TuiTimeoutPolicy::from_config(&default_config());
-        let client_t = policy.shared_client_timeout();
-        for op in ALL_REQUEST_OPS {
-            assert!(client_t >= policy.request_timeout(*op));
-        }
-    }
-
-    // TP-7: workflow ceilings do not contaminate client timeout.
-    #[test]
-    fn shared_client_timeout_does_not_include_workflow() {
-        let policy = TuiTimeoutPolicy::from_config(&default_config());
-        let expected_request_budget = hyperactor_config::global::get(
-            hyperactor_mesh::config::MESH_ADMIN_PYSPY_CLIENT_TIMEOUT,
-        );
-        assert_eq!(policy.shared_client_timeout(), expected_request_budget);
-        assert_eq!(
-            policy.workflow_timeout(WorkflowOp::DiagnosticsRun),
-            Duration::from_secs(120),
-        );
-        assert_ne!(
-            policy.shared_client_timeout(),
-            policy.workflow_timeout(WorkflowOp::DiagnosticsRun),
-        );
     }
 
     // TP-2: separation law — refresh_interval is independent of
