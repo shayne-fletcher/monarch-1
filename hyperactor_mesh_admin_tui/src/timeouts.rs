@@ -14,8 +14,6 @@
 //!   entry.
 //! - **TP-2:** Refresh cadence and request timeout are distinct
 //!   concepts.
-//! - **TP-3:** Phase 1 preserves all effective timeout values
-//!   exactly.
 //! - **TP-4:** Diagnostics thresholds are policy-backed, not
 //!   file-local.
 //! - **TP-5:** Timeout policy is recorded at operation boundaries.
@@ -28,6 +26,10 @@
 //!   budgets.
 //! - **TP-9:** Each request operation enforces its own budget via
 //!   `tokio::time::timeout` at the operation boundary.
+//! - **TP-10:** The effective refresh policy is derived from active
+//!   job state. `RefreshPolicy` implements `JoinSemilattice` so
+//!   multiple sources can be combined when added. Background refresh
+//!   is suspended while a foreground operation is in flight.
 
 use std::time::Duration;
 
@@ -140,6 +142,36 @@ impl TuiTimeoutPolicy {
     }
 }
 
+/// Refresh interaction policy for background topology updates.
+///
+/// Phase 3a implements the minimal carrier:
+/// `Baseline < Suspend`.
+///
+/// The policy is a join-semilattice so refresh constraints can be
+/// combined compositionally rather than encoded as ad hoc event-loop
+/// conditionals. In this first version, foreground jobs contribute
+/// either `Baseline` or `Suspend`. Later phases may add additional
+/// sources or richer policies such as `Degrade(...)` without changing
+/// the combination model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RefreshPolicy {
+    /// Run at the user-configured refresh cadence.
+    Baseline,
+    /// Do not schedule background refresh.
+    Suspend,
+}
+
+impl algebra::JoinSemilattice for RefreshPolicy {
+    /// Join chooses the more restrictive refresh policy.
+    ///
+    /// This is intentionally defined in algebraic form so that future
+    /// extensions can combine multiple refresh-pressure sources by join
+    /// rather than bespoke branching.
+    fn join(&self, other: &Self) -> Self {
+        std::cmp::max(*self, *other)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +277,43 @@ mod tests {
     fn refresh_interval_default_cadence() {
         let policy = TuiTimeoutPolicy::from_config(&default_config());
         assert_eq!(policy.refresh_interval, Duration::from_secs(2));
+    }
+
+    // TP-10: RefreshPolicy semilattice laws. Intentionally minimal
+    // because the carrier is intentionally minimal in Phase 3a.
+    // Extend when the carrier grows.
+
+    use algebra::JoinSemilattice;
+
+    #[test]
+    fn refresh_policy_join_baseline_suspend() {
+        assert_eq!(
+            RefreshPolicy::Baseline.join(&RefreshPolicy::Suspend),
+            RefreshPolicy::Suspend,
+        );
+    }
+
+    #[test]
+    fn refresh_policy_join_baseline_baseline() {
+        assert_eq!(
+            RefreshPolicy::Baseline.join(&RefreshPolicy::Baseline),
+            RefreshPolicy::Baseline,
+        );
+    }
+
+    #[test]
+    fn refresh_policy_join_suspend_baseline() {
+        assert_eq!(
+            RefreshPolicy::Suspend.join(&RefreshPolicy::Baseline),
+            RefreshPolicy::Suspend,
+        );
+    }
+
+    #[test]
+    fn refresh_policy_join_suspend_suspend() {
+        assert_eq!(
+            RefreshPolicy::Suspend.join(&RefreshPolicy::Suspend),
+            RefreshPolicy::Suspend,
+        );
     }
 }
