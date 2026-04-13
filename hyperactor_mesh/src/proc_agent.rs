@@ -61,6 +61,8 @@ use crate::Name;
 use crate::config_dump::ConfigDump;
 use crate::config_dump::ConfigDumpResult;
 use crate::pyspy::PySpyDump;
+use crate::pyspy::PySpyProfile;
+use crate::pyspy::PySpyProfileWorker;
 use crate::pyspy::PySpyWorker;
 use crate::resource;
 
@@ -380,6 +382,7 @@ struct SelfCheck {}
         resource::WaitRankStatus { cast = true },
         RepublishIntrospect { cast = true },
         PySpyDump,
+        PySpyProfile,
         ConfigDump,
     ]
 )]
@@ -926,6 +929,17 @@ impl Handler<PySpyDump> for ProcAgent {
         message: PySpyDump,
     ) -> Result<(), anyhow::Error> {
         PySpyWorker::spawn_and_forward(cx, message.opts, message.result)
+    }
+}
+
+#[async_trait]
+impl Handler<PySpyProfile> for ProcAgent {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        message: PySpyProfile,
+    ) -> Result<(), anyhow::Error> {
+        PySpyProfileWorker::spawn_and_forward(cx, message.request, message.result)
     }
 }
 
