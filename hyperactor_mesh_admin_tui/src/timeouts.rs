@@ -48,6 +48,7 @@ pub(crate) enum RequestOp {
 }
 
 /// All [`RequestOp`] variants, for iteration in law-based tests.
+#[cfg(test)]
 pub(crate) const ALL_REQUEST_OPS: &[RequestOp] = &[
     RequestOp::InteractiveFetch,
     RequestOp::ConfigDump,

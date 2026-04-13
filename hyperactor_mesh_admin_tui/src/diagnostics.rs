@@ -28,7 +28,6 @@
 //! If Phase 1 fails → admin infra bug.
 
 use std::collections::HashSet;
-use std::time::Duration;
 use std::time::Instant;
 
 use hyperactor::host::LOCAL_PROC_NAME;

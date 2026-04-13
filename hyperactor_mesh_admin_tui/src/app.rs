@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
-use std::time::Duration;
 
 use crossterm::event::Event;
 use crossterm::event::EventStream;
