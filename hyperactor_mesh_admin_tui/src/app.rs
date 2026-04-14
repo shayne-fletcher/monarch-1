@@ -1307,6 +1307,25 @@ async fn recv_active_job(job: &mut Option<ActiveJob>) -> ActiveJobEvent {
     }
 }
 
+/// TP-10: derive refresh policy from active job state.
+///
+/// Suspend refresh only while a foreground operation is in flight.
+/// Completed overlays (results displayed, waiting for Esc) do not
+/// suppress refresh — the user is reading results, not waiting for
+/// a network operation. The mapping is local to the app module so
+/// `timeouts::RefreshPolicy` stays independent of UI job types.
+pub(crate) fn refresh_policy_for_job(job: &Option<ActiveJob>) -> crate::timeouts::RefreshPolicy {
+    use crate::timeouts::RefreshPolicy;
+    match job {
+        None => RefreshPolicy::Baseline,
+        Some(ActiveJob::Diagnostics { running: true, .. }) => RefreshPolicy::Suspend,
+        Some(ActiveJob::PySpy { rx: Some(_), .. }) => RefreshPolicy::Suspend,
+        Some(ActiveJob::Config { rx: Some(_), .. }) => RefreshPolicy::Suspend,
+        // Completed overlays: operation finished, user is reading results.
+        Some(_) => RefreshPolicy::Baseline,
+    }
+}
+
 /// Drive the main event loop for the admin TUI.
 ///
 /// Periodically refreshes topology from the admin API, renders the UI
@@ -1334,7 +1353,21 @@ pub(crate) async fn run_app(
 
         tokio::select! {
             _ = refresh_interval.tick() => {
-                app.refresh().await;
+                // Phase 3a: the effective refresh policy is the
+                // join of all refresh-pressure sources. Currently
+                // there is one source (foreground job state); later
+                // sources extend by more joins, not by rewriting
+                // the branch. Refresh runs only when effective
+                // policy is Baseline. When the in-flight operation
+                // completes, refresh resumes on the next scheduled
+                // tick, not immediately.
+                use algebra::JoinSemilattice;
+                use crate::timeouts::RefreshPolicy;
+                let effective = RefreshPolicy::Baseline
+                    .join(&refresh_policy_for_job(&app.active_job));
+                if effective == RefreshPolicy::Baseline {
+                    app.refresh().await;
+                }
             }
             maybe_event = events.next() => {
                 match maybe_event {
