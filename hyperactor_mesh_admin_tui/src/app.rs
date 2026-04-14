@@ -222,6 +222,8 @@ impl App {
             self.refresh_gen,
             &mut self.seq_counter,
             force,
+            self.policy
+                .request_timeout(crate::timeouts::RequestOp::InteractiveFetch),
         )
         .await
     }
@@ -324,6 +326,8 @@ impl App {
                 &failed_keys,
                 self.refresh_gen,
                 &mut self.seq_counter,
+                self.policy
+                    .request_timeout(crate::timeouts::RequestOp::InteractiveFetch),
             )
             .await
             {
@@ -647,6 +651,9 @@ impl App {
         let scheme = self.theme.scheme; // ColorScheme: Copy
         let client = self.client.clone();
         let base_url = self.base_url.clone();
+        let timeout = self
+            .policy
+            .request_timeout(crate::timeouts::RequestOp::PySpyDump);
         let (tx, rx) = oneshot::channel();
         self.set_job(ActiveJob::PySpy {
             rx: Some(rx),
@@ -654,21 +661,37 @@ impl App {
             lines: vec![],
             completed_at: None,
         });
+        // TP-9: timeout covers the full request lifecycle (send +
+        // body + parse) at the operation boundary.
         tokio::spawn(async move {
             let url = format!("{}/v1/pyspy/{}", base_url, urlencoding::encode(&proc_ref));
-            let lines: Vec<Line<'static>> = match client.get(&url).send().await {
-                Err(e) => vec![Line::from(format!("request failed: {e}"))],
-                Ok(resp) if !resp.status().is_success() => {
+            let result = tokio::time::timeout(timeout, async {
+                let resp = client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("request failed: {e}"))?;
+                if !resp.status().is_success() {
                     let status = resp.status();
-                    match resp.json::<serde_json::Value>().await {
+                    let lines = match resp.json::<serde_json::Value>().await {
                         Ok(json) => parse_error_envelope(&json),
                         Err(_) => vec![Line::from(format!("HTTP {status}"))],
-                    }
+                    };
+                    return Ok::<_, String>(lines);
                 }
-                Ok(resp) => match resp.json::<serde_json::Value>().await {
-                    Err(e) => vec![Line::from(format!("parse error: {e}"))],
-                    Ok(json) => pyspy_json_to_lines(&json, &scheme),
-                },
+                match resp.json::<serde_json::Value>().await {
+                    Err(e) => Ok(vec![Line::from(format!("parse error: {e}"))]),
+                    Ok(json) => Ok(pyspy_json_to_lines(&json, &scheme)),
+                }
+            })
+            .await;
+            let lines: Vec<Line<'static>> = match result {
+                Err(_) => vec![Line::from(format!(
+                    "request timed out after {}s",
+                    timeout.as_secs()
+                ))],
+                Ok(Ok(l)) => l,
+                Ok(Err(e)) => vec![Line::from(e)],
             };
             let _ = tx.send(lines);
         });
@@ -684,6 +707,9 @@ impl App {
         let scheme = self.theme.scheme; // ColorScheme: Copy
         let client = self.client.clone();
         let base_url = self.base_url.clone();
+        let timeout = self
+            .policy
+            .request_timeout(crate::timeouts::RequestOp::ConfigDump);
         let (tx, rx) = oneshot::channel();
         self.set_job(ActiveJob::Config {
             rx: Some(rx),
@@ -691,21 +717,37 @@ impl App {
             lines: vec![],
             completed_at: None,
         });
+        // TP-9: timeout covers the full request lifecycle (send +
+        // body + parse) at the operation boundary.
         tokio::spawn(async move {
             let url = format!("{}/v1/config/{}", base_url, urlencoding::encode(&proc_ref));
-            let lines: Vec<Line<'static>> = match client.get(&url).send().await {
-                Err(e) => vec![Line::from(format!("request failed: {e}"))],
-                Ok(resp) if !resp.status().is_success() => {
+            let result = tokio::time::timeout(timeout, async {
+                let resp = client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("request failed: {e}"))?;
+                if !resp.status().is_success() {
                     let status = resp.status();
-                    match resp.json::<serde_json::Value>().await {
+                    let lines = match resp.json::<serde_json::Value>().await {
                         Ok(json) => parse_error_envelope(&json),
                         Err(_) => vec![Line::from(format!("HTTP {status}"))],
-                    }
+                    };
+                    return Ok::<_, String>(lines);
                 }
-                Ok(resp) => match resp.json::<serde_json::Value>().await {
-                    Err(e) => vec![Line::from(format!("parse error: {e}"))],
-                    Ok(json) => config_json_to_lines(&json, &scheme),
-                },
+                match resp.json::<serde_json::Value>().await {
+                    Err(e) => Ok(vec![Line::from(format!("parse error: {e}"))]),
+                    Ok(json) => Ok(config_json_to_lines(&json, &scheme)),
+                }
+            })
+            .await;
+            let lines: Vec<Line<'static>> = match result {
+                Err(_) => vec![Line::from(format!(
+                    "request timed out after {}s",
+                    timeout.as_secs()
+                ))],
+                Ok(Ok(l)) => l,
+                Ok(Err(e)) => vec![Line::from(e)],
             };
             let _ = tx.send(lines);
         });

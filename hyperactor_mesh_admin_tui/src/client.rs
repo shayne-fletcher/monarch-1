@@ -164,15 +164,12 @@ fn add_tls_from_bundle(
 ///
 /// Returns `(base_url, client)` where `base_url` always includes the
 /// scheme selected (`http://...` or `https://...`).
-pub(crate) fn build_client(
-    config: &TuiConfig,
-    policy: &crate::timeouts::TuiTimeoutPolicy,
-) -> (String, reqwest::Client) {
+pub(crate) fn build_client(config: &TuiConfig) -> (String, reqwest::Client) {
     let (explicit_scheme, host) = parse_addr(&config.addr);
 
-    // TP-7: client timeout sourced from policy, not directly from
-    // mesh-admin config attrs.
-    let mut builder = reqwest::Client::builder().timeout(policy.shared_client_timeout());
+    // TP-7: no client-level timeout. All timeout enforcement is
+    // per-operation via tokio::time::timeout at the call boundary.
+    let mut builder = reqwest::Client::builder();
     let mut use_tls = explicit_scheme == Some("https");
 
     // 1. Explicit CLI cert paths.
