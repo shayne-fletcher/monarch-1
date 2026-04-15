@@ -2427,7 +2427,7 @@ fn refresh_policy_pyspy_in_flight() {
     assert_eq!(refresh_policy_for_job(&job), RefreshPolicy::Suspend);
 }
 
-// TP-10: py-spy completed → Baseline (refresh resumes).
+// TP-10: py-spy completed → Suspend (topology stable while user reads overlay).
 #[test]
 fn refresh_policy_pyspy_completed() {
     let job = Some(ActiveJob::PySpy {
@@ -2436,7 +2436,7 @@ fn refresh_policy_pyspy_completed() {
         lines: vec![],
         completed_at: Some("14:30:00".to_string()),
     });
-    assert_eq!(refresh_policy_for_job(&job), RefreshPolicy::Baseline);
+    assert_eq!(refresh_policy_for_job(&job), RefreshPolicy::Suspend);
 }
 
 // TP-10: config in flight → Suspend.
@@ -2452,7 +2452,7 @@ fn refresh_policy_config_in_flight() {
     assert_eq!(refresh_policy_for_job(&job), RefreshPolicy::Suspend);
 }
 
-// TP-10: config completed → Baseline (refresh resumes).
+// TP-10: config completed → Suspend (topology stable while user reads overlay).
 #[test]
 fn refresh_policy_config_completed() {
     let job = Some(ActiveJob::Config {
@@ -2461,10 +2461,10 @@ fn refresh_policy_config_completed() {
         lines: vec![],
         completed_at: Some("14:30:00".to_string()),
     });
-    assert_eq!(refresh_policy_for_job(&job), RefreshPolicy::Baseline);
+    assert_eq!(refresh_policy_for_job(&job), RefreshPolicy::Suspend);
 }
 
-// TP-10: diagnostics completed → Baseline (refresh resumes).
+// TP-10: diagnostics completed → Suspend (topology stable while user reads overlay).
 #[test]
 fn refresh_policy_diagnostics_completed() {
     let job = Some(ActiveJob::Diagnostics {
@@ -2473,7 +2473,7 @@ fn refresh_policy_diagnostics_completed() {
         rx: None,
         completed_at: Some("14:30:00".to_string()),
     });
-    assert_eq!(refresh_policy_for_job(&job), RefreshPolicy::Baseline);
+    assert_eq!(refresh_policy_for_job(&job), RefreshPolicy::Suspend);
 }
 
 // TP-10: policy state transitions through set_job / dismiss_job.
