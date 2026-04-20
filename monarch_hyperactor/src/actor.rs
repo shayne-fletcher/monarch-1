@@ -556,7 +556,15 @@ pub struct PythonActor {
     /// governing `display_name`) and it is NOT a general attribution
     /// side channel; downstream code must not consume this field for
     /// any other purpose.
-    mesh_base_name: Option<String>,
+    pub(crate) mesh_base_name: Option<String>,
+    /// Python actor class token (qualified class name, e.g.
+    /// `"monarch_examples.dining.Philosopher"`) plumbed from
+    /// `PythonActorParams`. Used to populate
+    /// `ActorSupervisionEvent.attribution.actor_class` on the direct
+    /// actor-handle supervision path. This is the structured class
+    /// carrier consumed by telemetry and consumers that previously
+    /// had to regex the rendered display-name string.
+    pub(crate) actor_class: Option<String>,
 }
 
 impl PythonActor {
@@ -565,6 +573,7 @@ impl PythonActor {
         init_message: Option<PythonMessage>,
         spawn_point: Option<Point>,
         mesh_base_name: Option<String>,
+        actor_class: Option<String>,
     ) -> Result<Self, anyhow::Error> {
         let use_queue_dispatch = hyperactor_config::global::get(ACTOR_QUEUE_DISPATCH);
 
@@ -599,6 +608,7 @@ impl PythonActor {
                     spawn_point: OnceLock::from(spawn_point),
                     init_message,
                     mesh_base_name,
+                    actor_class,
                 })
             },
         )?)
@@ -663,6 +673,7 @@ impl PythonActor {
             Some(init_message),
             Some(extent!().point_of_rank(0).unwrap()),
             None, // root client actor has no user-facing mesh name
+            None, // root client actor has no attribution actor_class
         )
         .expect("create client PythonActor");
 
@@ -834,6 +845,40 @@ impl PythonActor {
     }
 }
 
+/// Build the structured `Attribution` carrier for supervision events
+/// synthesized on a `PythonActor`'s behalf, from the three fields
+/// locally in scope on that `PythonActor`. Extracted so the mapping
+/// can be unit-tested without constructing a full `PythonActor`
+/// (which requires Python runtime).
+///
+/// Production callers are:
+/// - `actor_error_to_event` on the root-client error loop, and
+/// - `PythonActor::supervision_attribution`, which hyperactor's
+///   `proc.rs` invokes at worker-actor failure synthesis sites via
+///   `Actor::supervision_attribution`.
+///
+/// Both pass the three fields read off `PythonActor` at the moment of
+/// synthesis and return an `Attribution` for the event.
+///
+/// `actor_display_name` on the returned `Attribution` mirrors the
+/// `display_name` argument to satisfy FA-2: when both are `Some`,
+/// they must be equal; the producer here guarantees that by copying.
+///
+/// Rank is `None` — per-instance rank is not in scope at either
+/// synthesis site.
+fn build_direct_handled_attribution(
+    mesh_base_name: Option<String>,
+    actor_class: Option<String>,
+    display_name: Option<String>,
+) -> hyperactor::supervision::Attribution {
+    hyperactor::supervision::Attribution {
+        mesh_name: mesh_base_name,
+        actor_class,
+        actor_display_name: display_name,
+        rank: None,
+    }
+}
+
 fn actor_error_to_event(
     instance: &Instance<PythonActor>,
     actor: &PythonActor,
@@ -843,11 +888,18 @@ fn actor_error_to_event(
         ActorErrorKind::UnhandledSupervisionEvent(event) => *event,
         _ => {
             let status = ActorStatus::generic_failure(err.kind.to_string());
+            let display_name = actor.display_name();
+            let attribution = build_direct_handled_attribution(
+                actor.mesh_base_name.clone(),
+                actor.actor_class.clone(),
+                display_name.clone(),
+            );
             ActorSupervisionEvent::new(
                 instance.self_id().clone(),
-                actor.display_name(),
+                display_name,
                 status,
                 None,
+                Some(attribution),
             )
         }
     }
@@ -1003,6 +1055,20 @@ impl Actor for PythonActor {
         })
     }
 
+    /// Substrate-local hook: supply structured supervision
+    /// attribution for events synthesized on this actor's behalf (see
+    /// `hyperactor/src/actor.rs`'s `Actor::supervision_attribution`).
+    /// Reuses the `build_direct_handled_attribution` helper so the
+    /// field mapping is identical to the monarch_hyperactor-side
+    /// `actor_error_to_event` path.
+    fn supervision_attribution(&self) -> Option<hyperactor::supervision::Attribution> {
+        Some(build_direct_handled_attribution(
+            self.mesh_base_name.clone(),
+            self.actor_class.clone(),
+            self.display_name(),
+        ))
+    }
+
     async fn handle_undeliverable_message(
         &mut self,
         ins: &Instance<Self>,
@@ -1098,26 +1164,42 @@ impl Actor for PythonActor {
     }
 }
 
+/// Spawn-time parameters for constructing a `PythonActor`.
+///
+/// This bundle carries the pickled actor type plus the narrow
+/// structured attribution inputs that are locally available at spawn
+/// time and needed later on the direct actor-handled supervision
+/// path. The fields here are intentionally kept distinct:
+/// `mesh_base_name` is mesh-name data and `actor_class` is structured
+/// class attribution.
 #[derive(Debug, Clone, Serialize, Deserialize, Named)]
 pub struct PythonActorParams {
-    // The pickled actor class to instantiate.
+    /// The pickled actor class to instantiate.
     actor_type: PickledPyObject,
-    // Python message to process as part of the actor initialization.
+    /// Python message to process as part of the actor initialization.
     init_message: Option<PythonMessage>,
-    // User-provided mesh base-name string under which this actor was
-    // spawned. This is mesh-name data — the base name the caller passed
-    // when the mesh was spawned — and is plumbed through `PythonActor`
-    // narrowly to populate `MeshFailure.actor_mesh_name` on the direct
-    // actor-handle supervision path without a lookup (mesh-specific
-    // FA-1 interpretation in `hyperactor_mesh/src/supervision.rs`).
-    // It is NOT actor display text (see FA-2 in
-    // `hyperactor/src/supervision.rs` for the rules governing
-    // `display_name`) and it is NOT a general attribution side
-    // channel; downstream code must not consume this field for any
-    // other purpose. Kept separate from `supervision_display_name`,
-    // which is a rendered supervision display string passed through
-    // `spawn_with_name(...)`.
+    /// User-provided mesh base-name string under which this actor was
+    /// spawned. This is mesh-name data — the base name the caller passed
+    /// when the mesh was spawned — and is plumbed through `PythonActor`
+    /// narrowly to populate `MeshFailure.actor_mesh_name` on the direct
+    /// actor-handle supervision path without a lookup (mesh-specific
+    /// FA-1 interpretation in `hyperactor_mesh/src/supervision.rs`).
+    /// It is NOT actor display text (see FA-2 in
+    /// `hyperactor/src/supervision.rs` for the rules governing
+    /// `display_name`) and it is NOT a general attribution side
+    /// channel; downstream code must not consume this field for any
+    /// other purpose. Kept separate from `supervision_display_name`,
+    /// which is a rendered supervision display string passed through
+    /// `spawn_with_name(...)`.
     mesh_base_name: Option<String>,
+    /// Python actor class token (qualified class name plumbed from
+    /// Python at spawn time). This is the structured class carrier
+    /// used to populate
+    /// `ActorSupervisionEvent.attribution.actor_class` on the direct
+    /// actor-handle supervision path. Distinct from `mesh_base_name`
+    /// (which describes the mesh) and from `supervision_display_name`
+    /// (which is rendered presentation).
+    actor_class: Option<String>,
 }
 
 impl PythonActorParams {
@@ -1125,11 +1207,13 @@ impl PythonActorParams {
         actor_type: PickledPyObject,
         init_message: Option<PythonMessage>,
         mesh_base_name: Option<String>,
+        actor_class: Option<String>,
     ) -> Self {
         Self {
             actor_type,
             init_message,
             mesh_base_name,
+            actor_class,
         }
     }
 }
@@ -1143,11 +1227,18 @@ impl RemoteSpawn for PythonActor {
             actor_type,
             init_message,
             mesh_base_name,
+            actor_class,
         }: PythonActorParams,
         environment: Flattrs,
     ) -> Result<Self, anyhow::Error> {
         let spawn_point = environment.get(CAST_POINT);
-        Self::new(actor_type, init_message, spawn_point, mesh_base_name)
+        Self::new(
+            actor_type,
+            init_message,
+            spawn_point,
+            mesh_base_name,
+            actor_class,
+        )
     }
 }
 
@@ -1437,6 +1528,7 @@ impl Handler<MeshFailure> for PythonActor {
                                     Box::new(message.event.clone()),
                                 )),
                                 None,
+                                None,
                             ),
                         ));
                         Err(anyhow::Error::new(err))
@@ -1486,6 +1578,7 @@ impl Handler<MeshFailure> for PythonActor {
                                 err.to_string(),
                                 Box::new(message.event.clone()),
                             )),
+                            None,
                             None,
                         ),
                     ));
@@ -1839,5 +1932,55 @@ mod tests {
             // 3) Starts with the expected prefix
             assert!(py_msg.starts_with(&expected_prefix));
         });
+    }
+
+    // Mapping proof for `build_direct_handled_attribution`: given
+    // the three inputs in scope on `PythonActor`, the builder
+    // produces an `Attribution` with the expected field mapping.
+    //
+    // Scope limit: this test exercises the extracted builder only.
+    // It does NOT prove that `actor_error_to_event` continues to
+    // call this builder; if a future refactor inlines or bypasses
+    // the builder, this test still passes. End-to-end coverage on
+    // the direct actor-handled path — including that the populated
+    // structured attributes survive through to the raised
+    // `SupervisionError` — lives in
+    // `fbcode//monarch/python/tests:test_actor_error` as
+    // `test_supervision_error_structured_attributes`.
+    #[test]
+    fn test_build_direct_handled_attribution_mapping() {
+        // Neutral tokens: the helper does not parse or validate these
+        // strings, so the test uses placeholders rather than
+        // production-shape values. The assertions are about the
+        // mapping from inputs to output fields, not about any string
+        // format.
+
+        // All three inputs present.
+        let a = super::build_direct_handled_attribution(
+            Some("MESH_NAME".to_string()),
+            Some("ACTOR_CLASS".to_string()),
+            Some("DISPLAY_NAME".to_string()),
+        );
+        assert_eq!(a.mesh_name.as_deref(), Some("MESH_NAME"));
+        assert_eq!(a.actor_class.as_deref(), Some("ACTOR_CLASS"));
+        assert_eq!(a.actor_display_name.as_deref(), Some("DISPLAY_NAME"));
+        // The helper always sets rank to None.
+        assert_eq!(a.rank, None);
+
+        // All inputs absent — the helper does not fabricate values.
+        let empty = super::build_direct_handled_attribution(None, None, None);
+        assert_eq!(empty.mesh_name, None);
+        assert_eq!(empty.actor_class, None);
+        assert_eq!(empty.actor_display_name, None);
+        assert_eq!(empty.rank, None);
+
+        // `display_name` is copied into `actor_display_name` verbatim
+        // — the helper never transforms it. Callers that pass the
+        // same value to both `ActorSupervisionEvent::new` and to this
+        // helper therefore satisfy the FA-2 no-divergence invariant
+        // by construction.
+        let mirrored =
+            super::build_direct_handled_attribution(None, None, Some("DISPLAY_NAME".to_string()));
+        assert_eq!(mirrored.actor_display_name.as_deref(), Some("DISPLAY_NAME"),);
     }
 }

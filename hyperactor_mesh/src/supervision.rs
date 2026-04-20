@@ -72,6 +72,7 @@ impl MeshFailure {
                 self.event.clone(),
             ))),
             None,
+            None,
         )));
         Err(anyhow::Error::new(err))
     }
@@ -142,6 +143,7 @@ mod tests {
             proc_id.actor_id(name, 0),
             display_name,
             ActorStatus::Failed(ActorErrorKind::Generic("boom".to_string())),
+            None,
             None,
         )
     }
@@ -219,6 +221,7 @@ mod tests {
                  error: broken link: message returned to global root client"
                     .to_string(),
             ),
+            None,
             None,
         )
     }
@@ -329,6 +332,7 @@ mod tests {
                     "IndexError: list index out of range".to_string(),
                 )),
                 None,
+                None,
             )
         };
         let before = MeshFailure {
@@ -389,6 +393,7 @@ mod tests {
                         .to_string(),
                 ),
                 None,
+                None,
             )
         };
         // Both before and after have actor_mesh_name populated, and
@@ -418,4 +423,16 @@ mod tests {
         // construction site at `actor_mesh.rs:773-787` has no
         // PythonActor context — follow-on work for this class.
     }
+
+    // Note: the helper-level mapping test for
+    // `build_direct_handled_attribution` lives in
+    // `monarch_hyperactor/src/actor.rs` as
+    // `tests::test_build_direct_handled_attribution_mapping`
+    // because the helper is defined there. End-to-end coverage on
+    // the direct actor-handled path — spawn a Python actor, trigger
+    // a supervision failure, and read the structured attributes
+    // off the raised `SupervisionError` — lives in
+    // `fbcode//monarch/python/tests:test_actor_error` as
+    // `test_supervision_error_structured_attributes`. This module
+    // tests `MeshFailure` rendering only.
 }
