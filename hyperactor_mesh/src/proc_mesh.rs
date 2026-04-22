@@ -1387,6 +1387,17 @@ impl view::RankedSliceable for ProcMeshRef {
 ///
 /// The supervision display name format is `{instance}.<{module}.{ClassName} {mesh_name}>`.
 /// Returns `"Python<ClassName>"` if the format matches, `None` otherwise.
+///
+/// Scope note: this function is used only by telemetry
+/// (`MeshEvent.class`), which needs the Python class as a
+/// structured string and has no structured carrier today. It is
+/// not on the supervision rendering path.
+///
+/// TODO: retained only because the telemetry path needs a
+/// structured Python-class string and this is the only available
+/// source. A follow-up should add a structured carrier (e.g. an
+/// `actor_class` field on `ActorSupervisionEvent`, or a dedicated
+/// telemetry-side field) and delete this function.
 fn python_class_from_supervision_name(sdn: &str) -> Option<String> {
     let inner = sdn.rsplit_once('<')?.1.strip_suffix('>')?;
     let qualified = inner.split_whitespace().next()?;
