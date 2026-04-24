@@ -223,6 +223,7 @@ impl GlobalClientActor {
                         Some("testclient".into()),
                         status,
                         None,
+                        None,
                     )
                 }
             };
@@ -273,11 +274,17 @@ impl Actor for GlobalClientActor {
         ));
         let actor_id = env.dest().actor_id().clone();
         let headers = env.headers().clone();
+        // Synthesis-site attachment: project attribution headers
+        // carried on the bounced envelope into the event's neutral
+        // structured-attribution carrier. No rendering or identity
+        // semantics.
+        let attribution = crate::supervision::attribution_from_headers(&headers);
         let event = ActorSupervisionEvent::new(
             actor_id.clone(),
             None,
             ActorStatus::generic_failure(format!("message not delivered: {}", env)),
             Some(headers),
+            attribution,
         );
 
         match get_global_supervision_sink() {

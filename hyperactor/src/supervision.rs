@@ -49,6 +49,22 @@ use crate::actor::ActorErrorKind;
 use crate::actor::ActorStatus;
 use crate::reference;
 
+/// Structured attribution carrier for supervision events. Neutral
+/// data — this type does not participate in rendering or identity
+/// decisions. Producers populate fields they have in scope;
+/// consumers read fields they care about.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Attribution {
+    /// Container/context name, when available.
+    pub mesh_name: Option<String>,
+    /// Actor class/type token, when available.
+    pub actor_class: Option<String>,
+    /// Actor display name, when available.
+    pub actor_display_name: Option<String>,
+    /// Per-rank rank, when available.
+    pub rank: Option<usize>,
+}
+
 /// This is the local actor supervision event. Child actor will propagate this event to its parent.
 #[derive(Clone, Debug, Derivative, Serialize, Deserialize, typeuri::Named)]
 #[derivative(PartialEq, Eq)]
@@ -65,6 +81,11 @@ pub struct ActorSupervisionEvent {
     /// If this event is associated with a message, the message headers.
     #[derivative(PartialEq = "ignore")]
     pub message_headers: Option<Flattrs>,
+    /// Structured attribution carrier. `None` at construction sites
+    /// that do not populate it. Consumers read fields they care
+    /// about; these fields do not carry rendering or identity
+    /// semantics.
+    pub attribution: Option<Attribution>,
 }
 wirevalue::register_type!(ActorSupervisionEvent);
 
@@ -75,6 +96,7 @@ impl ActorSupervisionEvent {
         display_name: Option<String>,
         actor_status: ActorStatus,
         message_headers: Option<Flattrs>,
+        attribution: Option<Attribution>,
     ) -> Self {
         Self {
             actor_id,
@@ -82,6 +104,7 @@ impl ActorSupervisionEvent {
             occurred_at: std::time::SystemTime::now(),
             actor_status,
             message_headers,
+            attribution,
         }
     }
 
@@ -243,6 +266,7 @@ mod tests {
             Some(name.to_string()),
             status,
             None,
+            None,
         )
     }
 
@@ -252,7 +276,7 @@ mod tests {
         status: ActorStatus,
     ) -> ActorSupervisionEvent {
         let proc_id = reference::ProcId::with_name(addr, "test_proc");
-        ActorSupervisionEvent::new(proc_id.actor_id(name, 0), None, status, None)
+        ActorSupervisionEvent::new(proc_id.actor_id(name, 0), None, status, None, None)
     }
 
     fn generic(name: &str, msg: &str) -> ActorSupervisionEvent {
@@ -574,6 +598,7 @@ mod tests {
             Some("proc_agent".into()),
             ActorStatus::Stopped("host died".into()),
             None,
+            None,
         );
         let parent_event = ActorSupervisionEvent::new(
             parent_id,
@@ -581,6 +606,7 @@ mod tests {
             ActorStatus::Failed(ActorErrorKind::UnhandledSupervisionEvent(Box::new(
                 child_event,
             ))),
+            None,
             None,
         );
 
