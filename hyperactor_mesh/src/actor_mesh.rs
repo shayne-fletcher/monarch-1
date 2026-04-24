@@ -214,7 +214,6 @@ impl<A: Referable> ActorMesh<A> {
                     None,
                     ActorStatus::Stopped("mesh stopped".to_string()),
                     None,
-                    None,
                 ),
                 crashed_ranks: vec![],
             }));
@@ -838,9 +837,8 @@ impl<A: Referable> ActorMeshRef<A> {
                     // the controller is unreachable.
                     //
                     // Synthesis-site attachment: project the mesh's
-                    // transport attribution onto the synthesized event
-                    // as neutral structured metadata. No rendering or
-                    // identity participation.
+                    // transport attribution onto the synthesized event's
+                    // structured-attribution carrier.
                     let attribution = crate::supervision::attribution_from_attrs(&self.attribution);
                     Ok(MeshFailure {
                         actor_mesh_name: Some(self.name().to_string()),
@@ -852,7 +850,6 @@ impl<A: Referable> ActorMeshRef<A> {
                                 controller.actor_id(),
                                 self.name()
                             )),
-                            None,
                             attribution,
                         ),
                         crashed_ranks: vec![],

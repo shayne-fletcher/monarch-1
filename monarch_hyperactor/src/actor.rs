@@ -844,7 +844,6 @@ fn actor_error_to_event(
                 instance.self_id().clone(),
                 actor.display_name(),
                 status,
-                None,
                 actor.supervision_attribution(),
             )
         }
@@ -1466,7 +1465,6 @@ impl Handler<MeshFailure> for PythonActor {
                                 Box::new(message.event.clone()),
                             )),
                             None,
-                            None,
                         ),
                     ));
                     Err(anyhow::Error::new(err))
@@ -1513,7 +1511,6 @@ impl Handler<MeshFailure> for PythonActor {
                             err.to_string(),
                             Box::new(message.event.clone()),
                         )),
-                        None,
                         None,
                     ),
                 ));

@@ -267,7 +267,6 @@ impl MeshFailure {
                 self.event.clone(),
             ))),
             None,
-            None,
         )));
         Err(anyhow::Error::new(err))
     }
@@ -330,7 +329,6 @@ mod tests {
             proc_id.actor_id(name, 0),
             display_name,
             ActorStatus::Failed(ActorErrorKind::Generic("boom".to_string())),
-            None,
             None,
         )
     }
@@ -395,9 +393,10 @@ mod tests {
     }
 
     // Shared fixture for the proofs: the exact synthesized event shape
-    // that `GlobalClientActor::handle_undeliverable_message` produces
-    // (`hyperactor_mesh/src/global_context.rs:278`): display_name =
-    // None, actor_status = generic_failure("message not delivered: ...").
+    // that `GlobalClientActor::handle_undeliverable_message`
+    // produces in `hyperactor_mesh/src/global_context.rs`:
+    // display_name = None, actor_status =
+    // generic_failure("message not delivered: ...").
     fn undeliverable_synthesized_event() -> ActorSupervisionEvent {
         let proc_id = reference::ProcId::with_name(ChannelAddr::Local(0), "worker_proc");
         ActorSupervisionEvent::new(
@@ -408,7 +407,6 @@ mod tests {
                  error: broken link: message returned to global root client"
                     .to_string(),
             ),
-            None,
             None,
         )
     }
@@ -486,7 +484,6 @@ mod tests {
                     "IndexError: list index out of range".to_string(),
                 )),
                 None,
-                None,
             )
         };
         let without_mesh_name = MeshFailure {
@@ -532,7 +529,6 @@ mod tests {
                     "timed out reaching controller ... Assuming controller's proc is dead"
                         .to_string(),
                 ),
-                None,
                 None,
             )
         };
