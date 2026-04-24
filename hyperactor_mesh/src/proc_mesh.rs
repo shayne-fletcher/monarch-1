@@ -912,20 +912,12 @@ impl ProcMeshRef {
             hyperactor_telemetry::notify_mesh_created(hyperactor_telemetry::MeshEvent {
                 id: mesh_id_hash,
                 timestamp: std::time::SystemTime::now(),
-                // Derive the Python class token by parsing
-                // `supervision_display_name`, falling back to the
-                // Rust `actor_type` name when there is no
-                // supervision display name or it does not contain
-                // a Python-class segment. A structured `actor_class`
-                // carrier exists on `spawn_with_name` but the Python
-                // binding path does not yet populate it; once it
-                // does, this parse-based fallback can be replaced
-                // with a direct read of `actor_class` and
-                // `python_class_from_supervision_name` deleted.
-                class: supervision_display_name
-                    .as_deref()
-                    .and_then(python_class_from_supervision_name)
-                    .unwrap_or_else(|| actor_type.clone()),
+                // Read the structured `actor_class` token populated
+                // at spawn time (fully-qualified `module.qualname`
+                // for Python actors; `None` for non-Python callers).
+                // Fall back to the Rust `actor_type` name when no
+                // structured class was supplied.
+                class: actor_class.clone().unwrap_or_else(|| actor_type.clone()),
                 given_name: mesh.name().name().to_string(),
                 full_name: name_str,
                 shape_json: serde_json::to_string(&self.region().extent()).unwrap_or_default(),
@@ -1111,28 +1103,6 @@ impl view::RankedSliceable for ProcMeshRef {
         )
         .unwrap()
     }
-}
-
-/// Extract a Python class display name from a supervision display name.
-///
-/// The supervision display name format is `{instance}.<{module}.{ClassName} {mesh_name}>`.
-/// Returns `"Python<ClassName>"` if the format matches, `None` otherwise.
-///
-/// Scope note: this function is used only by telemetry
-/// (`MeshEvent.class`), which needs the Python class as a
-/// structured string and has no structured carrier today. It is
-/// not on the supervision rendering path.
-///
-/// TODO: retained only because the telemetry path needs a
-/// structured Python-class string and this is the only available
-/// source. A follow-up should add a structured carrier (e.g. an
-/// `actor_class` field on `ActorSupervisionEvent`, or a dedicated
-/// telemetry-side field) and delete this function.
-fn python_class_from_supervision_name(sdn: &str) -> Option<String> {
-    let inner = sdn.rsplit_once('<')?.1.strip_suffix('>')?;
-    let qualified = inner.split_whitespace().next()?;
-    let class_name = qualified.rsplit_once('.')?.1;
-    Some(format!("Python<{class_name}>"))
 }
 
 #[cfg(test)]
