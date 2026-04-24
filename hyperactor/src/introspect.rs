@@ -1200,7 +1200,6 @@ mod tests {
             Some("proc_agent".into()),
             ActorStatus::Stopped("host died".into()),
             None,
-            None,
         );
         let parent_event = ActorSupervisionEvent::new(
             parent_id.clone(),
@@ -1208,7 +1207,6 @@ mod tests {
             ActorStatus::Failed(ActorErrorKind::UnhandledSupervisionEvent(Box::new(
                 child_event,
             ))),
-            None,
             None,
         );
 

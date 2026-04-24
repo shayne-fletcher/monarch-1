@@ -40,7 +40,6 @@ use std::fmt::Write;
 use std::time::SystemTime;
 
 use derivative::Derivative;
-use hyperactor_config::Flattrs;
 use indenter::indented;
 use serde::Deserialize;
 use serde::Serialize;
@@ -78,9 +77,6 @@ pub struct ActorSupervisionEvent {
     pub occurred_at: SystemTime,
     /// Status of the child actor.
     pub actor_status: ActorStatus,
-    /// If this event is associated with a message, the message headers.
-    #[derivative(PartialEq = "ignore")]
-    pub message_headers: Option<Flattrs>,
     /// Structured attribution carrier. `None` at construction sites
     /// that do not populate it. Consumers read fields they care
     /// about; these fields do not carry rendering or identity
@@ -95,7 +91,6 @@ impl ActorSupervisionEvent {
         actor_id: reference::ActorId,
         display_name: Option<String>,
         actor_status: ActorStatus,
-        message_headers: Option<Flattrs>,
         attribution: Option<Attribution>,
     ) -> Self {
         Self {
@@ -103,7 +98,6 @@ impl ActorSupervisionEvent {
             display_name,
             occurred_at: std::time::SystemTime::now(),
             actor_status,
-            message_headers,
             attribution,
         }
     }
@@ -266,7 +260,6 @@ mod tests {
             Some(name.to_string()),
             status,
             None,
-            None,
         )
     }
 
@@ -276,7 +269,7 @@ mod tests {
         status: ActorStatus,
     ) -> ActorSupervisionEvent {
         let proc_id = reference::ProcId::with_name(addr, "test_proc");
-        ActorSupervisionEvent::new(proc_id.actor_id(name, 0), None, status, None, None)
+        ActorSupervisionEvent::new(proc_id.actor_id(name, 0), None, status, None)
     }
 
     fn generic(name: &str, msg: &str) -> ActorSupervisionEvent {
@@ -598,7 +591,6 @@ mod tests {
             Some("proc_agent".into()),
             ActorStatus::Stopped("host died".into()),
             None,
-            None,
         );
         let parent_event = ActorSupervisionEvent::new(
             parent_id,
@@ -606,7 +598,6 @@ mod tests {
             ActorStatus::Failed(ActorErrorKind::UnhandledSupervisionEvent(Box::new(
                 child_event,
             ))),
-            None,
             None,
         );
 
@@ -620,5 +611,51 @@ mod tests {
             "root cause should be the stopped child, got: {:?}",
             root.actor_status,
         );
+    }
+
+    // Bincode round-trip after the `message_headers` field removal —
+    // guards against accidental wire-shape breakage on the remaining
+    // fields (`actor_id`, `display_name`, `actor_status`,
+    // `attribution`). `occurred_at` is excluded from `PartialEq` so
+    // equality compares the other fields only.
+    #[test]
+    fn test_bincode_round_trip_with_attribution() {
+        let proc_id = reference::ProcId::with_name(ChannelAddr::Local(0), "test_proc");
+        let event = ActorSupervisionEvent::new(
+            proc_id.actor_id("worker", 7),
+            Some("instance7.<Philosopher training>".to_string()),
+            ActorStatus::Failed(ActorErrorKind::Generic("boom".to_string())),
+            Some(Attribution {
+                mesh_name: Some("training".to_string()),
+                actor_class: Some("monarch_examples.dining.Philosopher".to_string()),
+                actor_display_name: Some("instance7.<Philosopher training>".to_string()),
+                rank: Some(7),
+            }),
+        );
+        let bytes =
+            bincode::serde::encode_to_vec(&event, bincode::config::legacy()).expect("serialize");
+        let decoded: ActorSupervisionEvent =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::legacy())
+                .map(|(v, _)| v)
+                .expect("deserialize");
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn test_bincode_round_trip_no_attribution() {
+        let proc_id = reference::ProcId::with_name(ChannelAddr::Local(0), "test_proc");
+        let event = ActorSupervisionEvent::new(
+            proc_id.actor_id("worker", 0),
+            None,
+            ActorStatus::Stopped("stopped".to_string()),
+            None,
+        );
+        let bytes =
+            bincode::serde::encode_to_vec(&event, bincode::config::legacy()).expect("serialize");
+        let decoded: ActorSupervisionEvent =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::legacy())
+                .map(|(v, _)| v)
+                .expect("deserialize");
+        assert_eq!(decoded, event);
     }
 }

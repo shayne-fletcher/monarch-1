@@ -1859,7 +1859,6 @@ impl<A: Actor> Instance<A> {
                     self.inner.cell.actor_id().clone(),
                     actor.display_name(),
                     status.clone(),
-                    None,
                     actor.supervision_attribution(),
                 );
                 (status, Some(event))
@@ -1878,7 +1877,6 @@ impl<A: Actor> Instance<A> {
                         self.inner.cell.actor_id().clone(),
                         actor.display_name(),
                         status.clone(),
-                        None,
                         actor.supervision_attribution(),
                     );
                     (status, Some(event))

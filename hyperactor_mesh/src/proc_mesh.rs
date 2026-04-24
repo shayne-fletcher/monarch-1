@@ -567,7 +567,6 @@ impl ProcMeshRef {
                                         name,
                                     )),
                                     None,
-                                    None,
                                 )],
                             }),
                         },
