@@ -203,6 +203,16 @@ declare_attrs! {
     ))
     pub attr MESH_ADMIN_CONFIG_DUMP_BRIDGE_TIMEOUT: Duration = Duration::from_secs(5);
 
+    /// Timeout for host-local diagnostic tool inventory/provisioning
+    /// bridge requests. This is intentionally independent from
+    /// config-dump because provisioning may perform provider I/O,
+    /// artifact verification, archive extraction, and cache locking.
+    @meta(CONFIG = ConfigAttr::new(
+        Some("HYPERACTOR_MESH_ADMIN_TOOL_PROVISION_BRIDGE_TIMEOUT".to_string()),
+        Some("mesh_admin_tool_provision_bridge_timeout".to_string()),
+    ))
+    pub attr MESH_ADMIN_TOOL_PROVISION_BRIDGE_TIMEOUT: Duration = Duration::from_secs(60);
+
     /// Timeout for py-spy dump requests. See PS-5 in `introspect`
     /// module doc. With `--native --native-all`, py-spy unwinds native
     /// stacks via libunwind which is significantly slower than
