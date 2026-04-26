@@ -16,6 +16,8 @@
 //! - **TF-FETCH-4 (atomic-blob-placement):** Downloaded bytes are first
 //!   written to a temp file in the destination directory, then persisted
 //!   to the final blob path.
+//! - **TF-FETCH-5 (download-observability):** HTTP provider attempts
+//!   emit structured start/complete events, but never per-chunk events.
 
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
@@ -67,6 +69,19 @@ async fn fetch_http(
     url: &str,
     destination: &Path,
 ) -> Result<(), ProvisionError> {
+    tracing::info!(
+        name = "ToolFetchStatus",
+        status = "Download::Start",
+        message = %format!(
+            "download start: {} -> {}",
+            url,
+            destination.display(),
+        ),
+        url = %url,
+        expected_size = entry.size,
+        artifact_digest = %entry.digest,
+        destination = %destination.display(),
+    );
     let response = reqwest::get(url)
         .await
         .map_err(|e| ProvisionError::DownloadFailed {
@@ -124,5 +139,19 @@ async fn fetch_http(
 
     temp.persist(destination)
         .map_err(|e| ProvisionError::IoError(e.error))?;
+    tracing::info!(
+        name = "ToolFetchStatus",
+        status = "Download::Complete",
+        message = %format!(
+            "download complete: {} bytes={} -> {}",
+            url,
+            size,
+            destination.display(),
+        ),
+        url = %url,
+        actual_size = size,
+        artifact_digest = %entry.digest,
+        destination = %destination.display(),
+    );
     Ok(())
 }

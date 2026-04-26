@@ -30,6 +30,10 @@
 //!   and continues rather than failing.
 //! - **TP-6 (tool-fetch-boundary):** Fetch, verification, extraction,
 //!   and executable resolution are delegated to `tool_fetch`.
+//! - **TP-7 (flight-recorder-observability):** Every operator-visible
+//!   tool state transition emits a structured tracing event from inside
+//!   the actor handler, so the actor-local flight recorder explains
+//!   provisioning and resolution history in mesh-admin.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -114,7 +118,15 @@ pub struct QueryToolInventory {
 wirevalue::register_type!(QueryToolInventory);
 
 /// Result of a `ProvisionTool` request.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    Named,
+    schemars::JsonSchema
+)]
 pub enum ProvisionResult {
     /// The tool is available at the returned executable path.
     Available {
@@ -140,7 +152,15 @@ pub enum ProvisionResult {
 wirevalue::register_type!(ProvisionResult);
 
 /// Result of a `ResolveTool` request.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    Named,
+    schemars::JsonSchema
+)]
 pub enum ResolveResult {
     /// Tool resolved successfully.
     Available {
@@ -171,7 +191,15 @@ pub enum ResolveResult {
 wirevalue::register_type!(ResolveResult);
 
 /// Inventory snapshot for a host.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    Named,
+    schemars::JsonSchema
+)]
 pub struct ToolInventory {
     /// Tool states known to this host.
     pub tools: Vec<ToolInventoryEntry>,
@@ -223,7 +251,9 @@ struct DesiredTool {
 
 #[derive(Debug, Clone)]
 enum ObservedToolState {
-    Fetching { _started_at: SystemTime },
+    Fetching {
+        _started_at: SystemTime,
+    },
     Available {
         executable: PathBuf,
         artifact_digest: String,
@@ -283,7 +313,10 @@ impl ToolProvisionActor {
     fn resolve(&self, tool: &str, requested_version: Option<&str>) -> ResolveResult {
         let version = match requested_version {
             Some(version) => Some(version.to_string()),
-            None => self.desired.get(tool).map(|desired| desired.version.clone()),
+            None => self
+                .desired
+                .get(tool)
+                .map(|desired| desired.version.clone()),
         };
 
         if let Some(version) = version {
@@ -359,8 +392,19 @@ impl Actor for ToolProvisionActor {
         this.bind::<Self>();
         this.set_system();
 
+        let mut scanned = 0usize;
         for artifact in self.cache.scan() {
+            scanned += 1;
             let key = tool_key(&artifact.name, &artifact.version);
+            tracing::info!(
+                name = "ToolProvisionStatus",
+                status = "CacheScan::Discovered",
+                tool = %artifact.name,
+                version = %artifact.version,
+                executable = %artifact.executable.display(),
+                artifact_digest = %artifact.digest,
+                provisioned_at = %artifact.provisioned_at,
+            );
             self.observed.insert(
                 key,
                 ObservedToolState::CachedButNotRegistered {
@@ -370,6 +414,11 @@ impl Actor for ToolProvisionActor {
                 },
             );
         }
+        tracing::info!(
+            name = "ToolProvisionStatus",
+            status = "CacheScan::Complete",
+            scanned,
+        );
         self.publish_attrs(this);
         Ok(())
     }
@@ -384,6 +433,12 @@ impl Handler<ProvisionTool> for ToolProvisionActor {
     ) -> Result<(), anyhow::Error> {
         let spec = message.spec;
         let key = tool_key(&spec.name, &spec.version);
+        tracing::info!(
+            name = "ToolProvisionStatus",
+            status = "Provision::Requested",
+            tool = %spec.name,
+            version = %spec.version,
+        );
         self.desired.insert(
             spec.name.clone(),
             DesiredTool {
@@ -407,14 +462,39 @@ impl Handler<ProvisionTool> for ToolProvisionActor {
                     .get(&platform)
                     .map(|entry| entry.digest.clone())
                     .unwrap_or_default();
+                tracing::info!(
+                    name = "ToolProvisionStatus",
+                    status = "Provision::FetchStart",
+                    tool = %spec.name,
+                    version = %spec.version,
+                    platform = ?platform,
+                    artifact_digest = %digest,
+                );
                 (digest, self.cache.provision(&spec, platform).await)
             }
-            Err(err) => (String::new(), Err(err)),
+            Err(err) => {
+                tracing::warn!(
+                    name = "ToolProvisionStatus",
+                    status = "Provision::PlatformUnsupported",
+                    tool = %spec.name,
+                    version = %spec.version,
+                    error = %err,
+                );
+                (String::new(), Err(err))
+            }
         };
 
         let reply = match result.1 {
             Ok(executable) => {
                 let digest = result.0;
+                tracing::info!(
+                    name = "ToolProvisionStatus",
+                    status = "Provision::Available",
+                    tool = %spec.name,
+                    version = %spec.version,
+                    executable = %executable.display(),
+                    artifact_digest = %digest,
+                );
                 self.observed.insert(
                     key,
                     ObservedToolState::Available {
@@ -432,6 +512,13 @@ impl Handler<ProvisionTool> for ToolProvisionActor {
             }
             Err(err) => {
                 let error = error_string(&err);
+                tracing::warn!(
+                    name = "ToolProvisionStatus",
+                    status = "Provision::Failed",
+                    tool = %spec.name,
+                    version = %spec.version,
+                    error = %error,
+                );
                 self.observed.insert(
                     key,
                     ObservedToolState::Failed {
@@ -448,7 +535,12 @@ impl Handler<ProvisionTool> for ToolProvisionActor {
         };
         self.publish_attrs(cx.instance());
         if let Err(e) = message.reply.send(cx, reply) {
-            tracing::debug!("ProvisionTool reply failed (caller gone?): {e}");
+            tracing::debug!(
+                name = "ToolProvisionStatus",
+                status = "Provision::ReplyDropped",
+                error = %e,
+                "ProvisionTool reply failed (caller gone?)",
+            );
         }
         Ok(())
     }
@@ -462,9 +554,17 @@ impl Handler<ResolveTool> for ToolProvisionActor {
         message: ResolveTool,
     ) -> Result<(), anyhow::Error> {
         let reply = self.resolve(&message.tool, message.version.as_deref());
+        log_resolve_result(&reply);
 
         if let Err(e) = message.reply.send(cx, reply) {
-            tracing::debug!("ResolveTool reply failed (caller gone?): {e}");
+            tracing::debug!(
+                name = "ToolProvisionStatus",
+                status = "Resolve::ReplyDropped",
+                tool = %message.tool,
+                requested_version = ?message.version,
+                error = %e,
+                "ResolveTool reply failed (caller gone?)",
+            );
         }
         Ok(())
     }
@@ -477,8 +577,19 @@ impl Handler<QueryToolInventory> for ToolProvisionActor {
         cx: &Context<Self>,
         message: QueryToolInventory,
     ) -> Result<(), anyhow::Error> {
-        if let Err(e) = message.reply.send(cx, self.inventory()) {
-            tracing::debug!("QueryToolInventory reply failed (caller gone?): {e}");
+        let inventory = self.inventory();
+        tracing::info!(
+            name = "ToolProvisionStatus",
+            status = "Inventory::Queried",
+            tool_count = inventory.tools.len(),
+        );
+        if let Err(e) = message.reply.send(cx, inventory) {
+            tracing::debug!(
+                name = "ToolProvisionStatus",
+                status = "Inventory::ReplyDropped",
+                error = %e,
+                "QueryToolInventory reply failed (caller gone?)",
+            );
         }
         Ok(())
     }
@@ -528,6 +639,45 @@ fn timestamp_now() -> String {
 
 fn error_string(err: &ProvisionError) -> String {
     err.to_string()
+}
+
+fn log_resolve_result(result: &ResolveResult) {
+    match result {
+        ResolveResult::Available {
+            name,
+            version,
+            executable,
+        } => {
+            tracing::info!(
+                name = "ToolProvisionStatus",
+                status = "Resolve::Available",
+                tool = %name,
+                version = %version,
+                executable = %executable.display(),
+            );
+        }
+        ResolveResult::NotProvisioned { tool, version } => {
+            tracing::info!(
+                name = "ToolProvisionStatus",
+                status = "Resolve::NotProvisioned",
+                tool = %tool,
+                requested_version = ?version,
+            );
+        }
+        ResolveResult::Failed {
+            name,
+            version,
+            error,
+        } => {
+            tracing::warn!(
+                name = "ToolProvisionStatus",
+                status = "Resolve::Failed",
+                tool = %name,
+                version = %version,
+                error = %error,
+            );
+        }
+    }
 }
 
 #[cfg(test)]

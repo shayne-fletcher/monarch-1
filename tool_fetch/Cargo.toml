@@ -17,6 +17,7 @@ tar = "0.4.44"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "time"] }
+tracing = "0.1.41"
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

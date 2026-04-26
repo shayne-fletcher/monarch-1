@@ -33,6 +33,10 @@
 //! - **TF-SPEC-1 (spec-selects-platform):** [`ToolCache::provision`]
 //!   accepts a full spec plus platform and performs entry selection
 //!   internally.
+//! - **TF-CACHE-7 (operator-observability):** Cache decisions emit
+//!   structured tracing events so callers running inside actor
+//!   recording spans can explain whether provisioning downloaded,
+//!   reused a blob, reused an install, or extracted from cache.
 
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
@@ -197,15 +201,52 @@ impl ToolCache {
         entry: &PlatformEntry,
     ) -> Result<PathBuf, ProvisionError> {
         if let Some(path) = self.lookup(entry) {
+            tracing::info!(
+                name = "ToolFetchStatus",
+                status = "InstallCache::Hit",
+                tool = %spec.name,
+                version = %spec.version,
+                platform = ?platform,
+                artifact_digest = %entry.digest,
+                executable = %path.display(),
+            );
             return Ok(path);
         }
 
         let blob = self.blob_path(&entry.digest);
         if blob.is_file() && !verify_blob(&blob, entry)? {
+            tracing::warn!(
+                name = "ToolFetchStatus",
+                status = "BlobCache::Invalid",
+                tool = %spec.name,
+                version = %spec.version,
+                platform = ?platform,
+                artifact_digest = %entry.digest,
+                blob = %blob.display(),
+            );
             fs::remove_file(&blob)?;
         }
         if !blob.is_file() {
+            tracing::info!(
+                name = "ToolFetchStatus",
+                status = "BlobCache::Miss",
+                tool = %spec.name,
+                version = %spec.version,
+                platform = ?platform,
+                artifact_digest = %entry.digest,
+                blob = %blob.display(),
+            );
             fetch::fetch_verified_blob(entry, &blob).await?;
+        } else {
+            tracing::info!(
+                name = "ToolFetchStatus",
+                status = "BlobCache::Hit",
+                tool = %spec.name,
+                version = %spec.version,
+                platform = ?platform,
+                artifact_digest = %entry.digest,
+                blob = %blob.display(),
+            );
         }
 
         let extracted_dir = self.extracted_path(&entry.digest);
@@ -213,6 +254,16 @@ impl ToolCache {
             .prefix("extract-")
             .tempdir_in(self.extracted_parent(&entry.digest))?;
 
+        tracing::info!(
+            name = "ToolFetchStatus",
+            status = "Extract::Start",
+            tool = %spec.name,
+            version = %spec.version,
+            platform = ?platform,
+            artifact_format = ?entry.format,
+            artifact_digest = %entry.digest,
+            destination = %extracted_dir.display(),
+        );
         let executable = match entry.format {
             ArtifactFormat::Plain => extract::install_plain(&blob, temp_dir.path(), &spec.name)?,
             ArtifactFormat::TarGz => {
@@ -254,6 +305,15 @@ impl ToolCache {
             .ok_or_else(|| ProvisionError::ExecutableMissing {
                 expected_path: extracted_dir.join(executable_path),
             })?;
+        tracing::info!(
+            name = "ToolFetchStatus",
+            status = "Extract::Complete",
+            tool = %spec.name,
+            version = %spec.version,
+            platform = ?platform,
+            artifact_digest = %entry.digest,
+            executable = %executable.display(),
+        );
         Ok(executable)
     }
 
