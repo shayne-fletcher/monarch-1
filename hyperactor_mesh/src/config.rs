@@ -213,6 +213,14 @@ declare_attrs! {
     ))
     pub attr MESH_ADMIN_TOOL_PROVISION_BRIDGE_TIMEOUT: Duration = Duration::from_secs(60);
 
+    /// Timeout for resolving an already-provisioned diagnostic tool
+    /// before running an operator workflow such as py-spy.
+    @meta(CONFIG = ConfigAttr::new(
+        Some("HYPERACTOR_MESH_ADMIN_TOOL_RESOLVE_TIMEOUT".to_string()),
+        Some("mesh_admin_tool_resolve_timeout".to_string()),
+    ))
+    pub attr MESH_ADMIN_TOOL_RESOLVE_TIMEOUT: Duration = Duration::from_secs(1);
+
     /// Timeout for py-spy dump requests. See PS-5 in `introspect`
     /// module doc. With `--native --native-all`, py-spy unwinds native
     /// stacks via libunwind which is significantly slower than

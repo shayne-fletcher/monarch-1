@@ -58,6 +58,7 @@ use crate::pyspy::PySpyDump;
 use crate::pyspy::PySpyProfile;
 use crate::pyspy::PySpyProfileWorker;
 use crate::pyspy::PySpyWorker;
+use crate::pyspy::managed_pyspy_candidate;
 use crate::resource;
 use crate::resource::ProcSpec;
 use crate::tool_provision::ProvisionResult;
@@ -361,6 +362,44 @@ impl HostAgent {
         match &mut self.state {
             HostAgentState::Detached(h) | HostAgentState::Attached(h) => Some(h),
             _ => None,
+        }
+    }
+
+    async fn managed_pyspy_candidates(&self, cx: &Context<'_, Self>) -> Vec<(String, String)> {
+        let Some(tool_provision) = &self.tool_provision else {
+            return Vec::new();
+        };
+
+        let (reply_handle, reply_rx) = hyperactor::mailbox::open_once_port::<ResolveResult>(cx);
+        let mut reply = reply_handle.bind();
+        reply.return_undeliverable(false);
+        if let Err(err) = tool_provision.send(
+            cx,
+            ResolveTool {
+                tool: "py-spy".to_string(),
+                version: None,
+                reply,
+            },
+        ) {
+            tracing::debug!("HostAgent: managed py-spy resolve send failed: {err}");
+            return Vec::new();
+        }
+
+        match tokio::time::timeout(
+            hyperactor_config::global::get(crate::config::MESH_ADMIN_TOOL_RESOLVE_TIMEOUT),
+            reply_rx.recv(),
+        )
+        .await
+        {
+            Ok(Ok(result)) => managed_pyspy_candidate(result).into_iter().collect(),
+            Ok(Err(err)) => {
+                tracing::debug!("HostAgent: managed py-spy resolve receive failed: {err}");
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::debug!("HostAgent: managed py-spy resolve timed out");
+                Vec::new()
+            }
         }
     }
 
@@ -1351,7 +1390,8 @@ impl Handler<PySpyDump> for HostAgent {
         cx: &Context<Self>,
         message: PySpyDump,
     ) -> Result<(), anyhow::Error> {
-        PySpyWorker::spawn_and_forward(cx, message.opts, message.result)
+        let managed_candidates = self.managed_pyspy_candidates(cx).await;
+        PySpyWorker::spawn_and_forward(cx, message.opts, managed_candidates, message.result)
     }
 }
 
@@ -1362,7 +1402,13 @@ impl Handler<PySpyProfile> for HostAgent {
         cx: &Context<Self>,
         message: PySpyProfile,
     ) -> Result<(), anyhow::Error> {
-        PySpyProfileWorker::spawn_and_forward(cx, message.request, message.result)
+        let managed_candidates = self.managed_pyspy_candidates(cx).await;
+        PySpyProfileWorker::spawn_and_forward(
+            cx,
+            message.request,
+            managed_candidates,
+            message.result,
+        )
     }
 }
 

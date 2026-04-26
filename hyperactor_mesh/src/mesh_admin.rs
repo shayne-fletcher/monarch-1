@@ -3308,12 +3308,22 @@ mod advertised_host {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
+    use hyperactor::actor::ActorStatus;
     use hyperactor::channel::ChannelAddr;
     use hyperactor::testing::ids::test_proc_id_with_addr;
+    use sha2::Digest;
+    use sha2::Sha256;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
 
     use super::*;
+    use crate::tool_provision::ToolInventoryState;
 
     // Integration tests that spawn MeshAdminAgent must pass
     // `Some("[::]:0".parse().unwrap())` as the admin_addr to get an
@@ -3329,6 +3339,57 @@ mod tests {
     #[hyperactor::export(handlers = [])]
     struct TestIntrospectableActor;
     impl Actor for TestIntrospectableActor {}
+
+    async fn serve_bytes(bytes: Vec<u8>) -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = requests.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                request_count.fetch_add(1, Ordering::SeqCst);
+                let bytes = bytes.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 1024];
+                    let _ = socket.read(&mut buffer).await;
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    socket.write_all(headers.as_bytes()).await.unwrap();
+                    socket.write_all(&bytes).await.unwrap();
+                });
+            }
+        });
+
+        (format!("http://{addr}/artifact"), requests)
+    }
+
+    fn digest(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    fn plain_tool_spec(name: &str, version: &str, bytes: &[u8], url: String) -> ToolSpec {
+        ToolSpec {
+            name: name.to_string(),
+            version: version.to_string(),
+            platforms: HashMap::from([(
+                tool_fetch::current_platform().expect("test platform supported by tool_fetch"),
+                tool_fetch::PlatformEntry {
+                    size: bytes.len() as u64,
+                    hash_algorithm: tool_fetch::HashAlgorithm::Sha256,
+                    digest: digest(bytes),
+                    format: tool_fetch::ArtifactFormat::Plain,
+                    executable_path: None,
+                    providers: vec![tool_fetch::Provider::Http { url }],
+                },
+            )]),
+        }
+    }
 
     // Verifies that MeshAdminAgent::build_root_payload constructs the
     // expected root node: identity/root metadata, correct Root
@@ -4282,6 +4343,172 @@ mod tests {
         assert!(
             !admin_url.is_empty(),
             "spawn_admin ref must yield a non-empty URL"
+        );
+    }
+
+    async fn local_host_tool_handler(
+        test_name: &str,
+    ) -> (
+        ResolvedProcHandler,
+        hyperactor::Instance<()>,
+        hyperactor::ActorHandle<()>,
+    ) {
+        use hyperactor::Proc;
+        use hyperactor::channel::ChannelTransport;
+        use hyperactor::host::Host;
+        use hyperactor::host::LocalProcManager;
+
+        use crate::host_mesh::host_agent::HOST_MESH_AGENT_ACTOR_NAME;
+        use crate::host_mesh::host_agent::HostAgentMode;
+        use crate::host_mesh::host_agent::ProcManagerSpawnFn;
+        use crate::proc_agent::ProcAgent;
+
+        let spawn: ProcManagerSpawnFn =
+            Box::new(|proc| Box::pin(std::future::ready(ProcAgent::boot_v1(proc, None))));
+        let manager: LocalProcManager<ProcManagerSpawnFn> = LocalProcManager::new(spawn);
+        let host: Host<LocalProcManager<ProcManagerSpawnFn>> =
+            Host::new(manager, ChannelTransport::Unix.any())
+                .await
+                .unwrap();
+        let system_proc = host.system_proc().clone();
+        let service_proc_id = system_proc.proc_id().clone();
+        let host_agent = system_proc
+            .spawn(
+                HOST_MESH_AGENT_ACTOR_NAME,
+                HostAgent::new(HostAgentMode::Local(host)),
+            )
+            .unwrap();
+        host_agent
+            .status()
+            .wait_for(|s| matches!(s, ActorStatus::Idle))
+            .await
+            .unwrap();
+
+        let client_proc =
+            Proc::direct(ChannelTransport::Unix.any(), format!("{test_name}_client")).unwrap();
+        let (client, client_handle) = client_proc.instance("client").unwrap();
+        let handler = route_proc_handler(&service_proc_id.to_string()).unwrap();
+        (handler, client, client_handle)
+    }
+
+    #[tokio::test]
+    async fn managed_pyspy_dump_uses_provisioned_executable() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let log_path = temp.path().join("managed-pyspy.log");
+        let script = format!(
+            r#"#!/bin/sh
+echo "$@" >> "{}"
+echo '[]'
+exit 0
+"#,
+            log_path.display()
+        )
+        .into_bytes();
+        let (url, requests) = serve_bytes(script.clone()).await;
+        let spec = plain_tool_spec("py-spy", "mesh-admin-fake", &script, url);
+        let (handler, client, _client_handle) =
+            local_host_tool_handler("managed_pyspy_dump").await;
+
+        let provision = handler
+            .provision_tool(&client, spec, std::time::Duration::from_secs(10))
+            .await
+            .unwrap();
+        let executable = match provision {
+            ProvisionResult::Available { executable, .. } => executable,
+            other => panic!("expected py-spy provisioned, got {other:?}"),
+        };
+
+        let result = handler
+            .pyspy_dump(
+                &client,
+                PySpyOpts {
+                    threads: false,
+                    native: false,
+                    native_all: false,
+                    nonblocking: false,
+                },
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+
+        match result {
+            PySpyResult::Ok {
+                binary,
+                stack_traces,
+                ..
+            } => {
+                assert_eq!(binary, executable.display().to_string());
+                assert!(stack_traces.is_empty());
+            }
+            other => panic!("expected managed fake py-spy success, got {other:?}"),
+        }
+        let log = std::fs::read_to_string(&log_path).expect("fake py-spy must run");
+        assert!(
+            log.contains("dump") && log.contains("--json"),
+            "managed py-spy invocation log: {log:?}"
+        );
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "artifact should be fetched once by provisioning"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads the real py-spy wheel and executes the managed binary"]
+    async fn provision_real_pyspy_through_mesh_admin_and_run_version() {
+        let spec: ToolSpec =
+            serde_json::from_str(include_str!("../../tool_fetch/specs/py-spy.json"))
+                .expect("valid py-spy spec");
+        let (handler, client, _client_handle) = local_host_tool_handler("real_pyspy").await;
+
+        let provision = handler
+            .provision_tool(&client, spec, std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        let executable = match provision {
+            ProvisionResult::Available {
+                name,
+                version,
+                executable,
+                ..
+            } => {
+                assert_eq!(name, "py-spy");
+                assert_eq!(version, "0.4.1");
+                executable
+            }
+            other => panic!("expected real py-spy provisioned, got {other:?}"),
+        };
+
+        let inventory = handler
+            .tool_inventory(&client, std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(inventory.tools.iter().any(|entry| {
+            entry.name == "py-spy"
+                && entry.version == "0.4.1"
+                && matches!(entry.state, ToolInventoryState::Available { .. })
+        }));
+
+        let output = tokio::process::Command::new(&executable)
+            .arg("--version")
+            .output()
+            .await
+            .expect("managed py-spy should execute");
+        assert!(
+            output.status.success(),
+            "py-spy --version failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            combined.contains("py-spy") && combined.contains("0.4.1"),
+            "unexpected py-spy version output: {combined:?}"
         );
     }
 
