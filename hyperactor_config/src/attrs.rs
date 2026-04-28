@@ -179,6 +179,21 @@ pub fn lookup_key_info_by_name(name: &str) -> Option<&'static AttrKeyInfo> {
     KEYS_BY_NAME.get(name).copied()
 }
 
+declare_attrs! {
+    /// Meta-attribute marker for operation context carried on
+    /// envelope headers. Attrs declared with
+    /// `@meta(OPERATION_CONTEXT_HEADER = true)` are stamped onto
+    /// outgoing request envelopes and copied onto reply envelopes
+    /// by the marker-driven helpers
+    /// (`stamp_marked_attrs_into_flattrs`, `copy_marked_flattrs`).
+    ///
+    /// The vocabulary describes which user operation a message
+    /// belongs to, so consumers such as the undeliverable-
+    /// abandonment log can name the operation. `OPERATION_*` names
+    /// the operation; it does not imply request/reply direction.
+    pub attr OPERATION_CONTEXT_HEADER: bool;
+}
+
 /// Returns `Some(true)` when the declared attribute key with this
 /// name carries the given bool meta marker with value `true`,
 /// `Some(false)` when it carries the marker with value `false`, and
