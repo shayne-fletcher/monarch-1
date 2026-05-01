@@ -394,6 +394,7 @@ impl Actor for ToolProvisionActor {
         this.bind::<Self>();
         this.set_system();
 
+        let mut scanned = 0_usize;
         for artifact in self.cache.scan() {
             let key = tool_key(&artifact.name, &artifact.version);
             self.observed.insert(
@@ -404,7 +405,13 @@ impl Actor for ToolProvisionActor {
                     provisioned_at: artifact.provisioned_at,
                 },
             );
+            scanned += 1;
         }
+        tracing::info!(
+            name = "ToolProvisionStatus",
+            status = "CacheScan::Complete",
+            scanned,
+        );
         self.publish_attrs(this);
         Ok(())
     }
@@ -576,9 +583,17 @@ impl Handler<ResolveTool> for ToolProvisionActor {
         message: ResolveTool,
     ) -> Result<(), anyhow::Error> {
         let reply = self.resolve(&message.tool, message.version.as_deref());
+        log_resolve_result(&reply);
 
         if let Err(e) = message.reply.send(cx, reply) {
-            tracing::debug!("ResolveTool reply failed (caller gone?): {e}");
+            tracing::debug!(
+                name = "ToolProvisionStatus",
+                status = "Resolve::ReplyDropped",
+                tool = %message.tool,
+                requested_version = ?message.version,
+                error = %e,
+                "ResolveTool reply failed (caller gone?)",
+            );
         }
         Ok(())
     }
@@ -591,8 +606,19 @@ impl Handler<QueryToolInventory> for ToolProvisionActor {
         cx: &Context<Self>,
         message: QueryToolInventory,
     ) -> Result<(), anyhow::Error> {
-        if let Err(e) = message.reply.send(cx, self.inventory()) {
-            tracing::debug!("QueryToolInventory reply failed (caller gone?): {e}");
+        let inventory = self.inventory();
+        tracing::info!(
+            name = "ToolProvisionStatus",
+            status = "Inventory::Queried",
+            tool_count = inventory.tools.len(),
+        );
+        if let Err(e) = message.reply.send(cx, inventory) {
+            tracing::debug!(
+                name = "ToolProvisionStatus",
+                status = "Inventory::ReplyDropped",
+                error = %e,
+                "QueryToolInventory reply failed (caller gone?)",
+            );
         }
         Ok(())
     }
@@ -611,6 +637,45 @@ fn split_key(key: &str) -> (String, String) {
 
 fn error_string(err: &ProvisionError) -> String {
     err.to_string()
+}
+
+fn log_resolve_result(result: &ResolveResult) {
+    match result {
+        ResolveResult::Available {
+            name,
+            version,
+            executable,
+        } => {
+            tracing::info!(
+                name = "ToolProvisionStatus",
+                status = "Resolve::Available",
+                tool = %name,
+                version = %version,
+                executable = %executable.display(),
+            );
+        }
+        ResolveResult::NotProvisioned { tool, version } => {
+            tracing::info!(
+                name = "ToolProvisionStatus",
+                status = "Resolve::NotProvisioned",
+                tool = %tool,
+                requested_version = ?version,
+            );
+        }
+        ResolveResult::Failed {
+            name,
+            version,
+            error,
+        } => {
+            tracing::warn!(
+                name = "ToolProvisionStatus",
+                status = "Resolve::Failed",
+                tool = %name,
+                version = %version,
+                error = %error,
+            );
+        }
+    }
 }
 
 #[cfg(test)]

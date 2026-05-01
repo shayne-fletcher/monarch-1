@@ -33,6 +33,8 @@
 //!   one ad hoc. The client carries any HTTPS proxy configuration
 //!   (see [`FetchConfig`]); fetch logic does not read environment
 //!   policy, keeping `tool_fetch` config-agnostic.
+//! - **TF-FETCH-6 (download-observability):** HTTP provider attempts
+//!   emit structured start/complete events, but never per-chunk events.
 
 use std::path::Path;
 
@@ -116,6 +118,19 @@ async fn fetch_http(
     url: &str,
     destination: &Path,
 ) -> Result<(), ProvisionError> {
+    tracing::info!(
+        name = "ToolFetchStatus",
+        status = "Download::Start",
+        message = %format!(
+            "download start: {} -> {}",
+            url,
+            destination.display(),
+        ),
+        url = %url,
+        expected_size = entry.size,
+        artifact_digest = %entry.digest,
+        destination = %destination.display(),
+    );
     let response = client
         .get(url)
         .send()
@@ -195,5 +210,22 @@ async fn fetch_http(
         .keep()
         .map_err(|e| ProvisionError::IoError(e.error))?;
     tokio::fs::rename(&temp_path, destination).await?;
+    // TF-FETCH-6: emit Download::Complete after the rename commits,
+    // so an observer that sees this event can trust the artifact is
+    // at `destination`.
+    tracing::info!(
+        name = "ToolFetchStatus",
+        status = "Download::Complete",
+        message = %format!(
+            "download complete: {} bytes={} -> {}",
+            url,
+            size,
+            destination.display(),
+        ),
+        url = %url,
+        actual_size = size,
+        artifact_digest = %entry.digest,
+        destination = %destination.display(),
+    );
     Ok(())
 }
