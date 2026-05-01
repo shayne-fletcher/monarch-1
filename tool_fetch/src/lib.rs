@@ -68,6 +68,12 @@
 //!   provided [`reqwest::Client`] built from a [`FetchConfig`]. HTTPS
 //!   proxy policy is supplied by the caller; the substrate does not
 //!   read `https_proxy`/`HTTPS_PROXY` env vars on its own.
+//! - **TF-CACHE-10 (operator-observability):** Cache decisions emit
+//!   structured tracing events so callers running inside actor
+//!   recording spans can explain whether provisioning downloaded,
+//!   reused a blob, reused an install, or extracted from cache.
+//! - **TF-FETCH-6 (download-observability):** HTTP provider attempts
+//!   emit structured start/complete events, but never per-chunk events.
 //!
 //! ## Extraction invariants
 //!

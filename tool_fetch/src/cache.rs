@@ -57,6 +57,10 @@
 //!   [`reqwest::Client`] used for downloads. Callers configure HTTPS
 //!   proxying through [`ToolCache::with_fetch_config`]; the cache
 //!   never reads `https_proxy` env vars on its own.
+//! - **TF-CACHE-10 (operator-observability):** Cache decisions emit
+//!   structured tracing events so callers running inside actor
+//!   recording spans can explain whether provisioning downloaded,
+//!   reused a blob, reused an install, or extracted from cache.
 
 use std::fs;
 use std::io::Read;
@@ -265,6 +269,15 @@ impl ToolCache {
         // spawn_blocking so the metadata `fs::read` and `is_file`
         // probe never run on a tokio worker.
         if let Some(path) = self.lookup_async(entry).await {
+            tracing::info!(
+                name = "ToolFetchStatus",
+                status = "InstallCache::Hit",
+                tool = %spec.name,
+                version = %spec.version,
+                platform = ?platform,
+                artifact_digest = %entry.digest,
+                executable = %path.display(),
+            );
             return Ok(path);
         }
 
@@ -275,13 +288,28 @@ impl ToolCache {
         // so any tracing events emitted by the sync section land in
         // the caller's recording span (e.g. an actor's flight
         // recorder) instead of being detached on the blocking thread.
+        // TF-CACHE-10: emit BlobCache::Invalid from inside the closure
+        // so the operator sees the rejection at the moment the cached
+        // blob fails reverification.
         let blob = self.blob_path(&entry.digest);
         let blob_for_verify = blob.clone();
         let entry_for_verify = entry.clone();
+        let verify_tool = spec.name.clone();
+        let verify_version = spec.version.clone();
+        let verify_blob_display = blob.display().to_string();
         let verify_span = tracing::Span::current();
         let needs_fetch = tokio::task::spawn_blocking(move || -> Result<bool, ProvisionError> {
             let _enter = verify_span.enter();
             if blob_for_verify.is_file() && !verify_blob(&blob_for_verify, &entry_for_verify)? {
+                tracing::warn!(
+                    name = "ToolFetchStatus",
+                    status = "BlobCache::Invalid",
+                    tool = %verify_tool,
+                    version = %verify_version,
+                    platform = ?platform,
+                    artifact_digest = %entry_for_verify.digest,
+                    blob = %verify_blob_display,
+                );
                 fs::remove_file(&blob_for_verify)?;
             }
             Ok(!blob_for_verify.is_file())
@@ -290,7 +318,26 @@ impl ToolCache {
         .expect("tool_fetch verify task panicked")?;
 
         if needs_fetch {
+            tracing::info!(
+                name = "ToolFetchStatus",
+                status = "BlobCache::Miss",
+                tool = %spec.name,
+                version = %spec.version,
+                platform = ?platform,
+                artifact_digest = %entry.digest,
+                blob = %blob.display(),
+            );
             fetch::fetch_verified_blob(&self.http_client, entry, &blob).await?;
+        } else {
+            tracing::info!(
+                name = "ToolFetchStatus",
+                status = "BlobCache::Hit",
+                tool = %spec.name,
+                version = %spec.version,
+                platform = ?platform,
+                artifact_digest = %entry.digest,
+                blob = %blob.display(),
+            );
         }
 
         // TF-CACHE-9: archive extraction (tar/zip) and the followup
@@ -301,18 +348,32 @@ impl ToolCache {
         // captured here and re-entered inside the closure so events
         // emitted during extraction land in the caller's recording
         // span rather than on a detached blocking thread.
+        // TF-CACHE-10: emit Extract::Start from inside the closure so
+        // the event marks the moment extraction actually begins.
         let extracted_dir = self.extracted_path(&entry.digest);
         let extracted_parent = self.extracted_parent(&entry.digest);
         let extracted_dir_for_extract = extracted_dir.clone();
         let blob_for_extract = blob;
         let spec_for_extract = spec.clone();
         let entry_for_extract = entry.clone();
+        let extract_destination_display = extracted_dir.display().to_string();
         let extract_span = tracing::Span::current();
         let executable = tokio::task::spawn_blocking(move || -> Result<PathBuf, ProvisionError> {
             let _enter = extract_span.enter();
             let temp_dir = tempfile::Builder::new()
                 .prefix("extract-")
                 .tempdir_in(&extracted_parent)?;
+
+            tracing::info!(
+                name = "ToolFetchStatus",
+                status = "Extract::Start",
+                tool = %spec_for_extract.name,
+                version = %spec_for_extract.version,
+                platform = ?platform,
+                artifact_format = ?entry_for_extract.format,
+                artifact_digest = %entry_for_extract.digest,
+                destination = %extract_destination_display,
+            );
 
             let executable = match entry_for_extract.format {
                 ArtifactFormat::Plain => extract::install_plain(
@@ -367,6 +428,21 @@ impl ToolCache {
         .await
         .expect("tool_fetch extract task panicked")?;
 
+        // TF-CACHE-10: Extract::Complete is the operator-visible
+        // marker that the install tree is ready under
+        // `extracted_dir`. It fires only after the spawn_blocking
+        // closure committed the rename and the post-rename lookup
+        // succeeded, so an observer can trust the event implies a
+        // resolvable executable.
+        tracing::info!(
+            name = "ToolFetchStatus",
+            status = "Extract::Complete",
+            tool = %spec.name,
+            version = %spec.version,
+            platform = ?platform,
+            artifact_digest = %entry.digest,
+            executable = %executable.display(),
+        );
         Ok(executable)
     }
 
