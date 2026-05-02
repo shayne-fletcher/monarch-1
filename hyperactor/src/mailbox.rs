@@ -3732,8 +3732,18 @@ mod tests {
             unreachable!()
         };
         let msg_str = msg.to_string();
-        assert!(msg_str.contains("undeliverable message error"));
-        // Updated assertions for direct format
+        // UE-3 (top-line shape): with no operation context, the top
+        // line names the destination — `undeliverable message to
+        // {dest}`. The retired neutral `undeliverable message error`
+        // wording is no longer emitted.
+        assert!(
+            msg_str.contains("undeliverable message to"),
+            "expected destination-named top line, got:\n{msg_str}"
+        );
+        assert!(
+            !msg_str.contains("undeliverable message error"),
+            "retired neutral fallback must not appear, got:\n{msg_str}"
+        );
         assert!(msg_str.contains("sender:") && msg_str.contains("quux_0"));
         assert!(msg_str.contains("dest:") && msg_str.contains("corge_0"));
 
