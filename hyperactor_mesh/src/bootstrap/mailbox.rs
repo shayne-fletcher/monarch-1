@@ -112,7 +112,7 @@ impl MailboxSender for LocalProcDialer {
 #[cfg(test)]
 mod tests {
 
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use hyperactor::Mailbox;
     use hyperactor::channel::ChannelAddr;

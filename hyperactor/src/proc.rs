@@ -3402,7 +3402,7 @@ impl<A: Actor> Ports<A> {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::sync::atomic::AtomicBool;
 
     use hyperactor_macros::export;
