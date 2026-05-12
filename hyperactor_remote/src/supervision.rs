@@ -17,6 +17,8 @@
 //! accepts one active remote supervision session, starts the worker-side link
 //! actor, and reports child or link lifecycle events to the supervisor session.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use hyperactor::Actor;
 use hyperactor::ActorAddr;
@@ -261,6 +263,8 @@ pub struct Worker<C: Actor> {
     child_handle: Option<ActorHandle<C>>,
     child_display_name: Option<String>,
     session: Option<WorkerSession>,
+    #[cfg(test)]
+    link_delay: Option<Duration>,
 }
 
 impl<C: Actor> Worker<C> {
@@ -271,7 +275,16 @@ impl<C: Actor> Worker<C> {
             child_handle: None,
             child_display_name: None,
             session: None,
+            // Field provisioned to enable deterministic testing.
+            #[cfg(test)]
+            link_delay: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_link_delay(mut self, delay: Duration) -> Self {
+        self.link_delay = Some(delay);
+        self
     }
 }
 
@@ -349,6 +362,11 @@ where
     C: Actor + Send + 'static,
 {
     async fn handle(&mut self, cx: &Context<Self>, message: Link) -> anyhow::Result<()> {
+        #[cfg(test)]
+        if let Some(delay) = self.link_delay {
+            tokio::time::sleep(delay).await;
+        }
+
         if self.session.is_some() {
             let _ = message.supervisor.send(
                 cx,
@@ -1387,6 +1405,89 @@ mod tests {
 
         parent2.stop("test").unwrap();
         tokio::time::timeout(Duration::from_secs(5), parent2)
+            .await
+            .unwrap();
+    }
+
+    // proc
+    // ├── client instance
+    // │   ├── ready port: receives the child address
+    // │   ├── stopped port: receives the child stop reason
+    // │   └── events port: parent's supervision events (silent — Parent absorbs)
+    // ├── worker: Worker<TestChild> (Handler<Link> delayed by 200ms via with_link_delay)
+    // │   ├── child: TestChild (spawned in Worker::init, ready before any Link arrives)
+    // │   └── worker-side link actor: KeepaliveWorker (only spawned once Link processes)
+    // └── parent: Parent
+    //     └── supervisor: Supervisor (constructed with a known session id)
+    //         └── supervisor-side link actor: KeepaliveSupervisor
+    //
+    // The worker artificially delays `Handler<Link>` by 200ms. The
+    // test stops the parent immediately after spawn — well inside the
+    // 200ms window — so the supervisor's `handle_stop` runs while the
+    // worker is still mid-Link and `Linked` has not yet reached the
+    // supervisor. This exercises the `Supervisor::pending_stop` path
+    // (`supervision.rs: 78`, `:128-139`): handle_stop sets
+    // `pending_stop = Some(...)`, `send_pending_worker_stop` takes it
+    // and sends `SupervisedWorker::Stop` to the still-blocked worker.
+    // The Stop queues behind the pending Link in the worker's
+    // mailbox; when the 200ms delay elapses the worker processes Link
+    // (setting its session and sending `Linked` back to the
+    // already-stopping supervisor), then processes Stop (which now
+    // succeeds because the session is set), then stops the child with
+    // the tree-teardown reason.
+    #[tokio::test]
+    async fn test_stop_before_linked_propagates_via_pending_stop() {
+        let proc = Proc::local();
+        let (inst, _inst_hndl) = proc.instance("inst").unwrap();
+        let (ready, mut ready_rx) = inst.open_port::<ActorAddr>();
+        let (stopped, mut stopped_rx) = inst.open_port::<String>();
+        let (events, _events_rx) = inst.open_port::<ActorSupervisionEvent>();
+        let worker = proc
+            .spawn(
+                "worker",
+                Worker::new(test_child(ready, stopped, None))
+                    .with_link_delay(Duration::from_millis(200)),
+            )
+            .unwrap();
+        let _child_addr = ready_rx.recv().await.unwrap();
+        let session_id = Uid::instance();
+        let parent = proc
+            .spawn(
+                "parent",
+                Parent {
+                    supervisor: Some(Supervisor::new_uid(
+                        worker.bind::<WorkerLike>(),
+                        KeepaliveLink::new(Duration::from_millis(5), Duration::from_secs(60)),
+                        LinkOptions::default(),
+                        session_id.clone(),
+                    )),
+                    events,
+                },
+            )
+            .unwrap();
+
+        // Stop the parent immediately. The worker's 200ms Link delay
+        // guarantees `Linked` has not yet arrived at the supervisor
+        // when its handle_stop fires.
+        parent.stop("test stop").unwrap();
+
+        // Child stops with the tree-teardown reason once the worker
+        // finishes its delay, processes the queued Link (sets
+        // session), and then processes the queued Stop (which now
+        // succeeds).
+        let reason = tokio::time::timeout(Duration::from_secs(5), stopped_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reason, "parent stopping");
+
+        // Worker exits as a downstream effect of the child stop.
+        let status = tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap();
+        assert!(matches!(status, ActorStatus::Stopped(_)));
+
+        tokio::time::timeout(Duration::from_secs(5), parent)
             .await
             .unwrap();
     }
