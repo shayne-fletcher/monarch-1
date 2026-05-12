@@ -727,7 +727,7 @@ impl Proc {
         R: Referable + RemoteHandles<M>,
     {
         let (instance, _handle) = self.instance(name)?;
-        let (_handle, rx) = instance.bind_actor_port::<M>();
+        let (_handle, rx) = instance.bind_handler_port::<M>();
         let actor_ref = ActorRef::attest(instance.self_addr().clone());
         Ok((instance, actor_ref, rx))
     }
@@ -1613,7 +1613,7 @@ impl<A: Actor> Instance<A> {
             None
         } else {
             let (signal_port, signal_receiver) = mailbox.open_port::<Signal>();
-            signal_port.bind_actor_port();
+            signal_port.bind_handler_port();
             let (supervision_port, supervision_receiver) =
                 mailbox.open_port::<ActorSupervisionEvent>();
             Some((
@@ -1625,13 +1625,13 @@ impl<A: Actor> Instance<A> {
         let (actor_loop, actor_loop_receivers) = actor_loop_ports.unzip();
 
         // Introspect port: a separate channel handled by a dedicated
-        // tokio task (not the actor's message loop). bind_actor_port()
+        // tokio task (not the actor's message loop). bind_handler_port()
         // registers in the mailbox
         // dispatch table at IntrospectMessage::port().
         //
         // Exercises S3, S4, S9 (see introspect module doc).
         let (introspect_port, introspect_receiver) = mailbox.open_port::<IntrospectMessage>();
-        introspect_port.bind_actor_port();
+        introspect_port.bind_handler_port();
 
         let cell = InstanceCell::new(
             actor_id,
@@ -2526,7 +2526,7 @@ impl<A: Actor> Instance<A> {
         self.inner.proc.child_instance(self.inner.cell.clone())
     }
 
-    /// Return a handle port handle representing the actor's message
+    /// Return a handler port handle representing the actor's message
     /// handler for M-typed messages.
     pub fn port<M: Message>(&self) -> PortHandle<M>
     where
@@ -2646,13 +2646,13 @@ impl<A: Actor> context::Actor for &Context<'_, A> {
 }
 
 impl Instance<()> {
-    /// See [Mailbox::bind_actor_port] for details.
-    pub fn bind_actor_port<M: RemoteMessage>(&self) -> (PortHandle<M>, PortReceiver<M>) {
+    /// See [Mailbox::bind_handler_port] for details.
+    pub fn bind_handler_port<M: RemoteMessage>(&self) -> (PortHandle<M>, PortReceiver<M>) {
         assert!(
             self.actor_task_handle().is_none(),
-            "can only bind actor port on instance with no running actor task"
+            "can only bind handler port on instance with no running actor task"
         );
-        self.inner.mailbox.bind_actor_port()
+        self.inner.mailbox.bind_handler_port()
     }
 }
 
@@ -3441,7 +3441,7 @@ impl<A: Actor> HandlerPorts<A> {
         }
     }
 
-    /// Bind the given message type to its actor port.
+    /// Bind the given message type to its handler port.
     pub fn bind<M: RemoteMessage>(&self)
     where
         A: Handler<M>,
@@ -3449,7 +3449,7 @@ impl<A: Actor> HandlerPorts<A> {
         let port_index = M::port();
         match self.bound.entry(port_index) {
             Entry::Vacant(entry) => {
-                self.get::<M>().bind_actor_port();
+                self.get::<M>().bind_handler_port();
                 entry.insert(M::typename());
             }
             Entry::Occupied(entry) => {
