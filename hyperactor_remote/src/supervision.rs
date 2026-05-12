@@ -973,4 +973,105 @@ mod tests {
             .await
             .unwrap();
     }
+
+    // proc
+    // ├── client instance
+    // │   ├── ready port: receives the child address
+    // │   ├── stopped port: not expected to fire (Detach leaves child running)
+    // │   ├── supervisor port: receives the initial Linked message
+    // │   └── supervisor-side link actor: KeepaliveSupervisor
+    // └── worker: Worker<TestChild>
+    //     ├── child: TestChild
+    //     └── worker-side link actor: KeepaliveWorker
+    //
+    // Worker accepts Link with OrphanPolicy::Detach and records an
+    // active supervisor session. The test then injects an
+    // Undeliverable for a worker-sent message. Worker treats the
+    // supervisor session as orphaned, stops the link actor and clears
+    // the session, but does NOT stop the child. Worker remains alive
+    // with no active session.
+    #[tokio::test]
+    async fn test_detach_orphan_policy_leaves_child_running_on_supervisor_loss() {
+        let proc = Proc::local();
+        let (inst, _client_handle) = proc.instance("inst").unwrap();
+        let (ready, mut ready_rx) = inst.open_port::<ActorAddr>();
+        let (stopped, mut stopped_rx) = inst.open_port::<String>();
+        let (supervisor, mut supervisor_rx) = inst.open_port::<WorkerSupervisor>();
+        let supervisor_ref = supervisor.bind();
+        let worker = proc
+            .spawn("worker", Worker::new(test_child(ready, stopped, None)))
+            .unwrap();
+        let (keep_alive, link_spec) =
+            KeepaliveLink::new(Duration::from_secs(60), Duration::from_secs(60))
+                .spawn_supervisor(&inst)
+                .unwrap();
+        let _child_addr = ready_rx.recv().await.unwrap();
+        let session_id = hyperactor::Uid::instance();
+
+        worker
+            .send(
+                &inst,
+                Link {
+                    session_id: session_id.clone(),
+                    supervisor: supervisor_ref.clone(),
+                    parent: inst.self_addr().clone(),
+                    link: link_spec,
+                    options: LinkOptions {
+                        orphan_policy: OrphanPolicy::Detach,
+                        ..Default::default()
+                    },
+                },
+            )
+            .unwrap();
+        let linked = tokio::time::timeout(Duration::from_secs(5), supervisor_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(linked, WorkerSupervisor::Linked { .. }));
+
+        // Forge an undeliverable bounce for a worker-to-supervisor
+        // message — a production trigger for
+        // `handle_orphaned_supervisor` where `OrphanPolicy` is
+        // applied.
+        let envelope = MessageEnvelope::serialize(
+            worker.actor_addr().clone(),
+            supervisor_ref.port_addr().clone(),
+            &WorkerSupervisor::Unlinked {
+                session_id,
+                reason: "test".to_string(),
+            },
+            hyperactor_config::Flattrs::new(),
+        )
+        .unwrap();
+        worker
+            .port::<Undeliverable<MessageEnvelope>>()
+            .send(&inst, Undeliverable(envelope))
+            .unwrap();
+
+        // Under `Detach`, the worker clears its session and stops the
+        // link, but does NOT stop the child. No message shhould arrive on
+        // the stopped port within a generous timeout.
+        let timed_out = tokio::time::timeout(Duration::from_millis(500), stopped_rx.recv()).await;
+        assert!(
+            timed_out.is_err(),
+            "child should not be stopped under OrphanPolicy::Detach"
+        );
+
+        // The worker itself is still alive. Cleanly stopping it should
+        // succeed and yield a Stopped status.
+        worker.stop("test").unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap();
+        assert!(
+            matches!(status, ActorStatus::Stopped(_)),
+            "worker should accept clean stop after Detach orphan, got {:?}",
+            status
+        );
+
+        keep_alive.stop("test").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), keep_alive)
+            .await
+            .unwrap();
+    }
 }
