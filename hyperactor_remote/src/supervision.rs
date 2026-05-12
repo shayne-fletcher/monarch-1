@@ -1612,4 +1612,124 @@ mod tests {
             .await
             .unwrap();
     }
+
+    // proc
+    // ├── client instance
+    // │   ├── ready port: child address
+    // │   ├── stopped port: child stop reasons (silent across both unlinks under Detach)
+    // │   ├── events1 port: parent1's supervision events
+    // │   └── events2 port: parent2's supervision events
+    // ├── worker: Worker<TestChild>
+    // │   └── child: TestChild (survives both unlinks under Detach)
+    // ├── parent1: Parent
+    // │   └── supervisor1 (session_id1, OrphanPolicy::Detach)
+    // └── parent2: Parent
+    //     └── supervisor2 (session_id2, OrphanPolicy::Detach)
+    //
+    // Verifies the worker accepts a fresh Link after Unlink clears
+    // self.session. Under OrphanPolicy::Detach the child and worker
+    // survive the first unlink, allowing a second supervisor with
+    // session_id2 to link. A second Unlink with session_id2 confirms
+    // accept_session_id installed the new session.
+    #[tokio::test]
+    async fn test_worker_accepts_relink_after_unlink_under_detach_policy() {
+        let proc = Proc::local();
+        let (inst, _inst_hndl) = proc.instance("inst").unwrap();
+        let session_id1 = Uid::instance();
+        let (_child_addr, worker, parent1, mut stopped_rx, mut events_rx1) = spawn_supervised_pair(
+            &proc,
+            &inst,
+            session_id1.clone(),
+            LinkOptions {
+                orphan_policy: OrphanPolicy::Detach,
+                ..Default::default()
+            },
+            None,
+        )
+        .await;
+
+        // Give the first Link/Linked handshake time to complete before
+        // issuing Unlink.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        worker
+            .send(
+                &inst,
+                SupervisedWorker::Unlink {
+                    session_id: session_id1.clone(),
+                    reason: "first unlink".to_string(),
+                },
+            )
+            .unwrap();
+
+        let event1 = tokio::time::timeout(Duration::from_secs(5), events_rx1.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event1.actor_status {
+            ActorStatus::Stopped(reason) => assert_eq!(reason, "first unlink"),
+            status => panic!("expected supervisor1 Stopped event, got {:?}", status),
+        }
+
+        let timed_out = tokio::time::timeout(Duration::from_millis(500), stopped_rx.recv()).await;
+        assert!(
+            timed_out.is_err(),
+            "child should survive unlink under OrphanPolicy::Detach"
+        );
+
+        let session_id2 = Uid::instance();
+        let (events2, mut events_rx2) = inst.open_port::<ActorSupervisionEvent>();
+        let parent2 = proc
+            .spawn(
+                "parent2",
+                Parent {
+                    supervisor: Some(Supervisor::new_uid(
+                        worker.bind::<WorkerLike>(),
+                        KeepaliveLink::new(Duration::from_millis(5), Duration::from_secs(60)),
+                        LinkOptions {
+                            orphan_policy: OrphanPolicy::Detach,
+                            ..Default::default()
+                        },
+                        session_id2.clone(),
+                    )),
+                    events: events2,
+                },
+            )
+            .unwrap();
+
+        // Give the second Link/Linked handshake time to complete.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        worker
+            .send(
+                &inst,
+                SupervisedWorker::Unlink {
+                    session_id: session_id2.clone(),
+                    reason: "second unlink".to_string(),
+                },
+            )
+            .unwrap();
+
+        let event2 = tokio::time::timeout(Duration::from_secs(5), events_rx2.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event2.actor_status {
+            ActorStatus::Stopped(reason) => assert_eq!(reason, "second unlink"),
+            status => panic!("expected supervisor2 Stopped event, got {:?}", status),
+        }
+
+        parent1.stop("test").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), parent1)
+            .await
+            .unwrap();
+        parent2.stop("test").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), parent2)
+            .await
+            .unwrap();
+        worker.stop("test").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap();
+    }
 }
