@@ -536,7 +536,9 @@ mod tests {
     use hyperactor::Bind;
     use hyperactor::PortHandle;
     use hyperactor::Proc;
+    use hyperactor::Uid;
     use hyperactor::Unbind;
+    use hyperactor::mailbox::PortReceiver;
     use serde::Deserialize;
     use serde::Serialize;
     use typeuri::Named;
@@ -692,6 +694,58 @@ mod tests {
         }
     }
 
+    // Sets up the `Parent → Supervisor → Worker<TestChild>` harness
+    // (not Grandparent or synthetic-link). Spawns the worker, awaits
+    // the child's ready signal, then spawns the parent with
+    // `Supervisor::new_uid` using the supplied session id and
+    // options. Any post-spawn `Link`/`Linked` sleep is intentionally
+    // omitted - tests add it themselves next to the message send that
+    // depends on it.
+    async fn spawn_supervised_pair(
+        proc: &Proc,
+        inst: &Instance<()>,
+        session_id: hyperactor::Uid,
+        options: LinkOptions,
+        child_action: Option<TestChildAction>,
+    ) -> (
+        ActorAddr,                           // child address
+        ActorHandle<Worker<TestChild>>,      // worker handle
+        ActorHandle<Parent>,                 // parent handle
+        PortReceiver<String>,                // child stop notification
+        PortReceiver<ActorSupervisionEvent>, // parent's supervision events
+    ) {
+        // The ready receiver is consumed since no test needs more
+        // than one child address.
+        let (ready, mut ready_rx) = inst.open_port::<ActorAddr>();
+        let (stopped, stopped_rx) = inst.open_port::<String>();
+        let (events, events_rx) = inst.open_port::<ActorSupervisionEvent>();
+        let worker = proc
+            .spawn(
+                "worker",
+                Worker::new(test_child(ready, stopped, child_action)),
+            )
+            .unwrap();
+        let child_addr = ready_rx.recv().await.unwrap();
+        // Spawning Parent starts the link handshake: Parent::init
+        // spawns the Supervisor whose own init sends `Link` to the
+        // worker.
+        let parent = proc
+            .spawn(
+                "parent",
+                Parent {
+                    supervisor: Some(Supervisor::new_uid(
+                        worker.bind::<WorkerLike>(),
+                        KeepaliveLink::new(Duration::from_millis(5), Duration::from_secs(60)),
+                        options,
+                        session_id,
+                    )),
+                    events,
+                },
+            )
+            .unwrap();
+        (child_addr, worker, parent, stopped_rx, events_rx)
+    }
+
     // proc
     // ├── client instance
     // │   ├── ready port: receives the child address
@@ -713,33 +767,16 @@ mod tests {
     async fn test_child_failure_propagates_to_parent() {
         let proc = Proc::local();
         let (client, _client_handle) = proc.instance("client").unwrap();
-        let (ready, mut ready_rx) = client.open_port::<ActorAddr>();
-        let (stopped, _stopped_rx) = client.open_port::<String>();
-        let (events, mut event_rx) = client.open_port::<ActorSupervisionEvent>();
-        let worker = proc
-            .spawn(
-                "worker",
-                Worker::new(test_child(
-                    ready,
-                    stopped,
-                    Some(TestChildAction::FailAfter(Duration::from_millis(200))),
-                )),
-            )
-            .unwrap();
-        let parent = proc
-            .spawn(
-                "parent",
-                Parent {
-                    supervisor: Some(Supervisor::new(
-                        worker.bind::<WorkerLike>(),
-                        KeepaliveLink::new(Duration::from_millis(5), Duration::from_secs(60)),
-                        LinkOptions::default(),
-                    )),
-                    events,
-                },
-            )
-            .unwrap();
-        let child_addr = ready_rx.recv().await.unwrap();
+        let session_id = Uid::instance();
+
+        let (child_addr, worker, parent, _stopped_rx, mut event_rx) = spawn_supervised_pair(
+            &proc,
+            &client,
+            session_id.clone(),
+            LinkOptions::default(),
+            Some(TestChildAction::FailAfter(Duration::from_millis(200))),
+        )
+        .await;
 
         let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
@@ -777,26 +814,16 @@ mod tests {
     async fn test_parent_stop_stops_remote_child_before_parent_finishes() {
         let proc = Proc::local();
         let (client, _client_handle) = proc.instance("client").unwrap();
-        let (ready, mut ready_rx) = client.open_port::<ActorAddr>();
-        let (stopped, mut stopped_rx) = client.open_port::<String>();
-        let (events, _event_rx) = client.open_port::<ActorSupervisionEvent>();
-        let worker = proc
-            .spawn("worker", Worker::new(test_child(ready, stopped, None)))
-            .unwrap();
-        let parent = proc
-            .spawn(
-                "parent",
-                Parent {
-                    supervisor: Some(Supervisor::new(
-                        worker.bind::<WorkerLike>(),
-                        KeepaliveLink::new(Duration::from_millis(5), Duration::from_secs(60)),
-                        LinkOptions::default(),
-                    )),
-                    events,
-                },
-            )
-            .unwrap();
-        let _child_addr = ready_rx.recv().await.unwrap();
+        let session_id = Uid::instance();
+
+        let (_child_addr, worker, parent, mut stopped_rx, _event_rx) = spawn_supervised_pair(
+            &proc,
+            &client,
+            session_id.clone(),
+            LinkOptions::default(),
+            None,
+        )
+        .await;
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         parent.stop("test parent stopping").unwrap();
@@ -1099,32 +1126,17 @@ mod tests {
     async fn test_supervised_worker_unlink_stops_child_under_stop_policy() {
         let proc = Proc::local();
         let (inst, _inst_hndl) = proc.instance("inst").unwrap();
-        let (ready, mut ready_rx) = inst.open_port::<ActorAddr>();
-        let (stopped, mut stopped_rx) = inst.open_port::<String>();
-        let (events, mut events_rx) = inst.open_port::<ActorSupervisionEvent>();
-        let worker = proc
-            .spawn("worker", Worker::new(test_child(ready, stopped, None)))
-            .unwrap();
-        let _child_addr = ready_rx.recv().await.unwrap();
-        let session_id = hyperactor::Uid::instance();
-        // Spawning Parent starts the link handshake: Parent::init
-        // spawns the Supervisor whose own init sends `Link` to the
-        // worker (the sleep below waits for the `Link`/`Linked`
-        // round-trip).
-        let parent = proc
-            .spawn(
-                "parent",
-                Parent {
-                    supervisor: Some(Supervisor::new_uid(
-                        worker.bind::<WorkerLike>(),
-                        KeepaliveLink::new(Duration::from_millis(5), Duration::from_secs(60)),
-                        LinkOptions::default(),
-                        session_id.clone(),
-                    )),
-                    events,
-                },
-            )
-            .unwrap();
+        let session_id = Uid::instance();
+
+        let (_child_addr, worker, parent, mut stopped_rx, mut events_rx) = spawn_supervised_pair(
+            &proc,
+            &inst,
+            session_id.clone(),
+            LinkOptions::default(),
+            None,
+        )
+        .await;
+
         // Give the Link/Linked handshake time to complete before
         // issuing Unlink.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1199,35 +1211,20 @@ mod tests {
     async fn test_supervised_worker_unlink_leaves_child_running_under_detach_policy() {
         let proc = Proc::local();
         let (inst, _inst_hndl) = proc.instance("inst").unwrap();
-        let (ready, mut ready_rx) = inst.open_port::<ActorAddr>();
-        let (stopped, mut stopped_rx) = inst.open_port::<String>();
-        let (events, mut events_rx) = inst.open_port::<ActorSupervisionEvent>();
-        let worker = proc
-            .spawn("worker", Worker::new(test_child(ready, stopped, None)))
-            .unwrap();
-        let _child_addr = ready_rx.recv().await.unwrap();
-        let session_id = hyperactor::Uid::instance();
-        // Spawning Parent starts the link handshake: Parent::init
-        // spawns the Supervisor whose own init sends `Link` to the
-        // worker (the sleep below waits for the `Link`/`Linked`
-        // round-trip).
-        let parent = proc
-            .spawn(
-                "parent",
-                Parent {
-                    supervisor: Some(Supervisor::new_uid(
-                        worker.bind::<WorkerLike>(),
-                        KeepaliveLink::new(Duration::from_millis(5), Duration::from_secs(60)),
-                        LinkOptions {
-                            orphan_policy: OrphanPolicy::Detach,
-                            ..Default::default()
-                        },
-                        session_id.clone(),
-                    )),
-                    events,
-                },
-            )
-            .unwrap();
+        let session_id = Uid::instance();
+
+        let (_child_addr, worker, parent, mut stopped_rx, mut events_rx) = spawn_supervised_pair(
+            &proc,
+            &inst,
+            session_id.clone(),
+            LinkOptions {
+                orphan_policy: OrphanPolicy::Detach,
+                ..Default::default()
+            },
+            None,
+        )
+        .await;
+
         // Give the Link/Linked handshake time to complete before
         // issuing Unlink.
         tokio::time::sleep(Duration::from_millis(100)).await;
