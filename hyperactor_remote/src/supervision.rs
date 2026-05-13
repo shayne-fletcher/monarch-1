@@ -550,6 +550,7 @@ mod tests {
     #[derive(Clone, Debug, Serialize, Deserialize, Named, Bind, Unbind)]
     enum TestChildCommand {
         Fail,
+        Drain(String),
     }
     wirevalue::register_type!(TestChildCommand);
 
@@ -560,6 +561,7 @@ mod tests {
     #[derive(Debug)]
     enum TestChildAction {
         FailAfter(Duration),
+        DrainAfter(Duration, String),
     }
 
     #[derive(Debug)]
@@ -568,14 +570,28 @@ mod tests {
         ready: PortHandle<ActorAddr>,
         stopped: PortHandle<String>,
         action: Option<TestChildAction>,
+        drain_observer: Option<PortHandle<String>>,
+    }
+
+    impl TestChild {
+        fn with_drain_observer(mut self, port: PortHandle<String>) -> Self {
+            self.drain_observer = Some(port);
+            self
+        }
     }
 
     #[async_trait]
     impl Actor for TestChild {
         async fn init(&mut self, this: &Instance<Self>) -> anyhow::Result<()> {
             self.ready.send(this, this.self_addr().clone())?;
-            if let Some(TestChildAction::FailAfter(delay)) = self.action.take() {
-                this.self_message_with_delay(TestChildCommand::Fail, delay)?;
+            match self.action.take() {
+                Some(TestChildAction::FailAfter(delay)) => {
+                    this.self_message_with_delay(TestChildCommand::Fail, delay)?;
+                }
+                Some(TestChildAction::DrainAfter(delay, tag)) => {
+                    this.self_message_with_delay(TestChildCommand::Drain(tag), delay)?;
+                }
+                None => {}
             }
             Ok(())
         }
@@ -605,6 +621,11 @@ mod tests {
         ) -> anyhow::Result<()> {
             match message {
                 TestChildCommand::Fail => cx.kill("test child failed")?,
+                TestChildCommand::Drain(tag) => {
+                    if let Some(ref port) = self.drain_observer {
+                        port.send(cx, tag)?;
+                    }
+                }
             }
             Ok(())
         }
@@ -693,6 +714,7 @@ mod tests {
             ready,
             stopped,
             action,
+            drain_observer: None,
         }
     }
 
@@ -1521,6 +1543,105 @@ mod tests {
             .unwrap();
         worker.stop("test").unwrap();
         tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap();
+    }
+
+    // proc
+    // ├── client instance
+    // │   ├── ready port: receives the child address
+    // │   ├── stopped port: receives the child stop reason
+    // │   ├── drained port: receives the child's work tag
+    // │   └── events port: parent's supervision events (silent — Parent absorbs)
+    // ├── worker: Worker<TestChild> (with DrainAfter(10ms, "child work"))
+    // │   ├── child: TestChild
+    // │   └── worker-side link actor: KeepaliveWorker
+    // └── parent: Parent
+    //     └── supervisor: Supervisor (constructed with a known session id)
+    //         └── supervisor-side link actor: KeepaliveSupervisor
+    //
+    // End-to-end proxy for the worker->child DrainAndStop path:
+    // verifies that `Worker::stop_child` takes the `DrainAndStop`
+    // branch, `TestChild::handle_stop` takes `exit_after_drain`, and
+    // the child can process ordinary work before terminating. It does
+    // not force work to remain queued at the instant stop arrives;
+    // that stricter property would require a blocked-handler style
+    // test.
+    #[tokio::test]
+    async fn test_drain_and_stop_propagates_through_worker_after_child_work() {
+        let proc = Proc::local();
+        let (inst, _inst_hndl) = proc.instance("inst").unwrap();
+        let (ready, mut ready_rx) = inst.open_port::<ActorAddr>();
+        let (stopped, mut stopped_rx) = inst.open_port::<String>();
+        let (drained, mut drained_rx) = inst.open_port::<String>();
+        let (events, _events_rx) = inst.open_port::<ActorSupervisionEvent>();
+        let worker = proc
+            .spawn(
+                "worker",
+                Worker::new(
+                    test_child(
+                        ready,
+                        stopped,
+                        Some(TestChildAction::DrainAfter(
+                            Duration::from_millis(10),
+                            "child work".to_string(),
+                        )),
+                    )
+                    .with_drain_observer(drained),
+                ),
+            )
+            .unwrap();
+        let _child_addr = ready_rx.recv().await.unwrap();
+        let session_id = Uid::instance();
+        let parent = proc
+            .spawn(
+                "parent",
+                Parent {
+                    supervisor: Some(Supervisor::new_uid(
+                        worker.bind::<WorkerLike>(),
+                        KeepaliveLink::new(Duration::from_millis(5), Duration::from_secs(60)),
+                        LinkOptions::default(),
+                        session_id.clone(),
+                    )),
+                    events,
+                },
+            )
+            .unwrap();
+
+        // Wait for the self-scheduled child work.
+        let drained_tag = tokio::time::timeout(Duration::from_secs(5), drained_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(drained_tag, "child work");
+
+        // Now send Stop with DrainAndStop.
+        worker
+            .send(
+                &inst,
+                SupervisedWorker::Stop {
+                    session_id: session_id.clone(),
+                    mode: StopMode::DrainAndStop,
+                    reason: "drain test".to_string(),
+                },
+            )
+            .unwrap();
+
+        // Child reports the drain-stop reason via handle_stop.
+        let reason = tokio::time::timeout(Duration::from_secs(5), stopped_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reason, "drain test");
+
+        // Worker exits as a downstream effect of the child stop.
+        let status = tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap();
+        assert!(matches!(status, ActorStatus::Stopped(_)));
+
+        parent.stop("test").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), parent)
             .await
             .unwrap();
     }
