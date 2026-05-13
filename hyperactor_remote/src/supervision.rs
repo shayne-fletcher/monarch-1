@@ -531,6 +531,7 @@ impl<C: Actor> Worker<C> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use hyperactor::Bind;
@@ -541,6 +542,7 @@ mod tests {
     use hyperactor::mailbox::PortReceiver;
     use serde::Deserialize;
     use serde::Serialize;
+    use tokio::sync::Notify;
     use typeuri::Named;
 
     use super::*;
@@ -744,6 +746,54 @@ mod tests {
             )
             .unwrap();
         (child_addr, worker, parent, stopped_rx, events_rx)
+    }
+
+    #[derive(Debug)]
+    #[hyperactor::export(Link, SupervisedWorker)]
+    struct TestSlowWorker {
+        link_started: PortHandle<()>,
+        release_link: Arc<Notify>,
+        received_stop: PortHandle<String>,
+        session: Option<(hyperactor::Uid, PortRef<WorkerSupervisor>)>,
+    }
+
+    #[async_trait]
+    impl Actor for TestSlowWorker {
+        async fn init(&mut self, _this: &Instance<Self>) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Link> for TestSlowWorker {
+        async fn handle(&mut self, cx: &Context<Self>, message: Link) -> anyhow::Result<()> {
+            self.session = Some((message.session_id, message.supervisor));
+            self.link_started.send(cx, ())?;
+            self.release_link.notified().await;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Handler<SupervisedWorker> for TestSlowWorker {
+        async fn handle(
+            &mut self,
+            cx: &Context<Self>,
+            message: SupervisedWorker,
+        ) -> anyhow::Result<()> {
+            if let SupervisedWorker::Stop {
+                session_id, reason, ..
+            } = message
+            {
+                let Some((expected_session_id, supervisor)) = self.session.take() else {
+                    anyhow::bail!("stop received before link");
+                };
+                anyhow::ensure!(session_id == expected_session_id, "unexpected session id");
+                self.received_stop.send(cx, reason.clone())?;
+                let _ = supervisor.send(cx, WorkerSupervisor::Unlinked { session_id, reason });
+            }
+            Ok(())
+        }
     }
 
     // proc
@@ -1387,6 +1437,90 @@ mod tests {
 
         parent2.stop("test").unwrap();
         tokio::time::timeout(Duration::from_secs(5), parent2)
+            .await
+            .unwrap();
+    }
+
+    // proc
+    // ├── client instance
+    // │   ├── link_started port: signals when TestSlowWorker enters Handler<Link>
+    // │   ├── received_stop port: signals when Stop arrives at the worker side
+    // │   └── events port: parent's supervision events (Parent absorbs)
+    // ├── worker: TestSlowWorker (fake WorkerLike, never sends Linked)
+    // └── parent: Parent
+    //     └── supervisor: Supervisor (constructed with a known session id)
+    //         └── supervisor-side link actor: KeepaliveSupervisor
+    //
+    // Protocol-surface test for `Supervisor::pending_stop`. The
+    // fake worker records the session, signals link_started, and
+    // blocks on a Notify the test holds. The test calls
+    // `parent.stop` while the worker is still in Handler<Link>,
+    // then releases the worker. The pending_stop machinery must
+    // have already queued `SupervisedWorker::Stop` carrying the
+    // parent's reason and the matching session_id. The worker
+    // validates the session_id, sends the reason via
+    // `received_stop`, then emits a synthetic `Unlinked` so the
+    // supervisor exits cleanly via cx.exit (the Unlinked arm only
+    // checks session_id; it does not require a prior Linked).
+    #[tokio::test]
+    async fn test_stop_before_linked_propagates_via_pending_stop() {
+        let proc = Proc::local();
+        let (inst, _inst_hndl) = proc.instance("inst").unwrap();
+        let (link_started, mut link_started_rx) = inst.open_port::<()>();
+        let (received_stop, mut received_stop_rx) = inst.open_port::<String>();
+        let (events, _events_rx) = inst.open_port::<ActorSupervisionEvent>();
+        let release_link = Arc::new(Notify::new());
+        let worker = proc
+            .spawn(
+                "worker",
+                TestSlowWorker {
+                    link_started,
+                    release_link: Arc::clone(&release_link),
+                    received_stop,
+                    session: None,
+                },
+            )
+            .unwrap();
+        let session_id = Uid::instance();
+        let parent = proc
+            .spawn(
+                "parent",
+                Parent {
+                    supervisor: Some(Supervisor::new_uid(
+                        worker.bind::<WorkerLike>(),
+                        KeepaliveLink::new(Duration::from_millis(5), Duration::from_secs(60)),
+                        LinkOptions::default(),
+                        session_id.clone(),
+                    )),
+                    events,
+                },
+            )
+            .unwrap();
+
+        // Observe Link receipt - worker is now blocked in Handler<Link>.
+        tokio::time::timeout(Duration::from_secs(5), link_started_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // `Supervisor::handle_stop` does not call `cx.exit` — the
+        // only path that exits the supervisor is
+        // `WorkerSupervisor::Unlinked`. That's why `TestSlowWorker`
+        // emits `Unlinked` in its `Stop` handler.
+        parent.stop("test stop").unwrap();
+        release_link.notify_one();
+
+        let stop_reason = tokio::time::timeout(Duration::from_secs(5), received_stop_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stop_reason, "parent stopping");
+
+        tokio::time::timeout(Duration::from_secs(5), parent)
+            .await
+            .unwrap();
+        worker.stop("test").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), worker)
             .await
             .unwrap();
     }
