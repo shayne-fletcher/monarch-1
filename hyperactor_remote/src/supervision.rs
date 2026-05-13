@@ -1281,4 +1281,113 @@ mod tests {
             .await
             .unwrap();
     }
+
+    // proc
+    // ├── client instance
+    // │   ├── ready port: receives the child address (consumed by helper)
+    // │   ├── stopped port: not expected to fire
+    // │   ├── events1 port: parent1's supervision events (silent — first link succeeds)
+    // │   └── events2 port: parent2's supervision events (Failed with bail reason)
+    // ├── worker: Worker<TestChild>
+    // │   ├── child: TestChild
+    // │   └── worker-side link actor: KeepaliveWorker (under session_id1)
+    // ├── parent1: Parent
+    // │   └── supervisor1: Supervisor (session_id1) — wins the race, receives Linked
+    // └── parent2: Parent
+    //     └── supervisor2: Supervisor (session_id2) — rejected, bails
+    //
+    // Spawn worker + parent1 via the helper, sleep 100ms so the
+    // worker has `self.session = Some(...)` before parent2's Link
+    // arrives, then spawn a second parent whose Supervisor targets
+    // the same worker with a different session id. supervisor2 sends
+    // `Link`, the worker sees `self.session.is_some()` and replies
+    // with `WorkerSupervisor::LinkRejected { reason: "worker already
+    // linked" }` (`supervision.rs:181`). supervisor2's
+    // `Handler<WorkerSupervisor>` arm bails with "remote supervision
+    // link rejected: worker already linked", supervisor2 fails,
+    // parent2 observes that failure on events_rx2.
+    #[tokio::test]
+    async fn test_concurrent_link_rejects_second_supervisor() {
+        let proc = Proc::local();
+        let (inst, _inst_hndl) = proc.instance("inst").unwrap();
+        let session_id1 = Uid::instance();
+        let (_child_addr, worker, parent1, _stopped_rx, mut events_rx1) = spawn_supervised_pair(
+            &proc,
+            &inst,
+            session_id1.clone(),
+            LinkOptions::default(),
+            None,
+        )
+        .await;
+
+        // Let the first Link/Linked handshake complete so the worker
+        // has self.session.is_some() = true before parent2's Link
+        // arrives.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Spawn a second parent whose Supervisor targets the same
+        // worker with a different session id. Its Link will be
+        // rejected.
+        let session_id2 = Uid::instance();
+        let (events2, mut events_rx2) = inst.open_port::<ActorSupervisionEvent>();
+        let parent2 = proc
+            .spawn(
+                "parent2",
+                Parent {
+                    supervisor: Some(Supervisor::new_uid(
+                        worker.bind::<WorkerLike>(),
+                        KeepaliveLink::new(Duration::from_millis(5), Duration::from_secs(60)),
+                        LinkOptions::default(),
+                        session_id2.clone(),
+                    )),
+                    events: events2,
+                },
+            )
+            .unwrap();
+
+        // supervisor2 receives WorkerSupervisor::LinkRejected and
+        // bails with "remote supervision link rejected: worker
+        // already linked" (supervision.rs:181). parent2 observes that
+        // failure.
+        let event = tokio::time::timeout(Duration::from_secs(5), events_rx2.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event.actor_status, ActorStatus::Failed(_)),
+            "expected supervisor2 Failed event, got {:?}",
+            event.actor_status
+        );
+        assert!(
+            event
+                .to_string()
+                .contains("remote supervision link rejected: worker already linked"),
+            "expected LinkRejected bail string in failure message, got: {}",
+            event
+        );
+
+        // parent1's supervisor stays linked and healthy: its events
+        // port should not receive any failure within a short window.
+        let timed_out = tokio::time::timeout(Duration::from_millis(200), events_rx1.recv()).await;
+        assert!(
+            timed_out.is_err(),
+            "first supervisor should remain linked, no failure expected"
+        );
+
+        parent1.stop("test").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), parent1)
+            .await
+            .unwrap();
+        // Worker exits as a downstream effect of parent1's stop
+        // (cascading SupervisedWorker::Stop -> child stop -> Worker
+        // exit).
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap();
+
+        parent2.stop("test").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), parent2)
+            .await
+            .unwrap();
+    }
 }
