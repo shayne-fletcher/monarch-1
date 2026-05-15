@@ -409,6 +409,8 @@ mod tests {
     use crate::port::Port;
     use crate::proc::Proc;
     use crate::testing::ids::test_actor_id;
+    use crate::testing::pingpong::PingPongActor;
+    use crate::testing::pingpong::PingPongMessage;
 
     /// `Gateway::post_unchecked` demuxes inbound envelopes by
     /// destination `ProcId` to the matching attached proc's muxer,
@@ -507,6 +509,57 @@ mod tests {
                 .await
                 .is_err(),
             "beta_rx received a message after stranger post",
+        );
+    }
+
+    /// Ping-pong between two `PingPongActor`s on two procs that share
+    /// one gateway. Each cross-proc hop goes `Proc::post_unchecked` →
+    /// `Gateway::post_unchecked` demux → destination proc's muxer
+    /// directly, without touching the gateway's forwarder.
+    #[tokio::test]
+    async fn test_ping_pong_across_shared_gateway() {
+        let gateway = Gateway::isolated();
+
+        let alpha = Proc::builder()
+            .proc_id(ProcId::instance(Label::strip("alpha")))
+            .shared_gateway(gateway.clone())
+            .build()
+            .unwrap();
+        let beta = Proc::builder()
+            .proc_id(ProcId::instance(Label::strip("beta")))
+            .shared_gateway(gateway.clone())
+            .build()
+            .unwrap();
+
+        let (client, _) = alpha.instance("client").unwrap();
+        let (undeliverable_msg_tx, mut undeliverable_rx) =
+            client.open_port::<Undeliverable<MessageEnvelope>>();
+
+        let ping_actor = PingPongActor::new(Some(undeliverable_msg_tx.bind()), None, None);
+        let pong_actor = PingPongActor::new(Some(undeliverable_msg_tx.bind()), None, None);
+        let ping_handle = alpha.spawn::<PingPongActor>("ping", ping_actor).unwrap();
+        let pong_handle = beta.spawn::<PingPongActor>("pong", pong_actor).unwrap();
+
+        let (local_port, local_receiver) = client.open_once_port();
+
+        ping_handle
+            .send(
+                &client,
+                PingPongMessage(10, pong_handle.bind(), local_port.bind()),
+            )
+            .unwrap();
+
+        let received = time::timeout(Duration::from_secs(5), local_receiver.recv())
+            .await
+            .expect("local_receiver timed out")
+            .expect("ping pong did not complete");
+        assert!(received);
+
+        assert!(
+            time::timeout(Duration::from_millis(50), undeliverable_rx.recv())
+                .await
+                .is_err(),
+            "unexpected undeliverable during cross-proc ping-pong",
         );
     }
 }

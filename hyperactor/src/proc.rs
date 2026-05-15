@@ -1627,7 +1627,7 @@ impl MailboxSender for Proc {
         if self.is_local_delivery_target(&dest_proc) {
             self.state().proc_muxer.post(envelope, return_handle)
         } else {
-            self.forwarder().post(envelope, return_handle)
+            self.state().gateway.post(envelope, return_handle)
         }
     }
 
