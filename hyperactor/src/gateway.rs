@@ -389,3 +389,124 @@ impl crate::mailbox::MailboxSender for Gateway {
         Gateway::flush(self).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use hyperactor_config::Flattrs;
+    use tokio::time;
+
+    use super::*;
+    use crate::Label;
+    use crate::mailbox::MailboxSender;
+    use crate::mailbox::PortLocation;
+    use crate::mailbox::monitored_return_handle;
+    use crate::port::Port;
+    use crate::proc::Proc;
+    use crate::testing::ids::test_actor_id;
+
+    /// `Gateway::post_unchecked` demuxes inbound envelopes by
+    /// destination `ProcId` to the matching attached proc's muxer,
+    /// and falls through to the configured forwarder for unknown
+    /// destinations. Attached procs only receive envelopes addressed
+    /// to them — a stranger-addressed envelope does not leak to local
+    /// receivers.
+    #[tokio::test]
+    async fn test_gateway_post_demuxes_by_proc_id() {
+        #[derive(Clone)]
+        struct CountingSender(Arc<AtomicUsize>);
+
+        #[async_trait]
+        impl MailboxSender for CountingSender {
+            fn post_unchecked(
+                &self,
+                _envelope: MessageEnvelope,
+                _return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
+            ) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let forwarded = Arc::new(AtomicUsize::new(0));
+        let gateway = Gateway::configured(
+            channel::reserve_local_addr().into(),
+            BoxedMailboxSender::new(CountingSender(forwarded.clone())),
+        );
+
+        let alpha = Proc::builder()
+            .proc_id(ProcId::instance(Label::strip("alpha")))
+            .shared_gateway(gateway.clone())
+            .build()
+            .unwrap();
+        let beta = Proc::builder()
+            .proc_id(ProcId::instance(Label::strip("beta")))
+            .shared_gateway(gateway.clone())
+            .build()
+            .unwrap();
+
+        let (alpha_client, _) = alpha.instance("client").unwrap();
+        let (alpha_port, mut alpha_rx) = alpha_client.bind_handler_port::<u64>();
+        let PortLocation::Bound(alpha_dest) = alpha_port.location() else {
+            panic!("alpha handler port must be bound");
+        };
+
+        let (beta_client, _) = beta.instance("client").unwrap();
+        let (beta_port, mut beta_rx) = beta_client.bind_handler_port::<u64>();
+        let PortLocation::Bound(beta_dest) = beta_port.location() else {
+            panic!("beta handler port must be bound");
+        };
+
+        let sender = test_actor_id("sender", "client");
+
+        gateway.post(
+            MessageEnvelope::serialize(sender.clone(), alpha_dest.clone(), &111u64, Flattrs::new())
+                .unwrap(),
+            monitored_return_handle(),
+        );
+        let received = time::timeout(Duration::from_secs(5), alpha_rx.recv())
+            .await
+            .expect("alpha_rx timed out")
+            .expect("alpha_rx closed");
+        assert_eq!(received, 111);
+        assert_eq!(forwarded.load(Ordering::SeqCst), 0);
+
+        gateway.post(
+            MessageEnvelope::serialize(sender.clone(), beta_dest.clone(), &222u64, Flattrs::new())
+                .unwrap(),
+            monitored_return_handle(),
+        );
+        let received = time::timeout(Duration::from_secs(5), beta_rx.recv())
+            .await
+            .expect("beta_rx timed out")
+            .expect("beta_rx closed");
+        assert_eq!(received, 222);
+        assert_eq!(forwarded.load(Ordering::SeqCst), 0);
+
+        let stranger_proc = ProcAddr::unique(ChannelAddr::Local(9999), "stranger");
+        let stranger_dest = stranger_proc
+            .actor_addr("ghost")
+            .port_addr(Port::from(0u64));
+        gateway.post(
+            MessageEnvelope::serialize(sender, stranger_dest, &333u64, Flattrs::new()).unwrap(),
+            monitored_return_handle(),
+        );
+        assert_eq!(forwarded.load(Ordering::SeqCst), 1);
+        assert!(
+            time::timeout(Duration::from_millis(50), alpha_rx.recv())
+                .await
+                .is_err(),
+            "alpha_rx received a message after stranger post",
+        );
+        assert!(
+            time::timeout(Duration::from_millis(50), beta_rx.recv())
+                .await
+                .is_err(),
+            "beta_rx received a message after stranger post",
+        );
+    }
+}
