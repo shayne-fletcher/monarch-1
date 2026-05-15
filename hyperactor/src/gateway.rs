@@ -637,4 +637,31 @@ mod tests {
             assert!(procs.get(&proc_id).is_none());
         }
     }
+
+    /// `Gateway::attach` panics when a second proc with the same
+    /// `ProcId` is built against the same gateway while the first is
+    /// still alive. The check is in `Gateway::attach`, invoked from
+    /// `Proc::builder().build()` via `Proc::from_parts_unchecked`.
+    #[test]
+    #[should_panic(expected = "gateway already has a live proc")]
+    fn test_gateway_attach_panics_on_duplicate_live_proc() {
+        let gateway = Gateway::isolated();
+        let proc_id = ProcId::instance(Label::strip("alpha"));
+
+        // Hold the first proc in a binding so it stays alive across
+        // the second build; if the first were dropped, the gateway's
+        // stale-entry path would silently replace it instead of
+        // panicking.
+        let _first = Proc::builder()
+            .proc_id(proc_id.clone())
+            .shared_gateway(gateway.clone())
+            .build()
+            .unwrap();
+
+        let _second = Proc::builder()
+            .proc_id(proc_id)
+            .shared_gateway(gateway.clone())
+            .build()
+            .unwrap();
+    }
 }
