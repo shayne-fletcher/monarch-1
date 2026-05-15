@@ -490,6 +490,25 @@ mod tests {
     )]
     struct OtherJoinerRef;
 
+    #[derive(
+        Clone,
+        Debug,
+        Serialize,
+        Deserialize,
+        Named,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        Bind,
+        Unbind
+    )]
+    enum MultiJoinerRef {
+        One,
+        Two,
+        Three,
+    }
+
     #[tokio::test]
     async fn test_create_delivers_join_to_both_sides() {
         let proc = Proc::isolated();
@@ -547,6 +566,69 @@ mod tests {
             JoinResult::Rejected {
                 reason: "token already joined".to_string()
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multi_token_accepts_every_join() {
+        let proc = Proc::isolated();
+        let (creator, _creator_hndl) = proc.instance("creator").unwrap();
+        let (creator_joined, mut creator_joined_rx) = creator.open_port::<Joined<MultiJoinerRef>>();
+        let token = create(
+            &creator,
+            CreatorRef,
+            creator_joined.bind(),
+            Options {
+                policy: Policy::Multi,
+            },
+        )
+        .unwrap();
+
+        let (joiner1, _joiner1_handle) = proc.instance("joiner1").unwrap();
+        let (joiner2, _joiner2_handle) = proc.instance("joiner2").unwrap();
+        let (joiner3, _joiner3_handle) = proc.instance("joiner3").unwrap();
+
+        let (r1, mut r1_rx) = joiner1.open_port::<JoinResult<CreatorRef>>();
+        let (r2, mut r2_rx) = joiner2.open_port::<JoinResult<CreatorRef>>();
+        let (r3, mut r3_rx) = joiner3.open_port::<JoinResult<CreatorRef>>();
+
+        token
+            .join(&joiner1, MultiJoinerRef::One, r1.bind())
+            .unwrap();
+        token
+            .join(&joiner2, MultiJoinerRef::Two, r2.bind())
+            .unwrap();
+        token
+            .join(&joiner3, MultiJoinerRef::Three, r3.bind())
+            .unwrap();
+
+        let mut joined = vec![
+            creator_joined_rx.recv().await.unwrap().peer,
+            creator_joined_rx.recv().await.unwrap().peer,
+            creator_joined_rx.recv().await.unwrap().peer,
+        ];
+        joined.sort();
+
+        assert_eq!(
+            joined,
+            vec![
+                MultiJoinerRef::One,
+                MultiJoinerRef::Two,
+                MultiJoinerRef::Three,
+            ]
+        );
+
+        assert_eq!(
+            r1_rx.recv().await.unwrap(),
+            JoinResult::Joined { peer: CreatorRef }
+        );
+        assert_eq!(
+            r2_rx.recv().await.unwrap(),
+            JoinResult::Joined { peer: CreatorRef }
+        );
+        assert_eq!(
+            r3_rx.recv().await.unwrap(),
+            JoinResult::Joined { peer: CreatorRef }
         );
     }
 
