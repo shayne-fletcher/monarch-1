@@ -715,4 +715,33 @@ mod tests {
         rendezvous.stop("test").unwrap();
         rendezvous.await;
     }
+
+    #[test]
+    fn test_token_from_str_rejects_corrupt_base64() {
+        let result: Result<Token<CreatorRef, JoinerRef>, _> = "%%%".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_token_from_str_rejects_invalid_json() {
+        let encoded = BASE64_STANDARD.encode(b"not json at all");
+        let result: Result<Token<CreatorRef, JoinerRef>, _> = encoded.parse();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_token_from_str_rejects_mismatched_type_uris() {
+        let proc = Proc::isolated();
+        let rendezvous = proc.spawn("rendezvous", RendezvousStub).unwrap();
+        let token = Token::<CreatorRef, JoinerRef>::new(
+            rendezvous.bind::<RendezvousLike<CreatorRef, JoinerRef>>(),
+        );
+
+        let encoded = token.encode().unwrap();
+        let result: Result<Token<CreatorRef, OtherJoinerRef>, _> = encoded.parse();
+        assert!(result.is_err());
+
+        rendezvous.stop("test").unwrap();
+        rendezvous.await;
+    }
 }
