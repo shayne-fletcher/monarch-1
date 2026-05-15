@@ -675,4 +675,76 @@ mod tests {
             .build()
             .unwrap();
     }
+
+    /// `Gateway::flush()` propagates the flush to each attached
+    /// proc's muxer (which in turn flushes its bound senders) and
+    /// then to the gateway's forwarder. Verified by binding a
+    /// `FlushCountingSender` into each proc's muxer and asserting all
+    /// three counters (alpha's, beta's, the forwarder's) increment
+    /// exactly once.
+    #[tokio::test]
+    async fn test_gateway_flush_propagates_to_attached_procs() {
+        #[derive(Clone)]
+        struct FlushCountingSender(Arc<AtomicUsize>);
+
+        #[async_trait]
+        impl MailboxSender for FlushCountingSender {
+            fn post_unchecked(
+                &self,
+                _envelope: MessageEnvelope,
+                _return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
+            ) {
+                // Not exercised by this test.
+            }
+
+            async fn flush(&self) -> Result<(), anyhow::Error> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let alpha_flushed = Arc::new(AtomicUsize::new(0));
+        let beta_flushed = Arc::new(AtomicUsize::new(0));
+        let forwarder_flushed = Arc::new(AtomicUsize::new(0));
+
+        let gateway = Gateway::configured(
+            channel::reserve_local_addr().into(),
+            BoxedMailboxSender::new(FlushCountingSender(forwarder_flushed.clone())),
+        );
+
+        let alpha = Proc::builder()
+            .proc_id(ProcId::instance(Label::strip("alpha")))
+            .shared_gateway(gateway.clone())
+            .build()
+            .unwrap();
+        let beta = Proc::builder()
+            .proc_id(ProcId::instance(Label::strip("beta")))
+            .shared_gateway(gateway.clone())
+            .build()
+            .unwrap();
+
+        // Bind a flush-counting probe into each proc's muxer. Use a
+        // fabricated actor id under the proc — no actor is spawned
+        // there; the muxer just routes flushes to whatever's bound.
+        let alpha_probe = alpha.proc_addr().actor_addr("alpha_probe").id().clone();
+        let beta_probe = beta.proc_addr().actor_addr("beta_probe").id().clone();
+        assert!(
+            alpha
+                .muxer()
+                .bind(alpha_probe, FlushCountingSender(alpha_flushed.clone()))
+        );
+        assert!(
+            beta.muxer()
+                .bind(beta_probe, FlushCountingSender(beta_flushed.clone()))
+        );
+
+        // Sanity: two procs attached, both live.
+        assert_eq!(gateway.inner.procs.read().unwrap().len(), 2);
+
+        gateway.flush().await.unwrap();
+
+        assert_eq!(alpha_flushed.load(Ordering::SeqCst), 1);
+        assert_eq!(beta_flushed.load(Ordering::SeqCst), 1);
+        assert_eq!(forwarder_flushed.load(Ordering::SeqCst), 1);
+    }
 }
