@@ -463,7 +463,7 @@ mod tests {
             panic!("beta handler port must be bound");
         };
 
-        let sender = test_actor_id("sender", "client");
+        let sender = test_actor_id("test", "sender");
 
         gateway.post(
             MessageEnvelope::serialize(sender.clone(), alpha_dest.clone(), &111u64, Flattrs::new())
@@ -619,7 +619,7 @@ mod tests {
 
         gateway.post(
             MessageEnvelope::serialize(
-                test_actor_id("sender", "client"),
+                test_actor_id("test", "sender"),
                 dest,
                 &42u64,
                 Flattrs::new(),
@@ -762,7 +762,7 @@ mod tests {
         let dest_proc = ProcAddr::unique(ChannelAddr::Local(1234), "stranger");
         let dest = dest_proc.actor_addr("ghost").port_addr(Port::from(0u64));
         let envelope = MessageEnvelope::serialize(
-            test_actor_id("sender", "client"),
+            test_actor_id("test", "sender"),
             dest.clone(),
             &42u64,
             Flattrs::new(),
@@ -787,5 +787,63 @@ mod tests {
             "expected BrokenLink bounce, got {:?}",
             envelope.errors(),
         );
+    }
+
+    /// `Gateway::attach` silently replaces a stale `WeakProc` entry
+    /// (one whose strong reference has dropped). No panic; the new
+    /// proc takes over routing for that `ProcId`.
+    #[tokio::test]
+    async fn test_gateway_attach_silently_replaces_dead_entry() {
+        let gateway = Gateway::isolated();
+        let proc_id = ProcId::instance(Label::strip("alpha"));
+
+        let first = Proc::builder()
+            .proc_id(proc_id.clone())
+            .shared_gateway(gateway.clone())
+            .build()
+            .unwrap();
+        drop(first);
+
+        // The entry is still present but stale (upgrade fails).
+        {
+            let procs = gateway.inner.procs.read().unwrap();
+            assert_eq!(procs.len(), 1);
+            assert!(
+                procs.get(&proc_id).and_then(WeakProc::upgrade).is_none(),
+                "expected first proc to remain only as a stale WeakProc entry",
+            );
+        }
+
+        // Attach a second proc with the same id. The dead WeakProc
+        // entry is silently replaced; no panic; map still has exactly
+        // one entry.
+        let second = Proc::builder()
+            .proc_id(proc_id.clone())
+            .shared_gateway(gateway.clone())
+            .build()
+            .unwrap();
+        assert_eq!(gateway.inner.procs.read().unwrap().len(), 1);
+
+        // Verify the new proc is reachable via the gateway.
+        let (client, _) = second.instance("client").unwrap();
+        let (port, mut rx) = client.bind_handler_port::<u64>();
+        let dest = port.bind().port_addr().clone();
+
+        gateway.post(
+            MessageEnvelope::serialize(
+                test_actor_id("test", "sender"),
+                dest,
+                &42u64,
+                Flattrs::new(),
+            )
+            .unwrap(),
+            monitored_return_handle(),
+        );
+
+        let received = time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("rx timed out")
+            .expect("rx closed");
+        assert_eq!(received, 42);
     }
 }
