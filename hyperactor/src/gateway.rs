@@ -736,4 +736,56 @@ mod tests {
         assert_eq!(beta_flushed.load(Ordering::SeqCst), 1);
         assert_eq!(forwarder_flushed.load(Ordering::SeqCst), 1);
     }
+
+    /// After the gateway is dropped, `WeakGateway::post_unchecked`
+    /// (the sender used by gateway-served mailbox tasks) bounces
+    /// envelopes as `BrokenLink` rather than panicking or hanging.
+    /// Tested directly against `WeakGateway` — no channel server, no
+    /// task lifecycle — because the bounce is in-process and
+    /// observable at the caller's return port without going through
+    /// any serialize/dispatch path.
+    #[tokio::test]
+    async fn test_weak_gateway_bounces_broken_link_after_drop() {
+        let gateway = Gateway::isolated();
+        let weak = WeakGateway::new(&gateway);
+        drop(gateway);
+
+        // Scratch proc just to host the return port.
+        let scratch = Proc::isolated();
+        let (scratch_client, _) = scratch.instance("return").unwrap();
+        let (return_handle, mut return_rx) =
+            scratch_client.open_port::<Undeliverable<MessageEnvelope>>();
+
+        // Fabricate a destination — its contents don't matter; the
+        // bounce happens at WeakGateway::upgrade before any demux
+        // would run.
+        let dest_proc = ProcAddr::unique(ChannelAddr::Local(1234), "stranger");
+        let dest = dest_proc.actor_addr("ghost").port_addr(Port::from(0u64));
+        let envelope = MessageEnvelope::serialize(
+            test_actor_id("sender", "client"),
+            dest.clone(),
+            &42u64,
+            Flattrs::new(),
+        )
+        .unwrap();
+
+        // Post directly through the WeakGateway. Upgrade fails →
+        // envelope.undeliverable(BrokenLink, return_handle) sends
+        // synchronously to our return port.
+        weak.post(envelope, return_handle);
+
+        let Undeliverable(envelope) = time::timeout(Duration::from_secs(5), return_rx.recv())
+            .await
+            .expect("return_rx timed out")
+            .expect("return_rx closed");
+        assert_eq!(envelope.dest(), &dest);
+        assert!(
+            envelope
+                .errors()
+                .iter()
+                .any(|e| matches!(e, DeliveryError::BrokenLink(_))),
+            "expected BrokenLink bounce, got {:?}",
+            envelope.errors(),
+        );
+    }
 }
