@@ -82,7 +82,7 @@ py_global!(
 );
 py_global!(make_future, "monarch._src.actor.future", "Future");
 
-fn unpickle_from_part<'py>(py: Python<'py>, part: Part) -> PyResult<Bound<'py, PyAny>> {
+fn unpickle_from_part(py: Python<'_>, part: Part) -> PyResult<Bound<'_, PyAny>> {
     unpickle(
         py,
         FrozenBuffer {
