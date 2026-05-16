@@ -846,4 +846,47 @@ mod tests {
             .expect("rx closed");
         assert_eq!(received, 42);
     }
+
+    /// `Gateway::remove_server` correctly unwinds `active_servers`
+    /// when handles stop out of order. Three concurrent servers; stop
+    /// the middle one, then the last, then the first, asserting the
+    /// gateway's `default_location` at each step. Final empty state
+    /// reverts to the construction-time fallback.
+    #[tokio::test]
+    async fn test_gateway_serve_stop_unwinds_in_any_order() {
+        let gateway = Gateway::isolated();
+        let fallback = gateway.default_location();
+
+        let s1 = Gateway::serve(&gateway, ChannelAddr::any(ChannelTransport::Local)).unwrap();
+        let loc1 = gateway.default_location();
+        let s2 = Gateway::serve(&gateway, ChannelAddr::any(ChannelTransport::Local)).unwrap();
+        let loc2 = gateway.default_location();
+        let s3 = Gateway::serve(&gateway, ChannelAddr::any(ChannelTransport::Local)).unwrap();
+        let loc3 = gateway.default_location();
+
+        // First serve(any) reuses the gateway's reserved fallback
+        // address (see resolve_serve_addr); subsequent serves
+        // allocate fresh ports.
+        assert_eq!(loc1, fallback);
+        assert_ne!(loc1, loc2);
+        assert_ne!(loc2, loc3);
+        assert_ne!(loc1, loc3);
+
+        // Middle handle stops first: default stays at loc3 (still the
+        // last entry in active_servers).
+        s2.stop("test");
+        s2.await.unwrap().unwrap();
+        assert_eq!(gateway.default_location(), loc3);
+
+        // Last handle stops: default falls back to loc1.
+        s3.stop("test");
+        s3.await.unwrap().unwrap();
+        assert_eq!(gateway.default_location(), loc1);
+
+        // Final handle stops: default reverts to the
+        // construction-time fallback.
+        s1.stop("test");
+        s1.await.unwrap().unwrap();
+        assert_eq!(gateway.default_location(), fallback);
+    }
 }
