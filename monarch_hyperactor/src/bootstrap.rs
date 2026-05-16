@@ -113,9 +113,9 @@ pub fn run_worker_loop_forever(_py: Python<'_>, address: &str) -> PyResult<PyPyt
 }
 
 #[pyfunction]
-pub fn attach_to_workers<'py>(
+pub fn attach_to_workers(
     instance: &crate::context::PyInstance,
-    workers: Vec<Bound<'py, PyPythonTask>>,
+    workers: Vec<Bound<'_, PyPythonTask>>,
     name: Option<&str>,
 ) -> PyResult<PyPythonTask> {
     let tasks = workers

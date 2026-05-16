@@ -523,7 +523,7 @@ impl Drop for LoggingMeshClient {
 
 /// Turns a python exception into a string with a traceback. If the traceback doesn't
 /// exist or can't be formatted, returns just the exception message.
-pub(crate) fn format_traceback<'py>(py: Python<'py>, err: &PyErr) -> String {
+pub(crate) fn format_traceback(py: Python<'_>, err: &PyErr) -> String {
     let traceback = err.traceback(py);
     if traceback.is_some() {
         let inner = || -> PyResult<String> {
@@ -544,8 +544,8 @@ pub(crate) fn format_traceback<'py>(py: Python<'py>, err: &PyErr) -> String {
 }
 
 #[pyfunction]
-fn log_endpoint_exception<'py>(
-    py: Python<'py>,
+fn log_endpoint_exception(
+    py: Python<'_>,
     e: Py<PyAny>,
     endpoint: Py<PyAny>,
     actor_id: PyActorAddr,
