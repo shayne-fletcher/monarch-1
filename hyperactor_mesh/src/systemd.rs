@@ -1310,7 +1310,7 @@ mod tests {
             conn: &'a Connection,
             name: String,
         }
-        impl<'a> Cleanup<'a> {
+        impl Cleanup<'_> {
             async fn run(self) {
                 let _ = stop_unit_best_effort(self.conn, &self.name).await;
             }

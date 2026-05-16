@@ -3027,10 +3027,10 @@ mod advertised_host {
 
         // Candidate 2: host IPv6 address (Meta environments).
         #[cfg(fbcode_build)]
-        if let Ok(ip_str) = hyperactor::meta::host_ip::host_ipv6_address() {
-            if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                candidates.push((format!("[{}]", ip), SanIdentity::Ip(ip)));
-            }
+        if let Ok(ip_str) = hyperactor::meta::host_ip::host_ipv6_address()
+            && let Ok(ip) = ip_str.parse::<IpAddr>()
+        {
+            candidates.push((format!("[{}]", ip), SanIdentity::Ip(ip)));
         }
 
         let cert_sans = load_cert_sans();
