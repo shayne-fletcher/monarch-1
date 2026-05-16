@@ -378,6 +378,10 @@ wirevalue::register_type!(AttachRequest);
 /// Wire protocol for the host -> client direction on a duplex attach
 /// connection.
 #[derive(Debug, Serialize, Deserialize, typeuri::Named)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "wire-protocol enum; boxing Envelope ripples through all channel/networking construction and destructure sites and needs a wire-compatibility review — separate diff"
+)]
 pub enum Host2Client {
     /// First message: identity assignment from the host.
     Bootstrap(BootstrapAssignment),
