@@ -147,6 +147,10 @@ pub struct WorkspaceConfig {
 }
 
 #[derive(Handler, Clone, Serialize, Deserialize, Debug, Named, Bind, Unbind)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "actor message enum with Handler/Bind/Unbind derives; boxing fields ripples into handler call sites and may require derive-macro changes — separate diff"
+)]
 pub enum CodeSyncMessage {
     Sync {
         workspace: WorkspaceLocation,
