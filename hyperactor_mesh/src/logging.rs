@@ -314,6 +314,10 @@ pub enum LogMessage {
     HandleClient,
     RefClient
 )]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "actor message enum with Handler/HandleClient/RefClient derives; boxing fields ripples into client/handler call sites and may require derive-macro changes — separate diff"
+)]
 pub enum LogClientMessage {
     SetAggregate {
         /// The time window in seconds to aggregate logs. If None, aggregation is disabled.
