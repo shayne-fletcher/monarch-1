@@ -562,4 +562,79 @@ mod tests {
             "unexpected undeliverable during cross-proc ping-pong",
         );
     }
+
+    /// `Gateway::post_unchecked` removes stale `WeakProc` entries
+    /// lazily on the post path. Dropping a proc leaves a dead
+    /// `WeakProc` in the gateway's `procs` map; the next post to that
+    /// proc's id falls through to the forwarder and removes the stale
+    /// entry.
+    #[tokio::test]
+    async fn test_gateway_post_removes_stale_weak_procs() {
+        #[derive(Clone)]
+        struct CountingSender(Arc<AtomicUsize>);
+
+        #[async_trait]
+        impl MailboxSender for CountingSender {
+            fn post_unchecked(
+                &self,
+                _envelope: MessageEnvelope,
+                _return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
+            ) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let forwarded = Arc::new(AtomicUsize::new(0));
+        let gateway = Gateway::configured(
+            channel::reserve_local_addr().into(),
+            BoxedMailboxSender::new(CountingSender(forwarded.clone())),
+        );
+
+        let proc = Proc::builder()
+            .proc_id(ProcId::instance(Label::strip("alpha")))
+            .shared_gateway(gateway.clone())
+            .build()
+            .unwrap();
+        let proc_id = proc.proc_id().clone();
+        let dest = proc
+            .proc_addr()
+            .actor_addr("worker")
+            .port_addr(Port::from(0u64));
+
+        // Sanity: proc is attached.
+        assert_eq!(gateway.inner.procs.read().unwrap().len(), 1);
+
+        drop(proc);
+
+        // The entry is still present, but it is now a *stale* WeakProc:
+        // upgrade must fail.
+        {
+            let procs = gateway.inner.procs.read().unwrap();
+            assert_eq!(procs.len(), 1);
+            assert!(
+                procs.get(&proc_id).and_then(WeakProc::upgrade).is_none(),
+                "expected dropped proc to remain only as a stale WeakProc entry",
+            );
+        }
+
+        gateway.post(
+            MessageEnvelope::serialize(
+                test_actor_id("sender", "client"),
+                dest,
+                &42u64,
+                Flattrs::new(),
+            )
+            .unwrap(),
+            monitored_return_handle(),
+        );
+
+        // Envelope fell through to the forwarder; stale entry
+        // removed.
+        assert_eq!(forwarded.load(Ordering::SeqCst), 1);
+        {
+            let procs = gateway.inner.procs.read().unwrap();
+            assert_eq!(procs.len(), 0);
+            assert!(procs.get(&proc_id).is_none());
+        }
+    }
 }
