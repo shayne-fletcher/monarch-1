@@ -2979,6 +2979,7 @@ mod tests {
     /// - `backend_addr`: a mailbox address served by the **parent
     ///   (host) proc** here; the spawned bootstrap process dials this
     ///   so its messages route via the host.
+    #[cfg(fbcode_build)]
     async fn make_proc_id_and_backend_addr(
         instance: &hyperactor::Instance<()>,
         _tag: &str,
@@ -3168,6 +3169,7 @@ mod tests {
     }
 
     impl DummyLauncher {
+        #[allow(dead_code)]
         fn new(marker: u64) -> Self {
             Self { marker }
         }

@@ -513,10 +513,13 @@ mod tests {
 
     use hyperactor::testing::ids::test_actor_id;
     use hyperactor_config::Flattrs;
+    #[cfg(fbcode_build)]
     use ndslice::view::Extent;
+    #[cfg(fbcode_build)]
     use timed_test::async_timed_test;
 
     use super::*;
+    #[cfg(fbcode_build)]
     use crate::testing;
 
     /// Helper: send an `Undeliverable<MessageEnvelope>` to the global
