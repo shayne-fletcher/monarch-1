@@ -1564,7 +1564,7 @@ mod tests {
         let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
         let (client, _client_handle) = client_proc.client("client").unwrap();
 
-        let id = ResourceId::unique(Label::new("proc1").unwrap());
+        let id = ResourceId::instance(Label::new("proc1").unwrap());
 
         // First, create the proc, then query its state:
 
@@ -1624,7 +1624,7 @@ mod tests {
         let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
         let (client, _client_handle) = client_proc.client("client").unwrap();
 
-        let id = ResourceId::unique(Label::new("proc1").unwrap());
+        let id = ResourceId::instance(Label::new("proc1").unwrap());
         host_agent
             .create_or_update(
                 &client,
@@ -1674,7 +1674,7 @@ mod tests {
         let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
         let (client, _client_handle) = client_proc.client("client").unwrap();
 
-        let id = ResourceId::unique(Label::new("proc1").unwrap());
+        let id = ResourceId::instance(Label::new("proc1").unwrap());
         host_agent
             .create_or_update(
                 &client,
@@ -1730,7 +1730,7 @@ mod tests {
         let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
         let (client, _client_handle) = client_proc.client("client").unwrap();
 
-        let id = ResourceId::unique(Label::new("proc1").unwrap());
+        let id = ResourceId::instance(Label::new("proc1").unwrap());
 
         // Wait for Running on a proc that doesn't exist yet.
         let (port, mut rx) = client.open_port::<crate::StatusOverlay>();
@@ -1778,10 +1778,10 @@ mod tests {
         let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
         let (client, _client_handle) = client_proc.client("client").unwrap();
 
-        let mesh_a = HostMeshId::unique(Label::new("mesh-a").unwrap());
-        let mesh_b = HostMeshId::unique(Label::new("mesh-b").unwrap());
-        let proc_a_id = ResourceId::unique(Label::new("proc-a").unwrap());
-        let proc_b_id = ResourceId::unique(Label::new("proc-b").unwrap());
+        let mesh_a = HostMeshId::instance(Label::new("mesh-a").unwrap());
+        let mesh_b = HostMeshId::instance(Label::new("mesh-b").unwrap());
+        let proc_a_id = ResourceId::instance(Label::new("proc-a").unwrap());
+        let proc_b_id = ResourceId::instance(Label::new("proc-b").unwrap());
 
         // Create proc_a belonging to mesh_a.
         let spec_a = ProcSpec {
@@ -1881,10 +1881,10 @@ mod tests {
         let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
         let (client, _client_handle) = client_proc.client("client").unwrap();
 
-        let mesh_a = HostMeshId::unique(Label::new("mesh-a").unwrap());
-        let mesh_b = HostMeshId::unique(Label::new("mesh-b").unwrap());
-        let proc_a_id = ResourceId::unique(Label::new("proc-a").unwrap());
-        let proc_b_id = ResourceId::unique(Label::new("proc-b").unwrap());
+        let mesh_a = HostMeshId::instance(Label::new("mesh-a").unwrap());
+        let mesh_b = HostMeshId::instance(Label::new("mesh-b").unwrap());
+        let proc_a_id = ResourceId::instance(Label::new("proc-a").unwrap());
+        let proc_b_id = ResourceId::instance(Label::new("proc-b").unwrap());
 
         let spec_a = ProcSpec {
             host_mesh_id: Some(mesh_a),
@@ -1969,7 +1969,7 @@ mod tests {
 
         // Spawn a proc so the host_agent processes at least one
         // CreateOrUpdate message, which goes through the work queue.
-        let name = ResourceId::unique(Label::new("qd_test_proc").unwrap());
+        let name = ResourceId::instance(Label::new("qd_test_proc").unwrap());
         host_agent
             .create_or_update(
                 &client,

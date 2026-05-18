@@ -1330,7 +1330,7 @@ mod tests {
             .spawn(instance, "test", Extent::unity(), None, None)
             .await
             .unwrap();
-        let child_name = ActorMeshId::unique(Label::new("child").unwrap());
+        let child_name = ActorMeshId::instance(Label::new("child").unwrap());
 
         // Need to use a wrapper as there's no way to customize the handler for MeshFailure
         // on the client instance. The client would just panic with the message.
@@ -1440,7 +1440,7 @@ mod tests {
             .spawn(instance, "test2", Extent::unity(), None, None)
             .await
             .unwrap();
-        let child_name = ActorMeshId::unique(Label::new("child").unwrap());
+        let child_name = ActorMeshId::instance(Label::new("child").unwrap());
 
         // Need to use a wrapper as there's no way to customize the handler for MeshFailure
         // on the client instance. The client would just panic with the message.
@@ -1538,7 +1538,7 @@ mod tests {
                 .spawn(instance, "test", Extent::unity(), None, None)
                 .await
                 .unwrap();
-            let child_name = ActorMeshId::unique(Label::new("child").unwrap());
+            let child_name = ActorMeshId::instance(Label::new("child").unwrap());
 
             // Need to use a wrapper as there's no way to customize the handler for MeshFailure
             // on the client instance. The client would just panic with the message.
