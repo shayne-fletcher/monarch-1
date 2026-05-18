@@ -1923,23 +1923,36 @@ impl FromStr for HostMeshRef {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(fbcode_build)]
     use std::assert_matches;
 
+    #[cfg(fbcode_build)]
     use hyperactor::config::ENABLE_DEST_ACTOR_REORDERING_BUFFER;
+    #[cfg(fbcode_build)]
     use hyperactor_config::attrs::Attrs;
     use ndslice::ViewExt;
     use ndslice::extent;
+    #[cfg(fbcode_build)]
     use timed_test::assert_no_process_leak;
+    #[cfg(fbcode_build)]
     use tokio::process::Command;
 
     use super::*;
+    #[cfg(fbcode_build)]
     use crate::ActorMesh;
+    #[cfg(fbcode_build)]
     use crate::Bootstrap;
+    #[cfg(fbcode_build)]
     use crate::bootstrap::MESH_TAIL_LOG_LINES;
+    #[cfg(fbcode_build)]
     use crate::comm::ENABLE_NATIVE_V1_CASTING;
+    #[cfg(fbcode_build)]
     use crate::resource::Status;
+    #[cfg(fbcode_build)]
     use crate::testactor;
+    #[cfg(fbcode_build)]
     use crate::testactor::GetConfigAttrs;
+    #[cfg(fbcode_build)]
     use crate::testactor::SetConfigAttrs;
     use crate::testing;
 

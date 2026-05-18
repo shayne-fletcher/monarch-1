@@ -3888,7 +3888,10 @@ mod tests {
         let (_signal_port, _signal_rx) = client.bind_handler_port::<Signal>();
     }
 
-    #[allow(clippy::await_holding_invalid_type)]
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "tracing_test::traced_test macro expansion holds tracing::span::Entered across awaits; can't be fixed in our code"
+    )]
     #[tracing_test::traced_test]
     #[async_timed_test(timeout_secs = 30)]
     async fn test_spawn_actor() {
@@ -4416,7 +4419,10 @@ mod tests {
         );
     }
 
-    #[allow(clippy::await_holding_invalid_type)]
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "tracing_test::traced_test macro expansion holds tracing::span::Entered across awaits; can't be fixed in our code"
+    )]
     #[tracing_test::traced_test]
     #[async_timed_test(timeout_secs = 30)]
     async fn test_spawn_child() {
@@ -4981,7 +4987,10 @@ mod tests {
 
         #[async_trait]
         impl Handler<Arc<(Barrier, Barrier)>> for LoggingActor {
-            #[allow(clippy::await_holding_invalid_type)]
+            #[expect(
+                clippy::await_holding_invalid_type,
+                reason = "tracing_test::traced_test macro expansion holds tracing::span::Entered across awaits; can't be fixed in our code"
+            )]
             async fn handle(
                 &mut self,
                 _cx: &crate::Context<Self>,

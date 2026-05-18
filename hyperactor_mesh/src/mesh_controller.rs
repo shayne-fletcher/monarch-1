@@ -1516,15 +1516,19 @@ mod tests {
     use ndslice::Extent;
     use ndslice::ViewExt;
 
+    #[cfg(fbcode_build)]
     use super::SUPERVISION_POLL_FREQUENCY;
     use super::proc_status_to_actor_status;
     use crate::ActorMesh;
     use crate::bootstrap::ProcStatus;
+    #[cfg(fbcode_build)]
     use crate::host_mesh::PROC_SPAWN_MAX_IDLE;
     use crate::mesh_id::ActorMeshId;
+    #[cfg(fbcode_build)]
     use crate::mesh_id::HostMeshId;
     use crate::proc_agent::MESH_ORPHAN_TIMEOUT;
     use crate::resource;
+    #[cfg(fbcode_build)]
     use crate::supervision::MeshFailure;
     use crate::test_utils::local_host_mesh;
     use crate::testactor;

@@ -34,13 +34,18 @@ use hyperactor::channel::ChannelTransport;
 use hyperactor::mailbox::PortReceiver;
 use hyperactor::proc::WorkCell;
 use hyperactor::supervision::ActorSupervisionEvent;
+#[cfg(fbcode_build)]
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+#[cfg(fbcode_build)]
 use crate::Bootstrap;
+#[cfg(fbcode_build)]
 use crate::HostMeshRef;
+#[cfg(fbcode_build)]
 use crate::host_mesh::HostMesh;
+#[cfg(fbcode_build)]
 use crate::host_mesh::HostMeshShutdownGuard;
 use crate::supervision::MeshFailure;
 

@@ -1524,7 +1524,7 @@ impl Handler<ConfigDump> for HostAgent {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, fbcode_build))]
 mod tests {
     use std::assert_matches;
 
@@ -1541,7 +1541,6 @@ mod tests {
     use crate::resource::WaitRankStatusClient;
 
     #[tokio::test]
-    #[cfg(fbcode_build)]
     async fn test_basic() {
         let host = Host::new(
             BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
@@ -1603,7 +1602,6 @@ mod tests {
 
     /// WaitRankStatus on a running proc replies immediately with Running.
     #[tokio::test]
-    #[cfg(fbcode_build)]
     async fn test_wait_rank_status_already_running() {
         let host = Host::new(
             BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
@@ -1654,7 +1652,6 @@ mod tests {
     /// WaitRankStatus for Stopped, then stop the proc — reply should
     /// arrive only after the proc actually stops.
     #[tokio::test]
-    #[cfg(fbcode_build)]
     async fn test_wait_rank_status_stop() {
         let host = Host::new(
             BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
@@ -1711,7 +1708,6 @@ mod tests {
     /// WaitRankStatus sent before the proc is created — the waiter is
     /// stashed and replied to once CreateOrUpdate runs.
     #[tokio::test]
-    #[cfg(fbcode_build)]
     async fn test_wait_rank_status_before_proc_exists() {
         let host = Host::new(
             BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
@@ -1760,7 +1756,6 @@ mod tests {
     /// DrainHost with a host_mesh_id filter only stops procs
     /// belonging to that mesh; procs from other meshes are unaffected.
     #[tokio::test]
-    #[cfg(fbcode_build)]
     async fn test_drain_scoped_to_host_mesh_id() {
         let host = Host::new(
             BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
@@ -1864,7 +1859,6 @@ mod tests {
     /// DrainHost with host_mesh_id=None drains all procs regardless
     /// of their mesh affiliation (backwards compatibility).
     #[tokio::test]
-    #[cfg(fbcode_build)]
     async fn test_drain_none_drains_all() {
         let host = Host::new(
             BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
@@ -1939,7 +1933,6 @@ mod tests {
     // defaulted queue stats to zero because it predated Proc-level
     // queue accessors.
     #[tokio::test]
-    #[cfg(fbcode_build)]
     async fn test_service_proc_query_child_has_queue_stats() {
         use hyperactor::actor::ActorStatus;
         use hyperactor::introspect::IntrospectMessage;
