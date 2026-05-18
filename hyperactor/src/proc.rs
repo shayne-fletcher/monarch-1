@@ -968,7 +968,7 @@ impl Proc {
         M: RemoteMessage,
         R: Referable + RemoteHandles<M>,
     {
-        let (instance, _handle) = self.instance(name)?;
+        let (instance, _handle) = self.client(name)?;
         let (_handle, rx) = instance.bind_handler_port::<M>();
         let actor_ref = ActorRef::attest(instance.self_addr().clone());
         Ok((instance, actor_ref, rx))
@@ -1010,7 +1010,7 @@ impl Proc {
     /// introspect task).  This is safe to call outside a Tokio
     /// runtime — unlike [`actor_instance`], it never calls
     /// `tokio::spawn`.
-    pub fn instance(&self, name: &str) -> Result<(Instance<()>, ActorHandle<()>), anyhow::Error> {
+    pub fn client(&self, name: &str) -> Result<(Instance<()>, ActorHandle<()>), anyhow::Error> {
         let actor_id: ActorAddr = self.allocate_root_id(name)?;
         let (instance, _receivers) = Instance::new(self.clone(), actor_id, false, None);
         let handle = ActorHandle::new(instance.inner.cell.clone(), instance.inner.ports.clone());
@@ -1021,8 +1021,8 @@ impl Proc {
     /// Create a lightweight client instance that handles
     /// [`IntrospectMessage`].
     ///
-    /// Like [`instance`](Self::instance), this creates a client-mode
-    /// instance with no actor message loop. Unlike `instance`, it
+    /// Like [`client`](Self::client), this creates a client-mode
+    /// instance with no actor message loop. Unlike `client`, it
     /// spawns a dedicated introspect task, so the instance responds
     /// to `IntrospectMessage::Query` and is visible and navigable in
     /// admin tooling such as the mesh TUI.
@@ -2250,7 +2250,7 @@ impl<A: Actor> Instance<A> {
     pub fn self_client() -> &'static Instance<()> {
         static CLIENT: OnceLock<(Instance<()>, ActorHandle<()>)> = OnceLock::new();
         &CLIENT
-            .get_or_init(|| Proc::runtime().instance("self_message_client").unwrap())
+            .get_or_init(|| Proc::runtime().client("self_message_client").unwrap())
             .0
     }
 
@@ -3228,7 +3228,7 @@ impl InstanceCell {
             // A global signal client is used to send signals to the actor.
             static CLIENT: OnceLock<(Instance<()>, ActorHandle<()>)> = OnceLock::new();
             let client = &CLIENT
-                .get_or_init(|| Proc::runtime().instance("global_signal_client").unwrap())
+                .get_or_init(|| Proc::runtime().client("global_signal_client").unwrap())
                 .0;
             signal_port.send(&client, signal).map_err(ActorError::from)
         } else {
@@ -3258,7 +3258,7 @@ impl InstanceCell {
                         // send are silently dropped. This happens when a child
                         // stops after the parent's mailbox has been closed or its
                         // supervision port receiver has been dropped (e.g. client
-                        // instances created via Proc::instance()).
+                        // instances created via Proc::client()).
                         tracing::debug!(
                             "{}: dropping non-error supervision event {}: {:?}",
                             self.actor_addr(),
@@ -3883,7 +3883,7 @@ mod tests {
     #[tokio::test]
     async fn test_client_instance_can_bind_signal_port() {
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
 
         let (_signal_port, _signal_rx) = client.bind_handler_port::<Signal>();
     }
@@ -3896,7 +3896,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_spawn_actor() {
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
         let handle = proc.spawn("test", TestActor).unwrap();
 
         // Check on the join handle.
@@ -3946,7 +3946,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_proc_actors_messaging() {
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
         let first = proc.spawn::<TestActor>("first", TestActor).unwrap();
         let second = proc.spawn::<TestActor>("second", TestActor).unwrap();
         let (tx, rx) = oneshot::channel::<()>();
@@ -4132,7 +4132,7 @@ mod tests {
         use crate::testing::ids::test_actor_id;
 
         let proc = Proc::isolated();
-        let (instance, _) = proc.instance("worker").unwrap();
+        let (instance, _) = proc.client("worker").unwrap();
         let (port, mut receiver) = instance.bind_handler_port::<u64>();
 
         let PortLocation::Bound(default_dest) = port.location() else {
@@ -4159,7 +4159,7 @@ mod tests {
     fn test_default_location_changes_new_bindings_not_lookup() {
         let proc = Proc::isolated();
         let gateway = proc.gateway();
-        let (_instance, handle) = proc.instance("worker").unwrap();
+        let (_instance, handle) = proc.client("worker").unwrap();
 
         let first_ref: ActorRef<()> = handle.bind();
         let new_location = ChannelAddr::Local(9876).into();
@@ -4227,7 +4227,7 @@ mod tests {
         let proc = Proc::isolated();
         let gateway = proc.gateway();
         let initial_location = proc.default_location();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
         let (port, mut receiver) = client.bind_handler_port::<u64>();
         let PortLocation::Bound(default_dest) = port.location() else {
             panic!("handler port must be bound");
@@ -4310,7 +4310,7 @@ mod tests {
         use crate::testing::ids::test_actor_id;
 
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
         let (return_handle, mut undeliverable_rx) =
             client.open_port::<Undeliverable<MessageEnvelope>>();
         let remote_proc = ProcAddr::unique(ChannelAddr::Local(1234), "remote");
@@ -4357,7 +4357,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_actor_lookup() {
         let proc = Proc::isolated();
-        let (client, _handle) = proc.instance("client").unwrap();
+        let (client, _handle) = proc.client("client").unwrap();
 
         let target_actor = proc.spawn::<TestActor>("target", TestActor).unwrap();
         let target_actor_ref = target_actor.bind();
@@ -4427,7 +4427,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_spawn_child() {
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
 
         let first = proc.spawn::<TestActor>("first", TestActor).unwrap();
         let second = TestActor::spawn_child(&client, &first).await;
@@ -4496,7 +4496,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_child_lifecycle() {
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
 
         let root = proc.spawn::<TestActor>("root", TestActor).unwrap();
         let root_1 = TestActor::spawn_child(&client, &root).await;
@@ -4579,7 +4579,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_drain_and_stop_closes_handler_ingress() {
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
         let stop_started = Arc::new(tokio::sync::Notify::new());
         let release_stop = Arc::new(tokio::sync::Notify::new());
         let handle = proc
@@ -4607,7 +4607,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_parent_failure() {
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
         // Need to set a supervison coordinator for this Proc because there will
         // be actor failure(s) in this test which trigger supervision.
         let (_reported, _coordinator) = ProcSupervisionCoordinator::set(&proc).await.unwrap();
@@ -4679,7 +4679,7 @@ mod tests {
         let state = Arc::new(AtomicUsize::new(0));
         let actor = TestActor(state.clone());
         let handle = proc.spawn::<TestActor>("test", actor).unwrap();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
         let (tx, rx) = client.open_once_port();
         handle.send(&client, tx).unwrap();
         let usize_handle = rx.recv().await.unwrap();
@@ -4701,7 +4701,7 @@ mod tests {
         // be actor failure(s) in this test which trigger supervision.
         let (_reported, _coordinator) = ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
-        let (client, _handle) = proc.instance("client").unwrap();
+        let (client, _handle) = proc.client("client").unwrap();
         let actor_handle = proc.spawn("test", TestActor).unwrap();
         actor_handle
             .panic(&client, "some random failure".to_string())
@@ -4777,7 +4777,7 @@ mod tests {
         };
 
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
         let (mut reported_event, _coordinator) =
             ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
@@ -4870,7 +4870,7 @@ mod tests {
 
         let proc = Proc::isolated();
 
-        let (instance, handle) = proc.instance("my_test_actor").unwrap();
+        let (instance, handle) = proc.client("my_test_actor").unwrap();
 
         let child_actor = TestActor.spawn(&instance).unwrap();
 
@@ -4907,7 +4907,7 @@ mod tests {
             // should cause the process to terminate.
             // ProcSupervisionCoordinator::set(&proc).await.unwrap();
             let root = proc.spawn("root", TestActor).unwrap();
-            let (client, _handle) = proc.instance("client").unwrap();
+            let (client, _handle) = proc.client("client").unwrap();
             root.fail(&client, anyhow::anyhow!("some random failure"))
                 .await
                 .unwrap();
@@ -5006,7 +5006,7 @@ mod tests {
 
         trace_and_block(async {
             let proc = Proc::isolated();
-            let (client, _) = proc.instance("client").unwrap();
+            let (client, _) = proc.client("client").unwrap();
             let handle = LoggingActor.spawn_detached().unwrap();
             handle.send(&client, "hello world".to_string()).unwrap();
             handle
@@ -5046,7 +5046,7 @@ mod tests {
         use crate::mailbox::MailboxSenderErrorKind;
 
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
         let actor_handle = proc.spawn("test", TestActor).unwrap();
 
         // Clone the handle before awaiting since await consumes the handle
@@ -5079,7 +5079,7 @@ mod tests {
         use crate::mailbox::MailboxSenderErrorKind;
 
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
         // Need to set a supervison coordinator for this Proc because there will
         // be actor failure(s) in this test which trigger supervision.
         let (_reported, _coordinator) = ProcSupervisionCoordinator::set(&proc).await.unwrap();
@@ -5148,7 +5148,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 60)]
     async fn test_terminated_snapshot_stored_on_stop() {
         let proc = Proc::isolated();
-        let (_client, _client_handle) = proc.instance("client").unwrap();
+        let (_client, _client_handle) = proc.client("client").unwrap();
 
         let handle = proc.spawn::<TestActor>("actor", TestActor).unwrap();
         let actor_id = handle.actor_addr().clone();
@@ -5192,7 +5192,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 60)]
     async fn test_terminated_snapshot_stored_on_failure() {
         let proc = Proc::isolated();
-        let (client, _client_handle) = proc.instance("client").unwrap();
+        let (client, _client_handle) = proc.client("client").unwrap();
         // Supervision coordinator required for actor failure handling.
         ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
@@ -5222,7 +5222,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_supervision_event_stored_on_failure() {
         let proc = Proc::isolated();
-        let (client, _client_handle) = proc.instance("client").unwrap();
+        let (client, _client_handle) = proc.client("client").unwrap();
         ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
         let handle = proc.spawn::<TestActor>("fail_actor", TestActor).unwrap();
@@ -5247,7 +5247,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_supervision_event_on_clean_stop() {
         let proc = Proc::isolated();
-        let (_client, _client_handle) = proc.instance("client").unwrap();
+        let (_client, _client_handle) = proc.client("client").unwrap();
 
         let handle = proc.spawn::<TestActor>("stop_actor", TestActor).unwrap();
         let cell = handle.cell().clone();
@@ -5269,7 +5269,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_supervision_coordinator_receives_clean_stop() {
         let proc = Proc::isolated();
-        let (_client, _client_handle) = proc.instance("client").unwrap();
+        let (_client, _client_handle) = proc.client("client").unwrap();
         let (mut reported_event, _coordinator_handle) =
             ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
@@ -5292,7 +5292,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_coordinator_shuts_down_last_during_destroy() {
         let mut proc = Proc::isolated();
-        let (_client, _client_handle) = proc.instance("client").unwrap();
+        let (_client, _client_handle) = proc.client("client").unwrap();
         let (mut reported_event, _coordinator_handle) =
             ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
@@ -5333,7 +5333,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_supervision_event_on_propagated_failure() {
         let proc = Proc::isolated();
-        let (client, _client_handle) = proc.instance("client").unwrap();
+        let (client, _client_handle) = proc.client("client").unwrap();
         ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
         let parent = proc.spawn::<TestActor>("parent", TestActor).unwrap();
@@ -5375,7 +5375,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_resolve_actor_ref_none_for_terminal_actor() {
         let proc = Proc::isolated();
-        let (_client, _client_handle) = proc.instance("client").unwrap();
+        let (_client, _client_handle) = proc.client("client").unwrap();
 
         let handle = proc.spawn::<TestActor>("target", TestActor).unwrap();
         let actor_ref: ActorRef<TestActor> = handle.bind();
@@ -5401,7 +5401,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 60)]
     async fn test_terminated_snapshot_has_failure_info() {
         let proc = Proc::isolated();
-        let (client, _client_handle) = proc.instance("client").unwrap();
+        let (client, _client_handle) = proc.client("client").unwrap();
         ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
         let handle = proc.spawn::<TestActor>("fail_actor", TestActor).unwrap();
@@ -5445,7 +5445,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 60)]
     async fn test_propagated_failure_info() {
         let proc = Proc::isolated();
-        let (client, _client_handle) = proc.instance("client").unwrap();
+        let (client, _client_handle) = proc.client("client").unwrap();
         ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
         let parent = proc.spawn::<TestActor>("parent", TestActor).unwrap();
@@ -5628,7 +5628,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 60)]
     async fn test_stopped_snapshot_has_no_failure_info() {
         let proc = Proc::isolated();
-        let (_client, _client_handle) = proc.instance("client").unwrap();
+        let (_client, _client_handle) = proc.client("client").unwrap();
 
         let handle = proc.spawn::<TestActor>("stop_actor", TestActor).unwrap();
         let actor_id = handle.actor_addr().clone();
@@ -5664,7 +5664,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 10)]
     async fn test_queue_depth_increment_decrement() {
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
         let handle = proc.spawn("qd_test", TestActor).unwrap();
         let actor_ref: crate::ActorRef<TestActor> = handle.bind();
         let actor_id = actor_ref.actor_addr().clone();
@@ -5719,7 +5719,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 10)]
     async fn test_proc_queue_depth_aggregation_under_pressure() {
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
 
         // Spawn two actors.
         let h1 = proc.spawn("a1", TestActor).unwrap();
@@ -5809,7 +5809,7 @@ mod tests {
     #[async_timed_test(timeout_secs = 10)]
     async fn test_retained_queue_stats_burst_then_drain() {
         let proc = Proc::isolated();
-        let (client, _) = proc.instance("client").unwrap();
+        let (client, _) = proc.client("client").unwrap();
         let h = proc.spawn("ret_test", TestActor).unwrap();
 
         // Block the actor.

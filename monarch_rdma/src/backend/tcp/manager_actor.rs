@@ -304,7 +304,7 @@ impl TcpManagerActor {
                     hyperactor_mesh::shortuuid::ShortUuid::generate()
                 );
                 let (instance, _handle) = proc
-                    .instance(&sender_name)
+                    .client(&sender_name)
                     .expect("failed to create sender instance");
 
                 loop {
@@ -408,7 +408,7 @@ impl Actor for TcpManagerActor {
 
             tokio::spawn(async move {
                 let (instance, _handle) = proc
-                    .instance(&receiver_name.to_string())
+                    .client(&receiver_name.to_string())
                     .expect("failed to create receiver instance");
 
                 loop {
@@ -1011,7 +1011,7 @@ mod tests {
                 ChannelAddr::any(hyperactor::channel::ChannelTransport::Unix),
                 format!("tcp_test_{id}"),
             )?;
-            let (instance, _) = proc.instance("client")?;
+            let (instance, _) = proc.client("client")?;
 
             let rdma_actor = RdmaManagerActor::new(None, Flattrs::default()).await?;
             let rdma_handle = proc.spawn("rdma_manager", rdma_actor)?;
@@ -1044,7 +1044,7 @@ mod tests {
             buffer_size: usize,
         ) -> anyhow::Result<Self> {
             let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let (instance, _) = proc.instance(&format!("client_{id}"))?;
+            let (instance, _) = proc.client(&format!("client_{id}"))?;
 
             let (local_memory, rdma_remote_buf) =
                 Self::alloc_cpu_buffer(&instance, rdma_handle, buffer_size).await?;
@@ -1601,7 +1601,7 @@ mod tests {
                 ChannelAddr::any(hyperactor::channel::ChannelTransport::Unix),
                 format!("tcp_gpu_test_{id}"),
             )?;
-            let (instance, _) = proc.instance("client")?;
+            let (instance, _) = proc.client("client")?;
 
             let rdma_actor = RdmaManagerActor::new(None, Flattrs::default()).await?;
             let rdma_handle = proc.spawn("rdma_manager", rdma_actor)?;
