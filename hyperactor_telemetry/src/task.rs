@@ -36,6 +36,9 @@ macro_rules! spawn {
 
 #[cfg(test)]
 mod tests {
+    // #[traced_test] holds a tracing::Entered guard across await points; suppress the false positive.
+    #![allow(clippy::await_holding_invalid_type)]
+
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
