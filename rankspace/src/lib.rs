@@ -1177,6 +1177,60 @@ mod tests {
     }
 
     #[test]
+    fn select_with_start_past_dim_yields_empty() {
+        // `start >= dim_size`: clamped start equals end, len = 0.
+        let rect = host_gpu_rect();
+        let selected = rect
+            .select("gpu", DimRange::with_step(4, None, 1).unwrap())
+            .unwrap();
+
+        assert_eq!(selected.extent().dims()[1].size(), 0);
+        assert!(selected.iter_ranks().next().is_none());
+    }
+
+    #[test]
+    fn select_with_end_before_start_yields_empty() {
+        // `end <= start`: short-circuit to len = 0.
+        let rect = host_gpu_rect();
+        let selected = rect
+            .select("gpu", DimRange::with_step(2, Some(2), 1).unwrap())
+            .unwrap();
+
+        assert_eq!(selected.extent().dims()[1].size(), 0);
+        assert!(selected.iter_ranks().next().is_none());
+    }
+
+    #[test]
+    fn select_with_step_past_range_yields_single() {
+        // step > (end - start), end set explicitly: len = 1, picks up `start`.
+        let rect = host_gpu_rect();
+        let selected = rect
+            .select("gpu", DimRange::with_step(1, Some(2), 8).unwrap())
+            .unwrap();
+
+        assert_eq!(selected.extent().dims()[1].size(), 1);
+        assert_eq!(
+            selected.iter_ranks().collect::<Vec<_>>(),
+            vec![Rank(1), Rank(5)],
+        );
+    }
+
+    #[test]
+    fn select_with_step_past_dim_yields_single() {
+        // step > dim_size, end defaulted from `None`: len = 1, picks up `start = 0`.
+        let rect = host_gpu_rect();
+        let selected = rect
+            .select("gpu", DimRange::with_step(0, None, 8).unwrap())
+            .unwrap();
+
+        assert_eq!(selected.extent().dims()[1].size(), 1);
+        assert_eq!(
+            selected.iter_ranks().collect::<Vec<_>>(),
+            vec![Rank(0), Rank(4)],
+        );
+    }
+
+    #[test]
     fn fix_removes_a_dimension() {
         let rect = host_gpu_rect();
         let host1 = rect.fix("host", 1).unwrap();
