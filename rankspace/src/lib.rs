@@ -1126,6 +1126,42 @@ mod tests {
     }
 
     #[test]
+    fn rank_rect_affine_rejects_invalid_strides() {
+        let extent =
+            |a: usize, b: usize| Extent::new(vec![Dim::new("a", a), Dim::new("b", b)]).unwrap();
+
+        // `DimMismatch`: strides length doesn't match extent rank.
+        assert_eq!(
+            RankRect::affine(extent(2, 2), Rank(0), vec![2]).unwrap_err(),
+            RankSpaceError::DimMismatch {
+                dims: 2,
+                strides: 1,
+            },
+        );
+
+        // `NonrectangularStrides`: after sorting, a stride doesn't divide its predecessor.
+        assert_eq!(
+            RankRect::affine(extent(2, 2), Rank(0), vec![4, 3]).unwrap_err(),
+            RankSpaceError::NonrectangularStrides,
+        );
+
+        // `OverlappingStrides`: two non-unit dims share a stride.
+        assert_eq!(
+            RankRect::affine(extent(2, 2), Rank(0), vec![2, 2]).unwrap_err(),
+            RankSpaceError::OverlappingStrides,
+        );
+
+        // `StrideTooSmall`: a stride is smaller than the coordinate space below it.
+        assert_eq!(
+            RankRect::affine(extent(4, 4), Rank(0), vec![3, 1]).unwrap_err(),
+            RankSpaceError::StrideTooSmall {
+                stride: 3,
+                space: 4,
+            },
+        );
+    }
+
+    #[test]
     fn select_preserves_base_rank_coordinates() {
         let rect = host_gpu_rect();
         let gpus = rect
