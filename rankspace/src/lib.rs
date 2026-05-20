@@ -1162,6 +1162,25 @@ mod tests {
     }
 
     #[test]
+    fn rank_rect_with_empty_extent_is_a_single_point() {
+        // 0-dim `RankRect`: a "scalar" rect whose one rank is the offset.
+        let rect = RankRect::affine(Extent::new(vec![]).unwrap(), Rank(42), vec![]).unwrap();
+
+        assert!(!rect.is_empty());
+        assert_eq!(rect.cardinality(), 1);
+        assert_eq!(rect.iter_ranks().collect::<Vec<_>>(), vec![Rank(42)]);
+        assert_eq!(rect.coord_of(Rank(42)), Some(Coord::new(vec![])));
+        assert_eq!(rect.coord_of(Rank(0)), None);
+        let coord = Coord::new(vec![]);
+        assert_eq!(rect.rank_of(coord.indices()), Some(Rank(42)));
+
+        // `RankRect::new` (default offset 0) takes the same scalar shape.
+        let zero_rect = RankRect::new(Extent::new(vec![]).unwrap()).unwrap();
+        assert_eq!(zero_rect.cardinality(), 1);
+        assert_eq!(zero_rect.iter_ranks().collect::<Vec<_>>(), vec![Rank(0)]);
+    }
+
+    #[test]
     fn select_preserves_base_rank_coordinates() {
         let rect = host_gpu_rect();
         let gpus = rect
