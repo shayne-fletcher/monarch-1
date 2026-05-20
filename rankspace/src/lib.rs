@@ -1313,6 +1313,61 @@ mod tests {
     }
 
     #[test]
+    fn mask_union_all_empty_yields_empty() {
+        let mask = RankMask::union([RankMask::empty(), RankMask::empty(), RankMask::empty()]);
+        assert_eq!(mask, RankMask::Empty);
+    }
+
+    #[test]
+    fn mask_union_single_non_empty_unwraps() {
+        let ranks = RankMask::ranks([Rank(5)]);
+        let mask = RankMask::union([RankMask::empty(), ranks.clone(), RankMask::empty()]);
+        assert_eq!(mask, ranks);
+    }
+
+    #[test]
+    fn mask_union_mixed_variants_yields_union() {
+        let rect = RankMask::rect(host_gpu_rect()); // covers ranks 0..=7
+        let ranks = RankMask::ranks([Rank(42)]);
+        let mask = RankMask::union([rect, RankMask::empty(), ranks]);
+
+        match &mask {
+            RankMask::Union(children) => {
+                assert_eq!(children.len(), 2);
+                assert!(matches!(children[0], RankMask::Rect(_)));
+                assert!(matches!(children[1], RankMask::Ranks(_)));
+            }
+            other => panic!("expected Union, got {other:?}"),
+        }
+
+        assert!(mask.contains(Rank(0))); // in the rect
+        assert!(mask.contains(Rank(42))); // in the explicit ranks
+        assert!(!mask.contains(Rank(100))); // in neither
+    }
+
+    #[test]
+    fn mask_union_preserves_nested_unions() {
+        // Pins current behavior: `union` does not flatten nested `Union`s.
+        // `contains` still resolves through both layers.
+        let inner_a = RankMask::union([RankMask::ranks([Rank(1)]), RankMask::ranks([Rank(2)])]);
+        let inner_b = RankMask::union([RankMask::ranks([Rank(3)]), RankMask::ranks([Rank(4)])]);
+        let outer = RankMask::union([inner_a, inner_b]);
+
+        match &outer {
+            RankMask::Union(children) => {
+                assert_eq!(children.len(), 2);
+                assert!(matches!(children[0], RankMask::Union(_)));
+                assert!(matches!(children[1], RankMask::Union(_)));
+            }
+            other => panic!("expected Union, got {other:?}"),
+        }
+
+        assert!(outer.contains(Rank(1)));
+        assert!(outer.contains(Rank(4)));
+        assert!(!outer.contains(Rank(99)));
+    }
+
+    #[test]
     fn select_reports_rank_arithmetic_overflow() {
         let rect = RankRect {
             extent: Extent::new(vec![Dim::new("host", 3)]).unwrap(),
