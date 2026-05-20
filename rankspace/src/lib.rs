@@ -1301,6 +1301,23 @@ mod tests {
     }
 
     #[test]
+    fn rank_space_under_full_occlusion_is_empty() {
+        let base = host_gpu_rect();
+        let space = RankSpace::dense(base.clone()).without(RankMask::rect(base.clone()));
+
+        assert!(space.is_empty());
+        assert_eq!(space.cardinality(), 0);
+        assert!(space.iter_ranks().next().is_none());
+        assert_eq!(space.rank_at(0), None);
+
+        // Every base rank is occluded.
+        for rank in base.iter_ranks() {
+            assert!(!space.contains_rank(rank));
+            assert_eq!(space.local_index_of(rank), None);
+        }
+    }
+
+    #[test]
     fn mask_can_be_an_affine_rect() {
         let rect = host_gpu_rect();
         let host1 = rect.fix("host", 1).unwrap();
