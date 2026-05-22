@@ -1160,6 +1160,47 @@ mod tests {
     }
 
     #[test]
+    fn coord_of_returns_none_for_ranks_outside_rect() {
+        // Empty rect: `self.is_empty()` short-circuits to None.
+        let empty = RankRect::affine(
+            Extent::new(vec![Dim::new("host", 0)]).unwrap(),
+            Rank(0),
+            vec![1],
+        )
+        .unwrap();
+        assert_eq!(empty.coord_of(Rank(0)), None);
+
+        // Below offset: `rank.0.checked_sub(self.offset.0)` returns None.
+        let offset_rect = RankRect::affine(
+            Extent::new(vec![Dim::new("host", 2), Dim::new("gpu", 4)]).unwrap(),
+            Rank(100),
+            vec![4, 1],
+        )
+        .unwrap();
+        assert_eq!(offset_rect.coord_of(Rank(99)), None);
+        assert_eq!(offset_rect.coord_of(Rank(0)), None);
+
+        // Above max bound on a dense rect: the largest-stride iteration produces
+        // `index >= size`. `host_gpu_rect` has valid ranks 0..=7.
+        let dense = host_gpu_rect();
+        assert_eq!(dense.coord_of(Rank(8)), None);
+        assert_eq!(dense.coord_of(Rank(100)), None);
+
+        // Inside bounds but not on a stride boundary: the decomposition completes
+        // without hitting `index >= size`, but leaves `rest != 0` at the end.
+        // Requires a smallest stride > 1; extent [2] with stride [3] has valid
+        // ranks {0, 3}, so ranks 1 and 2 sit between them and are unreachable.
+        let sparse = RankRect::affine(
+            Extent::new(vec![Dim::new("host", 2)]).unwrap(),
+            Rank(0),
+            vec![3],
+        )
+        .unwrap();
+        assert_eq!(sparse.coord_of(Rank(1)), None);
+        assert_eq!(sparse.coord_of(Rank(2)), None);
+    }
+
+    #[test]
     fn rank_rect_affine_rejects_invalid_strides() {
         let extent =
             |a: usize, b: usize| Extent::new(vec![Dim::new("a", a), Dim::new("b", b)]).unwrap();
