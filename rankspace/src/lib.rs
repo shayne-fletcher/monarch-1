@@ -1479,6 +1479,42 @@ mod tests {
     }
 
     #[test]
+    fn sparse_space_with_empty_mask_matches_dense() {
+        let base = host_gpu_rect(); // sizes [2, 4], valid ranks 0..=7
+        let dense = RankSpace::dense(base.clone());
+        let sparse = RankSpace::sparse(base.clone(), RankMask::Empty);
+
+        // Structural equivalence: both constructors produce the same struct.
+        assert_eq!(dense, sparse);
+
+        // Behavioral equivalence: derived methods agree, and the concrete values
+        // match the expected dense iteration (so a bug producing equally-broken
+        // results on both sides would still be caught).
+        assert_eq!(dense.cardinality(), sparse.cardinality());
+        assert_eq!(dense.cardinality(), 8);
+        let expected = vec![
+            Rank(0),
+            Rank(1),
+            Rank(2),
+            Rank(3),
+            Rank(4),
+            Rank(5),
+            Rank(6),
+            Rank(7),
+        ];
+        assert_eq!(dense.iter_ranks().collect::<Vec<_>>(), expected);
+        assert_eq!(sparse.iter_ranks().collect::<Vec<_>>(), expected);
+        for rank in base.iter_ranks() {
+            assert_eq!(dense.contains_rank(rank), sparse.contains_rank(rank));
+        }
+        // Out-of-base rank: both short-circuit via `base.contains_rank`.
+        assert_eq!(
+            dense.contains_rank(Rank(100)),
+            sparse.contains_rank(Rank(100))
+        );
+    }
+
+    #[test]
     fn sparse_subspaces_keep_masks_in_base_rank_coordinates() {
         let rect = host_gpu_rect();
         let missing_gpu = RankMask::ranks([Rank(5)]);
