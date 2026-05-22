@@ -1162,6 +1162,123 @@ mod tests {
     }
 
     #[test]
+    fn affine_supports_column_major_strides() {
+        // sizes [2, 4] with column-major strides [1, 2]: dim 0 has the smallest
+        // stride, so iter (local row-major over the extent) produces ranks in
+        // interleaved order rather than consecutive.
+        let extent = Extent::new(vec![Dim::new("a", 2), Dim::new("b", 4)]).unwrap();
+        let rect = RankRect::affine(extent, Rank(0), vec![1, 2]).unwrap();
+
+        assert_eq!(
+            rect.iter_ranks().collect::<Vec<_>>(),
+            vec![
+                Rank(0),
+                Rank(2),
+                Rank(4),
+                Rank(6),
+                Rank(1),
+                Rank(3),
+                Rank(5),
+                Rank(7),
+            ],
+        );
+
+        assert_eq!(rect.rank_of([1, 2]), Some(Rank(5)));
+        assert_eq!(rect.coord_of(Rank(5)), Some(Coord::from([1, 2])));
+        assert_eq!(rect.rank_of([0, 3]), Some(Rank(6)));
+        assert_eq!(rect.coord_of(Rank(6)), Some(Coord::from([0, 3])));
+    }
+
+    #[test]
+    fn affine_supports_permuted_strides() {
+        // sizes [2, 3, 4] with strides [4, 8, 1]: the dim with the largest stride
+        // (`b`) is in the middle position, not the outermost. Iteration is still
+        // local row-major over the extent, but the rank arithmetic depends on the
+        // non-canonical stride permutation. Dense (no gaps): the coord_space chain
+        // is 1 -> 4 -> 8 -> 24, exactly matching 2*3*4.
+        let extent =
+            Extent::new(vec![Dim::new("a", 2), Dim::new("b", 3), Dim::new("c", 4)]).unwrap();
+        let rect = RankRect::affine(extent, Rank(0), vec![4, 8, 1]).unwrap();
+
+        for (coord, rank) in [
+            ([0usize, 0, 0], 0usize),
+            ([0, 0, 3], 3),
+            ([0, 1, 0], 8),
+            ([1, 0, 0], 4),
+            ([1, 2, 3], 23),
+        ] {
+            assert_eq!(rect.rank_of(coord), Some(Rank(rank)));
+            assert_eq!(rect.coord_of(Rank(rank)), Some(Coord::from(coord)));
+        }
+
+        // Iteration walks the 24 coords in local row-major over the extent; the
+        // rank stream reflects the permuted strides, not the dim declaration order.
+        assert_eq!(
+            rect.iter_ranks().collect::<Vec<_>>(),
+            vec![
+                Rank(0),
+                Rank(1),
+                Rank(2),
+                Rank(3),
+                Rank(8),
+                Rank(9),
+                Rank(10),
+                Rank(11),
+                Rank(16),
+                Rank(17),
+                Rank(18),
+                Rank(19),
+                Rank(4),
+                Rank(5),
+                Rank(6),
+                Rank(7),
+                Rank(12),
+                Rank(13),
+                Rank(14),
+                Rank(15),
+                Rank(20),
+                Rank(21),
+                Rank(22),
+                Rank(23),
+            ],
+        );
+    }
+
+    #[test]
+    fn affine_supports_gapped_strides() {
+        // sizes [2, 4] with strides [10, 1]: rows are 10 apart, leaving a gap
+        // (ranks 4..=9) between row 0 and row 1 that's not part of the rect.
+        let extent = Extent::new(vec![Dim::new("a", 2), Dim::new("b", 4)]).unwrap();
+        let rect = RankRect::affine(extent, Rank(0), vec![10, 1]).unwrap();
+
+        assert_eq!(
+            rect.iter_ranks().collect::<Vec<_>>(),
+            vec![
+                Rank(0),
+                Rank(1),
+                Rank(2),
+                Rank(3),
+                Rank(10),
+                Rank(11),
+                Rank(12),
+                Rank(13),
+            ],
+        );
+
+        assert_eq!(rect.rank_of([1, 2]), Some(Rank(12)));
+        assert_eq!(rect.coord_of(Rank(12)), Some(Coord::from([1, 2])));
+
+        // Ranks inside the gap are not part of the rect.
+        assert_eq!(rect.coord_of(Rank(4)), None); // immediately after row 0
+        assert_eq!(rect.coord_of(Rank(5)), None);
+        assert_eq!(rect.coord_of(Rank(9)), None);
+
+        // Ranks above the last valid row also return None.
+        assert_eq!(rect.coord_of(Rank(14)), None); // immediately after row 1
+        assert_eq!(rect.coord_of(Rank(20)), None); // where row 2 would start
+    }
+
+    #[test]
     fn rank_rect_with_empty_extent_is_a_single_point() {
         // 0-dim `RankRect`: a "scalar" rect whose one rank is the offset.
         let rect = RankRect::affine(Extent::new(vec![]).unwrap(), Rank(42), vec![]).unwrap();
