@@ -1126,6 +1126,40 @@ mod tests {
     }
 
     #[test]
+    fn rank_of_returns_none_for_invalid_coords_and_overflow() {
+        let rect = host_gpu_rect(); // extent [host = 2, gpu = 4]
+
+        // Wrong-length coord (coord.len() != extent.len()).
+        assert_eq!(rect.rank_of([0]), None);
+        assert_eq!(rect.rank_of([0, 0, 0]), None);
+
+        // Out-of-range coord (coord[d] >= sizes[d]).
+        assert_eq!(rect.rank_of([2, 0]), None); // host out of range (size 2)
+        assert_eq!(rect.rank_of([0, 4]), None); // gpu out of range (size 4)
+
+        // Multiply overflow: coord[i] * stride[i] overflows usize.
+        // Direct struct construction bypasses `validate_strides`; this mirrors
+        // the existing `select_reports_rank_arithmetic_overflow` pattern.
+        let overflow_stride = RankRect {
+            extent: Extent::new(vec![Dim::new("host", 3)]).unwrap(),
+            offset: Rank(0),
+            strides: vec![usize::MAX],
+        };
+        assert_eq!(overflow_stride.rank_of([2]), None); // 2 * usize::MAX overflows
+
+        // Add overflow: offset + sum overflows usize. Reachable through the public
+        // constructor — `validate_strides` does not constrain offset, so a near-MAX
+        // offset is admitted.
+        let overflow_offset = RankRect::affine(
+            Extent::new(vec![Dim::new("host", 3)]).unwrap(),
+            Rank(usize::MAX),
+            vec![1],
+        )
+        .unwrap();
+        assert_eq!(overflow_offset.rank_of([1]), None); // usize::MAX + 1 overflows
+    }
+
+    #[test]
     fn rank_rect_affine_rejects_invalid_strides() {
         let extent =
             |a: usize, b: usize| Extent::new(vec![Dim::new("a", a), Dim::new("b", b)]).unwrap();
