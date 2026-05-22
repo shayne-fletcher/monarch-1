@@ -1693,4 +1693,64 @@ mod tests {
             RankSpaceError::RankArithmeticOverflow
         );
     }
+
+    #[test]
+    fn types_serde_round_trip_via_bincode() {
+        fn roundtrip<T>(value: &T) -> T
+        where
+            T: serde::Serialize + serde::de::DeserializeOwned,
+        {
+            let bytes = bincode::serde::encode_to_vec(value, bincode::config::legacy()).unwrap();
+            let (decoded, len) =
+                bincode::serde::decode_from_slice(&bytes, bincode::config::legacy()).unwrap();
+            assert_eq!(len, bytes.len(), "decoder left trailing bytes");
+            decoded
+        }
+
+        // Rank, Coord
+        let rank = Rank(7);
+        assert_eq!(roundtrip(&rank), rank);
+        let coord = Coord::from([1, 2]);
+        assert_eq!(roundtrip(&coord), coord);
+
+        // Dim
+        let dim = Dim::new("host", 2);
+        assert_eq!(roundtrip(&dim), dim);
+
+        // DimRange
+        let range = DimRange::with_step(0, Some(10), 2).unwrap();
+        assert_eq!(roundtrip(&range), range);
+
+        // Extent
+        let extent = Extent::new(vec![Dim::new("host", 2), Dim::new("gpu", 4)]).unwrap();
+        assert_eq!(roundtrip(&extent), extent);
+
+        // RankRect
+        let rect = host_gpu_rect();
+        assert_eq!(roundtrip(&rect), rect);
+
+        // RankMask: cover each variant.
+        let mask_empty = RankMask::Empty;
+        let mask_ranks = RankMask::ranks([Rank(0), Rank(3)]);
+        let mask_rect = RankMask::rect(rect.clone());
+        let mask_union = RankMask::union([mask_ranks.clone(), mask_rect.clone()]);
+        for mask in [mask_empty, mask_ranks, mask_rect, mask_union] {
+            assert_eq!(roundtrip(&mask), mask);
+        }
+
+        // RankSpace
+        let space = RankSpace::sparse(rect.clone(), RankMask::ranks([Rank(5)]));
+        assert_eq!(roundtrip(&space), space);
+
+        // BaseView and CompactView (over Vec<u32>, length = cardinality 8).
+        let base_view = view::BaseView::new(
+            RankSpace::dense(rect.clone()),
+            vec![0u32, 1, 2, 3, 4, 5, 6, 7],
+        );
+        assert_eq!(roundtrip(&base_view), base_view);
+        let compact_view =
+            view::CompactView::new(RankSpace::dense(rect), vec![0u32, 1, 2, 3, 4, 5, 6, 7])
+                .unwrap();
+        assert_eq!(roundtrip(&compact_view), compact_view);
+    }
 }
