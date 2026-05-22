@@ -1515,6 +1515,33 @@ mod tests {
     }
 
     #[test]
+    fn without_chains_accumulate_via_union() {
+        let rect = host_gpu_rect(); // sizes [2, 4], valid ranks 0..=7
+        let mask_a = RankMask::ranks([Rank(2)]);
+        let mask_b = RankMask::ranks([Rank(5)]);
+
+        let space = RankSpace::dense(rect)
+            .without(mask_a.clone())
+            .without(mask_b.clone());
+
+        // Behavioral: both masks are applied — ranks 2 and 5 are hidden.
+        assert!(!space.contains_rank(Rank(2)));
+        assert!(!space.contains_rank(Rank(5)));
+        assert!(space.contains_rank(Rank(0)));
+        assert!(space.contains_rank(Rank(7)));
+        assert!(!space.contains_rank(Rank(100))); // out-of-base
+        assert_eq!(
+            space.iter_ranks().collect::<Vec<_>>(),
+            vec![Rank(0), Rank(1), Rank(3), Rank(4), Rank(6), Rank(7)],
+        );
+        assert_eq!(space.cardinality(), 6);
+
+        // Structural: the chained occlusion equals a direct union of the two masks.
+        let expected_occlusion = RankMask::union([mask_a, mask_b]);
+        assert_eq!(space.occlusion(), &expected_occlusion);
+    }
+
+    #[test]
     fn sparse_subspaces_keep_masks_in_base_rank_coordinates() {
         let rect = host_gpu_rect();
         let missing_gpu = RankMask::ranks([Rank(5)]);
