@@ -1551,12 +1551,14 @@ mod tests {
     #[test]
     fn test_derive_properties_valid_actor() {
         use hyperactor::introspect::ACTOR_TYPE;
+        use hyperactor::introspect::INSTANCE_ID;
         use hyperactor::introspect::MESSAGES_PROCESSED;
         use hyperactor::introspect::STATUS;
 
         let mut attrs = Attrs::new();
         attrs.set(STATUS, "running".into());
         attrs.set(ACTOR_TYPE, "TestActor".into());
+        attrs.set(INSTANCE_ID, "01900000-0000-7000-8000-000000000001".into());
         attrs.set(MESSAGES_PROCESSED, 7u64);
         let json = serde_json::to_string(&attrs).unwrap();
         let props = derive_properties(&json);
@@ -1613,11 +1615,13 @@ mod tests {
     #[test]
     fn test_ia6_actor_ignores_unknown_keys() {
         use hyperactor::introspect::ACTOR_TYPE;
+        use hyperactor::introspect::INSTANCE_ID;
         use hyperactor::introspect::STATUS;
 
         let mut attrs = Attrs::new();
         attrs.set(STATUS, "running".into());
         attrs.set(ACTOR_TYPE, "TestActor".into());
+        attrs.set(INSTANCE_ID, "01900000-0000-7000-8000-000000000001".into());
         let json = inject_unknown_key(&attrs);
         let props = derive_properties(&json);
         assert!(matches!(props, NodeProperties::Actor { .. }));
