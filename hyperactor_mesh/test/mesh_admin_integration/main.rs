@@ -310,12 +310,23 @@
 //!   with populated actor_id, proc_id, host, and url fields.
 //! - **MIT-76 (admin-schema):** `GET /v1/schema/admin` returns a
 //!   valid JSON Schema document.
+//!
+//! ### Inbound ordering API exposure
+//!
+//! - **MIT-77 (inbound-ordering API exposure):** `GET /v1/{actor}` for
+//!   a live actor built through `Instance::new` returns the three new
+//!   inbound-ordering fields (`instance_id`, `queue_depth`,
+//!   `inbound_ordering`). `inbound_ordering` is `Some` (IO-7),
+//!   `snapshot_complete` follows IO-4, `known_session_count` follows
+//!   IO-5, and the `returned_*` rollups follow IO-6. Identity-only
+//!   assertions; no workload-dependent values.
 
 mod admin;
 mod auth;
 mod config;
 mod dining;
 mod harness;
+mod inbound_ordering;
 mod openapi;
 mod pyspy;
 mod ref_check;
@@ -326,14 +337,14 @@ mod tree;
 
 // --- dining family ---
 
-/// MIT-13, MIT-14, MIT-15, MIT-75, MIT-76: dining-based
+/// MIT-13, MIT-14, MIT-15, MIT-75, MIT-76, MIT-77: dining-based
 /// endpoint assertions — Rust binary.
 #[tokio::test]
 async fn test_dining_endpoints_rust() {
     dining::run_dining_endpoints_rust().await;
 }
 
-/// MIT-13, MIT-14, MIT-15, MIT-75, MIT-76: dining-based
+/// MIT-13, MIT-14, MIT-15, MIT-75, MIT-76, MIT-77: dining-based
 /// endpoint assertions — Python binary.
 #[tokio::test]
 async fn test_dining_endpoints_python() {
