@@ -283,6 +283,22 @@ trace-level debugging is needed. Filter with:
 `actor_status` starts with `failed`. Contains `error_message`,
 `root_cause_actor`, `occurred_at`, and `is_propagated`.
 
+## Diagnose ordering stalls
+
+`GET /v1/{actor}`. Look at `inbound_ordering`.
+
+- `inbound_ordering == null` — the actor doesn't go through the ordered work-queue path (IO-1: structural absence; e.g., an instance not built through `Instance::new`).
+- `inbound_ordering.enabled == false` — reorder buffering is off; `sessions` is empty regardless of traffic.
+- `inbound_ordering.snapshot_complete == false` — **partial snapshot**. `sessions` excludes any session that was held by a concurrent send at snapshot time. Every `returned_*` rollup is a **lower bound** over returned sessions only; the skipped sessions may themselves carry buffered messages. **Refetch before concluding "no stalls"** — a `returned_buffered_message_count == 0` reading is only authoritative when `snapshot_complete == true`. Usually a refetch yields a complete view; don't alert on partiality alone.
+- `inbound_ordering.snapshot_complete == true && inbound_ordering.returned_buffered_message_count == 0` — no stalls.
+- Otherwise: filter `sessions` for `buffered_count > 0`. Each stalled session has:
+  - `sender` — a string `ActorAddr` of the **session owner** (the actor whose `Sequencer` assigned the SEQ_INFO for this session). For direct sends and V1 cast, the session owner IS the logical sender. For V0 legacy cast, it is the forwarding CommActor.
+  - `expected_next_seq` — the seq the next contiguous send must carry to unblock the buffer.
+  - `oldest_buffered_seq` / `newest_buffered_seq` — the buffered seq range.
+- Diagnosis template: "session owner `{sender}` is waiting for seq `{expected_next_seq}` on `{actor}`; `{buffered_count}` messages buffered from seq `{oldest_buffered_seq}` to `{newest_buffered_seq}`."
+- `known_session_count` is the only rollup that totals returned and skipped together (`sessions.len() + skipped_session_count`). All other `returned_*` rollups are scoped to returned sessions.
+- `queue_depth` and `inbound_ordering.returned_buffered_message_count` are **independent diagnostics with different scopes** (IO-3). `queue_depth` is accepted handler work; `returned_buffered_message_count` is the reorder-buffer subset over returned sessions. No arithmetic or ordering relationship between the two is part of the API contract; don't derive one from the other.
+
 ## Navigation algorithm
 
 1. Fetch root:
