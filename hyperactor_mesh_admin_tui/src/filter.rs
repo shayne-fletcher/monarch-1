@@ -67,16 +67,16 @@ mod tests {
         NodeProperties::Actor {
             actor_status: status.to_string(),
             actor_type: "test".to_string(),
+            instance_id: String::new(),
             messages_processed: 0,
             created_at: Some(SystemTime::UNIX_EPOCH),
             last_message_handler: None,
             total_processing_time_us: 0,
-            flight_recorder: None,
-            instance_id: String::new(),
             queue_depth: 0,
+            flight_recorder: None,
+            is_system: false,
             inbound_ordering: None,
             failure_info: None,
-            is_system: false,
         }
     }
 
@@ -139,13 +139,14 @@ mod tests {
         let props = NodeProperties::Actor {
             actor_status: "failed:panic".to_string(),
             actor_type: "test".to_string(),
+            instance_id: String::new(),
             messages_processed: 0,
             created_at: Some(SystemTime::UNIX_EPOCH),
             last_message_handler: None,
             total_processing_time_us: 0,
-            flight_recorder: None,
-            instance_id: String::new(),
             queue_depth: 0,
+            flight_recorder: None,
+            is_system: false,
             inbound_ordering: None,
             failure_info: Some(FailureInfo {
                 error_message: "boom".to_string(),
@@ -154,7 +155,6 @@ mod tests {
                 occurred_at: SystemTime::UNIX_EPOCH,
                 is_propagated: false,
             }),
-            is_system: false,
         };
         assert!(is_failed_node(&props));
     }
