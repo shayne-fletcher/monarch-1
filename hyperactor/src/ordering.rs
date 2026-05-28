@@ -470,8 +470,30 @@ impl Sequencer {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering as AtomicOrdering;
+
+    use async_trait::async_trait;
+    use hyperactor_config::Flattrs;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use rand::seq::SliceRandom;
+    use timed_test::async_timed_test;
+    use tokio::sync::Barrier;
+    use tokio::sync::oneshot;
 
     use super::*;
+    use crate as hyperactor;
+    use crate::Actor;
+    use crate::ActorHandle;
+    use crate::ActorRef;
+    use crate::Context;
+    use crate::Endpoint as _;
+    use crate::Handler;
+    use crate::Proc;
+    use crate::config;
+    use crate::mailbox::headers::SENDER_ACTOR_ID;
+    use crate::mailbox::headers::stamp_sender_actor_id;
     use crate::port::Port;
     use crate::testing::ids::test_actor_id;
 
@@ -1023,5 +1045,871 @@ mod tests {
         let s = AttrValue::display(&snap);
         let parsed = <OrderingSnapshot as AttrValue>::parse(&s).unwrap();
         assert_eq!(snap, parsed);
+    }
+
+    // End-to-end ordering tests with real actor mailboxes. SenderActors
+    // send normally to a ChaosActor. ChaosActor forwards the same messages
+    // to ReceiverActor, but in shuffled batches and with optional duplicate
+    // replay. ReceiverActor only records what its handler observes; its
+    // mailbox OrderedSender is responsible for restoring per-session order.
+
+    #[derive(Clone, Debug, Serialize, Deserialize, Named)]
+    struct Frame {
+        sender_idx: u32,
+        payload_idx: u64,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize, Named)]
+    struct SenderDone {
+        sender_idx: u32,
+    }
+
+    // What ReceiverActor observed after its mailbox OrderedSender released a
+    // frame: the preserved ordering header, the sender-owner header, and the
+    // test payload.
+    type ReceivedFrame = (SeqInfo, Option<ActorAddr>, Frame);
+
+    // Start is only sent to a local ActorHandle, so it can carry local-only
+    // test handles like ActorHandle and Arc<Barrier>. Do not export it.
+    #[derive(Clone, Debug)]
+    struct Start {
+        count: u64,
+        target: ActorHandle<ChaosActor>,
+        start_barrier: Option<Arc<Barrier>>,
+        yield_between_frames: bool,
+    }
+
+    #[derive(Debug)]
+    struct SenderActor {
+        sender_idx: u32,
+    }
+
+    #[async_trait]
+    impl Actor for SenderActor {}
+
+    #[async_trait]
+    impl Handler<Start> for SenderActor {
+        async fn handle(&mut self, cx: &Context<Self>, msg: Start) -> Result<(), anyhow::Error> {
+            let Start {
+                count,
+                target,
+                start_barrier,
+                yield_between_frames,
+            } = msg;
+            if let Some(b) = start_barrier {
+                b.wait().await;
+            }
+            for payload_idx in 0..count {
+                target.post(
+                    cx,
+                    Frame {
+                        sender_idx: self.sender_idx,
+                        payload_idx,
+                    },
+                );
+                if yield_between_frames {
+                    tokio::task::yield_now().await;
+                }
+            }
+            target.post(
+                cx,
+                SenderDone {
+                    sender_idx: self.sender_idx,
+                },
+            );
+            Ok(())
+        }
+    }
+
+    // Which original frames should be replayed after their batch has been
+    // forwarded once.
+    #[derive(Debug, Clone, Copy)]
+    enum DuplicatePolicy {
+        None,
+        EveryNth { stride: usize },
+    }
+
+    #[derive(Debug, Default)]
+    struct ChaosStats {
+        // Number of original frames that reveal a per-session inversion.
+        // The counter is bumped on the lower sequence number, after a higher
+        // sequence number from the same SEQ_INFO session was already
+        // forwarded.
+        out_of_order_original_forwards: AtomicUsize,
+
+        // Number of original frames selected for replay.
+        duplicates_selected: AtomicUsize,
+
+        // Number of selected replays actually forwarded.
+        late_duplicate_forwards: AtomicUsize,
+
+        // Sessions that saw at least one inversion.
+        out_of_order_sessions: Mutex<HashSet<Uuid>>,
+
+        // Every frame ChaosActor forwarded, in forward order. Printed on
+        // failures so the panic includes the chaos-side trace.
+        forwarded_trace: Mutex<Vec<ForwardedEntry>>,
+
+        // Frames observed by ReceiverActor after it already sent the result
+        // snapshot. Non-zero is a failure. Zero is diagnostic only because
+        // the test does not wait for a final drain.
+        receiver_overflow: AtomicUsize,
+    }
+
+    // Used only in panic output.
+    #[allow(dead_code)]
+    #[derive(Debug, Clone)]
+    struct ForwardedEntry {
+        session_id: Uuid,
+        seq: u64,
+        sender_idx: u32,
+        is_duplicate: bool,
+    }
+
+    #[derive(Debug)]
+    #[hyperactor::export(handlers = [Frame, SenderDone])]
+    struct ChaosActor {
+        window: Vec<(SeqInfo, Flattrs, Frame)>,
+        window_size: usize,
+        target_port: PortAddr,
+        rng: StdRng,
+        expected_dones: u32,
+        done_count: u32,
+        expected_count_per_sender: u64,
+        duplicate_policy: DuplicatePolicy,
+        duplicate_cursor: usize,
+        stats: Arc<ChaosStats>,
+        session_owners: HashMap<Uuid, ActorAddr>,
+        max_forwarded_seq_by_session: HashMap<Uuid, u64>,
+    }
+
+    #[async_trait]
+    impl Actor for ChaosActor {}
+
+    impl ChaosActor {
+        // Forward the current batch to the receiver. The batch is shuffled,
+        // then adjusted if needed so at least one session is out of order
+        // whenever the batch has enough frames to make that possible.
+        fn flush(&mut self, cx: &Context<Self>) -> Result<(), anyhow::Error> {
+            self.window.shuffle(&mut self.rng);
+
+            // A shuffled batch can accidentally still be ordered. If so,
+            // pick the first session in window order that has at least two
+            // frames and swap its first two frames.
+            let mut first_seen_order: Vec<Uuid> = Vec::new();
+            let mut session_indices: HashMap<Uuid, Vec<usize>> = HashMap::new();
+            for (i, (seq_info, _, _)) in self.window.iter().enumerate() {
+                if let SeqInfo::Session { session_id, .. } = seq_info {
+                    if !session_indices.contains_key(session_id) {
+                        first_seen_order.push(*session_id);
+                    }
+                    session_indices.entry(*session_id).or_default().push(i);
+                }
+            }
+            for sid in &first_seen_order {
+                let indices = &session_indices[sid];
+                if indices.len() < 2 {
+                    continue;
+                }
+                let mut already_inverted = false;
+                for w in indices.windows(2) {
+                    if seq_of(&self.window[w[0]].0) > seq_of(&self.window[w[1]].0) {
+                        already_inverted = true;
+                        break;
+                    }
+                }
+                if !already_inverted {
+                    self.window.swap(indices[0], indices[1]);
+                    break;
+                }
+            }
+
+            // Send each shuffled frame once. Some frames are cloned for a
+            // later replay.
+            let mut duplicates: Vec<(SeqInfo, Flattrs, Frame)> = Vec::new();
+            let entries: Vec<(SeqInfo, Flattrs, Frame)> = self.window.drain(..).collect();
+            for (seq_info, headers, frame) in entries {
+                let (session_id, seq) = match &seq_info {
+                    SeqInfo::Session { session_id, seq } => (*session_id, *seq),
+                    SeqInfo::Direct => panic!("Direct SeqInfo at flush"),
+                };
+                // This frame proves an inversion if a higher sequence number
+                // from the same session was already forwarded.
+                let prev_max = self
+                    .max_forwarded_seq_by_session
+                    .get(&session_id)
+                    .copied()
+                    .unwrap_or(0);
+                if seq < prev_max {
+                    self.stats
+                        .out_of_order_original_forwards
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                    self.stats
+                        .out_of_order_sessions
+                        .lock()
+                        .unwrap()
+                        .insert(session_id);
+                }
+                self.max_forwarded_seq_by_session
+                    .insert(session_id, prev_max.max(seq));
+                // Select every Nth original frame for later replay.
+                let should_duplicate = match self.duplicate_policy {
+                    DuplicatePolicy::None => false,
+                    DuplicatePolicy::EveryNth { stride } => {
+                        assert!(stride > 0, "DuplicatePolicy::EveryNth requires stride > 0");
+                        self.duplicate_cursor = self.duplicate_cursor.wrapping_add(1);
+                        self.duplicate_cursor.is_multiple_of(stride)
+                    }
+                };
+                if should_duplicate {
+                    duplicates.push((seq_info.clone(), headers.clone(), frame.clone()));
+                    self.stats
+                        .duplicates_selected
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                }
+                // Forward with the original sequence header and original
+                // sender owner, like a routing hop would.
+                let owner = self
+                    .session_owners
+                    .get(&session_id)
+                    .expect("session owner missing at original forward")
+                    .clone();
+                let dest = self.target_port.clone();
+                let mut outbound = headers;
+                stamp_sender_actor_id(&mut outbound, &seq_info, &dest, &owner);
+                cx.post_with_external_seq_info(dest, outbound, wirevalue::Any::serialize(&frame)?);
+                self.stats
+                    .forwarded_trace
+                    .lock()
+                    .unwrap()
+                    .push(ForwardedEntry {
+                        session_id,
+                        seq,
+                        sender_idx: frame.sender_idx,
+                        is_duplicate: false,
+                    });
+            }
+
+            // Replay selected frames after the original batch. A duplicate
+            // that arrives while its original is still buffered trips
+            // OrderedSender's duplicate-buffer assert; these replays are
+            // intended to hit the late-duplicate drop path instead.
+            for (seq_info, headers, frame) in duplicates {
+                let (session_id, seq) = match &seq_info {
+                    SeqInfo::Session { session_id, seq } => (*session_id, *seq),
+                    SeqInfo::Direct => unreachable!(),
+                };
+                let owner = self
+                    .session_owners
+                    .get(&session_id)
+                    .expect("session owner missing at duplicate forward")
+                    .clone();
+                let dest = self.target_port.clone();
+                let mut outbound = headers;
+                stamp_sender_actor_id(&mut outbound, &seq_info, &dest, &owner);
+                cx.post_with_external_seq_info(dest, outbound, wirevalue::Any::serialize(&frame)?);
+                self.stats
+                    .late_duplicate_forwards
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+                self.stats
+                    .forwarded_trace
+                    .lock()
+                    .unwrap()
+                    .push(ForwardedEntry {
+                        session_id,
+                        seq,
+                        sender_idx: frame.sender_idx,
+                        is_duplicate: true,
+                    });
+            }
+
+            Ok(())
+        }
+    }
+
+    fn seq_of(s: &SeqInfo) -> u64 {
+        match s {
+            SeqInfo::Session { seq, .. } => *seq,
+            SeqInfo::Direct => panic!("seq_of called on SeqInfo::Direct"),
+        }
+    }
+
+    #[async_trait]
+    impl Handler<Frame> for ChaosActor {
+        async fn handle(&mut self, cx: &Context<Self>, frame: Frame) -> Result<(), anyhow::Error> {
+            let seq_info = cx.headers().get(SEQ_INFO);
+            let (session_id, seq) = match &seq_info {
+                Some(SeqInfo::Session { session_id, seq }) => (*session_id, *seq),
+                Some(SeqInfo::Direct) => {
+                    panic!("chaos inbound has SeqInfo::Direct; bind misconfigured")
+                }
+                None => panic!("chaos inbound missing SEQ_INFO"),
+            };
+            let sender_addr = cx.headers().get(SENDER_ACTOR_ID);
+            if seq <= 4 {
+                assert!(
+                    sender_addr.is_some(),
+                    "missing SENDER_ACTOR_ID on early-session chaos inbound (seq={seq})",
+                );
+            }
+            if let Some(addr) = &sender_addr {
+                match self.session_owners.entry(session_id) {
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(addr.clone());
+                    }
+                    std::collections::hash_map::Entry::Occupied(o) => {
+                        assert_eq!(
+                            o.get(),
+                            addr,
+                            "session owner changed mid-stream for session_id={session_id}",
+                        );
+                    }
+                }
+            }
+            let inbound_headers = cx.headers().clone();
+            self.window
+                .push((seq_info.unwrap(), inbound_headers, frame));
+            if self.window.len() >= self.window_size {
+                self.flush(cx)?;
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Handler<SenderDone> for ChaosActor {
+        async fn handle(
+            &mut self,
+            cx: &Context<Self>,
+            done: SenderDone,
+        ) -> Result<(), anyhow::Error> {
+            let seq_info = cx.headers().get(SEQ_INFO);
+            let (session_id, seq) = match &seq_info {
+                Some(SeqInfo::Session { session_id, seq }) => (*session_id, *seq),
+                Some(SeqInfo::Direct) => {
+                    panic!("SenderDone arrived as SeqInfo::Direct; bind misconfigured")
+                }
+                None => panic!("SenderDone missing SEQ_INFO"),
+            };
+            // The sender posts all Frames and then SenderDone to the same
+            // actor. They should share one sequence stream.
+            assert_eq!(
+                seq,
+                self.expected_count_per_sender + 1,
+                "SenderDone(sender_idx={}) seq={seq}; expected {} (count+1)",
+                done.sender_idx,
+                self.expected_count_per_sender + 1,
+            );
+            assert!(
+                self.session_owners.contains_key(&session_id),
+                "SenderDone(sender_idx={}) for session_id={session_id} \
+                 before any Frame from that session",
+                done.sender_idx,
+            );
+            // SenderDone is usually past the early messages that carry the
+            // sender-owner header. If the header is present, it must still
+            // match the session owner learned from the Frames.
+            if let Some(addr) = cx.headers().get(SENDER_ACTOR_ID) {
+                let owner = self.session_owners.get(&session_id).unwrap();
+                assert_eq!(
+                    &addr, owner,
+                    "SenderDone SENDER_ACTOR_ID inconsistent with session_owner \
+                     for session_id={session_id}",
+                );
+            }
+            assert!(
+                self.done_count < self.expected_dones,
+                "extra SenderDone(sender_idx={}); done_count already at expected_dones={}",
+                done.sender_idx,
+                self.expected_dones,
+            );
+            self.done_count += 1;
+            if self.done_count == self.expected_dones && !self.window.is_empty() {
+                self.flush(cx)?;
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    #[hyperactor::export(handlers = [Frame])]
+    struct ReceiverActor {
+        received: Vec<ReceivedFrame>,
+        expected_total: usize,
+        done: Option<oneshot::Sender<Vec<ReceivedFrame>>>,
+        stats: Arc<ChaosStats>,
+    }
+
+    #[async_trait]
+    impl Actor for ReceiverActor {}
+
+    #[async_trait]
+    impl Handler<Frame> for ReceiverActor {
+        async fn handle(&mut self, cx: &Context<Self>, frame: Frame) -> Result<(), anyhow::Error> {
+            let seq_info = match cx.headers().get(SEQ_INFO) {
+                Some(SeqInfo::Session { session_id, seq }) => SeqInfo::Session { session_id, seq },
+                Some(SeqInfo::Direct) => {
+                    panic!("receiver inbound has SeqInfo::Direct; chaos forward bypassed SEQ_INFO")
+                }
+                None => panic!("receiver inbound missing SEQ_INFO"),
+            };
+            let sender_addr = cx.headers().get(SENDER_ACTOR_ID);
+            // Anything after the snapshot is an extra delivery. Count it, but
+            // keep the original snapshot unchanged for assertions.
+            if self.done.is_none() {
+                self.stats
+                    .receiver_overflow
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+                return Ok(());
+            }
+            self.received.push((seq_info, sender_addr, frame));
+            if self.received.len() == self.expected_total {
+                let tx = self.done.take().expect("done sender already consumed");
+                let snapshot = std::mem::take(&mut self.received);
+                let _ = tx.send(snapshot);
+            }
+            Ok(())
+        }
+    }
+
+    // Checks the receiver-side invariants shared by all chaos tests. Panics
+    // include the ChaosActor forward trace.
+    fn assert_received_protocol_correct(
+        received: &[ReceivedFrame],
+        expected_senders: usize,
+        expected_count_per_sender: u64,
+        sender_addrs: &[ActorAddr],
+        stats: &ChaosStats,
+    ) {
+        let expected_total = expected_senders * (expected_count_per_sender as usize);
+        let dump_trace = || -> String {
+            let trace = stats.forwarded_trace.lock().unwrap();
+            format!("forwarded_trace ({} entries) = {:#?}", trace.len(), *trace,)
+        };
+
+        assert_eq!(
+            received.len(),
+            expected_total,
+            "expected {} frames at receiver, got {}; {}",
+            expected_total,
+            received.len(),
+            dump_trace(),
+        );
+
+        // This catches extra deliveries after the receiver snapshot.
+        let overflow = stats.receiver_overflow.load(AtomicOrdering::Acquire);
+        assert_eq!(
+            overflow,
+            0,
+            "stats.receiver_overflow = {overflow}; duplicate leaked past \
+             OrderedSender's drop branch after snapshot; {}",
+            dump_trace(),
+        );
+
+        // Each logical sender should map to exactly one wire session.
+        let mut sender_session: HashMap<u32, Uuid> = HashMap::new();
+        for (seq_info, _, frame) in received {
+            let session_id = match seq_info {
+                SeqInfo::Session { session_id, .. } => *session_id,
+                SeqInfo::Direct => {
+                    panic!("receiver captured Direct SEQ_INFO; {}", dump_trace())
+                }
+            };
+            match sender_session.entry(frame.sender_idx) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(session_id);
+                }
+                std::collections::hash_map::Entry::Occupied(o) => {
+                    assert_eq!(
+                        o.get(),
+                        &session_id,
+                        "sender_idx={} mapped to two distinct sessions ({} and {}); {}",
+                        frame.sender_idx,
+                        o.get(),
+                        session_id,
+                        dump_trace(),
+                    );
+                }
+            }
+        }
+
+        // And each wire session should belong to exactly one logical sender.
+        assert_eq!(
+            sender_session.len(),
+            expected_senders,
+            "expected {} distinct sender_idx, got {}; {}",
+            expected_senders,
+            sender_session.len(),
+            dump_trace(),
+        );
+        let distinct_sessions: HashSet<Uuid> = sender_session.values().copied().collect();
+        assert_eq!(
+            distinct_sessions.len(),
+            expected_senders,
+            "sender_idx -> session_id is not a bijection (got {} distinct sessions for {} senders); {}",
+            distinct_sessions.len(),
+            expected_senders,
+            dump_trace(),
+        );
+
+        // Each sender's delivered subsequence should be exactly 0..K payloads
+        // and 1..=K sequence numbers.
+        for sender_idx in 0..(expected_senders as u32) {
+            let subseq: Vec<&ReceivedFrame> = received
+                .iter()
+                .filter(|(_, _, f)| f.sender_idx == sender_idx)
+                .collect();
+            assert_eq!(
+                subseq.len() as u64,
+                expected_count_per_sender,
+                "sender_idx={sender_idx}: expected {} frames, got {}; {}",
+                expected_count_per_sender,
+                subseq.len(),
+                dump_trace(),
+            );
+            for (i, (seq_info, _, frame)) in subseq.iter().enumerate() {
+                let expected_payload = i as u64;
+                assert_eq!(
+                    frame.payload_idx,
+                    expected_payload,
+                    "sender_idx={sender_idx}, position {i}: payload_idx={} (expected {}); {}",
+                    frame.payload_idx,
+                    expected_payload,
+                    dump_trace(),
+                );
+                let expected_seq = (i as u64) + 1;
+                let actual_seq = seq_of(seq_info);
+                assert_eq!(
+                    actual_seq,
+                    expected_seq,
+                    "sender_idx={sender_idx}, position {i}: SEQ_INFO.seq={} (expected {}); {}",
+                    actual_seq,
+                    expected_seq,
+                    dump_trace(),
+                );
+            }
+        }
+
+        // Early messages should identify the actor that owns the sequence.
+        for (seq_info, sender_addr_opt, frame) in received {
+            let seq = seq_of(seq_info);
+            if seq > 4 {
+                continue;
+            }
+            let expected_addr = &sender_addrs[frame.sender_idx as usize];
+            let captured = sender_addr_opt.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "sender_idx={}, seq={seq}: SENDER_ACTOR_ID is None at early-session; {}",
+                    frame.sender_idx,
+                    dump_trace(),
+                )
+            });
+            assert_eq!(
+                captured,
+                expected_addr,
+                "sender_idx={}, seq={seq}: SENDER_ACTOR_ID {captured:?} != expected {expected_addr:?}; {}",
+                frame.sender_idx,
+                dump_trace(),
+            );
+        }
+    }
+
+    // One sender, shuffled batches, no duplicates.
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_chaos_single_sender_preserves_order() {
+        let config = hyperactor_config::global::lock();
+        let _g = config.override_key(config::ENABLE_DEST_ACTOR_REORDERING_BUFFER, true);
+
+        let proc = Proc::isolated();
+        let client = proc.client("client");
+
+        let stats = Arc::new(ChaosStats::default());
+        let n: usize = 1;
+        let k: u64 = 50;
+
+        let (done_tx, done_rx) = oneshot::channel();
+        let receiver_handle = proc.spawn_with_label(
+            "receiver",
+            ReceiverActor {
+                received: Vec::new(),
+                expected_total: n * (k as usize),
+                done: Some(done_tx),
+                stats: stats.clone(),
+            },
+        );
+        let receiver_ref: ActorRef<ReceiverActor> = receiver_handle.bind();
+        let target_port = receiver_ref.port::<Frame>().port_addr().clone();
+
+        let chaos_handle = proc.spawn_with_label(
+            "chaos",
+            ChaosActor {
+                window: Vec::new(),
+                window_size: 10,
+                target_port,
+                rng: StdRng::seed_from_u64(0xC4A0_5EED),
+                expected_dones: n as u32,
+                done_count: 0,
+                expected_count_per_sender: k,
+                duplicate_policy: DuplicatePolicy::None,
+                duplicate_cursor: 0,
+                stats: stats.clone(),
+                session_owners: HashMap::new(),
+                max_forwarded_seq_by_session: HashMap::new(),
+            },
+        );
+        // Bind exported handler ports so local handle posts carry
+        // SEQ_INFO::Session instead of SeqInfo::Direct.
+        let _bound_chaos_ref: ActorRef<ChaosActor> = chaos_handle.bind();
+
+        let sender_handle = proc.spawn_with_label("sender0", SenderActor { sender_idx: 0 });
+        let sender_addr = sender_handle.actor_addr().clone();
+
+        sender_handle.post(
+            &client,
+            Start {
+                count: k,
+                target: chaos_handle.clone(),
+                start_barrier: None,
+                yield_between_frames: false,
+            },
+        );
+
+        let received = match tokio::time::timeout(std::time::Duration::from_secs(5), done_rx).await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(_)) => panic!("done_rx sender dropped before sending; receiver crashed?"),
+            Err(_) => {
+                let trace = stats.forwarded_trace.lock().unwrap();
+                panic!(
+                    "timed out waiting for receiver; forwarded_trace ({} entries) = {:#?}",
+                    trace.len(),
+                    *trace,
+                );
+            }
+        };
+
+        assert_received_protocol_correct(&received, n, k, &[sender_addr], &stats);
+
+        let oo = stats
+            .out_of_order_original_forwards
+            .load(AtomicOrdering::Acquire);
+        assert!(
+            oo > 0,
+            "expected out_of_order_original_forwards > 0, got {oo}: \
+             chaos shuffle never inverted a real frame (shuffle was identity?)",
+        );
+    }
+
+    // Multiple senders share one chaos actor. Each sender must be delivered
+    // in order; cross-sender interleaving is unconstrained.
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_chaos_multi_sender_preserves_per_session_order() {
+        let config = hyperactor_config::global::lock();
+        let _g = config.override_key(config::ENABLE_DEST_ACTOR_REORDERING_BUFFER, true);
+
+        let proc = Proc::isolated();
+        let client = proc.client("client");
+
+        let stats = Arc::new(ChaosStats::default());
+        let n: usize = 4;
+        let k: u64 = 25;
+
+        let (done_tx, done_rx) = oneshot::channel();
+        let receiver_handle = proc.spawn_with_label(
+            "receiver",
+            ReceiverActor {
+                received: Vec::new(),
+                expected_total: n * (k as usize),
+                done: Some(done_tx),
+                stats: stats.clone(),
+            },
+        );
+        let receiver_ref: ActorRef<ReceiverActor> = receiver_handle.bind();
+        let target_port = receiver_ref.port::<Frame>().port_addr().clone();
+
+        let chaos_handle = proc.spawn_with_label(
+            "chaos",
+            ChaosActor {
+                window: Vec::new(),
+                window_size: 10,
+                target_port,
+                rng: StdRng::seed_from_u64(0xC4A0_5EED),
+                expected_dones: n as u32,
+                done_count: 0,
+                expected_count_per_sender: k,
+                duplicate_policy: DuplicatePolicy::None,
+                duplicate_cursor: 0,
+                stats: stats.clone(),
+                session_owners: HashMap::new(),
+                max_forwarded_seq_by_session: HashMap::new(),
+            },
+        );
+        // Bind exported handler ports so local handle posts carry
+        // SEQ_INFO::Session instead of SeqInfo::Direct.
+        let _bound_chaos_ref: ActorRef<ChaosActor> = chaos_handle.bind();
+
+        let barrier = Arc::new(Barrier::new(n));
+        let mut sender_addrs: Vec<ActorAddr> = Vec::with_capacity(n);
+        let mut sender_handles: Vec<ActorHandle<SenderActor>> = Vec::with_capacity(n);
+        for sender_idx in 0..n {
+            let h = proc.spawn_with_label(
+                &format!("sender{sender_idx}"),
+                SenderActor {
+                    sender_idx: sender_idx as u32,
+                },
+            );
+            sender_addrs.push(h.actor_addr().clone());
+            sender_handles.push(h);
+        }
+        for h in &sender_handles {
+            h.post(
+                &client,
+                Start {
+                    count: k,
+                    target: chaos_handle.clone(),
+                    start_barrier: Some(barrier.clone()),
+                    yield_between_frames: true,
+                },
+            );
+        }
+
+        let received = match tokio::time::timeout(std::time::Duration::from_secs(5), done_rx).await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(_)) => panic!("done_rx sender dropped before sending; receiver crashed?"),
+            Err(_) => {
+                let trace = stats.forwarded_trace.lock().unwrap();
+                panic!(
+                    "timed out waiting for receiver; forwarded_trace ({} entries) = {:#?}",
+                    trace.len(),
+                    *trace,
+                );
+            }
+        };
+
+        assert_received_protocol_correct(&received, n, k, &sender_addrs, &stats);
+
+        let oo = stats
+            .out_of_order_original_forwards
+            .load(AtomicOrdering::Acquire);
+        assert!(
+            oo > 0,
+            "expected out_of_order_original_forwards > 0, got {oo}",
+        );
+        // Keep the diagnostic set consistent with the global counter.
+        let sessions_with_inversion = stats.out_of_order_sessions.lock().unwrap().len();
+        assert!(
+            sessions_with_inversion >= 1,
+            "expected out_of_order_sessions.len() >= 1, got {sessions_with_inversion}",
+        );
+    }
+
+    // Same as the multi-sender case, but replay every 10th original frame.
+    // The receiver should still see each original exactly once.
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_chaos_drops_duplicates() {
+        let config = hyperactor_config::global::lock();
+        let _g = config.override_key(config::ENABLE_DEST_ACTOR_REORDERING_BUFFER, true);
+
+        let proc = Proc::isolated();
+        let client = proc.client("client");
+
+        let stats = Arc::new(ChaosStats::default());
+        let n: usize = 4;
+        let k: u64 = 25;
+
+        let (done_tx, done_rx) = oneshot::channel();
+        let receiver_handle = proc.spawn_with_label(
+            "receiver",
+            ReceiverActor {
+                received: Vec::new(),
+                expected_total: n * (k as usize),
+                done: Some(done_tx),
+                stats: stats.clone(),
+            },
+        );
+        let receiver_ref: ActorRef<ReceiverActor> = receiver_handle.bind();
+        let target_port = receiver_ref.port::<Frame>().port_addr().clone();
+
+        let chaos_handle = proc.spawn_with_label(
+            "chaos",
+            ChaosActor {
+                window: Vec::new(),
+                window_size: 10,
+                target_port,
+                rng: StdRng::seed_from_u64(0xC4A0_5EED),
+                expected_dones: n as u32,
+                done_count: 0,
+                expected_count_per_sender: k,
+                duplicate_policy: DuplicatePolicy::EveryNth { stride: 10 },
+                duplicate_cursor: 0,
+                stats: stats.clone(),
+                session_owners: HashMap::new(),
+                max_forwarded_seq_by_session: HashMap::new(),
+            },
+        );
+        // Bind exported handler ports so local handle posts carry
+        // SEQ_INFO::Session instead of SeqInfo::Direct.
+        let _bound_chaos_ref: ActorRef<ChaosActor> = chaos_handle.bind();
+
+        let barrier = Arc::new(Barrier::new(n));
+        let mut sender_addrs: Vec<ActorAddr> = Vec::with_capacity(n);
+        let mut sender_handles: Vec<ActorHandle<SenderActor>> = Vec::with_capacity(n);
+        for sender_idx in 0..n {
+            let h = proc.spawn_with_label(
+                &format!("sender{sender_idx}"),
+                SenderActor {
+                    sender_idx: sender_idx as u32,
+                },
+            );
+            sender_addrs.push(h.actor_addr().clone());
+            sender_handles.push(h);
+        }
+        for h in &sender_handles {
+            h.post(
+                &client,
+                Start {
+                    count: k,
+                    target: chaos_handle.clone(),
+                    start_barrier: Some(barrier.clone()),
+                    yield_between_frames: true,
+                },
+            );
+        }
+
+        let received = match tokio::time::timeout(std::time::Duration::from_secs(5), done_rx).await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(_)) => panic!("done_rx sender dropped before sending; receiver crashed?"),
+            Err(_) => {
+                let trace = stats.forwarded_trace.lock().unwrap();
+                panic!(
+                    "timed out waiting for receiver; forwarded_trace ({} entries) = {:#?}",
+                    trace.len(),
+                    *trace,
+                );
+            }
+        };
+
+        assert_received_protocol_correct(&received, n, k, &sender_addrs, &stats);
+
+        let selected = stats.duplicates_selected.load(AtomicOrdering::Acquire);
+        let emitted = stats.late_duplicate_forwards.load(AtomicOrdering::Acquire);
+        assert!(
+            selected > 0,
+            "expected duplicates_selected > 0, got {selected}: chaos policy never fired",
+        );
+        assert_eq!(
+            emitted, selected,
+            "duplicate selections did not match duplicate forwards: duplicates_selected={selected}, \
+             late_duplicate_forwards={emitted}",
+        );
+        let oo = stats
+            .out_of_order_original_forwards
+            .load(AtomicOrdering::Acquire);
+        assert!(
+            oo > 0,
+            "expected out_of_order_original_forwards > 0, got {oo}",
+        );
     }
 }
