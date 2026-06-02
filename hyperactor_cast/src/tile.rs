@@ -630,6 +630,50 @@ fn root_point_tile(base: &Tile, active_dims: &[(usize, usize)]) -> Tile {
     Tile::from_space(space)
 }
 
+/// Reference bisection tiler.
+///
+/// Splits the first non-singleton dimension into a lower anchor half
+/// (`0..mid`) and an upper sibling half (`mid..n`), where `mid = n / 2`.
+/// The structural split is binary, but communication children are computed
+/// after anchor contraction: sibling descendants inside the lower half are
+/// promoted to the current root. This yields a deeper send tree with less root
+/// fan-out than block partitioning on wide dimensions.
+///
+/// This tiler is included for model completeness, tests, and comparison with
+/// the reference implementation. [`BoundedFanout`] is the production-oriented
+/// fan-out control policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Bisection;
+
+impl Tiling for Bisection {
+    fn child_nodes(&self, tile: &Tile) -> Vec<TileNode> {
+        let space = tile.space();
+        let Some(dim) = first_non_singleton_dim(space) else {
+            return vec![];
+        };
+        let n = space.sizes()[dim];
+        let lower = n / 2;
+
+        let sibling = TileNode {
+            tile: Tile::from_space(
+                space
+                    .select(dim, lower, n, 1)
+                    .expect("Bisection: upper half must be a valid slice"),
+            ),
+            relation: TileRelation::Sibling(Split { dim, index: lower }),
+        };
+        let anchor = TileNode {
+            tile: Tile::from_space(
+                space
+                    .select(dim, 0, lower, 1)
+                    .expect("Bisection: lower half must be a valid slice"),
+            ),
+            relation: TileRelation::Anchor(Split { dim, index: 0 }),
+        };
+        vec![sibling, anchor]
+    }
+}
+
 /// Serializable selector for a concrete tiling algorithm.
 ///
 /// This keeps the tiling family open internally via [`Tiling`], while giving
@@ -642,14 +686,23 @@ pub enum TilingPolicy {
     /// Cap communication fan-out per node. When `fanout` is below the
     /// active-dimension minimum, the minimum is used.
     BoundedFanout { fanout: NonZeroUsize },
+    /// Recursively bisect the first non-singleton dimension at each step.
+    Bisection,
 }
 
 impl TilingPolicy {
     pub(crate) fn children(&self, tile: &Tile) -> Vec<Tile> {
         match self {
-            Self::BlockPartitioning => BlockPartitioning.children(tile),
+            Self::BlockPartitioning => {
+                let tiling = BlockPartitioning;
+                tiling.children(tile)
+            }
             Self::BoundedFanout { fanout } => {
                 let tiling = BoundedFanout { fanout: *fanout };
+                tiling.children(tile)
+            }
+            Self::Bisection => {
+                let tiling = Bisection;
                 tiling.children(tile)
             }
         }
@@ -1332,6 +1385,150 @@ mod tests {
             fanout in cap_strategy(),
         ) {
             let tiling = BoundedFanout { fanout };
+            let root = Tile::from_view(&view);
+            validate_structural_child_subsets(&tiling, &root);
+        }
+    }
+
+    // Bisection unit tests.
+
+    // Tests Bisection's raw structural split before anchor contraction. For a
+    // 1 x 5 tile, the first splittable dimension is `col`; `mid = 5 / 2 = 2`.
+    // The upper half, ranks [2, 3, 4], has a new root and is the sibling. The
+    // lower half, ranks [0, 1], keeps the parent root and is the anchor.
+    #[test]
+    fn test_bisection_child_nodes_on_1x5_exposes_upper_sibling_and_lower_anchor() {
+        let view = Region::from(shape!(row = 1, col = 5));
+        let tiling = Bisection;
+        let root = Tile::from_view(&view);
+
+        let nodes = tiling.child_nodes(&root);
+
+        assert_eq!(
+            nodes.iter().map(|node| node.relation).collect::<Vec<_>>(),
+            vec![
+                TileRelation::Sibling(Split { dim: 1, index: 2 }),
+                TileRelation::Anchor(Split { dim: 1, index: 0 }),
+            ],
+        );
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|node| node.tile.ranks().collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            vec![vec![2, 3, 4], vec![0, 1]],
+        );
+    }
+
+    // Tests the communication projection of that same 1 x 5 split. The upper
+    // half [2, 3, 4] is already a sibling, so it remains a direct child. The
+    // lower half [0, 1] is an anchor, so it is not returned; its own sibling
+    // [1] is promoted to a direct communication child of the root.
+    #[test]
+    fn test_bisection_children_on_1x5_contracts_lower_anchor() {
+        let view = Region::from(shape!(row = 1, col = 5));
+        let tiling = Bisection;
+        let root = Tile::from_view(&view);
+
+        assert_eq!(
+            tiling
+                .children(&root)
+                .iter()
+                .map(|tile| tile.ranks().collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            vec![vec![2, 3, 4], vec![1]],
+        );
+    }
+
+    // Tests the serializable policy selector for Bisection. The pinned rank
+    // sets are the communication children of rank 0 after anchor contraction;
+    // the direct-call assertion catches a wrong `TilingPolicy` dispatch arm.
+    #[test]
+    fn test_tiling_policy_bisection_dispatch_matches_direct_call() {
+        let view = Region::from(shape!(row = 1, col = 8));
+        let root = Tile::from_view(&view);
+
+        let via_policy = TilingPolicy::Bisection.children(&root);
+        let via_direct = Bisection.children(&root);
+
+        let policy_ranks: Vec<Vec<usize>> =
+            via_policy.iter().map(|t| t.ranks().collect()).collect();
+        let direct_ranks: Vec<Vec<usize>> =
+            via_direct.iter().map(|t| t.ranks().collect()).collect();
+
+        // For a 1 x 8 tile, the root first exposes the upper half [4, 5, 6, 7].
+        // The lower anchor half [0, 1, 2, 3] is contracted, which promotes its
+        // sibling [2, 3]; contracting [0, 1] then promotes [1].
+        assert_eq!(policy_ranks, vec![vec![4, 5, 6, 7], vec![2, 3], vec![1]],);
+        // Dispatch equivalence: TilingPolicy::Bisection must call the concrete
+        // Bisection tiler.
+        assert_eq!(policy_ranks, direct_ranks);
+    }
+
+    // Bisection proptests. Root-shape generators use `small_shape_sizes()`;
+    // sliced generators use `gen_region_strided(1..=4, 4, 3, 0)` from
+    // `ndslice::strategy`.
+    proptest! {
+        // Theorem: the Bisection send tree covers exactly the ranks in the
+        // root tile. Collecting communication roots recursively should produce
+        // every covered rank once, no omissions and no duplicates.
+        #[test]
+        fn prop_bisection_recursive_tiles_cover_each_rank_once(sizes in small_shape_sizes()) {
+            let view = Region::from(shape_from_sizes(&sizes));
+            let tiling = Bisection;
+            let root = Tile::from_view(&view);
+
+            let mut roots = Vec::new();
+            collect_roots(&tiling, &root, &mut roots);
+            roots.sort();
+
+            let mut expected = view.slice().iter().collect::<Vec<_>>();
+            expected.sort();
+            prop_assert_eq!(roots, expected);
+        }
+
+        // Theorem: each Bisection communication child stays inside its parent
+        // tile, and sibling communication children at the same step do not
+        // overlap.
+        #[test]
+        fn prop_bisection_child_tiles_are_disjoint_parent_subsets(sizes in small_shape_sizes()) {
+            let view = Region::from(shape_from_sizes(&sizes));
+            let tiling = Bisection;
+            let root = Tile::from_view(&view);
+            validate_child_tiles_are_parent_subsets(&tiling, &root);
+        }
+
+        // Theorem: the communication-child subset/disjointness property is
+        // affine-frame independent. It must still hold when the root tile is a
+        // strided or offset slice of a larger Region.
+        #[test]
+        fn prop_bisection_child_tiles_are_disjoint_parent_subsets_sliced(
+            view in gen_region_strided(1..=4, 4, 3, 0),
+        ) {
+            let tiling = Bisection;
+            let root = Tile::from_view(&view);
+            validate_child_tiles_are_parent_subsets(&tiling, &root);
+        }
+
+        // Theorem: the raw structural split is contained in the parent tile.
+        // This checks both halves before anchor contraction: the upper sibling
+        // half and the lower anchor half.
+        #[test]
+        fn prop_bisection_structural_children_are_parent_subsets(sizes in small_shape_sizes()) {
+            let view = Region::from(shape_from_sizes(&sizes));
+            let tiling = Bisection;
+            let root = Tile::from_view(&view);
+            validate_structural_child_subsets(&tiling, &root);
+        }
+
+        // Theorem: structural-child containment is affine-frame independent.
+        // Bisection should preserve base ranks correctly even when the root is
+        // a strided or offset slice.
+        #[test]
+        fn prop_bisection_structural_children_are_parent_subsets_sliced(
+            view in gen_region_strided(1..=4, 4, 3, 0),
+        ) {
+            let tiling = Bisection;
             let root = Tile::from_view(&view);
             validate_structural_child_subsets(&tiling, &root);
         }
