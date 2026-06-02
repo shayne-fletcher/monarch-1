@@ -639,12 +639,19 @@ fn root_point_tile(base: &Tile, active_dims: &[(usize, usize)]) -> Tile {
 pub enum TilingPolicy {
     /// Recursively split the first varying dimension and contract anchor edges.
     BlockPartitioning,
+    /// Cap communication fan-out per node. When `fanout` is below the
+    /// active-dimension minimum, the minimum is used.
+    BoundedFanout { fanout: NonZeroUsize },
 }
 
 impl TilingPolicy {
     pub(crate) fn children(&self, tile: &Tile) -> Vec<Tile> {
         match self {
             Self::BlockPartitioning => BlockPartitioning.children(tile),
+            Self::BoundedFanout { fanout } => {
+                let tiling = BoundedFanout { fanout: *fanout };
+                tiling.children(tile)
+            }
         }
     }
 }
@@ -1157,6 +1164,31 @@ mod tests {
         let rank_sets: Vec<Vec<usize>> = children.iter().map(|c| c.ranks().collect()).collect();
         assert_eq!(roots, vec![5, 2]);
         assert_eq!(rank_sets, vec![vec![5, 6], vec![2]]);
+    }
+
+    // Tests that the serializable policy selector preserves BoundedFanout's
+    // geometry. The rank assertion keeps the example readable; the direct-call
+    // assertion catches a wrong `TilingPolicy` dispatch arm.
+    #[test]
+    fn test_tiling_policy_bounded_fanout_dispatch_matches_direct_call() {
+        let view = Region::from(shape!(row = 1, col = 8));
+        let root = Tile::from_view(&view);
+        let fanout = NonZeroUsize::new(2).unwrap();
+
+        let via_policy = TilingPolicy::BoundedFanout { fanout }.children(&root);
+        let via_direct = BoundedFanout { fanout }.children(&root);
+
+        let policy_ranks: Vec<Vec<usize>> =
+            via_policy.iter().map(|t| t.ranks().collect()).collect();
+        let direct_ranks: Vec<Vec<usize>> =
+            via_direct.iter().map(|t| t.ranks().collect()).collect();
+
+        // Pin the example to the documented 1 x 8, fanout 2 intuition: two
+        // away-from-root groups, left-heavy.
+        assert_eq!(policy_ranks, vec![vec![1, 2, 3, 4], vec![5, 6, 7]]);
+        // Dispatch equivalence: TilingPolicy::BoundedFanout must call the
+        // same implementation as BoundedFanout directly.
+        assert_eq!(policy_ranks, direct_ranks);
     }
 
     // BoundedFanout proptests. Root-shape generators use
