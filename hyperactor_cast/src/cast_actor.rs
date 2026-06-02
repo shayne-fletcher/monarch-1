@@ -497,7 +497,7 @@ impl Handler<CreateCastDomain> for CastActor {
         fields(
             domain_id = %message.cast_domain_id,
             rank = message.tile.root_rank(),
-            num_members = message.tile.len(),
+            num_members = message.tile.rank_count(),
         )
     )]
     async fn handle(
