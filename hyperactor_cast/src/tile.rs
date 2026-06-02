@@ -689,6 +689,7 @@ mod tests {
     use ndslice::Shape;
     use ndslice::ViewExt;
     use ndslice::shape;
+    use ndslice::strategy::gen_region_strided;
     use proptest::prelude::*;
 
     use super::*;
@@ -752,6 +753,44 @@ mod tests {
         view
     }
 
+    /// Generates `NonZeroUsize` fan-out caps in `1..=8`.
+    fn cap_strategy() -> impl Strategy<Value = NonZeroUsize> {
+        (1usize..=8).prop_map(|k| NonZeroUsize::new(k).unwrap())
+    }
+
+    fn bounded_fanout(fanout: usize) -> BoundedFanout {
+        BoundedFanout {
+            fanout: NonZeroUsize::new(fanout).unwrap(),
+        }
+    }
+
+    /// Maximum number of communication children the tile's immediate frontier
+    /// can expose. Each active dimension contributes one possible child per
+    /// away-from-root index.
+    fn immediate_frontier_capacity(tile: &Tile) -> usize {
+        active_dimensions(tile.space())
+            .into_iter()
+            .map(|(_dim, extent)| extent - 1)
+            .sum()
+    }
+
+    /// One-level structural-subset check: every tile in `tiling.child_nodes(tile)`
+    /// covers a subset of `tile.ranks()`. The communication-children helper
+    /// (`validate_child_tiles_are_parent_subsets`) recurses; this one
+    /// intentionally does not — structural children include the anchor, and
+    /// structural cover is only meaningful at the immediate decomposition
+    /// step.
+    fn validate_structural_child_subsets<T: Tiling>(tiling: &T, tile: &Tile) {
+        let parent_ranks = tile.ranks().collect::<BTreeSet<_>>();
+        for node in tiling.child_nodes(tile) {
+            let child_ranks = node.tile.ranks().collect::<BTreeSet<_>>();
+            assert!(
+                child_ranks.is_subset(&parent_ranks),
+                "structural child {node:?} must be contained in parent {tile:?}",
+            );
+        }
+    }
+
     #[test]
     fn test_block_partitioning_covers_each_rank_once() {
         // The recursive send tree should choose each rank as the root of
@@ -779,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn test_child_nodes_expose_anchor_and_sibling_relations() {
+    fn test_block_partitioning_child_nodes_expose_anchor_and_sibling_relations() {
         // `child_nodes` returns the immediate structural decomposition before
         // anchor contraction. Splitting dim=0 produces a sibling row and an
         // anchor row.
@@ -816,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn test_children_contract_anchor_nodes() {
+    fn test_block_partitioning_children_contract_anchor_nodes() {
         // `children` projects structural decomposition into communication
         // children by contracting anchors. The anchor row `[0 1]` is spliced
         // out, exposing its sibling descendant `[1]`.
@@ -848,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sliced_view_tiles_stay_in_affine_frame() {
+    fn test_block_partitioning_sliced_view_tiles_stay_in_affine_frame() {
         // Root tile construction preserves the sliced view's affine offset.
         // Children are affine subspaces of that root tile.
         //
@@ -931,7 +970,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn prop_recursive_tiles_cover_each_rank_once(sizes in small_shape_sizes()) {
+        fn prop_block_partitioning_recursive_tiles_cover_each_rank_once(sizes in small_shape_sizes()) {
             // Example generalized by this property:
             //
             // ```text
@@ -956,7 +995,7 @@ mod tests {
         }
 
         #[test]
-        fn prop_child_tiles_are_disjoint_parent_subsets(sizes in small_shape_sizes()) {
+        fn prop_block_partitioning_child_tiles_are_disjoint_parent_subsets(sizes in small_shape_sizes()) {
             // Example generalized by this property:
             //
             // ```text
@@ -976,7 +1015,7 @@ mod tests {
         }
 
         #[test]
-        fn prop_sliced_view_tiles_remain_in_view_frame(sizes in small_shape_sizes()) {
+        fn prop_block_partitioning_sliced_view_tiles_remain_in_view_frame(sizes in small_shape_sizes()) {
             // Example generalized by this property:
             //
             // ```text
@@ -1007,18 +1046,262 @@ mod tests {
         }
     }
 
-    // Minimal smoke test for the BoundedFanout structural shape. In a 1 x 4
-    // tile there is one active dimension, so one slab: [1 2 3]. With fanout 2,
-    // that slab is split into two sibling groups, plus the root point anchor.
+    // BoundedFanout unit tests.
+
+    // Tests that `minimum_fanout` is exactly the number of active dimensions:
+    // each active dimension needs one child group for its frontier slab, while
+    // dimensions with extent 1 do not contribute a slab.
     #[test]
-    fn test_bounded_fanout_smoke_1x4_returns_three_nodes() {
-        let view = Region::from(shape!(row = 1, col = 4));
-        let tiling = BoundedFanout {
-            fanout: NonZeroUsize::new(2).unwrap(),
-        };
+    fn test_bounded_fanout_minimum_counts_active_dims() {
+        // `minimum_fanout` is one child group per active dimension. Dimensions
+        // with extent 1 do not contribute a slab, so `1 x 8` has minimum 1
+        // while `2 x 2 x 2` has minimum 3.
+        let t1 = Tile::from_view(&Region::from(shape!(row = 1, col = 8)));
+        assert_eq!(minimum_fanout(&t1), 1);
+
+        let t2 = Tile::from_view(&Region::from(shape!(row = 2, col = 2)));
+        assert_eq!(minimum_fanout(&t2), 2);
+
+        let t3 = Tile::from_view(&Region::from(shape!(a = 2, b = 2, c = 2)));
+        assert_eq!(minimum_fanout(&t3), 3);
+    }
+
+    // Tests BoundedFanout's immediate structural decomposition on a minimal
+    // two-dimensional tile: one sibling frontier for each active dimension,
+    // followed by the terminal root-point anchor.
+    #[test]
+    fn test_bounded_fanout_child_nodes_on_2x2_exposes_flat_frontier_and_root_anchor() {
+        // 2 x 2 tile, fanout 2:
+        //   slab dim 0: select(0, 1, 2, 1) -> ranks [2, 3]   (Sibling{0,1})
+        //   slab dim 1: anchor row 0, select(1, 1, 2, 1) -> [1]   (Sibling{1,1})
+        //   root point: [0]   (Anchor{1,0})
+        let view = Region::from(shape!(row = 2, col = 2));
+        let tiling = bounded_fanout(2);
         let root = Tile::from_view(&view);
-        let structural_children: Vec<TileNode> = tiling.child_nodes(&root);
-        // siblings: [1 2], [3]; anchor: [0]
-        assert_eq!(structural_children.len(), 3);
+        let nodes = tiling.child_nodes(&root);
+
+        assert_eq!(nodes.len(), 3);
+
+        assert!(matches!(
+            nodes[0].relation,
+            TileRelation::Sibling(Split { dim: 0, index: 1 })
+        ));
+        assert!(matches!(
+            nodes[1].relation,
+            TileRelation::Sibling(Split { dim: 1, index: 1 })
+        ));
+        assert!(matches!(
+            nodes[2].relation,
+            TileRelation::Anchor(Split { dim: 1, index: 0 })
+        ));
+
+        assert_eq!(nodes[0].tile.ranks().collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(nodes[1].tile.ranks().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(nodes[2].tile.ranks().collect::<Vec<_>>(), vec![0]);
+    }
+
+    // Tests that BoundedFanout splits a single-dimension frontier into
+    // left-heavy communication children when the requested fanout is smaller
+    // than the number of away-from-root ranks.
+    #[test]
+    fn test_bounded_fanout_children_on_1x8_split_into_left_heavy_intervals() {
+        // 1 x 8, fanout 2 over a single active dim of extent 8:
+        //   away-from-root indices [1..8) split into 2 left-heavy groups:
+        //   [1..5) (size 4) and [5..8) (size 3).
+        let view = Region::from(shape!(row = 1, col = 8));
+        let tiling = bounded_fanout(2);
+        let root = Tile::from_view(&view);
+
+        let rank_sets: Vec<Vec<usize>> = tiling
+            .children(&root)
+            .iter()
+            .map(|t| t.ranks().collect())
+            .collect();
+        assert_eq!(rank_sets, vec![vec![1, 2, 3, 4], vec![5, 6, 7]]);
+    }
+
+    // Tests that each tile's immediate BoundedFanout frontier uses at least
+    // one child per active dimension, even when the requested cap is lower.
+    #[test]
+    fn test_bounded_fanout_below_minimum_uses_minimum() {
+        // This assertion is about the immediate communication frontier at the
+        // root tile. The shape has 4 active dimensions, so the root frontier
+        // needs at least one sibling child per dimension. A requested cap of 3
+        // is therefore raised to the active-dimension minimum of 4.
+        let view = Region::from(shape!(a = 4, b = 4, c = 4, d = 3));
+        let tiling = bounded_fanout(3);
+        let root = Tile::from_view(&view);
+        assert_eq!(tiling.children(&root).len(), 4);
+    }
+
+    // Tests that BoundedFanout builds children from the sliced tile's actual
+    // covered ranks. The sliced tile covers [1, 2, 5, 6], so its children
+    // should be subsets of those ranks, not subsets of a fresh 0..4 tile.
+    #[test]
+    fn test_bounded_fanout_sliced_tile_keeps_affine_ranks() {
+        // Start with a 2 x 4 region and select columns 1..3. The resulting
+        // 2 x 2 tile covers ranks [1, 2, 5, 6] and has root rank 1. Its
+        // communication children must stay within those ranks: roots [5, 2],
+        // rank sets [[5, 6], [2]].
+        let view = Region::from(shape!(row = 2, col = 4))
+            .range("col", ndslice::Range(1, Some(3), 1))
+            .unwrap();
+        let tiling = bounded_fanout(2);
+        let root = Tile::from_view(&view);
+
+        assert_eq!(root.root_rank(), 1);
+        assert_eq!(root.ranks().collect::<Vec<_>>(), vec![1, 2, 5, 6]);
+
+        let children = tiling.children(&root);
+        let roots: Vec<usize> = children.iter().map(|c| c.root_rank()).collect();
+        let rank_sets: Vec<Vec<usize>> = children.iter().map(|c| c.ranks().collect()).collect();
+        assert_eq!(roots, vec![5, 2]);
+        assert_eq!(rank_sets, vec![vec![5, 6], vec![2]]);
+    }
+
+    // BoundedFanout proptests. Root-shape generators use
+    // `small_shape_sizes()`; sliced generators use
+    // `gen_region_strided(1..=4, 4, 3, 0)` from `ndslice::strategy`.
+    proptest! {
+        // Theorem: BoundedFanout's immediate communication frontier never
+        // exceeds the effective fanout for the tile. The effective fanout is
+        // the requested cap raised to the tile's active-dimension minimum when
+        // needed.
+        #[test]
+        fn prop_bounded_fanout_respects_effective_fanout(
+            sizes in small_shape_sizes(),
+            fanout in cap_strategy(),
+        ) {
+            let view = Region::from(shape_from_sizes(&sizes));
+            let tile = Tile::from_view(&view);
+            let tiling = BoundedFanout { fanout };
+            let bound = effective_fanout(&tile, fanout.get());
+            prop_assert!(tiling.children(&tile).len() <= bound);
+        }
+
+        // Theorem: the effective-fanout bound is independent of whether the
+        // tile is rooted at a dense row-major Region or at a strided/offset
+        // affine Region produced by slicing.
+        #[test]
+        fn prop_bounded_fanout_respects_effective_fanout_sliced(
+            view in gen_region_strided(1..=4, 4, 3, 0),
+            fanout in cap_strategy(),
+        ) {
+            let tile = Tile::from_view(&view);
+            let tiling = BoundedFanout { fanout };
+            let bound = effective_fanout(&tile, fanout.get());
+            prop_assert!(tiling.children(&tile).len() <= bound);
+        }
+
+        // Theorem: BoundedFanout uses exactly as much immediate frontier as
+        // the effective fanout allows. If the requested cap is below the
+        // active-dimension minimum, the effective fanout raises it; if the
+        // frontier has fewer available children than the cap, the frontier
+        // capacity wins.
+        #[test]
+        fn prop_bounded_fanout_honors_achievable_cap(
+            sizes in small_shape_sizes(),
+            fanout in cap_strategy(),
+        ) {
+            let view = Region::from(shape_from_sizes(&sizes));
+            let tile = Tile::from_view(&view);
+            let tiling = BoundedFanout { fanout };
+            // Expected child count is the smaller of the policy limit for
+            // this tile and the frontier children the tile can actually
+            // expose.
+            let expected = effective_fanout(&tile, fanout.get())
+                .min(immediate_frontier_capacity(&tile));
+            prop_assert_eq!(tiling.children(&tile).len(), expected);
+        }
+
+        // Theorem: the exact immediate-frontier count theorem also holds for
+        // strided/offset affine Regions produced by slicing.
+        #[test]
+        fn prop_bounded_fanout_honors_achievable_cap_sliced(
+            view in gen_region_strided(1..=4, 4, 3, 0),
+            fanout in cap_strategy(),
+        ) {
+            let tile = Tile::from_view(&view);
+            let tiling = BoundedFanout { fanout };
+            // Same exact-count rule: min(policy limit, available frontier).
+            let expected = effective_fanout(&tile, fanout.get())
+                .min(immediate_frontier_capacity(&tile));
+            prop_assert_eq!(tiling.children(&tile).len(), expected);
+        }
+
+        // Theorem: recursively following BoundedFanout communication children
+        // reaches every rank covered by the root tile exactly once.
+        #[test]
+        fn prop_bounded_fanout_recursive_tiles_cover_each_rank_once(
+            sizes in small_shape_sizes(),
+            fanout in cap_strategy(),
+        ) {
+            let view = Region::from(shape_from_sizes(&sizes));
+            let tiling = BoundedFanout { fanout };
+            let root = Tile::from_view(&view);
+
+            // Each recursive tile contributes its root rank. If the
+            // communication tree is a proper cover, those roots are exactly
+            // the ranks covered by the original view.
+            let mut roots = Vec::new();
+            collect_roots(&tiling, &root, &mut roots);
+            roots.sort();
+
+            let mut expected = view.slice().iter().collect::<Vec<_>>();
+            expected.sort();
+            prop_assert_eq!(roots, expected);
+        }
+
+        // Theorem: at every recursive communication step, BoundedFanout
+        // children are subsets of their parent tile and are disjoint from
+        // their sibling communication children.
+        #[test]
+        fn prop_bounded_fanout_child_tiles_are_disjoint_parent_subsets(
+            sizes in small_shape_sizes(),
+            fanout in cap_strategy(),
+        ) {
+            let view = Region::from(shape_from_sizes(&sizes));
+            let tiling = BoundedFanout { fanout };
+            let root = Tile::from_view(&view);
+            validate_child_tiles_are_parent_subsets(&tiling, &root);
+        }
+
+        // Theorem: the recursive communication-child subset/disjointness
+        // property also holds when the root tile comes from a strided/offset
+        // affine Region.
+        #[test]
+        fn prop_bounded_fanout_child_tiles_are_disjoint_parent_subsets_sliced(
+            view in gen_region_strided(1..=4, 4, 3, 0),
+            fanout in cap_strategy(),
+        ) {
+            let tiling = BoundedFanout { fanout };
+            let root = Tile::from_view(&view);
+            validate_child_tiles_are_parent_subsets(&tiling, &root);
+        }
+
+        // Theorem: BoundedFanout's immediate structural children, including
+        // the terminal anchor, all cover subsets of the parent tile.
+        #[test]
+        fn prop_bounded_fanout_structural_children_are_parent_subsets(
+            sizes in small_shape_sizes(),
+            fanout in cap_strategy(),
+        ) {
+            let view = Region::from(shape_from_sizes(&sizes));
+            let tiling = BoundedFanout { fanout };
+            let root = Tile::from_view(&view);
+            validate_structural_child_subsets(&tiling, &root);
+        }
+
+        // Theorem: structural-child subset containment also holds for
+        // strided/offset affine Regions.
+        #[test]
+        fn prop_bounded_fanout_structural_children_are_parent_subsets_sliced(
+            view in gen_region_strided(1..=4, 4, 3, 0),
+            fanout in cap_strategy(),
+        ) {
+            let tiling = BoundedFanout { fanout };
+            let root = Tile::from_view(&view);
+            validate_structural_child_subsets(&tiling, &root);
+        }
     }
 }
