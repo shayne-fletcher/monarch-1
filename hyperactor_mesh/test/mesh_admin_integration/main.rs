@@ -334,11 +334,38 @@
 //!   senders. Sister invariant to MIT-77 (happy-path transport): MIT-78
 //!   covers transport + presentation invariants + content against
 //!   manufactured deterministic state.
+//!
+//! ### Execution surface (Python hooks end-to-end)
+//!
+//! - **MIT-79 (execution surface, real Python hooks):** Spawning the
+//!   `execution_workload` binary and steering it through the stdin-
+//!   command / stdout-sentinel handshake
+//!   (`WorkloadFixture::send_command` / `wait_for_stdout`, NO sleeps)
+//!   proves the real `_Actor.handle` hooks
+//!   (`_execution_started` / `_execution_finished`) increment the
+//!   `execution` surface on handler entry and decrement on exit
+//!   (completion and exception), visible end-to-end via
+//!   `GET /v1/{actor}` and the typed
+//!   `NodeProperties::Actor { execution, .. }`. Covers direct dispatch
+//!   (one held -> count 1; two held same-name -> count 2 with ONE
+//!   aggregated row at active_count 2; per-invocation release decrement;
+//!   post-activity clear to the full zero-shape on completion AND on a
+//!   handler exception delivered via `call_one` so the actor survives),
+//!   queue dispatch (one held -> count 1, the hook fires in both modes),
+//!   and an idle sibling (count 0). Cancellation is actor-fatal in the
+//!   current runtime (`CancelledError` is a `BaseException` that re-raises
+//!   into a kill), so it is not observable as `count -> 0` on a live actor
+//!   and is not asserted here; the `finally` still decrements first (no
+//!   leak), a path covered by the `ExecutionRegistry` unit tests. Registry
+//!   logic (idempotence, truncation, compose-by-kind), DTO json-shape, and
+//!   schema requiredness are proven by unit/json tests, not re-proven
+//!   here.
 
 mod admin;
 mod auth;
 mod config;
 mod dining;
+mod execution;
 mod harness;
 mod inbound_ordering;
 mod inbound_ordering_workload;
@@ -372,6 +399,15 @@ async fn test_dining_endpoints_python() {
 #[tokio::test]
 async fn test_inbound_ordering_workload() {
     inbound_ordering_workload::run_inbound_ordering_workload().await;
+}
+
+// --- execution surface family ---
+
+/// MIT-79: execution surface, real Python hooks end-to-end — Python
+/// workload driven by the stdin/stdout handshake.
+#[tokio::test]
+async fn test_execution_workload() {
+    execution::run_execution_workload().await;
 }
 
 // --- pyspy family ---

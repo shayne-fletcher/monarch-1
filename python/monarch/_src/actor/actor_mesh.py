@@ -1294,21 +1294,31 @@ class _Actor:
 
             the_method, should_instrument, is_coro = self._method_cache[method_name]
 
-            if is_coro:
-                if should_instrument:
-                    with span(method_name):
-                        result = await the_method(*args, **kwargs)
-                else:
-                    result = await the_method(*args, **kwargs)
-                self._maybe_exit_debugger()
-            else:
-                with fake_sync_state():
+            # Bracket the user-method invocation with the execution
+            # registry so mesh-admin can report this in-flight handler.
+            # The token is a local in this coroutine's frame, so the
+            # finally guarantees _execution_finished on every exit path:
+            # sync/async, success/exception/cancellation. (The work is
+            # detached upstream in the Rust direct-dispatch path, not here.)
+            token = ctx.actor_instance._execution_started(method_name)
+            try:
+                if is_coro:
                     if should_instrument:
                         with span(method_name):
-                            result = the_method(*args, **kwargs)
+                            result = await the_method(*args, **kwargs)
                     else:
-                        result = the_method(*args, **kwargs)
+                        result = await the_method(*args, **kwargs)
                     self._maybe_exit_debugger()
+                else:
+                    with fake_sync_state():
+                        if should_instrument:
+                            with span(method_name):
+                                result = the_method(*args, **kwargs)
+                        else:
+                            result = the_method(*args, **kwargs)
+                        self._maybe_exit_debugger()
+            finally:
+                ctx.actor_instance._execution_finished(token)
 
             response_port.send(result)
         except Exception as e:

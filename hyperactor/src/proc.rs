@@ -123,6 +123,7 @@ use dashmap::DashSet;
 use dashmap::mapref::entry::Entry;
 use dashmap::mapref::multiple::RefMulti;
 use futures::FutureExt;
+use hyperactor_config::AttrValue;
 use hyperactor_config::Flattrs;
 use hyperactor_telemetry::ActorStatusEvent;
 use hyperactor_telemetry::generate_actor_status_event_id;
@@ -2420,6 +2421,25 @@ impl<A: Actor> Instance<A> {
             .store(true, Ordering::Relaxed);
     }
 
+    /// Install this actor's execution registry, so it self-reports
+    /// in-flight executions instead of having execution derived from
+    /// `ActorStatus::Processing`. Idempotent.
+    pub fn install_execution_registry(&self) {
+        self.inner.cell.install_execution_registry();
+    }
+
+    /// Record the start of an invocation of `name`, installing the registry
+    /// if needed. Returns the token to pass to `execution_finished`.
+    pub fn execution_started(&self, name: &str) -> u64 {
+        self.inner.cell.execution_started(name)
+    }
+
+    /// Record the end of the invocation identified by `token`. Tolerant of
+    /// unknown or already-removed tokens.
+    pub fn execution_finished(&self, token: u64) {
+        self.inner.cell.execution_finished(token);
+    }
+
     /// Register a callback for resolving non-addressable children.
     ///
     /// The callback runs on the actor's introspect task (not the
@@ -3491,6 +3511,242 @@ impl ActorType {
     }
 }
 
+/// Maximum number of per-name rows retained in an [`ExecutionSnapshot`].
+///
+/// The list is aggregated by endpoint name, so it is normally tiny; the
+/// cap bounds the pathological many-distinct-endpoints case. Because the
+/// list is sorted oldest-active-first before truncation, the dropped tail
+/// is always the youngest, so `oldest_*` survives truncation.
+pub const EXECUTION_MAX_ROWS: usize = 16;
+
+/// One live execution recorded in an [`ExecutionRegistry`].
+#[derive(Debug, Clone)]
+struct ExecutionEntry {
+    /// The endpoint/handler name (e.g. the Python method name).
+    name: String,
+    /// When this invocation started.
+    started_at: SystemTime,
+}
+
+/// Cell-owned registry of in-flight executions for a single actor.
+///
+/// This is plain local per-cell mutable state, deliberately NOT the
+/// `algebra` crate: that machinery models distributed accumulation across
+/// ranks, whereas this is local mutable state keyed by a monotonic
+/// cell-local token. The token is a `u64` drawn from a per-registry
+/// [`AtomicU64`]; entries are keyed by it in a [`DashMap`] (the in-crate
+/// concurrent-map choice, matching `children` / `exported_named_ports`).
+///
+/// An actor that self-reports execution (e.g. a Python actor) installs a
+/// registry and calls [`started`](Self::started) / [`finished`](Self::finished)
+/// around each invocation. [`snapshot`](Self::snapshot) produces the
+/// point-in-time [`ExecutionSnapshot`] read by introspection.
+pub(crate) struct ExecutionRegistry {
+    /// Token -> entry for every live invocation.
+    entries: DashMap<u64, ExecutionEntry>,
+    /// Monotonic source of tokens. Breaks equal-`started_at` ties so
+    /// "oldest" is deterministic regardless of clock granularity.
+    next_token: AtomicU64,
+}
+
+impl ExecutionRegistry {
+    fn new() -> Self {
+        Self {
+            entries: DashMap::new(),
+            next_token: AtomicU64::new(0),
+        }
+    }
+
+    /// Record the start of an invocation of `name`, returning its token.
+    fn started(&self, name: &str) -> u64 {
+        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
+        self.entries.insert(
+            token,
+            ExecutionEntry {
+                name: name.to_string(),
+                started_at: SystemTime::now(),
+            },
+        );
+        token
+    }
+
+    /// Record the end of the invocation identified by `token`.
+    ///
+    /// Idempotent and tolerant of unknown or already-removed tokens:
+    /// double-finish, cancellation, and cleanup races must never make the
+    /// registry a new failure source. At most this debug-logs; it never
+    /// panics or errors.
+    fn finished(&self, token: u64) {
+        if self.entries.remove(&token).is_none() {
+            tracing::debug!(
+                token,
+                "execution finished for unknown or already-removed token"
+            );
+        }
+    }
+
+    /// Point-in-time snapshot of all live executions.
+    ///
+    /// Built from a single traversal of `entries` so `active_handler_count`,
+    /// `oldest_*`, and the per-name rows are all derived from one observed set
+    /// of entries and stay mutually consistent. Reading the map more than once
+    /// could otherwise report impossible combinations under a concurrent
+    /// `started`/`finished` (e.g. a zero count beside non-empty rows). The pass
+    /// accumulates the full count, the overall oldest invocation by
+    /// `(started_at, token)`, and a per-name aggregate (count plus the name's
+    /// own oldest `(started_at, token)`). Rows are then sorted
+    /// oldest-active-first, then name, and capped at [`EXECUTION_MAX_ROWS`];
+    /// `active_handler_count` stays the full total across all names,
+    /// independent of that cap.
+    fn snapshot(&self) -> ExecutionSnapshot {
+        let mut active_handler_count: u64 = 0;
+        let mut overall_oldest: Option<(SystemTime, u64, String)> = None;
+        // name -> (live count, oldest started_at, oldest token)
+        let mut by_name: HashMap<String, (u64, SystemTime, u64)> = HashMap::new();
+
+        for entry in self.entries.iter() {
+            let token = *entry.key();
+            let started_at = entry.value().started_at;
+            let name = entry.value().name.clone();
+
+            active_handler_count += 1;
+
+            let is_oldest = match &overall_oldest {
+                None => true,
+                Some((oldest_at, oldest_token, _)) => {
+                    (started_at, token) < (*oldest_at, *oldest_token)
+                }
+            };
+            if is_oldest {
+                overall_oldest = Some((started_at, token, name.clone()));
+            }
+
+            by_name
+                .entry(name)
+                .and_modify(|(count, oldest_at, oldest_token)| {
+                    *count += 1;
+                    if (started_at, token) < (*oldest_at, *oldest_token) {
+                        *oldest_at = started_at;
+                        *oldest_token = token;
+                    }
+                })
+                .or_insert((1, started_at, token));
+        }
+
+        let (oldest_active_since, oldest_active_handler) = match overall_oldest {
+            Some((started_at, _, name)) => (Some(started_at), Some(name)),
+            None => (None, None),
+        };
+
+        let distinct_names = by_name.len();
+        let mut active_handlers: Vec<ExecutionHandler> = by_name
+            .into_iter()
+            .map(|(name, (active_count, oldest_at, _))| ExecutionHandler {
+                name,
+                active_count,
+                oldest_active_since: oldest_at,
+            })
+            .collect();
+
+        // Sort oldest-active-first, then name, before the cap so truncation
+        // drops only the youngest tail.
+        active_handlers.sort_by(|a, b| {
+            a.oldest_active_since
+                .cmp(&b.oldest_active_since)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        let active_handlers_truncated = distinct_names > EXECUTION_MAX_ROWS;
+        active_handlers.truncate(EXECUTION_MAX_ROWS);
+
+        ExecutionSnapshot {
+            active_handler_count,
+            total_handler_names: distinct_names as u64,
+            oldest_active_handler,
+            oldest_active_since,
+            active_handlers,
+            active_handlers_truncated,
+        }
+    }
+}
+
+/// Per-name aggregate of live executions within an [`ExecutionSnapshot`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Named, AttrValue)]
+pub struct ExecutionHandler {
+    /// The endpoint/handler name.
+    pub name: String,
+    /// Number of live invocations of this name.
+    pub active_count: u64,
+    /// Start time of the oldest live invocation of this name (resolved by
+    /// `(started_at, token)`; the wire value is `started_at`).
+    pub oldest_active_since: SystemTime,
+}
+
+/// Point-in-time view of an actor's in-flight executions.
+///
+/// `active_handler_count` is the authoritative total across all live
+/// invocations and all names, computed before list truncation; never derive
+/// it from the (possibly truncated) `active_handlers` rows. The row list
+/// answers the separate question "which endpoint names?".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Named, AttrValue)]
+pub struct ExecutionSnapshot {
+    /// Total live invocations across all names (full total, pre-truncation).
+    pub active_handler_count: u64,
+    /// Number of DISTINCT active endpoint names BEFORE the per-name list is
+    /// capped at [`EXECUTION_MAX_ROWS`]. When `active_handlers_truncated`,
+    /// `total_handler_names - active_handlers.len()` is the count of hidden
+    /// endpoint names the truncation marker reports.
+    pub total_handler_names: u64,
+    /// Name of the oldest live invocation, or `None` when idle.
+    pub oldest_active_handler: Option<String>,
+    /// Start time of the oldest live invocation, or `None` when idle.
+    pub oldest_active_since: Option<SystemTime>,
+    /// Per-name aggregates, sorted oldest-active-first then name, capped at
+    /// [`EXECUTION_MAX_ROWS`].
+    pub active_handlers: Vec<ExecutionHandler>,
+    /// Whether the per-name list was capped (distinct names exceeded the cap).
+    pub active_handlers_truncated: bool,
+}
+
+impl ExecutionSnapshot {
+    /// The zero shape: an idle actor with no live invocations.
+    pub fn idle() -> Self {
+        Self {
+            active_handler_count: 0,
+            total_handler_names: 0,
+            oldest_active_handler: None,
+            oldest_active_since: None,
+            active_handlers: Vec::new(),
+            active_handlers_truncated: false,
+        }
+    }
+}
+
+impl fmt::Display for ExecutionHandler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", serde_json::to_string(self).unwrap())
+    }
+}
+
+impl std::str::FromStr for ExecutionHandler {
+    type Err = serde_json::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(s)
+    }
+}
+
+impl fmt::Display for ExecutionSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", serde_json::to_string(self).unwrap())
+    }
+}
+
+impl std::str::FromStr for ExecutionSnapshot {
+    type Err = serde_json::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(s)
+    }
+}
+
 /// InstanceCell contains all of the type-erased, shareable state of an instance.
 /// Specifically, InstanceCells form a supervision tree, and is used by ActorHandle
 /// to access the underlying instance.
@@ -3622,6 +3878,14 @@ struct InstanceCellState {
     /// `Instance::new`; production live actors always install Some.
     inbound_ordering_snapshot:
         Option<Box<dyn Fn() -> crate::ordering::OrderingSnapshot + Send + Sync>>,
+
+    /// Registry of in-flight executions for actors that self-report
+    /// execution (e.g. Python actors). Presence is the discriminator:
+    /// set means "this actor self-reports", unset means "derive execution
+    /// from `ActorStatus::Processing`". Installed via
+    /// `install_execution_registry`; a `OnceLock` makes that install
+    /// idempotent and the "set if not already" semantics structural.
+    execution_registry: OnceLock<Arc<ExecutionRegistry>>,
 }
 
 impl InstanceCellState {
@@ -3735,6 +3999,7 @@ impl InstanceCell {
                 is_system: AtomicBool::new(false),
                 ports,
                 inbound_ordering_snapshot,
+                execution_registry: OnceLock::new(),
             }),
         };
         cell.maybe_link_parent();
@@ -3964,6 +4229,43 @@ impl InstanceCell {
     /// non-blocking) and never perturbs ordering state.
     pub fn inbound_ordering_snapshot(&self) -> Option<crate::ordering::OrderingSnapshot> {
         self.inner.inbound_ordering_snapshot.as_ref().map(|f| f())
+    }
+
+    /// Install the execution registry if not already present. Idempotent:
+    /// the first call wins, later calls are no-ops. After installation the
+    /// actor self-reports execution via `execution_started` /
+    /// `execution_finished` and `execution_snapshot` returns `Some`.
+    pub fn install_execution_registry(&self) {
+        let _ = self
+            .inner
+            .execution_registry
+            .set(Arc::new(ExecutionRegistry::new()));
+    }
+
+    /// Record the start of an invocation of `name`, installing the registry
+    /// first if needed. Returns the token to pass to `execution_finished`.
+    pub fn execution_started(&self, name: &str) -> u64 {
+        self.install_execution_registry();
+        self.inner
+            .execution_registry
+            .get()
+            .expect("execution registry installed above")
+            .started(name)
+    }
+
+    /// Record the end of the invocation identified by `token`. Tolerant of
+    /// unknown or already-removed tokens, and a no-op when no registry is
+    /// installed.
+    pub fn execution_finished(&self, token: u64) {
+        if let Some(registry) = self.inner.execution_registry.get() {
+            registry.finished(token);
+        }
+    }
+
+    /// Snapshot of in-flight executions. `Some` iff the registry has been
+    /// installed (i.e. the actor self-reports execution); `None` otherwise.
+    pub fn execution_snapshot(&self) -> Option<ExecutionSnapshot> {
+        self.inner.execution_registry.get().map(|r| r.snapshot())
     }
 
     /// Get parent instance cell, if it exists.
@@ -7223,5 +7525,187 @@ mod tests {
         // would panic in debug builds if running_total had wrapped to u64::MAX.
         account_enqueue(&depth, &stats, "a");
         assert_eq!(stats.running_total(), 1);
+    }
+
+    // --------------------------------------------------------------------
+    // ExecutionRegistry tests (pure Rust, no actor spawn).
+
+    /// Insert an entry with an explicit `started_at` so equal-timestamp
+    /// tiebreaks can be exercised deterministically (production `started`
+    /// always uses `SystemTime::now()`).
+    fn insert_at(registry: &ExecutionRegistry, name: &str, started_at: SystemTime) -> u64 {
+        let token = registry.next_token.fetch_add(1, Ordering::Relaxed);
+        registry.entries.insert(
+            token,
+            ExecutionEntry {
+                name: name.to_string(),
+                started_at,
+            },
+        );
+        token
+    }
+
+    /// `finished(token)` twice plus `finished(unknown)` must leave the
+    /// snapshot correct with no panic — the registry cannot become a new
+    /// failure source.
+    #[test]
+    fn test_execution_registry_finished_idempotent() {
+        let registry = ExecutionRegistry::new();
+        let a = registry.started("a");
+        let b = registry.started("b");
+
+        registry.finished(a);
+        // Double-finish of the same token: no-op, no panic.
+        registry.finished(a);
+        // Unknown token never seen: no-op, no panic.
+        registry.finished(a + b + 999);
+
+        let snap = registry.snapshot();
+        assert_eq!(snap.active_handler_count, 1, "only b remains live");
+        assert_eq!(snap.active_handlers.len(), 1);
+        assert_eq!(snap.active_handlers[0].name, "b");
+        assert_eq!(snap.oldest_active_handler.as_deref(), Some("b"));
+        assert!(!snap.active_handlers_truncated);
+
+        // Finish the last one; snapshot returns to the full zero-shape.
+        registry.finished(b);
+        let snap = registry.snapshot();
+        assert_eq!(snap.active_handler_count, 0);
+        assert!(snap.active_handlers.is_empty());
+        assert!(snap.oldest_active_handler.is_none());
+        assert!(snap.oldest_active_since.is_none());
+        assert!(!snap.active_handlers_truncated);
+    }
+
+    /// More than `EXECUTION_MAX_ROWS` distinct names with mixed per-name
+    /// counts: the list caps at the bound, `active_handlers_truncated` is
+    /// set, order stays oldest-first-then-name, `oldest_*` names the true
+    /// oldest, and `active_handler_count` is the FULL total (distinct from
+    /// the visible row count and from the cap).
+    #[test]
+    fn test_execution_registry_truncation() {
+        let registry = ExecutionRegistry::new();
+        let base = SystemTime::UNIX_EPOCH;
+        let distinct = EXECUTION_MAX_ROWS + 4;
+
+        // Name N gets (N + 1) live invocations, all started at base + N
+        // seconds so the oldest-first order is name_0, name_1, ....
+        let mut total = 0u64;
+        for n in 0..distinct {
+            let name = format!("name_{n:02}");
+            let started_at = base + Duration::from_secs(n as u64);
+            for _ in 0..(n + 1) {
+                insert_at(&registry, &name, started_at);
+                total += 1;
+            }
+        }
+
+        let snap = registry.snapshot();
+
+        // Full total counts every invocation across all names.
+        assert_eq!(snap.active_handler_count, total);
+        // total_handler_names is the full DISTINCT-name count before the
+        // cap, so the truncation marker can report the exact hidden count.
+        assert_eq!(snap.total_handler_names, distinct as u64);
+        // The visible list is capped at the bound; the hidden-name count is
+        // total_handler_names - active_handlers.len() (== 4 here).
+        assert_eq!(snap.active_handlers.len(), EXECUTION_MAX_ROWS);
+        assert_eq!(
+            snap.total_handler_names - snap.active_handlers.len() as u64,
+            4
+        );
+        // active_handler_count is neither the visible row count nor the cap.
+        assert_ne!(snap.active_handler_count, snap.active_handlers.len() as u64);
+        assert_ne!(snap.active_handler_count, EXECUTION_MAX_ROWS as u64);
+        assert!(snap.active_handlers_truncated);
+
+        // Oldest-first-then-name: the retained rows are the oldest names,
+        // and oldest_* names the true oldest live invocation.
+        assert_eq!(snap.active_handlers[0].name, "name_00");
+        assert_eq!(snap.active_handlers[0].active_count, 1);
+        assert_eq!(snap.oldest_active_handler.as_deref(), Some("name_00"));
+        assert_eq!(snap.oldest_active_since, Some(base));
+        let names: Vec<&str> = snap
+            .active_handlers
+            .iter()
+            .map(|h| h.name.as_str())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort_by(|a, b| {
+            let ai: u64 = a.trim_start_matches("name_").parse().unwrap();
+            let bi: u64 = b.trim_start_matches("name_").parse().unwrap();
+            ai.cmp(&bi)
+        });
+        assert_eq!(names, sorted, "rows stay oldest-first");
+        // The youngest tail (highest indices) is dropped.
+        assert!(!names.contains(&"name_19"));
+    }
+
+    /// Releasing the older of two live invocations advances overall
+    /// `oldest_*` to the younger; a shared `started_at` exercises the
+    /// `(started_at, token)` tiebreak so the result is deterministic
+    /// regardless of clock granularity.
+    #[test]
+    fn test_execution_registry_oldest_rollover() {
+        let registry = ExecutionRegistry::new();
+        let base = SystemTime::UNIX_EPOCH;
+
+        // A and B share a started_at; the smaller token (A) is oldest.
+        let a = insert_at(&registry, "a", base);
+        let b = insert_at(&registry, "b", base);
+        assert!(a < b, "A's token precedes B's");
+
+        let snap = registry.snapshot();
+        assert_eq!(snap.active_handler_count, 2);
+        assert_eq!(
+            snap.oldest_active_handler.as_deref(),
+            Some("a"),
+            "token tiebreak picks A as oldest on equal started_at"
+        );
+
+        // Release A; oldest rolls over to B, not stuck on A, not null-early.
+        registry.finished(a);
+        let snap = registry.snapshot();
+        assert_eq!(snap.active_handler_count, 1);
+        assert_eq!(snap.oldest_active_handler.as_deref(), Some("b"));
+        assert_eq!(snap.oldest_active_since, Some(base));
+
+        // Distinct-timestamp rollover too: younger C is added, then B
+        // released, leaving C as the only (hence oldest) live invocation.
+        let later = base + Duration::from_secs(5);
+        let _c = insert_at(&registry, "c", later);
+        registry.finished(b);
+        let snap = registry.snapshot();
+        assert_eq!(snap.active_handler_count, 1);
+        assert_eq!(snap.oldest_active_handler.as_deref(), Some("c"));
+        assert_eq!(snap.oldest_active_since, Some(later));
+    }
+
+    /// The `Instance`/cell forwarding methods drive the registry, and
+    /// `execution_snapshot` is gated on install: `None` before install,
+    /// `Some` after. `install_execution_registry` is idempotent.
+    #[test]
+    fn test_cell_execution_install_and_snapshot() {
+        let proc = Proc::isolated();
+        let actor_id = proc.allocate_client_id("exec_test");
+        // detached: no actor loop, no Tokio runtime required.
+        let (instance, _receivers) = Instance::<TestActor>::new(proc.clone(), actor_id, true, None);
+        let cell = &instance.inner.cell;
+
+        // Not installed yet: snapshot is None (status-derived branch).
+        assert!(cell.execution_snapshot().is_none());
+
+        // Idempotent install, then start an invocation.
+        instance.install_execution_registry();
+        instance.install_execution_registry();
+        let token = instance.execution_started("hold");
+        let snap = cell.execution_snapshot().expect("registry installed");
+        assert_eq!(snap.active_handler_count, 1);
+        assert_eq!(snap.oldest_active_handler.as_deref(), Some("hold"));
+
+        instance.execution_finished(token);
+        let snap = cell.execution_snapshot().expect("registry stays installed");
+        assert_eq!(snap.active_handler_count, 0);
+        assert!(snap.oldest_active_handler.is_none());
     }
 }

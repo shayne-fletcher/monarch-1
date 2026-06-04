@@ -894,6 +894,13 @@ pub(crate) fn root_client_actor(py: Python<'_>) -> &'static Instance<PythonActor
 #[async_trait]
 impl Actor for PythonActor {
     async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
+        // Eagerly install the execution registry so every Python actor
+        // (including the root client, which calls `actor.init` manually)
+        // self-reports in-flight executions from the start, instead of
+        // ever falling back to deriving execution from
+        // `ActorStatus::Processing`.
+        this.install_execution_registry();
+
         if let PythonActorDispatchMode::Queue { receiver, .. } = &mut self.dispatch_mode {
             let receiver = receiver.take().unwrap();
 

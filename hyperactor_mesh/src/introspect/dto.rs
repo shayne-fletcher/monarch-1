@@ -34,6 +34,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::ExecutionHandlerInfo;
+use super::ExecutionInfo;
 use super::FailureInfo;
 use super::InboundOrdering;
 use super::NodePayload;
@@ -170,6 +172,10 @@ pub enum NodePropertiesDto {
         /// `Some({enabled: true, ...})` means active. See IO-1 in
         /// `hyperactor::introspect`.
         inbound_ordering: Option<Box<InboundOrderingDto>>,
+        /// In-flight execution state, the second plane to
+        /// `actor_status`. Always present (count 0 when idle), unlike
+        /// `inbound_ordering`. See `ExecutionInfo`.
+        execution: Box<ExecutionInfoDto>,
         failure_info: Option<FailureInfoDto>,
     },
     /// Error sentinel returned when a child reference cannot be resolved.
@@ -244,6 +250,54 @@ pub struct InboundOrderingDto {
     pub returned_max_buffered_count: usize,
     /// Per-session entries, sorted by `session_id`.
     pub sessions: Vec<OrderingSessionSnapshotDto>,
+}
+
+/// Per-name aggregate of live executions at the HTTP boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(rename = "ExecutionHandler")]
+pub struct ExecutionHandlerDto {
+    /// The endpoint/handler name.
+    pub name: String,
+    /// Number of live invocations of this name.
+    pub active_count: u64,
+    /// Start time of the oldest live invocation of this name (ISO 8601
+    /// timestamp string).
+    pub oldest_active_since: String,
+}
+
+/// Mesh-admin presentation of in-flight execution state at the HTTP
+/// boundary. The second plane to `actor_status`: it answers "what is
+/// this actor handling now?".
+///
+/// Always present (count 0 when idle), unlike `inbound_ordering`. The
+/// TUI hides the section at count 0, but the wire always carries the
+/// block.
+///
+/// `active_handler_count` is the authoritative total across all live
+/// invocations and all names; never derive it from the (possibly
+/// truncated) `active_handlers` rows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(rename = "ExecutionInfo")]
+pub struct ExecutionInfoDto {
+    /// Total live invocations across all names (full total,
+    /// pre-truncation).
+    pub active_handler_count: u64,
+    /// Number of DISTINCT active endpoint names before the per-name list
+    /// was capped. When `active_handlers_truncated`, the count of hidden
+    /// names is `total_handler_names - active_handlers.len()`.
+    pub total_handler_names: u64,
+    /// Name of the oldest live invocation (ISO 8601 timestamp string in
+    /// `oldest_active_since`). `None` when idle.
+    pub oldest_active_handler: Option<String>,
+    /// Start time of the oldest live invocation (ISO 8601 timestamp
+    /// string). `None` when idle.
+    pub oldest_active_since: Option<String>,
+    /// Per-name aggregates, sorted oldest-active-first then name, capped
+    /// upstream.
+    pub active_handlers: Vec<ExecutionHandlerDto>,
+    /// Whether the per-name list was capped (distinct names exceeded the
+    /// cap).
+    pub active_handlers_truncated: bool,
 }
 
 // Helpers
@@ -350,6 +404,7 @@ impl From<NodeProperties> for NodePropertiesDto {
                 flight_recorder,
                 is_system,
                 inbound_ordering,
+                execution,
                 failure_info,
             } => Self::Actor {
                 actor_status,
@@ -364,6 +419,7 @@ impl From<NodeProperties> for NodePropertiesDto {
                 is_system,
                 inbound_ordering: inbound_ordering
                     .map(|io| Box::new(InboundOrderingDto::from(*io))),
+                execution: Box::new(ExecutionInfoDto::from(*execution)),
                 failure_info: failure_info.map(Into::into),
             },
             NodeProperties::Error { code, message } => Self::Error { code, message },
@@ -408,6 +464,29 @@ impl From<InboundOrdering> for InboundOrderingDto {
             returned_buffered_message_count: o.returned_buffered_message_count,
             returned_max_buffered_count: o.returned_max_buffered_count,
             sessions: o.sessions.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<ExecutionHandlerInfo> for ExecutionHandlerDto {
+    fn from(h: ExecutionHandlerInfo) -> Self {
+        Self {
+            name: h.name,
+            active_count: h.active_count,
+            oldest_active_since: format_time(&h.oldest_active_since),
+        }
+    }
+}
+
+impl From<ExecutionInfo> for ExecutionInfoDto {
+    fn from(e: ExecutionInfo) -> Self {
+        Self {
+            active_handler_count: e.active_handler_count,
+            total_handler_names: e.total_handler_names,
+            oldest_active_handler: e.oldest_active_handler,
+            oldest_active_since: e.oldest_active_since.as_ref().map(format_time),
+            active_handlers: e.active_handlers.into_iter().map(Into::into).collect(),
+            active_handlers_truncated: e.active_handlers_truncated,
         }
     }
 }
@@ -515,6 +594,7 @@ impl TryFrom<NodePropertiesDto> for NodeProperties {
                 flight_recorder,
                 is_system,
                 inbound_ordering,
+                execution,
                 failure_info,
             } => Self::Actor {
                 actor_status,
@@ -536,6 +616,10 @@ impl TryFrom<NodePropertiesDto> for NodeProperties {
                     .map(|dto| InboundOrdering::try_from(*dto).map(Box::new))
                     .transpose()
                     .context("failed to parse Actor.inbound_ordering")?,
+                execution: Box::new(
+                    ExecutionInfo::try_from(*execution)
+                        .context("failed to parse Actor.execution")?,
+                ),
                 failure_info: failure_info
                     .map(TryInto::try_into)
                     .transpose()
@@ -623,6 +707,56 @@ impl TryFrom<InboundOrderingDto> for InboundOrdering {
             returned_buffered_message_count: dto.returned_buffered_message_count,
             returned_max_buffered_count: dto.returned_max_buffered_count,
             sessions,
+        })
+    }
+}
+
+impl TryFrom<ExecutionHandlerDto> for ExecutionHandlerInfo {
+    type Error = anyhow::Error;
+
+    fn try_from(dto: ExecutionHandlerDto) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: dto.name,
+            active_count: dto.active_count,
+            oldest_active_since: humantime::parse_rfc3339(&dto.oldest_active_since).with_context(
+                || {
+                    format!(
+                        "failed to parse ExecutionHandler.oldest_active_since: {:?}",
+                        dto.oldest_active_since
+                    )
+                },
+            )?,
+        })
+    }
+}
+
+impl TryFrom<ExecutionInfoDto> for ExecutionInfo {
+    type Error = anyhow::Error;
+
+    fn try_from(dto: ExecutionInfoDto) -> Result<Self, Self::Error> {
+        let active_handlers: Vec<ExecutionHandlerInfo> = dto
+            .active_handlers
+            .into_iter()
+            .enumerate()
+            .map(|(i, h)| {
+                h.try_into()
+                    .with_context(|| format!("failed to parse ExecutionInfo.active_handlers[{i}]"))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            active_handler_count: dto.active_handler_count,
+            total_handler_names: dto.total_handler_names,
+            oldest_active_handler: dto.oldest_active_handler,
+            oldest_active_since: dto
+                .oldest_active_since
+                .map(|s| {
+                    humantime::parse_rfc3339(&s).with_context(|| {
+                        format!("failed to parse ExecutionInfo.oldest_active_since: {s:?}")
+                    })
+                })
+                .transpose()?,
+            active_handlers,
+            active_handlers_truncated: dto.active_handlers_truncated,
         })
     }
 }
@@ -723,6 +857,7 @@ mod tests {
                 flight_recorder: None,
                 is_system: false,
                 inbound_ordering: None,
+                execution: Box::new(ExecutionInfo::idle()),
                 failure_info: None,
             },
             children: vec![],
@@ -746,6 +881,7 @@ mod tests {
                 flight_recorder: Some("trace-abc".to_string()),
                 is_system: true,
                 inbound_ordering: None,
+                execution: Box::new(ExecutionInfo::idle()),
                 failure_info: Some(FailureInfo {
                     error_message: "boom".to_string(),
                     root_cause_actor: test_actor_id(),
@@ -775,6 +911,53 @@ mod tests {
                 flight_recorder: None,
                 is_system: false,
                 inbound_ordering: None,
+                execution: Box::new(ExecutionInfo::idle()),
+                failure_info: None,
+            },
+            children: vec![],
+            parent: Some(NodeRef::Proc(test_proc_id())),
+            as_of: test_time(),
+        }
+    }
+
+    /// Actor whose `execution` block reports live, in-flight work:
+    /// `active_handler_count == 3` with two distinct endpoint names
+    /// aggregated, the oldest being `hold`. Used for the
+    /// processing-shape json test and its round-trip.
+    fn make_actor_payload_execution_processing() -> NodePayload {
+        NodePayload {
+            identity: NodeRef::Actor(test_actor_id()),
+            properties: NodeProperties::Actor {
+                actor_status: "idle".to_string(),
+                actor_type: "PythonActor".to_string(),
+                instance_id: test_instance_id(),
+                messages_processed: 5,
+                created_at: Some(test_time()),
+                last_message_handler: None,
+                total_processing_time_us: 0,
+                queue_depth: 0,
+                flight_recorder: None,
+                is_system: false,
+                inbound_ordering: None,
+                execution: Box::new(ExecutionInfo {
+                    active_handler_count: 3,
+                    total_handler_names: 2,
+                    oldest_active_handler: Some("hold".to_string()),
+                    oldest_active_since: Some(test_time()),
+                    active_handlers: vec![
+                        ExecutionHandlerInfo {
+                            name: "hold".to_string(),
+                            active_count: 2,
+                            oldest_active_since: test_time(),
+                        },
+                        ExecutionHandlerInfo {
+                            name: "ping".to_string(),
+                            active_count: 1,
+                            oldest_active_since: test_time_2(),
+                        },
+                    ],
+                    active_handlers_truncated: false,
+                }),
                 failure_info: None,
             },
             children: vec![],
@@ -834,6 +1017,7 @@ mod tests {
                         make_ordering_session(uuid::Uuid::from_u128(2), 1, 3),
                     ],
                 })),
+                execution: Box::new(ExecutionInfo::idle()),
                 failure_info: None,
             },
             children: vec![],
@@ -868,6 +1052,7 @@ mod tests {
                     returned_max_buffered_count: 4,
                     sessions: vec![make_ordering_session(uuid::Uuid::from_u128(7), 0, 4)],
                 })),
+                execution: Box::new(ExecutionInfo::idle()),
                 failure_info: None,
             },
             children: vec![],
@@ -932,6 +1117,23 @@ mod tests {
     #[test]
     fn test_round_trip_actor_minimal() {
         assert_round_trip(&make_actor_payload_minimal());
+    }
+
+    /// HB-2: Actor whose `execution` reports an idle (zero) block
+    /// round-trips. Guards the always-present `execution` sub-structure
+    /// through the timestamp-as-string boundary.
+    #[test]
+    fn test_round_trip_actor_execution_idle() {
+        assert_round_trip(&make_actor_payload_no_failure());
+    }
+
+    /// HB-2: Actor with a populated `execution` block (count 3, two
+    /// aggregated rows, populated oldest) round-trips. The top-level
+    /// `oldest_active_since` and each row's `oldest_active_since` survive
+    /// the string-encoded timestamp boundary.
+    #[test]
+    fn test_round_trip_actor_execution_processing() {
+        assert_round_trip(&make_actor_payload_execution_processing());
     }
 
     /// HB-1 + HB-2 + IO-4 + IO-5: Actor with a complete inbound-ordering
@@ -1076,6 +1278,61 @@ mod tests {
         assert!(actor["last_message_handler"].is_null());
         assert!(actor["flight_recorder"].is_null());
         assert!(actor["failure_info"].is_null());
+    }
+
+    /// idle-wire-shape: a non-processing Actor's serialized JSON still
+    /// carries the always-present `execution` block at the full zero
+    /// shape. Catches accidental `Option`-elision in DTO conversion,
+    /// schema, fixtures, or payload assembly. The TUI hides the section
+    /// at count 0, but the wire always carries the block.
+    #[test]
+    fn test_json_shape_execution_idle() {
+        let dto: NodePayloadDto = make_actor_payload_no_failure().into();
+        let json = serde_json::to_value(&dto).unwrap();
+
+        let execution = &json["properties"]["Actor"]["execution"];
+        assert!(
+            execution.is_object(),
+            "execution must be present (not null) for an idle actor"
+        );
+        assert_eq!(execution["active_handler_count"], 0);
+        assert_eq!(execution["total_handler_names"], 0);
+        assert!(execution["oldest_active_handler"].is_null());
+        assert!(execution["oldest_active_since"].is_null());
+        assert!(
+            execution["active_handlers"].as_array().unwrap().is_empty(),
+            "active_handlers must serialize as []"
+        );
+        assert_eq!(execution["active_handlers_truncated"], false);
+    }
+
+    /// processing-shape: an actor with live work serializes a populated
+    /// `execution` block — `active_handler_count >= 1`, populated
+    /// `oldest_*`, and aggregated per-name rows with string timestamps.
+    /// `active_handler_count` (3) is the full total across names, not the
+    /// row-sum (2 + 1) by coincidence here; it is read directly from the
+    /// field, never derived from the rows.
+    #[test]
+    fn test_json_shape_execution_processing() {
+        let dto: NodePayloadDto = make_actor_payload_execution_processing().into();
+        let json = serde_json::to_value(&dto).unwrap();
+
+        let execution = &json["properties"]["Actor"]["execution"];
+        assert_eq!(execution["active_handler_count"], 3);
+        // Distinct from the count (3): two endpoint names are aggregated.
+        assert_eq!(execution["total_handler_names"], 2);
+        assert_eq!(execution["oldest_active_handler"], "hold");
+        assert_eq!(execution["oldest_active_since"], "2025-01-15T10:30:00.123Z");
+        assert_eq!(execution["active_handlers_truncated"], false);
+
+        let rows = execution["active_handlers"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "two distinct endpoint names");
+        assert_eq!(rows[0]["name"], "hold");
+        assert_eq!(rows[0]["active_count"], 2);
+        assert_eq!(rows[0]["oldest_active_since"], "2025-01-15T10:30:00.123Z");
+        assert_eq!(rows[1]["name"], "ping");
+        assert_eq!(rows[1]["active_count"], 1);
+        assert_eq!(rows[1]["oldest_active_since"], "2025-01-15T11:00:00.456Z");
     }
 
     /// HB-1: Error variant preserves code/message as plain strings.

@@ -549,6 +549,7 @@ mod tests {
                     queue_depth: 0,
                     flight_recorder: None,
                     inbound_ordering: None,
+                    execution: Box::new(hyperactor_mesh::introspect::ExecutionInfo::idle()),
                     is_system: false,
                     failure_info: None,
                 },

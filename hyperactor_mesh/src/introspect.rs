@@ -1004,6 +1004,12 @@ pub enum NodeProperties {
         flight_recorder: Option<String>,
         is_system: bool,
         inbound_ordering: Option<Box<InboundOrdering>>,
+        /// In-flight execution state, the second plane to
+        /// `actor_status`. Always present (count 0 when idle), unlike
+        /// `inbound_ordering`. See `ExecutionInfo`. Boxed (like
+        /// `inbound_ordering`) to keep the `Actor` variant from dominating
+        /// the enum size; serde and schemars see through the `Box`.
+        execution: Box<ExecutionInfo>,
         failure_info: Option<FailureInfo>,
     },
     /// Error sentinel returned when a child reference cannot be resolved.
@@ -1105,6 +1111,103 @@ impl From<hyperactor::ordering::OrderingSnapshot> for InboundOrdering {
     }
 }
 
+/// Per-name aggregate of live executions, presented within
+/// [`ExecutionInfo`]. Mesh-admin mirror of
+/// `hyperactor::proc::ExecutionHandler`.
+//
+// Serialize/Deserialize required by wirevalue::register_type! and
+// ResolveReferenceResponse actor messaging. HTTP serialization uses
+// dto::ExecutionHandlerDto, not these derives.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+pub struct ExecutionHandlerInfo {
+    /// The endpoint/handler name.
+    pub name: String,
+    /// Number of live invocations of this name.
+    pub active_count: u64,
+    /// Start time of the oldest live invocation of this name.
+    pub oldest_active_since: SystemTime,
+}
+wirevalue::register_type!(ExecutionHandlerInfo);
+
+impl From<hyperactor::proc::ExecutionHandler> for ExecutionHandlerInfo {
+    fn from(h: hyperactor::proc::ExecutionHandler) -> Self {
+        Self {
+            name: h.name,
+            active_count: h.active_count,
+            oldest_active_since: h.oldest_active_since,
+        }
+    }
+}
+
+/// Mesh-admin presentation of in-flight execution state. The second
+/// plane to lifecycle status (`actor_status`): it answers "what is this
+/// actor handling now?" for both Rust actor-loop and self-reporting
+/// (Python) actors. Computed from the composed
+/// `hyperactor::proc::ExecutionSnapshot`.
+///
+/// Always present (count 0 when idle), unlike `inbound_ordering`: the
+/// `None`-vs-`Some({count:0})` ambiguity buys nothing here. The TUI
+/// hides the section when `active_handler_count == 0` (presentation, not
+/// API shape).
+///
+/// `active_handler_count` is the authoritative total across all live
+/// invocations and all names; never derive it from the (possibly
+/// truncated) `active_handlers` rows. The row list answers the separate
+/// question "which endpoint names?".
+//
+// Serialize/Deserialize required by wirevalue::register_type! and
+// ResolveReferenceResponse actor messaging. HTTP serialization uses
+// dto::ExecutionInfoDto, not these derives.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+pub struct ExecutionInfo {
+    /// Total live invocations across all names (full total,
+    /// pre-truncation).
+    pub active_handler_count: u64,
+    /// Number of DISTINCT active endpoint names before the per-name list
+    /// was capped. When `active_handlers_truncated`, the count of hidden
+    /// names is `total_handler_names - active_handlers.len()`.
+    pub total_handler_names: u64,
+    /// Name of the oldest live invocation, or `None` when idle.
+    pub oldest_active_handler: Option<String>,
+    /// Start time of the oldest live invocation, or `None` when idle.
+    pub oldest_active_since: Option<SystemTime>,
+    /// Per-name aggregates, sorted oldest-active-first then name, capped
+    /// upstream.
+    pub active_handlers: Vec<ExecutionHandlerInfo>,
+    /// Whether the per-name list was capped (distinct names exceeded the
+    /// cap).
+    pub active_handlers_truncated: bool,
+}
+wirevalue::register_type!(ExecutionInfo);
+
+impl ExecutionInfo {
+    /// The zero shape: an idle actor with no live invocations. Used for
+    /// fixtures and backfill.
+    pub fn idle() -> Self {
+        Self {
+            active_handler_count: 0,
+            total_handler_names: 0,
+            oldest_active_handler: None,
+            oldest_active_since: None,
+            active_handlers: Vec::new(),
+            active_handlers_truncated: false,
+        }
+    }
+}
+
+impl From<hyperactor::proc::ExecutionSnapshot> for ExecutionInfo {
+    fn from(s: hyperactor::proc::ExecutionSnapshot) -> Self {
+        Self {
+            active_handler_count: s.active_handler_count,
+            total_handler_names: s.total_handler_names,
+            oldest_active_handler: s.oldest_active_handler,
+            oldest_active_since: s.oldest_active_since,
+            active_handlers: s.active_handlers.into_iter().map(Into::into).collect(),
+            active_handlers_truncated: s.active_handlers_truncated,
+        }
+    }
+}
+
 /// Mesh-layer conversion from a typed attrs view to `NodeProperties`.
 ///
 /// Defined here so that `hyperactor` views (e.g. `ActorAttrsView`) can
@@ -1188,6 +1291,7 @@ impl IntoNodeProperties for hyperactor::introspect::ActorAttrsView {
             inbound_ordering: self
                 .inbound_ordering
                 .map(|io| Box::new(InboundOrdering::from(io))),
+            execution: Box::new(ExecutionInfo::from(self.execution)),
             failure_info,
         }
     }
@@ -1844,6 +1948,7 @@ mod tests {
                     flight_recorder: None,
                     is_system: false,
                     inbound_ordering: None,
+                    execution: Box::new(ExecutionInfo::idle()),
                     failure_info: None,
                 },
                 children: vec![],

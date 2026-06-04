@@ -9,6 +9,7 @@
 use std::time::SystemTime;
 
 use hyperactor::introspect::RecordedEvent;
+use hyperactor_mesh::introspect::ExecutionInfo;
 use hyperactor_mesh::introspect::FailureInfo;
 use hyperactor_mesh::introspect::InboundOrdering;
 use hyperactor_mesh::introspect::NodePayload;
@@ -322,6 +323,7 @@ pub(crate) fn render_node_detail(
             total_processing_time_us,
             flight_recorder,
             inbound_ordering,
+            execution,
             failure_info,
             ..
         } => {
@@ -339,6 +341,7 @@ pub(crate) fn render_node_detail(
                 *total_processing_time_us,
                 flight_recorder.as_deref(),
                 inbound_ordering.as_deref(),
+                execution,
                 failure_info.as_ref(),
                 scheme,
                 labels,
@@ -608,6 +611,7 @@ fn render_actor_detail(
     total_processing_time_us: u64,
     flight_recorder_json: Option<&str>,
     inbound_ordering: Option<&InboundOrdering>,
+    execution: &ExecutionInfo,
     failure_info: Option<&FailureInfo>,
     scheme: &ColorScheme,
     l: &Labels,
@@ -616,11 +620,17 @@ fn render_actor_detail(
     // lines (Instance, Queue depth) in the info block.
     let info_height: u16 = if failure_info.is_some() { 17 } else { 13 };
     let ordering_height = compute_ordering_height(area.height, info_height, inbound_ordering);
+    // Execution section is hidden (height 0) when nothing is in flight;
+    // its budget comes after the info + ordering sections, preserving the
+    // flight recorder's minimum.
+    let execution_height =
+        compute_execution_height(area.height, info_height, ordering_height, execution);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(info_height),
             Constraint::Length(ordering_height),
+            Constraint::Length(execution_height),
             Constraint::Min(MIN_FLIGHT_RECORDER_HEIGHT),
         ])
         .split(area);
@@ -702,6 +712,9 @@ fn render_actor_detail(
     // Inbound ordering
     render_inbound_ordering(frame, chunks[1], inbound_ordering, scheme, l);
 
+    // Execution (hidden at count 0 via the zero-height chunk above).
+    render_execution(frame, chunks[2], execution, scheme, l);
+
     // Flight recorder
     let recorder_block = Block::default()
         .title(l.pane_flight_recorder)
@@ -744,7 +757,7 @@ fn render_actor_detail(
     let recorder = Paragraph::new(events)
         .block(recorder_block)
         .wrap(Wrap { trim: true });
-    frame.render_widget(recorder, chunks[2]);
+    frame.render_widget(recorder, chunks[3]);
 }
 
 /// Compute the desired height for the inbound-ordering section, capped
@@ -775,6 +788,116 @@ fn compute_ordering_height(
         }
     };
     want.min(budget)
+}
+
+/// Compute the desired height for the Execution section.
+///
+/// Returns 0 when nothing is in flight (`active_handler_count == 0`) so
+/// the section is hidden entirely (the wire still carries the zero-shape
+/// block; the TUI just doesn't draw it). Otherwise sizes to the rendered
+/// line count, capped against the remaining budget so the flight
+/// recorder keeps its minimum height.
+fn compute_execution_height(
+    area_height: u16,
+    info_height: u16,
+    ordering_height: u16,
+    execution: &ExecutionInfo,
+) -> u16 {
+    if execution.active_handler_count == 0 {
+        return 0;
+    }
+    let budget = area_height
+        .saturating_sub(info_height)
+        .saturating_sub(ordering_height)
+        .saturating_sub(MIN_FLIGHT_RECORDER_HEIGHT);
+    // border(2) + count line(1) + oldest line(1 iff present)
+    // + per-name rows + truncation marker(1 iff truncated). Must match
+    // the line count produced by `build_execution_lines`.
+    let oldest_line = u16::from(execution.oldest_active_handler.is_some());
+    let rows = execution.active_handlers.len() as u16;
+    let more_row = u16::from(execution.active_handlers_truncated);
+    let want = 2 + 1 + oldest_line + rows + more_row;
+    want.min(budget)
+}
+
+/// Render the Execution section: the second plane to lifecycle status,
+/// answering "what is this actor handling right now?".
+///
+/// Drawn only when `active_handler_count > 0` (the caller gives this a
+/// zero-height chunk otherwise). The top-level count is taken directly
+/// from `active_handler_count` — never summed from the (possibly
+/// truncated) per-name rows, which answer the separate question "which
+/// endpoint names?".
+fn render_execution(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    execution: &ExecutionInfo,
+    scheme: &ColorScheme,
+    l: &Labels,
+) {
+    if execution.active_handler_count == 0 {
+        return;
+    }
+    let block = Block::default()
+        .title(l.pane_execution)
+        .borders(Borders::ALL)
+        .border_style(scheme.border);
+    let p = Paragraph::new(build_execution_lines(execution, scheme, l))
+        .block(block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(p, area);
+}
+
+fn build_execution_lines<'a>(
+    execution: &'a ExecutionInfo,
+    scheme: &ColorScheme,
+    l: &'a Labels,
+) -> Vec<Line<'a>> {
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Top-level count: read directly from active_handler_count.
+    lines.push(detail_line(
+        l.execution_active_handlers,
+        execution.active_handler_count.to_string(),
+        scheme,
+    ));
+
+    // Oldest live invocation: name + relative age, shown only when known.
+    if let Some(name) = &execution.oldest_active_handler {
+        let age = match &execution.oldest_active_since {
+            Some(since) => format!(" ({})", format_system_time_relative(since)),
+            None => String::new(),
+        };
+        lines.push(detail_line(
+            l.execution_oldest,
+            format!("{name}{age}"),
+            scheme,
+        ));
+    }
+
+    // Per-name rows: "name ×active_count  age". The list is aggregated by
+    // name and sorted oldest-active-first upstream.
+    for h in &execution.active_handlers {
+        lines.push(Line::from(Span::raw(format!(
+            "{} \u{00d7}{}  {}",
+            h.name,
+            h.active_count,
+            format_system_time_relative(&h.oldest_active_since),
+        ))));
+    }
+
+    // Truncation marker: count HIDDEN endpoint names, not invocations.
+    if execution.active_handlers_truncated {
+        let hidden = execution
+            .total_handler_names
+            .saturating_sub(execution.active_handlers.len() as u64);
+        lines.push(Line::from(Span::styled(
+            l.execution_more_names.replace("{n}", &hidden.to_string()),
+            scheme.detail_label,
+        )));
+    }
+
+    lines
 }
 
 /// Column widths for the per-session table. Owner column truncates
@@ -1386,12 +1509,106 @@ mod tests {
                 flight_recorder: None,
                 is_system: false,
                 inbound_ordering,
+                execution: Box::new(hyperactor_mesh::introspect::ExecutionInfo::idle()),
                 failure_info: None,
             },
             children: vec![],
             parent: None,
             as_of: SystemTime::now(),
         }
+    }
+
+    fn actor_payload_with_execution(execution: ExecutionInfo) -> NodePayload {
+        let mut payload = actor_payload(None);
+        if let NodeProperties::Actor { execution: e, .. } = &mut payload.properties {
+            **e = execution;
+        }
+        payload
+    }
+
+    // Execution section is hidden when nothing is in flight: no border
+    // title, no count line. The wire still carries the zero-shape block.
+    #[test]
+    fn render_actor_detail_execution_hidden_when_idle() {
+        let text = render_detail_to_string_with_size(
+            &actor_payload_with_execution(ExecutionInfo::idle()),
+            120,
+            45,
+        );
+        assert!(
+            !text.contains("Active handlers"),
+            "Execution section must be hidden at count 0: {text}"
+        );
+    }
+
+    // Populated execution: the count line reads active_handler_count
+    // directly (2), the oldest line names the oldest endpoint, and the
+    // aggregated per-name row shows "hold ×2".
+    #[test]
+    fn render_actor_detail_execution_populated() {
+        let execution = ExecutionInfo {
+            active_handler_count: 2,
+            total_handler_names: 1,
+            oldest_active_handler: Some("hold".to_string()),
+            oldest_active_since: Some(SystemTime::now()),
+            active_handlers: vec![ExecutionHandlerInfo {
+                name: "hold".to_string(),
+                active_count: 2,
+                oldest_active_since: SystemTime::now(),
+            }],
+            active_handlers_truncated: false,
+        };
+        let text =
+            render_detail_to_string_with_size(&actor_payload_with_execution(execution), 120, 45);
+        assert!(
+            text.contains("Active handlers: 2"),
+            "expected count line from active_handler_count: {text}"
+        );
+        assert!(
+            text.contains("Oldest: hold"),
+            "expected oldest endpoint name: {text}"
+        );
+        assert!(
+            text.contains("hold \u{00d7}2"),
+            "expected aggregated row 'hold ×2': {text}"
+        );
+        assert!(
+            !text.contains("more endpoint names"),
+            "no truncation marker when not truncated: {text}"
+        );
+    }
+
+    // Truncation: the count line still reads the FULL total (200), while
+    // the marker counts HIDDEN endpoint NAMES (total_handler_names 20 −
+    // 16 visible rows = 4), not invocations.
+    #[test]
+    fn render_actor_detail_execution_truncated_marker() {
+        let mut active_handlers = Vec::new();
+        for i in 0..16u64 {
+            active_handlers.push(ExecutionHandlerInfo {
+                name: format!("ep_{i:02}"),
+                active_count: 1,
+                oldest_active_since: SystemTime::now(),
+            });
+        }
+        let execution = ExecutionInfo {
+            active_handler_count: 200,
+            total_handler_names: 20,
+            oldest_active_handler: Some("ep_00".to_string()),
+            oldest_active_since: Some(SystemTime::now()),
+            active_handlers,
+            active_handlers_truncated: true,
+        };
+        let text =
+            render_detail_to_string_with_size(&actor_payload_with_execution(execution), 120, 60);
+        assert!(
+            text.contains("Active handlers: 200"),
+            "count line is the full total, not the row count: {text}"
+        );
+        assert!(
+            text.contains("4 more endpoint names"),
+            "marker counts hidden NAMES (20 - 16 = 4): {text}"
+        );
     }
 
     fn session(

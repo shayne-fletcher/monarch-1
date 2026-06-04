@@ -1562,6 +1562,7 @@ fn pyspy_proc_ref_actor_node_with_parent() {
             flight_recorder: None,
             is_system: false,
             inbound_ordering: None,
+            execution: Box::new(hyperactor_mesh::introspect::ExecutionInfo::idle()),
             failure_info: None,
         },
         children: vec![],
@@ -2565,6 +2566,7 @@ fn help_content_actor_buffered_independence() {
         flight_recorder: None,
         is_system: false,
         inbound_ordering: None,
+        execution: Box::new(hyperactor_mesh::introspect::ExecutionInfo::idle()),
         failure_info: None,
     };
     let (_, entries) = crate::render::detail_pane::help_content(&props);

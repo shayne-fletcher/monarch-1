@@ -65,6 +65,80 @@
         "title": "ApiErrorEnvelope",
         "type": "object"
       },
+      "ExecutionHandler": {
+        "description": "Per-name aggregate of live executions at the HTTP boundary.",
+        "properties": {
+          "active_count": {
+            "description": "Number of live invocations of this name.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "description": "The endpoint/handler name.",
+            "type": "string"
+          },
+          "oldest_active_since": {
+            "description": "Start time of the oldest live invocation of this name (ISO 8601\ntimestamp string).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "active_count",
+          "oldest_active_since"
+        ],
+        "type": "object"
+      },
+      "ExecutionInfo": {
+        "description": "Mesh-admin presentation of in-flight execution state at the HTTP\nboundary. The second plane to `actor_status`: it answers \"what is\nthis actor handling now?\".\n\nAlways present (count 0 when idle), unlike `inbound_ordering`. The\nTUI hides the section at count 0, but the wire always carries the\nblock.\n\n`active_handler_count` is the authoritative total across all live\ninvocations and all names; never derive it from the (possibly\ntruncated) `active_handlers` rows.",
+        "properties": {
+          "active_handler_count": {
+            "description": "Total live invocations across all names (full total,\npre-truncation).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "active_handlers": {
+            "description": "Per-name aggregates, sorted oldest-active-first then name, capped\nupstream.",
+            "items": {
+              "$ref": "#/components/schemas/ExecutionHandler"
+            },
+            "type": "array"
+          },
+          "active_handlers_truncated": {
+            "description": "Whether the per-name list was capped (distinct names exceeded the\ncap).",
+            "type": "boolean"
+          },
+          "oldest_active_handler": {
+            "description": "Name of the oldest live invocation (ISO 8601 timestamp string in\n`oldest_active_since`). `None` when idle.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "oldest_active_since": {
+            "description": "Start time of the oldest live invocation (ISO 8601 timestamp\nstring). `None` when idle.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total_handler_names": {
+            "description": "Number of DISTINCT active endpoint names before the per-name list\nwas capped. When `active_handlers_truncated`, the count of hidden\nnames is `total_handler_names - active_handlers.len()`.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "active_handler_count",
+          "total_handler_names",
+          "active_handlers",
+          "active_handlers_truncated"
+        ],
+        "type": "object"
+      },
       "FailureInfo": {
         "description": "Structured failure information for failed actors.",
         "properties": {
@@ -360,6 +434,10 @@
                       "null"
                     ]
                   },
+                  "execution": {
+                    "$ref": "#/components/schemas/ExecutionInfo",
+                    "description": "In-flight execution state, the second plane to\n`actor_status`. Always present (count 0 when idle), unlike\n`inbound_ordering`. See `ExecutionInfo`."
+                  },
                   "failure_info": {
                     "anyOf": [
                       {
@@ -424,7 +502,8 @@
                   "messages_processed",
                   "total_processing_time_us",
                   "queue_depth",
-                  "is_system"
+                  "is_system",
+                  "execution"
                 ],
                 "type": "object"
               }

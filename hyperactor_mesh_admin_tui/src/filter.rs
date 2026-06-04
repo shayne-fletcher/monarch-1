@@ -76,6 +76,7 @@ mod tests {
             flight_recorder: None,
             is_system: false,
             inbound_ordering: None,
+            execution: Box::new(hyperactor_mesh::introspect::ExecutionInfo::idle()),
             failure_info: None,
         }
     }
@@ -148,6 +149,7 @@ mod tests {
             flight_recorder: None,
             is_system: false,
             inbound_ordering: None,
+            execution: Box::new(hyperactor_mesh::introspect::ExecutionInfo::idle()),
             failure_info: Some(FailureInfo {
                 error_message: "boom".to_string(),
                 root_cause_actor: mock_actor_id(),

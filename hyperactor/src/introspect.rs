@@ -434,6 +434,23 @@ declare_attrs! {
         desc: "Per-session reorder-buffer state from OrderedSender. Independent diagnostic from queue_depth; no arithmetic contract -- see IO-3. Absence vs Some({enabled: false}) is meaningful -- see IO-1.".into(),
     })
     pub attr INBOUND_ORDERING: crate::ordering::OrderingSnapshot;
+
+    /// In-flight execution state: the live invocations an actor is
+    /// currently handling. A second plane to lifecycle `status` --
+    /// `status` describes the Rust actor loop, `execution` answers "what
+    /// is this actor doing right now?" even when work runs detached from
+    /// the loop (e.g. concurrent Python endpoints).
+    ///
+    /// Always present (count 0 when idle); composed once in
+    /// `live_actor_payload` either from the cell's execution registry (for
+    /// actors that self-report) or derived from `ActorStatus::Processing`.
+    /// `active_handler_count` is the full live total; the `active_handlers`
+    /// list is aggregated by name and capped (`active_handlers_truncated`).
+    @meta(INTROSPECT = IntrospectAttr {
+        name: "execution".into(),
+        desc: "In-flight execution: live invocation count, oldest, and per-name aggregates. Second plane to lifecycle status -- answers 'what is this actor handling now?'. Always present (count 0 when idle).".into(),
+    })
+    pub attr EXECUTION: crate::proc::ExecutionSnapshot;
 }
 
 // See FI-1 through FI-8 in module doc.
@@ -528,6 +545,10 @@ pub struct ActorAttrsView {
     /// means buffering is disabled; `Some({enabled: true, ..})` means active.
     /// Consumers must distinguish all three states.
     pub inbound_ordering: Option<crate::ordering::OrderingSnapshot>,
+    /// In-flight execution state. Always present (count 0 when idle),
+    /// unlike `inbound_ordering`: the `None`-vs-`Some({count:0})` ambiguity
+    /// buys nothing here. Composed once in `live_actor_payload`.
+    pub execution: crate::proc::ExecutionSnapshot,
     /// Failure details, present iff status == "failed".
     pub failure: Option<FailureAttrs>,
 }
@@ -560,6 +581,13 @@ impl ActorAttrsView {
         let flight_recorder = attrs.get(FLIGHT_RECORDER).cloned();
         let is_system = *attrs.get(IS_SYSTEM).unwrap_or(&false);
         let inbound_ordering = attrs.get(INBOUND_ORDERING).cloned();
+        // `execution` is always present on the view. When the attr is
+        // absent (old payloads / hand-built fixtures) default to the zero
+        // shape: idle, no live invocations.
+        let execution = attrs
+            .get(EXECUTION)
+            .cloned()
+            .unwrap_or_else(crate::proc::ExecutionSnapshot::idle);
 
         // IA-3 (one-sided): status_reason must not be present for
         // non-terminal status. The converse is not enforced —
@@ -637,6 +665,7 @@ impl ActorAttrsView {
             flight_recorder,
             is_system,
             inbound_ordering,
+            execution,
             failure,
         })
     }
@@ -666,6 +695,9 @@ impl ActorAttrsView {
         if let Some(snapshot) = &self.inbound_ordering {
             attrs.set(INBOUND_ORDERING, snapshot.clone());
         }
+        // `execution` is always present (count 0 when idle), so it is
+        // always encoded -- never elided like the Option-shaped attrs.
+        attrs.set(EXECUTION, self.execution.clone());
         if let Some(fi) = &self.failure {
             attrs.set(FAILURE_ERROR_MESSAGE, fi.error_message.clone());
             attrs.set(FAILURE_ROOT_CAUSE_ACTOR, fi.root_cause_actor.clone());
@@ -805,6 +837,10 @@ struct ActorSnapshot {
     is_system: bool,
     last_handler: Option<String>,
     flight_recorder: Option<String>,
+    /// In-flight execution, composed once (compose-by-kind) in
+    /// `live_actor_payload`: registry snapshot when the actor self-reports,
+    /// otherwise derived from `ActorStatus::Processing`.
+    execution: crate::proc::ExecutionSnapshot,
     failure: Option<FailureSnapshot>,
 }
 
@@ -844,6 +880,10 @@ fn build_actor_attrs(cell: &crate::InstanceCell, snap: &ActorSnapshot) -> String
         attrs.set(INBOUND_ORDERING, snapshot);
     }
 
+    // `execution` is always present (count 0 when idle); composed once in
+    // `live_actor_payload`.
+    attrs.set(EXECUTION, snap.execution.clone());
+
     if let Some(handler) = &snap.last_handler {
         attrs.set(LAST_HANDLER, handler.clone());
     }
@@ -865,6 +905,54 @@ fn build_actor_attrs(cell: &crate::InstanceCell, snap: &ActorSnapshot) -> String
     // starting from a fresh Attrs bag (no stale keys possible).
 
     serde_json::to_string(&attrs).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Compose the actor's `execution` snapshot once, compose-by-kind.
+///
+/// If the cell has an execution registry installed (the actor
+/// self-reports, e.g. a Python actor), use it verbatim. Otherwise derive
+/// from the actor loop's `ActorStatus::Processing`:
+///
+/// - `Processing(since, Some(handler))` -> one entry, count 1, name =
+///   the handler dot-form, oldest = `since`.
+/// - `Processing(since, None)` -> count 1 with a `<unknown>` placeholder
+///   name (handler info unavailable), oldest = `since`.
+/// - any other status -> idle (count 0).
+///
+/// The registry branch never surfaces a hand-off artifact: a self-reporting
+/// actor always takes the registry branch, not the status branch.
+fn compose_execution(
+    cell: &InstanceCell,
+    status: &crate::actor::ActorStatus,
+) -> crate::proc::ExecutionSnapshot {
+    use crate::actor::ActorStatus;
+    use crate::proc::ExecutionHandler;
+    use crate::proc::ExecutionSnapshot;
+
+    if let Some(snapshot) = cell.execution_snapshot() {
+        return snapshot;
+    }
+
+    let ActorStatus::Processing(since, handler) = status else {
+        return ExecutionSnapshot::idle();
+    };
+
+    let name = handler
+        .as_ref()
+        .map(|h| h.to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    ExecutionSnapshot {
+        active_handler_count: 1,
+        total_handler_names: 1,
+        oldest_active_handler: Some(name.clone()),
+        oldest_active_since: Some(*since),
+        active_handlers: vec![ExecutionHandler {
+            name,
+            active_count: 1,
+            oldest_active_since: *since,
+        }],
+        active_handlers_truncated: false,
+    }
 }
 
 /// Build an [`IntrospectResult`] from live [`InstanceCell`] state.
@@ -923,11 +1011,14 @@ pub fn live_actor_payload(cell: &InstanceCell) -> IntrospectResult {
         None
     };
 
+    let execution = compose_execution(cell, &status);
+
     let snap = ActorSnapshot {
         status_str: status.to_string(),
         is_system: cell.is_system(),
         last_handler: last_handler.map(|info| info.to_string()),
         flight_recorder,
+        execution,
         failure,
     };
 
@@ -1102,6 +1193,7 @@ mod tests {
             ("instance_id", INSTANCE_ID.attrs()),
             ("queue_depth", ACTOR_QUEUE_DEPTH.attrs()),
             ("inbound_ordering", INBOUND_ORDERING.attrs()),
+            ("execution", EXECUTION.attrs()),
         ];
 
         for (expected_name, meta) in &cases {
@@ -1208,6 +1300,12 @@ mod tests {
         // running_actor_attrs() fixture.
         assert_eq!(view.queue_depth, 0);
         assert!(view.inbound_ordering.is_none());
+        // `execution` defaults to the idle zero-shape when the attr is
+        // absent from the fixture.
+        assert_eq!(view.execution.active_handler_count, 0);
+        assert!(view.execution.oldest_active_handler.is_none());
+        assert!(view.execution.active_handlers.is_empty());
+        assert!(!view.execution.active_handlers_truncated);
         assert!(view.failure.is_none());
 
         let round_tripped = ActorAttrsView::from_attrs(&view.to_attrs()).unwrap();
@@ -1301,6 +1399,66 @@ mod tests {
 
         let round_tripped = ActorAttrsView::from_attrs(&view.to_attrs()).unwrap();
         assert!(round_tripped.inbound_ordering.is_none());
+        assert_eq!(round_tripped, view);
+    }
+
+    /// AV-1: idle `execution` (count 0, empty list, null oldest) survives
+    /// the encode/decode boundary as the full zero-shape. The attr is
+    /// absent from the fixture, so this also pins the default.
+    #[test]
+    fn test_actor_view_round_trip_execution_idle() {
+        let view = ActorAttrsView::from_attrs(&running_actor_attrs()).unwrap();
+        assert_eq!(view.execution, crate::proc::ExecutionSnapshot::idle());
+
+        let attrs = view.to_attrs();
+        // Always encoded, never elided.
+        assert!(attrs.get(EXECUTION).is_some());
+
+        let round_tripped = ActorAttrsView::from_attrs(&attrs).unwrap();
+        assert_eq!(
+            round_tripped.execution,
+            crate::proc::ExecutionSnapshot::idle()
+        );
+        assert_eq!(round_tripped, view);
+    }
+
+    /// AV-1: a populated `execution` (multiple invocations across names,
+    /// populated oldest) survives the Attrs encode/decode boundary.
+    #[test]
+    fn test_actor_view_round_trip_execution_populated() {
+        use crate::proc::ExecutionHandler;
+        use crate::proc::ExecutionSnapshot;
+
+        let snapshot = ExecutionSnapshot {
+            active_handler_count: 3,
+            total_handler_names: 2,
+            oldest_active_handler: Some("hold".to_string()),
+            oldest_active_since: Some(SystemTime::UNIX_EPOCH),
+            active_handlers: vec![
+                ExecutionHandler {
+                    name: "hold".to_string(),
+                    active_count: 2,
+                    oldest_active_since: SystemTime::UNIX_EPOCH,
+                },
+                ExecutionHandler {
+                    name: "ping".to_string(),
+                    active_count: 1,
+                    oldest_active_since: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
+                },
+            ],
+            active_handlers_truncated: false,
+        };
+
+        let mut attrs = running_actor_attrs();
+        attrs.set(EXECUTION, snapshot.clone());
+
+        let view = ActorAttrsView::from_attrs(&attrs).unwrap();
+        assert_eq!(view.execution, snapshot);
+        assert_eq!(view.execution.active_handler_count, 3);
+        assert_eq!(view.execution.total_handler_names, 2);
+        assert_eq!(view.execution.active_handlers.len(), 2);
+
+        let round_tripped = ActorAttrsView::from_attrs(&view.to_attrs()).unwrap();
         assert_eq!(round_tripped, view);
     }
 

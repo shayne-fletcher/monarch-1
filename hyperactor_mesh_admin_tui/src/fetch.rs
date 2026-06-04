@@ -566,6 +566,7 @@ mod tests {
                 flight_recorder: None,
                 is_system: false,
                 inbound_ordering: None,
+                execution: Box::new(hyperactor_mesh::introspect::ExecutionInfo::idle()),
                 failure_info: None,
             },
             children: vec![],

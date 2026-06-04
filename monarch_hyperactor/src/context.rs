@@ -133,6 +133,22 @@ impl PyInstance {
         self.inner.set_system();
     }
 
+    /// Record the start of an invocation of `name` against this actor's
+    /// execution registry, returning the token to pass to
+    /// `_execution_finished`. Reached from Python via
+    /// `ctx.actor_instance` to bracket user-endpoint execution so
+    /// mesh-admin can report in-flight Python work.
+    fn _execution_started(&self, name: String) -> u64 {
+        self.inner.execution_started(&name)
+    }
+
+    /// Record the end of the invocation identified by `token`. Tolerant
+    /// of unknown or already-removed tokens, so double-finish and
+    /// cancellation are safe.
+    fn _execution_finished(&self, token: u64) {
+        self.inner.execution_finished(token);
+    }
+
     /// Reserve `count` ordering seqs against the receiver actor's
     /// `PythonMessage` handler port. Subsequent fire-and-forget
     /// endpoint sends to `receiver` pick up at the post-reservation
