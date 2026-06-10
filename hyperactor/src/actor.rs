@@ -2540,6 +2540,91 @@ mod tests {
         handle.await;
     }
 
+    /// AS-1 (snapshot-opacity): an INTROSPECT-tagged actor-supplied attr
+    /// is transported into the Actor view verbatim. `LAST_HANDLER` is
+    /// INTROSPECT-tagged and left unset by the core builder for a
+    /// message-free actor, so it shows additive transport cleanly (and
+    /// satisfies the accessor's INTROSPECT-tagging guard).
+    #[tokio::test]
+    async fn test_actor_attrs_snapshot_appears_verbatim() {
+        let proc = Proc::isolated();
+        let client = proc.client("client");
+        let (tx, _rx) = client.open_port::<u64>();
+        let handle = proc.spawn(EchoActor(tx.bind()));
+
+        handle.cell().set_attrs_snapshot(|| {
+            let mut attrs = hyperactor_config::Attrs::new();
+            attrs.set(crate::introspect::LAST_HANDLER, "seam-probe".to_string());
+            attrs
+        });
+
+        let payload = crate::introspect::live_actor_payload(handle.cell());
+        assert_valid_attrs(&payload);
+        assert_eq!(
+            attrs_get(&payload.attrs, "last_handler").and_then(|v| v.as_str().map(String::from)),
+            Some("seam-probe".to_string()),
+            "AS-1: actor-supplied attr must appear verbatim"
+        );
+
+        handle.drain_and_stop("test").unwrap();
+        handle.await;
+    }
+
+    /// AS-2 (core-precedence): on a key collision, the core/runtime
+    /// value wins over the actor-supplied snapshot.
+    #[tokio::test]
+    async fn test_actor_attrs_snapshot_core_wins_on_collision() {
+        let proc = Proc::isolated();
+        let client = proc.client("client");
+        let (tx, _rx) = client.open_port::<u64>();
+        let handle = proc.spawn(EchoActor(tx.bind()));
+
+        // The snapshot tries to clobber a core key with a bogus value;
+        // `build_actor_attrs` sets `messages_processed` unconditionally,
+        // so core must win.
+        handle.cell().set_attrs_snapshot(|| {
+            let mut attrs = hyperactor_config::Attrs::new();
+            attrs.set(crate::introspect::MESSAGES_PROCESSED, 999u64);
+            attrs
+        });
+
+        let payload = crate::introspect::live_actor_payload(handle.cell());
+        let messages = attrs_get(&payload.attrs, "messages_processed")
+            .and_then(|v| v.as_u64())
+            .expect("attrs must contain messages_processed");
+        // Fresh actor processed no messages: the exact core value is 0,
+        // and it wins over the snapshot's bogus 999.
+        assert_eq!(messages, 0, "AS-2: core value must win over the snapshot");
+
+        handle.drain_and_stop("test").unwrap();
+        handle.await;
+    }
+
+    /// AS-3 (snapshot-non-fatal): a panicking snapshot degrades to the
+    /// core-only Actor view rather than emptying or invalidating attrs.
+    #[tokio::test]
+    async fn test_actor_attrs_snapshot_panic_is_non_fatal() {
+        let proc = Proc::isolated();
+        let client = proc.client("client");
+        let (tx, _rx) = client.open_port::<u64>();
+        let handle = proc.spawn(EchoActor(tx.bind()));
+
+        handle
+            .cell()
+            .set_attrs_snapshot(|| -> hyperactor_config::Attrs {
+                panic!("snapshot callback boom")
+            });
+
+        let payload = crate::introspect::live_actor_payload(handle.cell());
+        // Core view survives a panicking snapshot intact (IA-1, IA-5, AS-3).
+        assert_valid_attrs(&payload);
+        assert_has_attr(&payload, "status");
+        assert_has_attr(&payload, "actor_type");
+
+        handle.drain_and_stop("test").unwrap();
+        handle.await;
+    }
+
     // Verifies that QueryChild returns an error for actors without
     // a registered query_child_handler callback. The runtime
     // introspect task responds with the error sentinel payload
