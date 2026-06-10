@@ -117,19 +117,26 @@
 //! ## Derive invariants (DP-*)
 //!
 //! - **DP-1 (derive-precedence):** `derive_properties` dispatches
-//!   on `node_type` first, then falls back to `error_code`,
-//!   then `status`, then unknown. This order is the canonical
-//!   detection chain.
+//!   on `status` first (DP-5), then `node_type`, then `error_code`,
+//!   then unknown. This order is the canonical detection chain.
 //! - **DP-2 (derive-totality-on-parse-failure):**
 //!   `derive_properties` is total; malformed or incoherent attrs
 //!   never panic and map to `NodeProperties::Error` with detail.
 //! - **DP-3 (derive-precedence-stability):**
 //!   `derive_properties` detection order is stable and explicit:
-//!   `node_type` > `error_code` > `status` > unknown.
+//!   `status` > `node_type` > `error_code` > unknown.
 //! - **DP-4 (error-on-decode-failure):** Any view decode or
 //!   invariant failure maps to a deterministic
 //!   `NodeProperties::Error` with a `malformed_*` code family,
 //!   without panic.
+//! - **DP-5 (actor-view classification safety):** a payload
+//!   carrying the core `STATUS` key always decodes as `Actor`.
+//!   `STATUS` is set only by the blanket Actor builder
+//!   (`build_actor_attrs`) and is core-owned, so the actor-attrs
+//!   snapshot seam can neither remove nor override it (AS-2), and no
+//!   non-actor payload (root/host/proc/error) carries it. Therefore
+//!   an actor cannot inject `node_type`/`error_code` via the seam to
+//!   spoof a different node kind.
 //!
 //! ## Inbound ordering presentation (IO-*)
 //!
@@ -1195,10 +1202,11 @@ impl IntoNodeProperties for hyperactor::introspect::ActorAttrsView {
 
 /// Derive `NodeProperties` from a JSON-serialized attrs string.
 ///
-/// Detection precedence (DP-1, DP-3):
-/// 1. `node_type` = "root" / "host" / "proc" → corresponding variant
-/// 2. `error_code` present → Error
-/// 3. `STATUS` key present → Actor
+/// Detection precedence (DP-1, DP-3, DP-5):
+/// 1. `STATUS` key present → Actor (DP-5: a STATUS-bearing payload always
+///    decodes as Actor, so the actor-attrs seam cannot spoof node kind)
+/// 2. `node_type` = "root" / "host" / "proc" → corresponding variant
+/// 3. `error_code` present → Error
 /// 4. none of the above → Error("unknown_node_type")
 ///
 /// DP-2 / DP-4: this function is total — malformed attrs never
@@ -1206,6 +1214,9 @@ impl IntoNodeProperties for hyperactor::introspect::ActorAttrsView {
 /// with a `malformed_*` code.
 /// AV-3 / IA-6: view decoders ignore unknown keys.
 pub fn derive_properties(attrs_json: &str) -> NodeProperties {
+    use hyperactor::introspect::ERROR_CODE;
+    use hyperactor::introspect::STATUS;
+
     let attrs: Attrs = match serde_json::from_str(attrs_json) {
         Ok(a) => a,
         Err(_) => {
@@ -1215,6 +1226,23 @@ pub fn derive_properties(attrs_json: &str) -> NodeProperties {
             };
         }
     };
+
+    // DP-5 (actor-view classification safety): the core `STATUS` key is set
+    // only by the blanket Actor builder (`build_actor_attrs`) and is
+    // core-owned, so the actor-attrs snapshot seam can neither remove nor
+    // override it (AS-2), and no non-actor payload carries it. Classifying
+    // STATUS-present as `Actor` *before* `node_type`/`error_code` means a
+    // snapshot-injected `node_type`/`error_code` cannot make a blanket actor
+    // decode as Root/Proc/Error.
+    if attrs.get(STATUS).is_some() {
+        return match hyperactor::introspect::ActorAttrsView::from_attrs(&attrs) {
+            Ok(v) => v.into_node_properties(),
+            Err(e) => NodeProperties::Error {
+                code: "malformed_actor".into(),
+                message: e.to_string(),
+            },
+        };
+    }
 
     let node_type = attrs.get(NODE_TYPE).cloned().unwrap_or_default();
 
@@ -1241,11 +1269,8 @@ pub fn derive_properties(attrs_json: &str) -> NodeProperties {
             },
         },
         _ => {
-            // DP-1: error_code → Error, STATUS present → Actor,
-            // else → Error("unknown_node_type").
-            use hyperactor::introspect::ERROR_CODE;
-            use hyperactor::introspect::STATUS;
-
+            // STATUS-bearing payloads decoded as Actor above (DP-5), so
+            // here STATUS is absent: error_code → Error, else unknown.
             if attrs.get(ERROR_CODE).is_some() {
                 return match ErrorAttrsView::from_attrs(&attrs) {
                     Ok(v) => v.into_node_properties(),
@@ -1256,19 +1281,9 @@ pub fn derive_properties(attrs_json: &str) -> NodeProperties {
                 };
             }
 
-            if attrs.get(STATUS).is_none() {
-                return NodeProperties::Error {
-                    code: "unknown_node_type".into(),
-                    message: format!("unrecognized node_type: {:?}", node_type),
-                };
-            }
-
-            match hyperactor::introspect::ActorAttrsView::from_attrs(&attrs) {
-                Ok(v) => v.into_node_properties(),
-                Err(e) => NodeProperties::Error {
-                    code: "malformed_actor".into(),
-                    message: e.to_string(),
-                },
+            NodeProperties::Error {
+                code: "unknown_node_type".into(),
+                message: format!("unrecognized node_type: {:?}", node_type),
             }
         }
     }
@@ -1685,6 +1700,49 @@ mod tests {
                 messages_processed: 7,
                 ..
             }
+        ));
+    }
+
+    /// DP-5: a snapshot-injected `node_type` cannot make a STATUS-bearing
+    /// (blanket) actor decode as a non-Actor node.
+    #[test]
+    fn test_derive_properties_status_first_ignores_injected_node_type() {
+        use hyperactor::introspect::ACTOR_TYPE;
+        use hyperactor::introspect::INSTANCE_ID;
+        use hyperactor::introspect::STATUS;
+
+        let mut attrs = Attrs::new();
+        attrs.set(STATUS, "running".into());
+        attrs.set(ACTOR_TYPE, "TestActor".into());
+        attrs.set(INSTANCE_ID, "01900000-0000-7000-8000-000000000001".into());
+        // Hostile injection via the actor-attrs seam.
+        attrs.set(NODE_TYPE, "root".into());
+        let json = serde_json::to_string(&attrs).unwrap();
+        assert!(matches!(
+            derive_properties(&json),
+            NodeProperties::Actor { .. }
+        ));
+    }
+
+    /// DP-5: a snapshot-injected `error_code` cannot make a STATUS-bearing
+    /// actor decode as an Error node.
+    #[test]
+    fn test_derive_properties_status_first_ignores_injected_error_code() {
+        use hyperactor::introspect::ACTOR_TYPE;
+        use hyperactor::introspect::ERROR_CODE;
+        use hyperactor::introspect::INSTANCE_ID;
+        use hyperactor::introspect::STATUS;
+
+        let mut attrs = Attrs::new();
+        attrs.set(STATUS, "running".into());
+        attrs.set(ACTOR_TYPE, "TestActor".into());
+        attrs.set(INSTANCE_ID, "01900000-0000-7000-8000-000000000001".into());
+        // Hostile injection via the actor-attrs seam.
+        attrs.set(ERROR_CODE, "not_found".into());
+        let json = serde_json::to_string(&attrs).unwrap();
+        assert!(matches!(
+            derive_properties(&json),
+            NodeProperties::Actor { .. }
         ));
     }
 
