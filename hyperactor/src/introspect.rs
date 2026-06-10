@@ -155,6 +155,32 @@
 //!   arithmetic or ordering relationship between them is part of the
 //!   API contract; the accounting paths are free to change. Consumers
 //!   must not derive one from the other.
+//!
+//! ## Actor-attrs snapshot invariants (AS-*)
+//!
+//! These govern the generic per-actor introspection-attrs snapshot
+//! seam: an actor may install a `Fn() -> Attrs` callback via
+//! `Instance::set_attrs_snapshot`, which the introspect task invokes in
+//! `build_actor_attrs` and merges into the Actor view. The seam is the
+//! runtime-agnostic transport for actor-supplied introspection data
+//! (e.g. a Python actor reporting in-flight handler execution); core
+//! interprets none of it.
+//!
+//! - **AS-1 (snapshot-opacity):** actor-supplied attrs are merged into
+//!   the Actor view verbatim. Core neither interprets nor validates the
+//!   keys -- any key the actor sets is transported as-is. This is what
+//!   keeps the seam runtime-agnostic (no Rust-vs-Python knowledge, no
+//!   "endpoint" concept in core).
+//! - **AS-2 (core-precedence):** on a key collision, the core/runtime
+//!   key wins over the actor-supplied value. This is the Actor-view
+//!   analog of IA-2, which governs the published-attrs path; the two
+//!   sources of actor-supplied keys (published attrs, snapshot seam) are
+//!   distinct, but both yield to core keys.
+//! - **AS-3 (snapshot-non-fatal):** an absent, empty, or panicking
+//!   snapshot degrades to the core-only Actor view. The callback is
+//!   `catch_unwind`-guarded and the merge falls back to the core attrs,
+//!   so a bad snapshot can never empty or invalidate `attrs` (with IA-1,
+//!   IA-5).
 
 use std::fmt;
 use std::str::FromStr;
@@ -864,7 +890,22 @@ fn build_actor_attrs(cell: &crate::InstanceCell, snap: &ActorSnapshot) -> String
     // IA-4: failure attrs absent when not failed — guaranteed by
     // starting from a fresh Attrs bag (no stale keys possible).
 
-    serde_json::to_string(&attrs).unwrap_or_else(|_| "{}".to_string())
+    let core_json = serde_json::to_string(&attrs).unwrap_or_else(|_| "{}".to_string());
+
+    // Merge actor-supplied attrs (the generic seam, AS-1). `Attrs::merge`
+    // overwrites the receiver's keys with the argument's, so merging the
+    // core bag *onto* the actor snapshot makes core keys win on collision
+    // (AS-2, the Actor-view analog of IA-2). No snapshot → the core bag is
+    // returned unchanged; if the merged bag somehow fails to serialize,
+    // fall back to the core-only JSON so a bad snapshot can never empty or
+    // invalidate the actor view (AS-3).
+    match cell.actor_attrs_snapshot() {
+        None => core_json,
+        Some(mut merged) => {
+            merged.merge(attrs);
+            serde_json::to_string(&merged).unwrap_or(core_json)
+        }
+    }
 }
 
 /// Build an [`IntrospectResult`] from live [`InstanceCell`] state.

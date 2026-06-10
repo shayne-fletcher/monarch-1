@@ -2437,6 +2437,22 @@ impl<A: Actor> Instance<A> {
         self.inner.cell.merge_published_attr(key, value);
     }
 
+    /// Install an actor-supplied introspection-attrs snapshot callback.
+    ///
+    /// The callback is invoked by the introspect task (outside the actor
+    /// loop) when building this actor's node payload; its `Attrs` are
+    /// merged into the Actor view, core keys winning on collision (AS-2).
+    /// It must be `Send + Sync`, non-blocking (`try_lock`), and
+    /// infallible. Core does not interpret the keys — the actor owns its
+    /// own introspection vocabulary (AS-1). See the AS-* family in
+    /// `introspect.rs`.
+    pub fn set_attrs_snapshot(
+        &self,
+        callback: impl Fn() -> hyperactor_config::Attrs + Send + Sync + 'static,
+    ) {
+        self.inner.cell.set_attrs_snapshot(callback);
+    }
+
     /// Mark this actor as system/infrastructure. System actors are
     /// hidden by default in the TUI (toggled via `s`).
     pub fn set_system(&self) {
@@ -3649,6 +3665,20 @@ struct InstanceCellState {
     /// `Instance::new`; production live actors always install Some.
     inbound_ordering_snapshot:
         Option<Box<dyn Fn() -> crate::ordering::OrderingSnapshot + Send + Sync>>,
+
+    /// Type-erased snapshot callback for actor-supplied introspection
+    /// attrs. Installed by the actor (e.g. in `Actor::init`) via
+    /// `Instance::set_attrs_snapshot`; invoked by the introspect task
+    /// (outside the actor loop) in `build_actor_attrs`, where the
+    /// returned `Attrs` are merged into the Actor view with core keys
+    /// winning on collision (AS-2).
+    ///
+    /// Generic: core does not interpret the keys (AS-1). The callback
+    /// must be non-blocking (`try_lock` internally); it is
+    /// `catch_unwind`-guarded at the call site so a panic degrades to no
+    /// extra attrs rather than breaking introspection (AS-3). `None`
+    /// means the actor publishes no extra attrs.
+    actor_attrs_snapshot: RwLock<Option<Box<dyn Fn() -> hyperactor_config::Attrs + Send + Sync>>>,
 }
 
 impl InstanceCellState {
@@ -3762,6 +3792,7 @@ impl InstanceCell {
                 is_system: AtomicBool::new(false),
                 ports,
                 inbound_ordering_snapshot,
+                actor_attrs_snapshot: RwLock::new(None),
             }),
         };
         cell.maybe_link_parent();
@@ -3991,6 +4022,50 @@ impl InstanceCell {
     /// (`try_lock`, non-blocking) and never perturbs ordering state.
     pub fn inbound_ordering_snapshot(&self) -> Option<crate::ordering::OrderingSnapshot> {
         self.inner.inbound_ordering_snapshot.as_ref().map(|f| f())
+    }
+
+    /// Install the actor-supplied introspection-attrs snapshot callback.
+    /// Called by the actor (e.g. in `Actor::init`). The callback runs on
+    /// the introspect task (outside the actor loop), so it must be
+    /// `Send + Sync`, non-blocking (`try_lock`), and must not access
+    /// actor-mutable state.
+    pub fn set_attrs_snapshot(
+        &self,
+        callback: impl Fn() -> hyperactor_config::Attrs + Send + Sync + 'static,
+    ) {
+        *self.inner.actor_attrs_snapshot.write().unwrap() = Some(Box::new(callback));
+    }
+
+    /// Out-of-band actor-supplied introspection attrs. `None` when no
+    /// callback was installed (the actor publishes no extra attrs).
+    /// `catch_unwind`-guarded: a panicking callback degrades to `None`
+    /// rather than killing the introspect task (AS-3).
+    pub fn actor_attrs_snapshot(&self) -> Option<hyperactor_config::Attrs> {
+        let guard = self.inner.actor_attrs_snapshot.read().unwrap();
+        let callback = guard.as_ref()?;
+        let attrs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback))
+            .map_err(|_| {
+                tracing::warn!(
+                    actor_id = %self.actor_addr(),
+                    "actor_attrs_snapshot callback panicked; omitting actor attrs",
+                );
+            })
+            .ok()?;
+        // AS-1 discipline: actor-supplied keys must be INTROSPECT-tagged
+        // (mirrors the `publish_attr` guard), so they carry a stable HTTP
+        // short-name and schema entry rather than forming an ungoverned
+        // second introspection channel.
+        #[cfg(debug_assertions)]
+        for (name, _) in attrs.iter() {
+            debug_assert!(
+                inventory::iter::<hyperactor_config::attrs::AttrKeyInfo>().any(|info| {
+                    info.name == name && info.meta.get(hyperactor_config::INTROSPECT).is_some()
+                }),
+                "actor_attrs_snapshot callback returned non-INTROSPECT key `{name}`; \
+                 actor introspection keys must carry @meta(INTROSPECT)"
+            );
+        }
+        Some(attrs)
     }
 
     /// Get parent instance cell, if it exists.
