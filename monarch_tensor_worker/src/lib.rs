@@ -6,7 +6,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#![feature(assert_matches)]
 #![feature(duration_constructors)]
 #![feature(exit_status_error)]
 // NOTE: Until https://github.com/PyO3/pyo3/pull/4674, `pyo3::pymethods` trigger
