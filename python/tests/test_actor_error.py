@@ -278,6 +278,71 @@ def test_actor_init_exception_sync(mesh, actor_class, num_procs) -> None:
     proc.stop().get()
 
 
+@pytest.mark.timeout(60)
+@parametrize_config(actor_queue_dispatch={True, False})
+@isolate_in_subprocess
+async def test_broadcast_exception_with_no_reply_port_kills_actor() -> None:
+    """A plain `Exception` from an endpoint invoked with *no reply port*
+    (fire-and-forget `broadcast()`) fails the actor: the return is dropped, the
+    exception escapes through `DroppingPort.exception`, and the actor is killed,
+    surfacing as a supervision fault at the client. Parametrized over both
+    dispatch modes because the kill reaches `Signal::Kill` by different paths
+    (direct: the endpoint task resolves `Err`; queue: `_dispatch_loop` calls
+    `self_instance.kill`). The existing broadcast-failure coverage uses a
+    `BaseException`; this pins the plain-`Exception` path."""
+    faults = []
+    faulted = asyncio.Event()
+
+    def fault_hook(failure):
+        faults.append(failure)
+        faulted.set()
+
+    monarch.actor.unhandled_fault_hook = fault_hook
+    proc = spawn_procs_on_this_host({"gpus": 1})
+    actor = proc.spawn("exception_actor", ExceptionActor)
+
+    actor.raise_exception.broadcast()  # no reply port => the actor dies
+    await asyncio.wait_for(faulted.wait(), timeout=15.0)
+
+    assert len(faults) >= 1
+    fault_str = str(faults[0])
+    assert "exception_actor" in fault_str
+    assert "This is a test exception" in fault_str
+
+    await proc.stop()
+
+
+@pytest.mark.timeout(60)
+@parametrize_config(actor_queue_dispatch={True, False})
+@isolate_in_subprocess
+async def test_reply_port_exception_returns_to_caller_and_actor_survives() -> None:
+    """The reply-port half of the contract, and the only cell where the actor
+    lives: an endpoint `Exception` called *with* a reply port comes back to the
+    caller as `ActorError`, the actor stays alive (a follow-up call succeeds),
+    and no supervision fires (a surviving actor is not a failure). The suite
+    already asserts the `ActorError`; the survival and the supervision-silence
+    are what this adds."""
+    faults = []
+    monarch.actor.unhandled_fault_hook = lambda failure: faults.append(failure)
+    proc = spawn_procs_on_this_host({"gpus": 1})
+    actor = proc.spawn("exception_actor", ExceptionActor)
+
+    with pytest.raises(ActorError, match="This is a test exception"):
+        await actor.raise_exception.call_one()
+
+    # the actor survived: a subsequent call still works
+    await actor.noop.call_one()
+
+    # supervision faults reach the hook asynchronously; drain so a late delivery
+    # can't slip past the empty-check below.
+    await asyncio.sleep(0.5)
+
+    # and no supervision fired for the handled exception
+    assert faults == [], f"expected no supervision faults, got {faults}"
+
+    await proc.stop()
+
+
 @parametrize_config(actor_queue_dispatch={True, False})
 @pytest.mark.parametrize(
     "mesh",
