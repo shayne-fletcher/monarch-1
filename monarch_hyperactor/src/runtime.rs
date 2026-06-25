@@ -6,8 +6,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::cell::OnceCell as UnsyncOnceCell;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicUsize;
@@ -15,8 +17,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
-use once_cell::sync::Lazy;
-use once_cell::unsync::OnceCell as UnsyncOnceCell;
 use pyo3::PyResult;
 use pyo3::Python;
 use pyo3::exceptions::PyRuntimeError;
@@ -302,7 +302,7 @@ where
 /// Note: this does not globally prevent other sync code from calling `Python::attach`
 /// directly. Use `monarch_with_gil` or `monarch_with_gil_blocking` for Python interaction
 /// that occurs on async hot paths.
-static GIL_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+static GIL_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 // Thread-local depth counter for re-entrant GIL acquisition.
 //
