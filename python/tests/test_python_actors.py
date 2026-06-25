@@ -22,6 +22,7 @@ import threading
 import time
 import unittest
 import unittest.mock
+import warnings
 from tempfile import TemporaryDirectory
 from types import ModuleType
 from typing import Any, cast, Dict, Iterator, NamedTuple, Tuple
@@ -267,6 +268,40 @@ def test_sync_actor_sync_client() -> None:
     r = a.sync_endpoint.choose(c).get()
     assert r == 5
     proc.stop().get()
+
+
+class SyncContextActor(Actor):
+    @endpoint
+    def observe_sync_context(self, a_counter: Counter) -> Tuple[bool, bool, int]:
+        # A sync endpoint runs with no asyncio loop visible on its thread, so
+        # get_running_loop() raises and Future.get() blocks without the
+        # active-event-loop warning.
+        try:
+            asyncio.get_running_loop()
+            loop_visible = True
+        except RuntimeError:
+            loop_visible = False
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            value = a_counter.value.choose().get()
+        warned = any("active event loop" in str(w.message) for w in caught)
+        return loop_visible, warned, value
+
+
+@pytest.mark.timeout(60)
+@parametrize_config(actor_queue_dispatch={True, False})
+async def test_sync_endpoint_has_no_visible_loop_and_get_does_not_warn() -> None:
+    """A sync (`def`) endpoint runs without a visible asyncio loop:
+    `asyncio.get_running_loop()` raises inside it, and `Future.get()` therefore
+    takes the legal blocking path without the "active event loop" warning."""
+    proc = this_host().spawn_procs(per_host={"gpus": 1})
+    a = proc.spawn("actor", SyncContextActor)
+    c = proc.spawn("counter", Counter, 5)
+    loop_visible, warned, value = await a.observe_sync_context.choose(c)
+    assert loop_visible is False, "a sync endpoint should see no running loop"
+    assert warned is False, "Future.get() in a sync endpoint should not warn"
+    assert value == 5
+    await proc.stop()
 
 
 @pytest.mark.timeout(60)
