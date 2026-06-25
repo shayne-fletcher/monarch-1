@@ -136,6 +136,32 @@ def spawn_procs_on_this_host(per_host: dict[str, int]) -> ProcMesh:
     return this_host().spawn_procs(per_host)
 
 
+class MixedEndpointActor(Actor):
+    @endpoint
+    async def an_async_endpoint(self) -> None:
+        pass
+
+    @endpoint
+    def a_sync_endpoint(self) -> None:
+        pass
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+async def test_actor_mixing_sync_and_async_endpoints_is_rejected_at_spawn() -> None:
+    """An actor declaring both a sync (`def`) and an async (`async def`) endpoint
+    is rejected at spawn: `ActorMesh.__init__` raises `ValueError` synchronously,
+    before any message is dispatched. This pins the all-sync-or-all-async
+    invariant the runtime relies on; enforcement is a single check in
+    `ActorMesh.__init__` and nothing downstream re-checks. The check is
+    construction-time, so it is independent of dispatch mode."""
+    proc = spawn_procs_on_this_host({"gpus": 1})
+    with pytest.raises(ValueError, match="mixes both async and sync"):
+        proc.spawn("mixed_actor", MixedEndpointActor)
+
+    await proc.stop()
+
+
 @parametrize_config(actor_queue_dispatch={True, False})
 @pytest.mark.parametrize(
     "mesh",
