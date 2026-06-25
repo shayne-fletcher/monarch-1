@@ -36,6 +36,7 @@ from monarch.actor import (
     endpoint,
     get_or_spawn_controller,
     MeshFailure,
+    Port,
 )
 from monarch.config import configured, parametrize_config
 
@@ -365,6 +366,34 @@ async def test_reply_port_exception_returns_to_caller_and_actor_survives() -> No
 
     # and no supervision fired for the handled exception
     assert faults == [], f"expected no supervision faults, got {faults}"
+
+    await proc.stop()
+
+
+class ExplicitPortFailingActor(Actor):
+    @endpoint(explicit_response_port=True)
+    async def fail(self, port: Port[None]) -> None:
+        raise Exception("This is a test exception")
+
+
+@pytest.mark.timeout(60)
+@parametrize_config(actor_queue_dispatch={True, False})
+@isolate_in_subprocess
+async def test_explicit_response_port_exception_kills_actor() -> None:
+    """A plain `@endpoint(explicit_response_port=True)` that raises instead of
+    sending via its port kills the actor: the explicit-port declaration rebinds
+    the ambient response port to `DroppingPort`, so the raise takes the no-port
+    kill path and the caller sees a `SupervisionError`. The
+    `@concurrent_endpoint(explicit_response_port=True)` form behaves the same
+    way: an escaped exception likewise kills the actor (see
+    `test_concurrent_explicit_port_exception_kills_actor` in
+    `test_concurrent_endpoints.py`)."""
+    monarch.actor.unhandled_fault_hook = lambda failure: None
+    proc = spawn_procs_on_this_host({"gpus": 1})
+    actor = proc.spawn("explicit_port_actor", ExplicitPortFailingActor)
+
+    with pytest.raises(SupervisionError):
+        await asyncio.wait_for(actor.fail.call_one(), timeout=15)
 
     await proc.stop()
 
