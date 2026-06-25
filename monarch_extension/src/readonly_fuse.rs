@@ -102,17 +102,11 @@ type ActorFuture = Pin<Box<dyn Future<Output = PyResult<Py<PyAny>>> + Send + 'st
 /// Extract the inner Rust `Future` from the Python `Future` object returned
 /// by `actor.endpoint.call_one(args)`.
 ///
-/// Python layout:
-/// ```text
-/// Future._status  →  _Unawaited(coro=PyPythonTask)
-/// ```
-/// `PyPythonTask.take_task()` consumes the task and returns the raw future.
+/// `Future._take_inner()` surrenders the underlying `PythonTask`, whose
+/// `take_task()` then consumes it and returns the raw future.
 fn take_actor_future(py_future: Bound<'_, PyAny>) -> PyResult<ActorFuture> {
-    let coro: Bound<'_, PyPythonTask> = py_future
-        .getattr("_status")?
-        .getattr("coro")?
-        .downcast_into()?;
-    coro.borrow_mut().take_task()
+    let task: Bound<'_, PyPythonTask> = py_future.call_method0("_take_inner")?.downcast_into()?;
+    task.borrow_mut().take_task()
 }
 
 /// Call `actor.<endpoint>.call_one(<args>)` while holding the GIL, extract
