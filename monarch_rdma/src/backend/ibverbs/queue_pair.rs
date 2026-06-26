@@ -1675,6 +1675,17 @@ impl<M: Manager, Qp: QueuePair> Actor for QueuePairActor<M, Qp> {
         })?;
         Ok(())
     }
+
+    // This actor is implemented in Rust, but the RDMA registration path may enter
+    // Python and take the GIL. Run its loop on the dedicated rdma runtime rather
+    // than the shared control-plane runtime; see `crate::rdma_runtime`.
+    fn spawn_server_task<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        crate::rdma_runtime::spawn_on_rdma_runtime(future)
+    }
 }
 
 #[async_trait]

@@ -17,6 +17,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
+use hyperactor::runtime_identity::shutdown_data_plane_runtimes;
 use pyo3::PyResult;
 use pyo3::Python;
 use pyo3::exceptions::PyRuntimeError;
@@ -65,7 +66,7 @@ pub fn get_tokio_runtime() -> Handle {
     global_runtime().handle.clone()
 }
 
-/// atexit handler that tears down the global Tokio runtime.
+/// atexit handler that tears down the data-plane runtimes and the global Tokio runtime.
 ///
 /// Callers obtain a cloned `Handle` from `get_tokio_runtime()` rather
 /// than a guard, so the `runtime` mutex is uncontended at shutdown. We
@@ -80,6 +81,10 @@ pub fn shutdown_tokio_runtime(py: Python<'_>) {
     // Called from Python's atexit, which holds the GIL. Release it so tokio
     // worker threads can acquire it to complete their Python work.
     py.detach(|| {
+        // Tear down the data-plane runtimes (e.g. rdma) first, while the
+        // control-plane runtime is still intact, so their GIL-taking workers
+        // stop before Py_Finalize.
+        shutdown_data_plane_runtimes(Duration::from_secs(1));
         let Some(global) = INSTANCE.get() else {
             return;
         };
