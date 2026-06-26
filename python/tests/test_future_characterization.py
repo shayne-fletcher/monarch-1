@@ -8,14 +8,11 @@
 
 """Characterization oracle for the public ``monarch`` ``Future`` state machine.
 
-Stage 0 of the pytokio removal (RFC1): this pins the *current* behavior of
-``monarch._src.actor.future.Future`` -- its five internal states, every
-transition between them, its seven conversion-error strings, and the
-``get()``-inside-a-loop warning -- so the later stages, which make ``Future``
-two-state and non-awaitable, have an oracle to diff against.
-
-This is a *transitional* oracle: stage 6 deletes the state machine it pins, so
-this file is expected to be rewritten or removed at that point.
+Pins the *current* behavior of ``monarch._src.actor.future.Future`` -- its
+internal states and every transition between them, its conversion-error
+strings, the ``get()``-inside-a-loop warning, and the ``_take_inner()``
+accessor with its ``_Taken`` terminal state -- so that any change to that
+behavior is caught here and made explicit.
 """
 
 import asyncio
@@ -266,3 +263,90 @@ def test_get_in_tokio_thread_warns_then_cannot_block(monkeypatch):
         _run_in_tokio(attempt())
     assert len(calls) == 1
     assert calls[0]["extra"]["context"] == "tokio"
+
+
+# ---------------------------------------------------------------------------
+# _take_inner() and the _Taken terminal state
+#
+# _take_inner() requires an unawaited Future -- it fails if the Future was
+# already resolved or converted by get()/await. On success it surrenders the
+# underlying PythonTask to a caller that drives it directly and transitions the
+# Future to the terminal _Taken state, so the Future is spent: a second take,
+# or any later get()/await, fails rather than silently re-driving the one-shot
+# task.
+# ---------------------------------------------------------------------------
+
+
+def test_take_inner_returns_task_and_marks_future_taken():
+    """_take_inner() on an unawaited Future returns the underlying (still
+    drivable) PythonTask and transitions the Future to the terminal _Taken
+    state."""
+    fut: Future[int] = Future(coro=_value(1))
+    task = fut._take_inner()
+    assert isinstance(task, PythonTask)
+    assert isinstance(fut._status, future_mod._Taken)
+    assert task.block_on() == 1
+
+
+def test_take_inner_twice_raises():
+    """The Future is spent after the first _take_inner(); a second raises."""
+    fut: Future[int] = Future(coro=_value(1))
+    fut._take_inner()
+    with pytest.raises(ValueError, match="already been awaited"):
+        fut._take_inner()
+
+
+def test_get_after_take_inner_raises():
+    """get() after _take_inner() fails at the Future instead of re-driving the
+    surrendered task."""
+    fut: Future[int] = Future(coro=_value(1))
+    fut._take_inner()
+    with pytest.raises(ValueError, match="consumed"):
+        fut.get()
+
+
+async def test_await_asyncio_after_take_inner_raises():
+    """await under asyncio after _take_inner() fails instead of re-driving."""
+    fut: Future[int] = Future(coro=_value(1))
+    fut._take_inner()
+    with pytest.raises(ValueError, match="consumed"):
+        await fut
+
+
+def test_await_tokio_after_take_inner_raises():
+    """await on a tokio thread after _take_inner() fails instead of re-driving."""
+    fut: Future[int] = Future(coro=_value(1))
+    fut._take_inner()
+
+    async def attempt():
+        await fut
+
+    with pytest.raises(ValueError, match="consumed"):
+        _run_in_tokio(attempt())
+
+
+def test_take_inner_after_get_raises():
+    """_take_inner() requires an unawaited Future: once get() has resolved it
+    (_Complete), taking the inner task is refused."""
+    fut: Future[int] = Future(coro=_value(1))
+    assert fut.get() == 1  # -> _Complete
+    with pytest.raises(ValueError, match="already been awaited"):
+        fut._take_inner()
+
+
+def test_take_inner_after_asyncio_await_raises():
+    """Once an asyncio await has converted the Future (_Asyncio), _take_inner()
+    is refused."""
+    fut: Future[int] = Future(coro=_value(1))
+    asyncio.run(_await_once(fut))  # -> _Asyncio
+    with pytest.raises(ValueError, match="already been awaited"):
+        fut._take_inner()
+
+
+def test_take_inner_after_tokio_await_raises():
+    """Once a tokio await has converted the Future (_Tokio), _take_inner() is
+    refused."""
+    fut: Future[int] = Future(coro=_value(1))
+    _run_in_tokio(_await_once(fut))  # -> _Tokio
+    with pytest.raises(ValueError, match="already been awaited"):
+        fut._take_inner()
