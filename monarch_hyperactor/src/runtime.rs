@@ -17,7 +17,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
+use hyperactor::runtime_identity::RuntimeKind;
 use hyperactor::runtime_identity::shutdown_data_plane_runtimes;
+use hyperactor::runtime_identity::tag_current_thread;
 use pyo3::PyResult;
 use pyo3::Python;
 use pyo3::exceptions::PyRuntimeError;
@@ -51,6 +53,10 @@ fn global_runtime() -> &'static GlobalRuntime {
                 let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
                 format!("monarch-pytokio-worker-{}", id)
             })
+            // The shared control-plane runtime: stamp its workers (and
+            // blocking-pool threads) so GIL-entry sites can tell they are on the
+            // control plane. See `hyperactor::runtime_identity`.
+            .on_thread_start(|| tag_current_thread(RuntimeKind::ControlPlane))
             .enable_all()
             .build()
             .unwrap();
@@ -416,4 +422,35 @@ where
 {
     let _depth_guard = increment_gil_depth();
     Python::attach(f)
+}
+
+#[cfg(test)]
+mod tests {
+    use hyperactor::runtime_identity::RuntimeKind;
+    use hyperactor::runtime_identity::current_runtime_kind;
+
+    use super::*;
+
+    // The shared control-plane runtime stamps its worker threads ControlPlane.
+    #[test]
+    fn global_runtime_workers_are_control_plane() {
+        let kind = get_tokio_runtime().block_on(async {
+            tokio::spawn(async { current_runtime_kind() })
+                .await
+                .unwrap()
+        });
+        assert_eq!(kind, RuntimeKind::ControlPlane);
+    }
+
+    // on_thread_start also reaches the blocking pool, so GIL work on a
+    // spawn_blocking thread is still seen as control-plane.
+    #[test]
+    fn global_runtime_blocking_pool_is_control_plane() {
+        let kind = get_tokio_runtime().block_on(async {
+            tokio::task::spawn_blocking(current_runtime_kind)
+                .await
+                .unwrap()
+        });
+        assert_eq!(kind, RuntimeKind::ControlPlane);
+    }
 }
