@@ -9,7 +9,6 @@
 use std::cell::OnceCell as UnsyncOnceCell;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicUsize;
@@ -28,6 +27,12 @@ use pyo3::types::PyAnyMethods;
 use pyo3_async_runtimes::TaskLocals;
 use tokio::runtime::Handle;
 use tokio::task;
+
+pub use crate::gil::GilSite;
+pub use crate::gil::get_gil_on_control_plane;
+pub use crate::gil::monarch_with_gil;
+pub use crate::gil::monarch_with_gil_blocking;
+pub use crate::gil::reset_gil_on_control_plane;
 
 /// Global tokio runtime container.
 ///
@@ -248,6 +253,22 @@ pub fn register_python_bindings(runtime_mod: &Bound<'_, PyModule>) -> PyResult<(
         "monarch._rust_bindings.monarch_hyperactor.runtime",
     )?;
     runtime_mod.add_function(sleep_indefinitely_fn)?;
+
+    let get_gil_on_control_plane_fn = wrap_pyfunction!(get_gil_on_control_plane, runtime_mod.py())?;
+    get_gil_on_control_plane_fn.setattr(
+        "__module__",
+        "monarch._rust_bindings.monarch_hyperactor.runtime",
+    )?;
+    runtime_mod.add_function(get_gil_on_control_plane_fn)?;
+
+    let reset_gil_on_control_plane_fn =
+        wrap_pyfunction!(reset_gil_on_control_plane, runtime_mod.py())?;
+    reset_gil_on_control_plane_fn.setattr(
+        "__module__",
+        "monarch._rust_bindings.monarch_hyperactor.runtime",
+    )?;
+    runtime_mod.add_function(reset_gil_on_control_plane_fn)?;
+
     Ok(())
 }
 
@@ -285,8 +306,9 @@ impl pyo3_async_runtimes::generic::ContextExt for SimpleRuntime {
     fn get_task_locals() -> Option<TaskLocals> {
         TASK_LOCALS
             .try_with(|c| {
-                c.get()
-                    .map(|locals| monarch_with_gil_blocking(|py| locals.clone_ref(py)))
+                c.get().map(|locals| {
+                    monarch_with_gil_blocking(GilSite::TaskLocals, |py| locals.clone_ref(py))
+                })
             })
             .unwrap_or_default()
     }
@@ -298,130 +320,6 @@ where
     T: for<'py> IntoPyObject<'py>,
 {
     pyo3_async_runtimes::generic::future_into_py::<SimpleRuntime, F, T>(py, fut)
-}
-
-/// Global lock to serialize GIL acquisition from Rust threads in async contexts.
-///
-/// Under high concurrency, many async tasks can simultaneously try to acquire the GIL.
-/// Each call blocks the current tokio worker thread, which can cause runtime starvation
-/// and apparent deadlocks (nothing else gets polled).
-///
-/// This wrapper serializes GIL acquisition among callers that opt in, so at most one
-/// tokio task is blocked in `Python::attach` at a time, improving fairness under
-/// contention.
-///
-/// Note: this does not globally prevent other sync code from calling `Python::attach`
-/// directly. Use `monarch_with_gil` or `monarch_with_gil_blocking` for Python interaction
-/// that occurs on async hot paths.
-static GIL_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
-
-// Thread-local depth counter for re-entrant GIL acquisition.
-//
-// This tracks when we're already inside a `monarch_with_gil` or `monarch_with_gil_blocking`
-// call. On re-entry (e.g., when Python calls back into Rust while we're already executing
-// under `Python::attach`), we bypass the `GIL_LOCK` to avoid deadlocks.
-//
-// Without this, the following scenario would deadlock:
-// 1. Rust async code calls `monarch_with_gil`, acquires `GIL_LOCK`
-// 2. Inside the closure, Python code is executed
-// 3. Python code calls back into Rust (e.g., via a PyO3 callback)
-// 4. The callback tries to call `monarch_with_gil` again
-// 5. DEADLOCK: waiting for `GIL_LOCK` which is held by the same logical call chain
-thread_local! {
-    static GIL_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-/// RAII guard that decrements the GIL depth counter when dropped.
-struct GilDepthGuard {
-    prev_depth: u32,
-}
-
-impl Drop for GilDepthGuard {
-    fn drop(&mut self) {
-        GIL_DEPTH.with(|d| d.set(self.prev_depth));
-    }
-}
-
-/// Increments the GIL depth counter and returns a guard that restores it on drop.
-fn increment_gil_depth() -> GilDepthGuard {
-    let prev_depth = GIL_DEPTH.with(|d| {
-        let current = d.get();
-        d.set(current + 1);
-        current
-    });
-    GilDepthGuard { prev_depth }
-}
-
-/// Returns true if we're already inside a `monarch_with_gil` call (re-entrant).
-fn is_reentrant() -> bool {
-    GIL_DEPTH.with(|d| d.get() > 0)
-}
-
-/// Async wrapper around `Python::attach` intended for async call sites.
-///
-/// Why: under high concurrency, many async tasks can simultaneously
-/// try to acquire the GIL. Each call blocks the current tokio worker
-/// thread, which can cause runtime starvation / apparent deadlocks
-/// (nothing else gets polled).
-///
-/// This wrapper serializes GIL acquisition among async callers so at most one tokio
-/// task is blocked in `Python::attach` at a time, preventing runtime starvation
-/// under GIL contention.
-///
-/// Note: this does not globally prevent other sync code from calling
-/// `Python::attach` directly. Use this wrapper for Python
-/// interaction that occurs on async hot paths.
-///
-/// # Re-entrancy Safety
-///
-/// This function is re-entrant safe. If called while already inside a `monarch_with_gil`
-/// or `monarch_with_gil_blocking` call (e.g., from a Python→Rust callback), it bypasses
-/// the `GIL_LOCK` to avoid deadlocks.
-///
-/// # Example
-/// ```ignore
-/// let result = monarch_with_gil(|py| {
-///     // Do work with Python GIL
-///     Ok(42)
-/// })
-/// .await?;
-/// ```
-pub async fn monarch_with_gil<F, R>(f: F) -> R
-where
-    F: for<'py> FnOnce(Python<'py>) -> R + Send,
-{
-    // If we're already inside a monarch_with_gil call (re-entrant), skip the lock
-    // to avoid deadlock from Python→Rust callbacks
-    if is_reentrant() {
-        let _depth_guard = increment_gil_depth();
-        return Python::attach(f);
-    }
-
-    // Not re-entrant: acquire the serialization lock
-    let _lock_guard = GIL_LOCK.lock().await;
-    let _depth_guard = increment_gil_depth();
-    Python::attach(f)
-}
-
-/// Blocking wrapper around `Python::with_gil` for use in synchronous contexts.
-///
-/// Unlike `monarch_with_gil`, this function does NOT use the `GIL_LOCK` async mutex.
-/// Since it is blocking call, it simply acquires the GIL and releases it when the
-/// closure returns.
-///
-/// # Example
-/// ```ignore
-/// let result = monarch_with_gil_blocking(|py| {
-///     // Do work with Python GIL
-///     Ok(42)
-/// })?;
-/// ```
-pub fn monarch_with_gil_blocking<F, R>(f: F) -> R
-where
-    F: for<'py> FnOnce(Python<'py>) -> R + Send,
-{
-    let _depth_guard = increment_gil_depth();
-    Python::attach(f)
 }
 
 #[cfg(test)]

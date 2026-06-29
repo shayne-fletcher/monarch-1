@@ -55,6 +55,7 @@ use crate::actor::to_py_error;
 use crate::context::PyInstance;
 use crate::proc_mesh::PyProcMesh;
 use crate::pytokio::PyPythonTask;
+use crate::runtime::GilSite;
 use crate::runtime::monarch_with_gil;
 use crate::shape::PyExtent;
 use crate::shape::PyPoint;
@@ -483,7 +484,7 @@ fn bootstrap_host(
             .await
             .map_err(|e| PyException::new_err(e.to_string()))?;
 
-        let (instance, _handle) = monarch_with_gil(|py| {
+        let (instance, _handle) = monarch_with_gil(GilSite::Bootstrap, |py| {
             PythonActor::bootstrap_client_inner(py, local_proc, &ROOT_CLIENT_INSTANCE_FOR_HOST)
         })
         .await;
