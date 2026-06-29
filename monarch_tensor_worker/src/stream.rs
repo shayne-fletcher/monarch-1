@@ -35,6 +35,8 @@ use hyperactor::id::Label;
 use hyperactor::mailbox::OncePortHandle;
 use hyperactor::mailbox::PortReceiver;
 use hyperactor::proc::Proc;
+use hyperactor::runtime_identity::RuntimeKind;
+use hyperactor::runtime_identity::tag_current_thread;
 use monarch_hyperactor::actor::PythonMessage;
 use monarch_hyperactor::actor::PythonMessageKind;
 use monarch_hyperactor::local_state_broker::BrokerId;
@@ -538,11 +540,20 @@ impl Actor for StreamActor {
         // hang forever.
         let builder = std::thread::Builder::new().name("worker-stream".to_string());
         let _thread_handle = builder.spawn(move || {
+            // Data-plane worker. The stream actor loop runs on THIS thread (via
+            // `rt.block_on` below, which drives its future on the calling thread,
+            // not a runtime worker), so tag this thread directly. The
+            // `on_thread_start` below additionally tags the runtime's own
+            // worker/blocking threads. Either way the Torch/CUDA GIL use here
+            // reads `DataPlane("stream")`, not the control plane. See
+            // `hyperactor::runtime_identity` (RI-6).
+            tag_current_thread(RuntimeKind::DataPlane("stream"));
             // Spawn a new thread with a single-threaded tokio runtime to run the
             // actor loop.  We avoid the current-threaded runtime, so that we can
             // use `block_in_place` for nested async-to-sync-to-async flows.
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
+                .on_thread_start(|| tag_current_thread(RuntimeKind::DataPlane("stream")))
                 .enable_all()
                 .build()
                 .unwrap();
