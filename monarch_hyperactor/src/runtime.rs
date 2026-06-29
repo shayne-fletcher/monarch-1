@@ -19,6 +19,11 @@ use anyhow::Result;
 use hyperactor::runtime_identity::RuntimeKind;
 use hyperactor::runtime_identity::shutdown_data_plane_runtimes;
 use hyperactor::runtime_identity::tag_current_thread;
+pub use monarch_gil::GilSite;
+pub use monarch_gil::get_gil_on_control_plane;
+pub use monarch_gil::monarch_with_gil;
+pub use monarch_gil::monarch_with_gil_blocking;
+pub use monarch_gil::reset_gil_on_control_plane;
 use pyo3::PyResult;
 use pyo3::Python;
 use pyo3::exceptions::PyRuntimeError;
@@ -27,12 +32,6 @@ use pyo3::types::PyAnyMethods;
 use pyo3_async_runtimes::TaskLocals;
 use tokio::runtime::Handle;
 use tokio::task;
-
-pub use crate::gil::GilSite;
-pub use crate::gil::get_gil_on_control_plane;
-pub use crate::gil::monarch_with_gil;
-pub use crate::gil::monarch_with_gil_blocking;
-pub use crate::gil::reset_gil_on_control_plane;
 
 /// Global tokio runtime container.
 ///
