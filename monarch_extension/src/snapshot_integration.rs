@@ -30,6 +30,13 @@ use pyo3::prelude::*;
 #[pyo3(name = "_pre_register_snapshot_schemas")]
 fn pre_register_snapshot_schemas_py(py: Python<'_>, scanner: &DatabaseScanner) -> PyResult<()> {
     let table_store = scanner.table_store();
+    // This is the pyo3-async-runtimes library's own tokio runtime, not monarch's
+    // control-plane runtime (`get_tokio_runtime()`); monarch does not tag it with
+    // a `RuntimeKind` (see `hyperactor::runtime_identity`), so GIL work here would
+    // not be classified by the runtime-identity net. Safe today only because this
+    // work is GIL-free: the GIL is released (`py.detach`) before `block_on` and
+    // `register_snapshot_schemas` is pure Arrow. If GIL work is ever needed here,
+    // route it through `get_tokio_runtime()` (or another tagged runtime).
     py.detach(|| {
         pyo3_async_runtimes::tokio::get_runtime()
             .block_on(async { register_snapshot_schemas(&table_store).await })
@@ -61,6 +68,9 @@ fn start_periodic_snapshots_py(
     }
     let interval = Duration::from_secs_f64(interval_secs);
 
+    // See the runtime-identity caveat in `pre_register_snapshot_schemas_py`:
+    // this enters that same library runtime, which monarch does not tag. The work
+    // here only spawns a Rust actor and takes no GIL; keep it that way.
     let _guard = pyo3_async_runtimes::tokio::get_runtime().enter();
     start_periodic_snapshots(&**instance, table_store, admin_ref, interval)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:#}", e)))

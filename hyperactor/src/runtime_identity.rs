@@ -10,7 +10,7 @@
 //!
 //! Monarch runs Python on more than one Tokio runtime: the shared control-plane
 //! runtime that drives `PythonActor` dispatch, and separate data-plane runtimes
-//! where GIL work runs safely, off the control plane (the tensor engine; the
+//! where GIL work runs safely, off the control plane (the tensor streams; the
 //! RDMA managers, during buffer registration). The
 //! hazard is contention on the shared runtime, where a thread holding the GIL
 //! while blocked stalls every actor loop, supervisor, and network task on it.
@@ -36,6 +36,10 @@
 //!   registry and stays valid until the runtime is torn down by
 //!   [`shutdown_data_plane_runtimes`] at process teardown; callers must not spawn
 //!   onto it afterward.
+//! - **RI-6 (block-on-host-tagged):** a data-plane runtime hosted on a manually
+//!   spawned thread that drives its work via `rt.block_on` must tag that hosting
+//!   thread explicitly; `on_thread_start` stamps only the runtime's own worker
+//!   threads, not the `block_on` caller.
 //! - **RI-7 (teardown-registered):** every runtime from
 //!   [`build_data_plane_runtime`] is registered in `DATA_PLANE_RUNTIMES` and shut
 //!   down by [`shutdown_data_plane_runtimes`]. The pyo3 layer calls that at
@@ -52,7 +56,7 @@ pub enum RuntimeKind {
     /// Control-plane GIL use is kept to brief, sanctioned sites.
     ControlPlane,
     /// A runtime off the control plane. GIL work here is safe because it does
-    /// not drive actor dispatch (the tensor engine; the RDMA managers during
+    /// not drive actor dispatch (the tensor streams; the RDMA managers during
     /// buffer registration).
     DataPlane(&'static str),
     /// A thread not stamped by any monarch runtime (e.g. a Python-owned thread).
@@ -155,6 +159,7 @@ mod tests {
     // RI-4 (tagging-does-not-leak): build_data_plane_runtime_tags_workers.
     // RI-5 (process-lifetime-runtime): structural (the registry keeps it alive;
     //   the tests rely on the runtime staying alive).
+    // RI-6 (block-on-host-tagged): on_thread_start_does_not_tag_the_block_on_thread.
     // RI-7 (teardown-registered): shutdown_aborts_in_flight_task;
     //   shutdown_runtimes_empty_is_noop. (the global registry drain is a thin
     //   Vec::drain wrapper, exercised structurally.)
@@ -184,6 +189,36 @@ mod tests {
         assert_eq!(rx.recv().unwrap(), RuntimeKind::DataPlane("test-dp"));
         // while the stamp stays confined to that runtime's worker threads.
         assert_eq!(current_runtime_kind(), RuntimeKind::Foreign);
+    }
+
+    // RI-6 (block-on-host-tagged): `rt.block_on` drives its future on the CALLING
+    // thread, which is not a runtime worker, so `on_thread_start` does not cover
+    // it. A thread that runs work via `block_on` (the StreamActor pattern) must
+    // tag itself explicitly; the `on_thread_start` tag alone leaves it `Foreign`.
+    #[test]
+    fn on_thread_start_does_not_tag_the_block_on_thread() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .on_thread_start(|| tag_current_thread(RuntimeKind::DataPlane("x")))
+                .enable_all()
+                .build()
+                .unwrap();
+            // block_on runs on this (the calling) thread, which on_thread_start
+            // does not tag -> still Foreign.
+            let on_caller = rt.block_on(async { current_runtime_kind() });
+            // a spawned task runs on a worker -> DataPlane.
+            let on_worker = rt.block_on(async {
+                tokio::spawn(async { current_runtime_kind() })
+                    .await
+                    .unwrap()
+            });
+            let _ = tx.send((on_caller, on_worker));
+        });
+        let (on_caller, on_worker) = rx.recv().unwrap();
+        assert_eq!(on_caller, RuntimeKind::Foreign);
+        assert_eq!(on_worker, RuntimeKind::DataPlane("x"));
     }
 
     // RI-7: shut down a runtime with an in-flight task, and confirm the task is
