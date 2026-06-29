@@ -42,6 +42,7 @@ use crate::context::PyInstance;
 use crate::pickle::PendingMessage;
 use crate::proc::PyActorAddr;
 use crate::pytokio::PyPythonTask;
+use crate::runtime::GilSite;
 use crate::runtime::get_tokio_runtime;
 use crate::runtime::monarch_with_gil;
 use crate::runtime::monarch_with_gil_blocking;
@@ -272,7 +273,7 @@ impl From<PyErr> for ClonePyErr {
 
 impl Clone for ClonePyErr {
     fn clone(&self) -> Self {
-        monarch_with_gil_blocking(|py| self.inner.clone_ref(py).into())
+        monarch_with_gil_blocking(GilSite::Convert, |py| self.inner.clone_ref(py).into())
     }
 }
 
@@ -389,7 +390,7 @@ impl ActorMeshProtocol for AsyncActorMesh {
             }
             .await;
             if let (Some(mut port_ref), Err(pyerr)) = (port, result) {
-                let _ = monarch_with_gil(|py: Python<'_>| {
+                let _ = monarch_with_gil(GilSite::Traceback, |py: Python<'_>| {
                     let exception_str = crate::logging::format_traceback(py, &pyerr);
                     tracing::error!(
                         actor_id = instance.self_addr().to_string(),
@@ -454,7 +455,7 @@ impl ActorMeshProtocol for AsyncActorMesh {
 
     fn stop(&self, instance: &PyInstance, reason: String) -> PyResult<PyPythonTask> {
         let mesh = self.mesh.clone();
-        let instance = monarch_with_gil_blocking(|_py| instance.clone());
+        let instance = monarch_with_gil_blocking(GilSite::Stop, |_py| instance.clone());
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.push(async move {
             let result =
@@ -609,7 +610,8 @@ impl ActorMeshProtocol for PythonActorMeshImpl {
     }
 
     fn stop(&self, instance: &PyInstance, reason: String) -> PyResult<PyPythonTask> {
-        let (slf, instance) = monarch_with_gil_blocking(|_py| (self.clone(), instance.clone()));
+        let (slf, instance) =
+            monarch_with_gil_blocking(GilSite::Stop, |_py| (self.clone(), instance.clone()));
         match slf {
             PythonActorMeshImpl::Owned(mut mesh) => PyPythonTask::new(async move {
                 mesh.mesh
