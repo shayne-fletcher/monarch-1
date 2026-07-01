@@ -227,11 +227,53 @@ fn mailbox<'py, T: Actor>(py: Python<'py>, cx: &Context<'_, T>) -> Bound<'py, Py
 }
 
 /// A serializable reference to a mesh (actor, proc, or host).
-#[derive(Clone, Debug, Serialize, Deserialize, Named, PartialEq, Eq)]
+///
+/// Serialized as a typed multipart part via [`MeshRefRepr`]: under the multipart
+/// serializer each `MeshRef` becomes its own typed part, and inline bincode
+/// elsewhere.
+#[derive(Clone, Debug, Named, PartialEq, Eq)]
 pub enum MeshRef {
     Actor(Box<ActorMeshRef<PythonActor>>),
     Proc(Box<ProcMeshRef>),
     Host(Box<HostMeshRef>),
+}
+
+/// Wire representation of [`MeshRef`] stored in a typed multipart part.
+#[doc(hidden)]
+#[derive(Clone, Debug, Serialize, Deserialize, Named)]
+pub enum MeshRefRepr {
+    Actor(Box<ActorMeshRef<PythonActor>>),
+    Proc(Box<ProcMeshRef>),
+    Host(Box<HostMeshRef>),
+}
+
+impl TryFrom<&MeshRef> for MeshRefRepr {
+    type Error = serde_multipart::Error;
+    fn try_from(m: &MeshRef) -> serde_multipart::Result<Self> {
+        Ok(match m {
+            MeshRef::Actor(r) => MeshRefRepr::Actor(r.clone()),
+            MeshRef::Proc(r) => MeshRefRepr::Proc(r.clone()),
+            MeshRef::Host(r) => MeshRefRepr::Host(r.clone()),
+        })
+    }
+}
+
+impl TryFrom<MeshRefRepr> for MeshRef {
+    type Error = serde_multipart::Error;
+    fn try_from(r: MeshRefRepr) -> serde_multipart::Result<Self> {
+        Ok(match r {
+            MeshRefRepr::Actor(r) => MeshRef::Actor(r),
+            MeshRefRepr::Proc(r) => MeshRef::Proc(r),
+            MeshRefRepr::Host(r) => MeshRef::Host(r),
+        })
+    }
+}
+
+serde_multipart::part_codec! {
+    impl MeshRef
+    {
+        type Repr = MeshRefRepr;
+    }
 }
 
 impl MeshRef {
@@ -2314,6 +2356,63 @@ mod tests {
                     .unwrap()
             );
         }
+    }
+
+    #[test]
+    fn test_python_message_refs_travel_as_parts() {
+        // A non-live proc mesh ref, built in-memory from ids (no spawn).
+        fn proc_mesh_ref(seed: u64, label: &str) -> MeshRef {
+            let proc_id = hyperactor::ProcId::new(
+                hyperactor::id::Uid::Instance(seed, None),
+                Some(Label::new("local").unwrap()),
+            );
+            let proc_addr = hyperactor::ProcAddr::new(
+                proc_id,
+                hyperactor::channel::ChannelAddr::Local(seed).into(),
+            );
+            let agent: hyperactor::ActorRef<hyperactor_mesh::proc_agent::ProcAgent> =
+                hyperactor::ActorRef::attest(
+                    proc_addr.actor_addr(hyperactor_mesh::proc_agent::PROC_AGENT_ACTOR_NAME),
+                );
+            let proc_ref = hyperactor_mesh::proc_mesh::ProcRef::new(proc_addr, 0, agent);
+            MeshRef::Proc(Box::new(
+                hyperactor_mesh::proc_mesh::ProcMeshRef::new_singleton(
+                    hyperactor_mesh::mesh_id::ProcMeshId::singleton(Label::new(label).unwrap()),
+                    proc_ref,
+                )
+                .unwrap(),
+            ))
+        }
+
+        let message = PythonMessage {
+            kind: PythonMessageKind::CallMethod {
+                name: MethodSpecifier::ReturnsResponse {
+                    name: "test".to_string(),
+                },
+                response_port: None,
+            },
+            message: Part::from(vec![1, 2, 3]),
+            refs: vec![proc_mesh_ref(1, "a"), proc_mesh_ref(2, "b")],
+        };
+
+        let mut multipart_message =
+            wirevalue::Any::<wirevalue::encoding::Multipart>::serialize(&message).unwrap();
+        let mut parts = vec![];
+        multipart_message
+            .visit_multipart_parts_mut::<MeshRefRepr, anyhow::Error>(|b| {
+                parts.push(b.clone());
+                Ok(())
+            })
+            .unwrap();
+        // Each MeshRef rides as its own typed part on the multipart wire.
+        assert_eq!(parts.len(), 2);
+        // And the message round-trips, reuniting the refs from those parts.
+        assert_eq!(
+            message,
+            multipart_message
+                .deserialized_unchecked::<PythonMessage>()
+                .unwrap()
+        );
     }
 
     #[test]
