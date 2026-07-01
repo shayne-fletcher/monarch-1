@@ -35,6 +35,8 @@ outcome-only.
 
 from __future__ import annotations
 
+import pickle
+
 import pytest
 from isolate_in_subprocess import isolate_in_subprocess
 from monarch._rust_bindings.monarch_hyperactor.pickle import (
@@ -178,3 +180,83 @@ def test_pending_mesh_returned_through_call_valuemesh_resolves_on_caller() -> No
         assert _get_mesh_pop_count() > 0
         for _, mesh in returned:
             assert mesh.ping.call_one().get() == "pong"
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+def test_resolved_mesh_survives_bare_pickle_outside_monarch() -> None:
+    """A resolved mesh pickled with the standard library pickle (no active monarch
+    pickling state, as when a reference is accidentally shipped to a non-monarch
+    process via multiprocessing, which uses stdlib pickle) inlines rather than
+    going out of band, so the bytes are self-contained and reconstruct a working
+    reference. We never recommended this cross-process pattern, but the move to
+    out-of-band references must not break it for a resolved mesh."""
+    with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
+        host = state.hosts
+        target = host.spawn_procs(name="target_proc").spawn("target", _Target)
+        # Drive one call so init finishes: resolved, not pending, at pickle time.
+        assert target.ping.call_one().get() == "pong"
+
+        _reset_mesh_pop_count()
+        restored = pickle.loads(pickle.dumps(target))
+        # With no active pickling state the ref inlines instead of reserving an
+        # out-of-band slot, so decode pops nothing from the table.
+        assert _get_mesh_pop_count() == 0
+        # loads succeeding proves the reducer keeps an inline branch for the
+        # no-active-state case; the reconstructed reference still answers.
+        assert restored.ping.call_one().get() == "pong"
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+def test_resolved_proc_mesh_survives_bare_pickle_outside_monarch() -> None:
+    """Same guarantee for a proc mesh: resolved, pickled with the standard library
+    pickle and no active monarch pickling state, it inlines and reconstructs a
+    working mesh."""
+    with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
+        host = state.hosts
+        proc_mesh = host.spawn_procs(name="target_proc")
+        # Drive one call through the proc mesh so its init finishes: resolved,
+        # not pending, at pickle time.
+        assert proc_mesh.spawn("warm", _Target).ping.call_one().get() == "pong"
+
+        _reset_mesh_pop_count()
+        restored = pickle.loads(pickle.dumps(proc_mesh))
+        assert _get_mesh_pop_count() == 0
+        assert restored.spawn("t", _Target).ping.call_one().get() == "pong"
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+def test_unresolved_mesh_bare_pickle_blocks_then_survives() -> None:
+    """An unresolved (still-initializing) actor mesh bare-pickled outside monarch's
+    messaging has no reference to inline and no reserve slot to fill, so the reduce
+    falls back to blocking on init and then ships the resolved reference. This pins
+    that block-then-survive behavior; a change making it raise instead would turn
+    this red. The actor mesh has no sync accessor to assert unresolved-ness (its
+    `peek` is internal, `initialized` is async), so this pins the round-trip
+    outcome and relies on spawn-then-immediately-pickle to hit the unresolved
+    path (init is ms, the synchronous pickle gap is us)."""
+    with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
+        host = state.hosts
+        # Spawned and pickled in the same breath: unresolved at pickle time.
+        target = host.spawn_procs(name="target_proc").spawn("target", _Target)
+        restored = pickle.loads(pickle.dumps(target))
+        assert restored.ping.call_one().get() == "pong"
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+def test_unresolved_proc_mesh_bare_pickle_blocks_then_survives() -> None:
+    """Same for a proc mesh, which reduces through the generic `reduce_shared`
+    block. Here `poll()` is exposed, so we can prove the mesh was unresolved at
+    pickle time rather than relying on timing: `poll() is None`, then the reduce
+    blocks on init and round-trips to a working mesh. A change making it raise
+    would turn this red."""
+    with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
+        host = state.hosts
+        proc_mesh = host.spawn_procs(name="target_proc")
+        # Unresolved at pickle time (init not driven); the reduce blocks on it.
+        assert proc_mesh._proc_mesh.poll() is None
+        restored = pickle.loads(pickle.dumps(proc_mesh))
+        assert restored.spawn("t", _Target).ping.call_one().get() == "pong"
