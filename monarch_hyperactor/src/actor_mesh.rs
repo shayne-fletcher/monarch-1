@@ -51,11 +51,6 @@ use crate::shape::PyRegion;
 use crate::supervision::Supervisable;
 use crate::supervision::SupervisionError;
 
-py_global!(
-    is_pending_pickle_allowed,
-    "monarch._src.actor.pickle",
-    "is_pending_pickle_allowed"
-);
 py_global!(_pickle, "monarch._src.actor.actor_mesh", "_pickle");
 
 py_global!(
@@ -429,7 +424,6 @@ impl ActorMeshProtocol for AsyncActorMesh {
                         let mut state = crate::pickle::pickle(
                             py,
                             pyerr.into_value(py).into_any(),
-                            false,
                             false,
                             false,
                         )?;
