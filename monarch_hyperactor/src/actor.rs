@@ -217,6 +217,65 @@ pub enum MeshRef {
     Host(Box<HostMeshRef>),
 }
 
+impl MeshRef {
+    /// Reconstruct the Python mesh wrapper this reference points at.
+    ///
+    /// Mirrors the `py_*_from_bytes` reconstructors, but takes an
+    /// already-deserialized [`MeshRef`] from the message's `refs` table.
+    pub(crate) fn reconstruct(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self {
+            MeshRef::Proc(r) => {
+                Ok(Py::new(py, crate::proc_mesh::PyProcMesh::new_ref(*r))?.into_any())
+            }
+            MeshRef::Host(r) => {
+                Ok(Py::new(py, crate::host_mesh::PyHostMesh::new_ref(*r))?.into_any())
+            }
+            MeshRef::Actor(r) => {
+                let inner = crate::actor_mesh::PythonActorMeshImpl::new_ref(*r);
+                let async_mesh = crate::actor_mesh::AsyncActorMesh::from_impl(Arc::new(inner));
+                let mesh = crate::actor_mesh::PythonActorMesh::from_impl(Arc::from(async_mesh));
+                Ok(Py::new(py, mesh)?.into_any())
+            }
+        }
+    }
+}
+
+/// An opaque carrier so a `MeshRef` can ride in `PythonMessage.refs` across
+/// the Python boundary (the message getter out, the `PicklingState` ctor in).
+#[pyclass(frozen, module = "monarch._rust_bindings.monarch_hyperactor.actor")]
+pub struct PyMeshRef {
+    pub(crate) inner: MeshRef,
+}
+
+impl<'py> IntoPyObject<'py> for MeshRef {
+    type Target = PyMeshRef;
+    type Output = Bound<'py, PyMeshRef>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        Bound::new(py, PyMeshRef { inner: self })
+    }
+}
+
+/// Extract the serializable [`MeshRef`] from a resolved mesh wrapper (the
+/// inverse of [`MeshRef::reconstruct`]), for the sender-side pending fill.
+pub(crate) fn mesh_ref_from_pyobject(value: &Bound<'_, PyAny>) -> PyResult<MeshRef> {
+    if let Ok(m) = value.downcast::<crate::proc_mesh::PyProcMesh>() {
+        return Ok(MeshRef::Proc(Box::new(m.borrow().mesh_ref()?)));
+    }
+    if let Ok(m) = value.downcast::<crate::host_mesh::PyHostMesh>() {
+        return Ok(MeshRef::Host(Box::new(m.borrow().mesh_ref().map_err(
+            |e| pyo3::exceptions::PyValueError::new_err(e.to_string()),
+        )?)));
+    }
+    if let Ok(m) = value.downcast::<crate::actor_mesh::PythonActorMesh>() {
+        return Ok(MeshRef::Actor(Box::new(m.borrow().get_inner().mesh_ref()?)));
+    }
+    Err(pyo3::exceptions::PyRuntimeError::new_err(
+        "pending pickle did not resolve to a mesh reference",
+    ))
+}
+
 #[pyclass(frozen, module = "monarch._rust_bindings.monarch_hyperactor.actor")]
 #[derive(Clone, Serialize, Deserialize, Named, Default, PartialEq)]
 pub struct PythonMessage {
@@ -311,6 +370,7 @@ struct ResolvedCallMethod {
     method: MethodSpecifier,
     bytes: FrozenBuffer,
     local_state: Option<Py<PyAny>>,
+    mesh_references: Vec<MeshRef>,
     /// Implements PortProtocol
     /// Concretely either a Port, DroppingPort, or LocalPort
     response_port: ResponsePort,
@@ -345,15 +405,25 @@ pub struct QueuedMessage {
     #[pyo3(get)]
     pub local_state: Py<PyAny>,
     #[pyo3(get)]
+    pub refs: Py<PyAny>,
+    #[pyo3(get)]
     pub response_port: Py<PyAny>,
 }
 
 impl PythonMessage {
     pub fn new_from_buf(kind: PythonMessageKind, message: impl Into<Part>) -> Self {
+        Self::new_from_buf_with_refs(kind, message, Vec::new())
+    }
+
+    pub fn new_from_buf_with_refs(
+        kind: PythonMessageKind,
+        message: impl Into<Part>,
+        refs: Vec<MeshRef>,
+    ) -> Self {
         Self {
             kind,
             message: message.into(),
-            refs: Vec::new(),
+            refs,
         }
     }
 
@@ -416,6 +486,7 @@ impl PythonMessage {
                             inner: self.message.into_bytes(),
                         },
                         local_state,
+                        mesh_references: self.refs,
                         response_port,
                     })
                 })
@@ -460,6 +531,7 @@ impl PythonMessage {
                         inner: self.message.into_bytes(),
                     },
                     local_state: None,
+                    mesh_references: self.refs,
                     response_port,
                 })
             }
@@ -501,6 +573,11 @@ impl PythonMessage {
         FrozenBuffer {
             inner: self.message.to_bytes(),
         }
+    }
+
+    #[getter]
+    fn refs(&self) -> Vec<MeshRef> {
+        self.refs.clone()
     }
 }
 
@@ -1614,6 +1691,7 @@ impl PythonActor {
                         resolved
                             .local_state
                             .unwrap_or_else(|| PyList::empty(py).unbind().into()),
+                        resolved.mesh_references.into_py_any(py)?,
                         resolved.response_port.into_py_any(py)?,
                     ),
                     None,
@@ -1664,6 +1742,7 @@ impl PythonActor {
                     local_state: resolved
                         .local_state
                         .unwrap_or_else(|| PyList::empty(py).unbind().into()),
+                    refs: resolved.mesh_references.into_py_any(py)?,
                     response_port: resolved.response_port.into_py_any(py)?,
                 })
             },
@@ -2087,6 +2166,7 @@ impl Port {
 pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     hyperactor_mod.add_class::<PythonActorHandle>()?;
     hyperactor_mod.add_class::<PythonMessage>()?;
+    hyperactor_mod.add_class::<PyMeshRef>()?;
     hyperactor_mod.add_class::<PythonMessageKind>()?;
     hyperactor_mod.add_class::<MethodSpecifier>()?;
     hyperactor_mod.add_class::<UnflattenArg>()?;

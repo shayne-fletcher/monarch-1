@@ -150,6 +150,10 @@ class PythonMessage:
         ...
     @property
     def kind(self) -> PythonMessageKind: ...
+    @property
+    def refs(self) -> List[Any]:
+        """Out-of-band mesh references carried alongside the message."""
+        ...
 
 @final
 class PythonActorHandle:
@@ -204,6 +208,7 @@ class Actor(Protocol):
         message: FrozenBuffer,
         panic_flag: PanicFlag,
         local_state: List[Any],
+        mesh_references: List[Any],
         response_port: PortProtocol[Any],
     ) -> None: ...
 
@@ -232,6 +237,11 @@ class QueuedMessage:
     @property
     def local_state(self) -> Any:
         """The local state for this message."""
+        ...
+
+    @property
+    def refs(self) -> List[Any]:
+        """Out-of-band mesh references carried alongside the message."""
         ...
 
     @property
