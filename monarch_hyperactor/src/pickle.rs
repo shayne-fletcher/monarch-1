@@ -11,9 +11,45 @@
 //! This module provides utilities for deferring the pickling of objects
 //! that contain async values (futures/tasks) that must be resolved before
 //! the final pickle can be produced.
+//!
+//! ## Out-of-band mesh-reference invariants
+//!
+//! Mesh references (proc/host/actor meshes) are not pickled inline. They ride
+//! *out of band* in a `refs` table carried next to the payload bytes, leaving a
+//! `pop_mesh_reference` sentinel in the pickle stream. Two invariants keep the
+//! table and its payload from ever drifting apart:
+//!
+//! **REFS-1 (ref-aware decode).** Any payload that can carry out-of-band refs
+//! must be decoded only through a ref-aware path: `PicklingState::from_parts`
+//! and `PicklingState::unpickle`, as wrapped by `PythonMessage::decode` and
+//! `PythonResponseMessage::decode`. A bare `pickle.loads`/`cloudpickle.loads`
+//! on the payload bytes drops the table, so a sentinel later pops with no active
+//! state and raises "No active pickling state". The raw payload bytes are
+//! deliberately not exposed on `PythonMessage` (there is no `.message` getter),
+//! so a bare decode is not even expressible from Python.
+//!
+//! **REFS-2 (refs preserved through intermediates).** Any intermediate that
+//! relays a payload -- `PythonResponseMessage` and the `ValueOverlay` behind a
+//! `.call()` valuemesh -- must carry its `refs` beside the bytes, all the way to
+//! the decode site. Dropping refs at a relay boundary reintroduces the REFS-1
+//! failure downstream. Refs are therefore part of `PythonResponseMessage`
+//! equality: two runs with identical bytes but different refs must not coalesce.
+//!
+//! These invariants have one sound exception. A table entry and a
+//! `pop_mesh_reference` sentinel are emitted together during pickling (1:1),
+//! so an empty `refs` table means the payload carries no sentinels: a bare
+//! decode of it pops nothing and is sound. The `.call()` valuemesh collector
+//! (`collect_valuemesh` in `endpoint.rs`) relies on this to preserve
+//! D96180139's lazy unpickle: it decodes a ref-empty batch lazily via
+//! `PyValueMesh::build_from_parts` (`value_mesh.rs`), which resolves on access
+//! outside the ref-aware path, and only a ref-carrying batch eagerly via
+//! `build_from_objects`. That lazy build is the sole bare decode of a payload
+//! that *could* carry refs; see `collect_valuemesh` for the gate itself.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use monarch_types::py_global;
 use pyo3::IntoPyObjectExt;
@@ -101,6 +137,15 @@ py_global!(
 thread_local! {
     static ACTIVE_PICKLING_STATE: RefCell<Option<ActivePicklingState>> = const { RefCell::new(None) };
 }
+
+/// Counters for tests. `PENDING_RESERVE_COUNT` bumps when a still-pending mesh
+/// reserves an out-of-band slot on the send side; it is pending-specific (a
+/// resolved mesh fills directly), so it proves the pending path ran.
+/// `MESH_POP_COUNT` bumps when any out-of-band mesh reference is reunited on the
+/// decode side; it is not pending-specific, since a resolved mesh also travels
+/// out-of-band, so it proves receive and reconstruct, not pending-ness.
+static PENDING_RESERVE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static MESH_POP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// RAII guard that sets the thread-local `ACTIVE_PICKLING_STATE` on creation
 /// and restores the previous state (if any) on drop. This supports nesting:
@@ -230,6 +275,26 @@ impl PicklingState {
             pyo3::exceptions::PyRuntimeError::new_err("PicklingState has already been consumed")
         })
     }
+
+    /// Build a PicklingState directly from already-separated parts: the pickled
+    /// `buffer`, the ordered local-state/tensor-engine list, and the resolved
+    /// mesh-reference table. Used by `PythonMessage::decode` so a message's
+    /// payload is always unpickled together with its `refs`.
+    pub(crate) fn from_parts(
+        buffer: Part,
+        tensor_engine_references: VecDeque<Py<PyAny>>,
+        mesh_references: VecDeque<Option<MeshRef>>,
+    ) -> Self {
+        Self {
+            inner: Some(PicklingStateInner {
+                buffer,
+                tensor_engine_references,
+                pending_pickles: VecDeque::new(),
+                mesh_references,
+                pending_mesh_fills: Vec::new(),
+            }),
+        }
+    }
 }
 
 #[pymethods]
@@ -298,7 +363,7 @@ impl PicklingState {
     ///
     /// This consumes the PicklingState. It will fail if there are any pending
     /// pickles that haven't been resolved.
-    fn unpickle(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    pub(crate) fn unpickle(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let inner = self.take_inner()?;
 
         // Verify all pending pickles are resolved before unpickling
@@ -590,6 +655,7 @@ fn pop_mesh_reference(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let mesh_ref = mesh_ref.ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err("mesh reference slot was never filled")
     })?;
+    MESH_POP_COUNT.fetch_add(1, Ordering::Relaxed);
     mesh_ref.reconstruct(py)
 }
 
@@ -624,6 +690,7 @@ pub fn reserve_mesh_reference_if_active(handle: Py<PyShared>) -> bool {
                 let index = s.mesh_references.len();
                 s.mesh_references.push_back(None);
                 s.pending_mesh_fills.push((index, handle));
+                PENDING_RESERVE_COUNT.fetch_add(1, Ordering::Relaxed);
                 true
             }
             _ => false,
@@ -786,6 +853,30 @@ pub(crate) fn unpickle(
     _unpickle(py).call1((buffer.into_py_any(py)?,))
 }
 
+/// Test helper: read the pending-mesh reserve counter.
+#[pyfunction]
+fn _get_pending_reserve_count() -> usize {
+    PENDING_RESERVE_COUNT.load(Ordering::Relaxed)
+}
+
+/// Test helper: reset the pending-mesh reserve counter to zero.
+#[pyfunction]
+fn _reset_pending_reserve_count() {
+    PENDING_RESERVE_COUNT.store(0, Ordering::Relaxed);
+}
+
+/// Test helper: read the mesh-pop counter.
+#[pyfunction]
+fn _get_mesh_pop_count() -> usize {
+    MESH_POP_COUNT.load(Ordering::Relaxed)
+}
+
+/// Test helper: reset the mesh-pop counter to zero.
+#[pyfunction]
+fn _reset_mesh_pop_count() {
+    MESH_POP_COUNT.store(0, Ordering::Relaxed);
+}
+
 /// Register the pickle Python bindings into the given module.
 pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PicklingState>()?;
@@ -799,5 +890,9 @@ pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(pop_pending_pickle, module)?)?;
     module.add_function(wrap_pyfunction!(pop_mesh_reference, module)?)?;
     module.add_function(wrap_pyfunction!(reserve_mesh_reference, module)?)?;
+    module.add_function(wrap_pyfunction!(_get_pending_reserve_count, module)?)?;
+    module.add_function(wrap_pyfunction!(_reset_pending_reserve_count, module)?)?;
+    module.add_function(wrap_pyfunction!(_get_mesh_pop_count, module)?)?;
+    module.add_function(wrap_pyfunction!(_reset_mesh_pop_count, module)?)?;
     Ok(())
 }
