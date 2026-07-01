@@ -24,6 +24,7 @@ class PicklingState:
         self,
         buffer: FrozenBuffer,
         tensor_engine_references: List[Any] | None = None,
+        mesh_references: List[Any] | None = None,
     ) -> None:
         """
         Create a new PicklingState from a buffer and optional tensor engine references.
@@ -35,6 +36,8 @@ class PicklingState:
             buffer: The pickled bytes as a FrozenBuffer.
             tensor_engine_references: Optional list of tensor engine references
                 to restore during unpickling.
+            mesh_references: Optional list of out-of-band mesh references to
+                restore during unpickling.
         """
         ...
 
@@ -90,6 +93,7 @@ def pickle(
     obj: Any,
     allow_pending_pickles: bool = True,
     allow_tensor_engine_references: bool = True,
+    allow_mesh_references: bool = False,
 ) -> PicklingState:
     """
     Pickle an object with support for pending pickles and tensor engine references.
@@ -146,5 +150,24 @@ def pop_pending_pickle() -> Shared[Any]:
 
     Raises:
         RuntimeError: If there is no active pickling state or no pending pickles remaining.
+    """
+    ...
+
+def pop_mesh_reference() -> Any:
+    """
+    Pop a mesh reference from the active pickling state and rebuild its
+    Python mesh wrapper.
+
+    Raises:
+        RuntimeError: If there is no active pickling state or no mesh
+            references remaining.
+    """
+    ...
+
+def reserve_mesh_reference(handle: Shared[Any]) -> bool:
+    """
+    Reserve a slot for a pending mesh, filled sender-side once the handle
+    resolves. Returns True if a slot was reserved (mesh-reference collection
+    is active), False otherwise.
     """
     ...

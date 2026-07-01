@@ -99,7 +99,7 @@ fn pickle_python_result(
     result: Bound<'_, PyAny>,
     worker_rank: usize,
 ) -> Result<PythonMessage, anyhow::Error> {
-    let mut state = pickle(py, result.unbind(), false, false)
+    let mut state = pickle(py, result.unbind(), false, false, false)
         .map_err(|pyerr| anyhow::Error::from(SerializablePyErr::from(py, &pyerr)))?;
     let inner = state
         .take_inner()

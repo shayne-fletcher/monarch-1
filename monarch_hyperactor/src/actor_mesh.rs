@@ -142,6 +142,14 @@ pub(crate) trait ActorMeshProtocol: Send + Sync {
 
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)>;
 
+    /// The serializable reference for this mesh, for the out-of-band `refs`
+    /// table. Defaults to an error; impls that hold a resolved ref override.
+    fn mesh_ref(&self) -> PyResult<ActorMeshRef<PythonActor>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "mesh_ref() is not available for this actor mesh",
+        ))
+    }
+
     /// Stop the actor mesh asynchronously.
     /// Default implementation raises NotImplementedError for types that don't support stopping.
     fn stop(&self, _instance: &PyInstance, _reason: String) -> PyResult<PyPythonTask> {
@@ -426,6 +434,7 @@ impl ActorMeshProtocol for AsyncActorMesh {
                             pyerr.into_value(py).into_any(),
                             false,
                             false,
+                            false,
                         )?;
                         let _ = port_ref.post(
                             &instance,
@@ -453,9 +462,16 @@ impl ActorMeshProtocol for AsyncActorMesh {
                 let shared =
                     PyPythonTask::new(async move { Ok(PythonActorMesh::from_impl(fut.await?)) })?
                         .spawn_abortable()?;
+                let shared = Py::new(py, shared)?;
+                if crate::pickle::reserve_mesh_reference_if_active(shared.clone_ref(py)) {
+                    let pop_fn = py
+                        .import("monarch._rust_bindings.monarch_hyperactor.pickle")?
+                        .getattr("pop_mesh_reference")?;
+                    return Ok((pop_fn, PyTuple::empty(py).into_any()));
+                }
                 // Get Shared.block_on as an unbound method
                 let block_on = shared_class(py).getattr("block_on")?;
-                let args = PyTuple::new(py, [shared.into_pyobject(py)?])?;
+                let args = PyTuple::new(py, [shared])?;
                 Ok((block_on, args.into_any()))
             }
         }
@@ -637,6 +653,11 @@ impl ActorMeshProtocol for PythonActorMeshImpl {
         self.mesh_ref().__reduce__(py)
     }
 
+    fn mesh_ref(&self) -> PyResult<ActorMeshRef<PythonActor>> {
+        // `self.mesh_ref()` resolves to the inherent borrow-returning method.
+        Ok(PythonActorMeshImpl::mesh_ref(self).clone())
+    }
+
     fn name(&self) -> PyResult<PyPythonTask> {
         let name = self.mesh_ref().id().to_string();
         PyPythonTask::new(async move { Ok(name) })
@@ -711,6 +732,14 @@ impl ActorMeshProtocol for ActorMeshRef<PythonActor> {
     }
 
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+        if crate::pickle::push_mesh_reference_if_active(crate::actor::MeshRef::Actor(Box::new(
+            self.clone(),
+        ))) {
+            let pop_fn = py
+                .import("monarch._rust_bindings.monarch_hyperactor.pickle")?
+                .getattr("pop_mesh_reference")?;
+            return Ok((pop_fn, pyo3::types::PyTuple::empty(py).into_any()));
+        }
         let bytes = bincode::serde::encode_to_vec(self, bincode::config::legacy())
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let py_bytes = (PyBytes::new(py, &bytes),).into_bound_py_any(py).unwrap();
@@ -719,6 +748,10 @@ impl ActorMeshProtocol for ActorMeshRef<PythonActor> {
             .unwrap();
         let from_bytes = module.getattr("py_actor_mesh_from_bytes").unwrap();
         Ok((from_bytes, py_bytes))
+    }
+
+    fn mesh_ref(&self) -> PyResult<ActorMeshRef<PythonActor>> {
+        Ok(self.clone())
     }
 
     fn name(&self) -> PyResult<PyPythonTask> {

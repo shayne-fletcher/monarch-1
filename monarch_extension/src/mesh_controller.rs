@@ -619,7 +619,7 @@ impl History {
                     let exe = remote_exception
                         .call1((exception.backtrace, traceback, rank))
                         .unwrap();
-                    let mut state = pickle(py, exe.unbind(), false, false).unwrap();
+                    let mut state = pickle(py, exe.unbind(), false, false, false).unwrap();
                     let inner = state.take_inner().unwrap();
                     PythonMessage::new_from_buf(
                         PythonMessageKind::Exception { rank: Some(rank) },

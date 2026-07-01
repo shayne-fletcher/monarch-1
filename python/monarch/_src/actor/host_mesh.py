@@ -315,6 +315,23 @@ class HostMesh(MeshTrait):
 
     # pyrefly: ignore [invalid-annotation]
     def __reduce_ex__(self, protocol: ...) -> Tuple[Any, Tuple[Any, ...]]:
+        # A pending host mesh has no HostMeshRef yet. When mesh-reference
+        # collection is active, reserve an out-of-band slot (filled sender-side
+        # once the mesh resolves) and reconstruct from the popped mesh;
+        # otherwise fall through to the ordinary reduce.
+        if self._hy_host_mesh.poll() is None:
+            from monarch._rust_bindings.monarch_hyperactor.pickle import (
+                reserve_mesh_reference,
+            )
+            from monarch._src.actor.pickle import _MeshSlot
+
+            if reserve_mesh_reference(self._hy_host_mesh):
+                return HostMesh._from_initialized_hy_host_mesh, (
+                    _MeshSlot(),
+                    self._region,
+                    self.stream_logs,
+                    self.is_fake_in_process,
+                )
         return HostMesh, (
             self._hy_host_mesh,
             self._region,
