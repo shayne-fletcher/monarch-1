@@ -91,7 +91,6 @@ class PendingMessage:
 
 def pickle(
     obj: Any,
-    allow_pending_pickles: bool = True,
     allow_tensor_engine_references: bool = True,
     allow_mesh_references: bool = False,
 ) -> PicklingState:
@@ -104,7 +103,6 @@ def pickle(
 
     Args:
         obj: The Python object to pickle
-        allow_pending_pickles: If true, allow PyShared values to be registered as pending
         allow_tensor_engine_references: If true, allow tensor engine references to be registered
 
     Returns:
@@ -138,18 +136,6 @@ def pop_tensor_engine_reference() -> Any:
 
     Raises:
         RuntimeError: If there is no active pickling state or no references remaining.
-    """
-    ...
-
-def pop_pending_pickle() -> Shared[Any]:
-    """
-    Pop a pending pickle from the active pickling state.
-
-    Called from Python during unpickling to retrieve the PyShared
-    object that was deferred during pickling.
-
-    Raises:
-        RuntimeError: If there is no active pickling state or no pending pickles remaining.
     """
     ...
 

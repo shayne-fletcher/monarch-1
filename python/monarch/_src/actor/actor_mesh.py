@@ -737,7 +737,6 @@ def _create_endpoint_message(
     _check_endpoint_arguments(method_name, signature, args, kwargs)
     pickling_state = pickle(
         (args, kwargs),
-        allow_pending_pickles=True,
         allow_tensor_engine_references=True,
         allow_mesh_references=True,
     )
@@ -1068,11 +1067,10 @@ class Port(Generic[R]):
     def send_message(self, message: PythonMessage) -> None: ...
 
     async def resolve_and_send(self, result: object) -> None:
-        # This is Port.send with deferred-pickle resolution inserted before the
+        # This is Port.send with mesh-reference resolution inserted before the
         # already-serialized Result message is posted.
         state = pickle(
             result,
-            allow_pending_pickles=True,
             allow_tensor_engine_references=False,
             allow_mesh_references=True,
         )
@@ -2002,7 +2000,6 @@ class RootClientActor(Actor):
         kwargs = {}
         state = pickle(
             (args, kwargs),
-            allow_pending_pickles=False,
             allow_tensor_engine_references=False,
         )
         return state.buffer()
