@@ -40,9 +40,12 @@ use hyperactor::mailbox::UndeliverableMessageError;
 use hyperactor::mailbox::UndeliverableReason;
 use hyperactor::supervision::ActorSupervisionEvent;
 use hyperactor_config::Flattrs;
+use hyperactor_mesh::ProcMeshRef;
+use hyperactor_mesh::actor_mesh::ActorMeshRef;
 use hyperactor_mesh::casting::update_undeliverable_envelope_for_casting;
 use hyperactor_mesh::comm::multicast::CAST_POINT;
 use hyperactor_mesh::comm::multicast::CastInfo;
+use hyperactor_mesh::host_mesh::HostMeshRef;
 use hyperactor_mesh::introspect::ActiveHandler;
 use hyperactor_mesh::introspect::EXECUTION;
 use hyperactor_mesh::introspect::Execution;
@@ -148,8 +151,14 @@ impl MethodSpecifier {
 /// a single run.
 #[derive(Clone, Debug, Serialize, Deserialize, Named, PartialEq, Eq)]
 pub enum PythonResponseMessage {
-    Result(serde_multipart::Part),
-    Exception(serde_multipart::Part),
+    Result {
+        part: serde_multipart::Part,
+        refs: Vec<MeshRef>,
+    },
+    Exception {
+        part: serde_multipart::Part,
+        refs: Vec<MeshRef>,
+    },
 }
 
 wirevalue::register_type!(PythonResponseMessage);
@@ -200,11 +209,21 @@ fn mailbox<'py, T: Actor>(py: Python<'py>, cx: &Context<'_, T>) -> Bound<'py, Py
     mailbox.into_bound_py_any(py).unwrap()
 }
 
+/// A serializable reference to a mesh (actor, proc, or host).
+#[derive(Clone, Debug, Serialize, Deserialize, Named, PartialEq, Eq)]
+pub enum MeshRef {
+    Actor(Box<ActorMeshRef<PythonActor>>),
+    Proc(Box<ProcMeshRef>),
+    Host(Box<HostMeshRef>),
+}
+
 #[pyclass(frozen, module = "monarch._rust_bindings.monarch_hyperactor.actor")]
 #[derive(Clone, Serialize, Deserialize, Named, Default, PartialEq)]
 pub struct PythonMessage {
     pub kind: PythonMessageKind,
     pub message: Part,
+    /// Mesh references carried out-of-band from the pickled `message`.
+    pub refs: Vec<MeshRef>,
 }
 
 /// Extract the endpoint method name from a [`PythonMessage`].
@@ -241,6 +260,7 @@ impl From<ValueOverlay<PythonResponseMessage>> for PythonMessage {
         PythonMessage {
             kind: PythonMessageKind::AccumulatedResponses(AccumulatedResponses(overlay)),
             message: Default::default(),
+            refs: Vec::new(),
         }
     }
 }
@@ -256,7 +276,13 @@ impl PythonMessage {
             PythonMessageKind::Result { rank, .. } => {
                 let rank = rank.expect("accumulated response should have a rank");
                 let mut overlay = ValueOverlay::new();
-                overlay.push_run(rank..rank + 1, PythonResponseMessage::Result(self.message))?;
+                overlay.push_run(
+                    rank..rank + 1,
+                    PythonResponseMessage::Result {
+                        part: self.message,
+                        refs: self.refs,
+                    },
+                )?;
                 Ok(overlay)
             }
             PythonMessageKind::Exception { rank, .. } => {
@@ -264,7 +290,10 @@ impl PythonMessage {
                 let mut overlay = ValueOverlay::new();
                 overlay.push_run(
                     rank..rank + 1,
-                    PythonResponseMessage::Exception(self.message),
+                    PythonResponseMessage::Exception {
+                        part: self.message,
+                        refs: self.refs,
+                    },
                 )?;
                 Ok(overlay)
             }
@@ -324,6 +353,7 @@ impl PythonMessage {
         Self {
             kind,
             message: message.into(),
+            refs: Vec::new(),
         }
     }
 
@@ -333,10 +363,12 @@ impl PythonMessage {
             PythonMessageKind::Result { .. } => PythonMessage {
                 kind: PythonMessageKind::Result { rank },
                 message: self.message,
+                refs: self.refs,
             },
             PythonMessageKind::Exception { .. } => PythonMessage {
                 kind: PythonMessageKind::Exception { rank },
                 message: self.message,
+                refs: self.refs,
             },
             _ => panic!("PythonMessage is not a response but {:?}", self),
         }
@@ -446,6 +478,7 @@ impl std::fmt::Debug for PythonMessage {
                 "message",
                 &wirevalue::HexFmt(&(*self.message.to_bytes())[..]).to_string(),
             )
+            .field("refs", &self.refs.len())
             .finish()
     }
 }
@@ -2100,6 +2133,7 @@ mod tests {
                 response_port: Some(EitherPortRef::Unbounded(port_ref.clone().into())),
             },
             message: Part::from(vec![1, 2, 3]),
+            refs: Vec::new(),
         };
         {
             let mut multipart_message =

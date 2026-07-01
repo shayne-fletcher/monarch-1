@@ -708,6 +708,7 @@ impl ProcLauncher for ActorProcLauncher {
                 response_port: Some(EitherPortRef::Once(PythonOncePortRef::from(bound_port))),
             },
             message: pickled_args.into(),
+            refs: Vec::new(),
         };
 
         self.spawner.post(&self.instance, message);
@@ -791,6 +792,7 @@ impl ProcLauncher for ActorProcLauncher {
                 response_port: None,
             },
             message: pickled.into(),
+            refs: Vec::new(),
         };
 
         self.spawner.post(&self.instance, message);
@@ -832,6 +834,7 @@ impl ProcLauncher for ActorProcLauncher {
                 response_port: None,
             },
             message: pickled.into(),
+            refs: Vec::new(),
         };
 
         self.spawner.post(&self.instance, message);
