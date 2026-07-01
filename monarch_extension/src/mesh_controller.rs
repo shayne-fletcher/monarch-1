@@ -419,9 +419,10 @@ impl Invocation {
                                         overlay
                                             .push_run(
                                                 rank..rank + 1,
-                                                PythonResponseMessage::Exception(
-                                                    exception.as_ref().message.clone(),
-                                                ),
+                                                PythonResponseMessage::Exception {
+                                                    part: exception.as_ref().message.clone(),
+                                                    refs: exception.as_ref().refs.clone(),
+                                                },
                                             )
                                             .expect("exception runs should not overlap");
                                     }

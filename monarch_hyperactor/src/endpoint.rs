@@ -417,11 +417,11 @@ async fn collect_valuemesh(
                     overlay.runs().try_fold(
                         Vec::with_capacity(expected_count),
                         |mut parts, (range, payload)| match payload {
-                            PythonResponseMessage::Result(part) => {
+                            PythonResponseMessage::Result { part, .. } => {
                                 parts.extend(range.clone().map(|_| part.clone()));
                                 Ok(parts)
                             }
-                            PythonResponseMessage::Exception(part) => {
+                            PythonResponseMessage::Exception { part, .. } => {
                                 record_guard.mark_error();
                                 monarch_with_gil_blocking(GilSite::Traceback, |py| {
                                     Err(PyErr::from_value(unpickle_from_part(py, part.clone())?))
