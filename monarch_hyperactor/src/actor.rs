@@ -7,6 +7,7 @@
  */
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt::Debug;
 use std::future::pending;
@@ -84,6 +85,7 @@ use crate::metrics::ENDPOINT_ACTOR_COUNT;
 use crate::metrics::ENDPOINT_ACTOR_ERROR;
 use crate::metrics::ENDPOINT_ACTOR_LATENCY_US_HISTOGRAM;
 use crate::metrics::ENDPOINT_ACTOR_PANIC;
+use crate::pickle::PicklingState;
 use crate::pickle::pickle_to_part;
 use crate::proc::PyActorAddr;
 use crate::pympsc;
@@ -163,6 +165,21 @@ pub enum PythonResponseMessage {
 
 wirevalue::register_type!(PythonResponseMessage);
 wirevalue::register_type!(ValueOverlay<PythonResponseMessage>);
+
+impl PythonResponseMessage {
+    /// Decode this response's payload, reuniting its out-of-band `refs` table
+    /// so mesh references reconstruct. Mirrors [`PythonMessage::decode`] for the
+    /// accumulated (valuemesh / `.call()`) path.
+    pub(crate) fn decode(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let (part, refs) = match self {
+            PythonResponseMessage::Result { part, refs }
+            | PythonResponseMessage::Exception { part, refs } => (part, refs),
+        };
+        let mesh_references = refs.iter().cloned().map(Some).collect();
+        let mut state = PicklingState::from_parts(part.clone(), VecDeque::new(), mesh_references);
+        state.unpickle(py)
+    }
+}
 
 /// Newtype wrapper around [`ValueOverlay<PythonResponseMessage>`] needed
 /// because `PythonMessageKind` is a `#[pyclass]` enum, requiring all variant
@@ -558,9 +575,21 @@ impl std::fmt::Debug for PythonMessage {
 #[pymethods]
 impl PythonMessage {
     #[new]
-    #[pyo3(signature = (kind, message))]
-    pub fn new(kind: PythonMessageKind, message: PyRef<'_, FrozenBuffer>) -> PyResult<Self> {
-        Ok(PythonMessage::new_from_buf(kind, message.inner.clone()))
+    #[pyo3(signature = (kind, message, refs))]
+    pub fn new(
+        kind: PythonMessageKind,
+        message: PyRef<'_, FrozenBuffer>,
+        refs: &Bound<'_, PyList>,
+    ) -> PyResult<Self> {
+        let mesh_refs: Vec<MeshRef> = refs
+            .iter()
+            .map(|item| Ok(item.downcast::<PyMeshRef>()?.borrow().inner.clone()))
+            .collect::<PyResult<_>>()?;
+        Ok(PythonMessage::new_from_buf_with_refs(
+            kind,
+            message.inner.clone(),
+            mesh_refs,
+        ))
     }
 
     #[getter]
@@ -568,11 +597,27 @@ impl PythonMessage {
         self.kind.clone()
     }
 
-    #[getter]
-    fn message(&self) -> FrozenBuffer {
-        FrozenBuffer {
-            inner: self.message.to_bytes(),
-        }
+    /// Decode this message's payload, reuniting the out-of-band `refs` table so
+    /// the `pop_mesh_reference` sentinels in the pickle stream resolve. The raw
+    /// bytes are deliberately not exposed: a payload can only be read back
+    /// through here, so a decode can never silently drop mesh references.
+    #[pyo3(signature = (local_state=None))]
+    fn decode(
+        &self,
+        py: Python<'_>,
+        local_state: Option<&Bound<'_, PyList>>,
+    ) -> PyResult<Py<PyAny>> {
+        let tensor_engine_references: VecDeque<Py<PyAny>> = local_state
+            .map(|list| list.iter().map(|item| item.unbind()).collect())
+            .unwrap_or_default();
+        let mesh_references: VecDeque<Option<MeshRef>> =
+            self.refs.iter().cloned().map(Some).collect();
+        let mut state = PicklingState::from_parts(
+            self.message.clone(),
+            tensor_engine_references,
+            mesh_references,
+        );
+        state.unpickle(py)
     }
 
     #[getter]

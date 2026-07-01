@@ -67,12 +67,10 @@ class Reducer(Generic[U]):
         self._reduce_f: Callable[[U, U], U] = reduce_f
 
     def __call__(self, left: PythonMessage, right: PythonMessage) -> PythonMessage:
-        # pyrefly: ignore [bad-argument-type]
-        l: U = cast(U, pickle.loads(left.message))
-        # pyrefly: ignore [bad-argument-type]
-        r: U = cast(U, pickle.loads(right.message))
+        l: U = cast(U, left.decode())
+        r: U = cast(U, right.decode())
         result: U = self._reduce_f(l, r)
-        return PythonMessage(left.kind, _to_frozen_buffer(pickle.dumps(result)))
+        return PythonMessage(left.kind, _to_frozen_buffer(pickle.dumps(result)), [])
 
 
 @final
@@ -90,12 +88,10 @@ class Accumulator(Generic[S, U]):
         )
 
     def __call__(self, state: PythonMessage, update: PythonMessage) -> PythonMessage:
-        # pyrefly: ignore [bad-argument-type]
-        s: S = cast(S, pickle.loads(state.message))
-        # pyrefly: ignore [bad-argument-type]
-        u: U = cast(U, pickle.loads(update.message))
+        s: S = cast(S, state.decode())
+        u: U = cast(U, update.decode())
         result: S = self._accumulate_f(s, u)
-        return PythonMessage(state.kind, _to_frozen_buffer(pickle.dumps(result)))
+        return PythonMessage(state.kind, _to_frozen_buffer(pickle.dumps(result)), [])
 
     @property
     def initial_state(self) -> PythonMessage:
@@ -107,6 +103,7 @@ class Accumulator(Generic[S, U]):
                 None,
             ),
             _to_frozen_buffer(pickle.dumps(self._initial_state)),
+            [],
         )
 
     @property
@@ -162,13 +159,13 @@ async def test_accumulator() -> None:
                     None,
                 ),
                 _to_frozen_buffer(pickle.dumps(value)),
+                [],
             ),
         )
 
     async def recv_message() -> str:
         messge = await receiver.recv_task().with_timeout(seconds=5)
-        # pyrefly: ignore [bad-argument-type]
-        value = pickle.loads(messge.message)
+        value = messge.decode()
         return cast(str, value)
 
     post_message(1)
@@ -257,8 +254,7 @@ async def test_reducer() -> None:
     )
 
     m = await receiver.recv_task().with_timeout(seconds=5)
-    # pyrefly: ignore [bad-argument-type]
-    value = pickle.loads(m.message)
+    value = m.decode()
     assert "[reduced](start+msg0)" in value
 
     #  Note: occasionally test would hang without this stop

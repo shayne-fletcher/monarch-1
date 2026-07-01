@@ -1341,7 +1341,7 @@ class UndeliverableMessageSender(Actor):
         port_ref.send(
             actor_instance._as_rust(),
             # pyrefly: ignore [bad-argument-count, bad-argument-type]
-            PythonMessage(PythonMessageKind.Result(None), buf.freeze()),
+            PythonMessage(PythonMessageKind.Result(None), buf.freeze(), []),
         )
 
 

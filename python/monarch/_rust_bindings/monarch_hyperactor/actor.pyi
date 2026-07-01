@@ -135,6 +135,7 @@ class PythonMessage:
         self,
         kind: PythonMessageKind,
         message: FrozenBuffer,
+        refs: List[Any],
     ) -> None:
         """
         Create a PythonMessage.
@@ -142,11 +143,16 @@ class PythonMessage:
         Args:
             kind: The message kind specifying the method to call.
             message: The pickled arguments as a FrozenBuffer.
+            refs: Out-of-band mesh references carried alongside the payload
+                (empty if the payload contains none).
         """
         ...
-    @property
-    def message(self) -> FrozenBuffer:
-        """The pickled arguments."""
+    def decode(self, local_state: List[Any] | None = None) -> Any:
+        """
+        Decode the payload, reuniting the out-of-band ``refs`` table so mesh
+        references reconstruct. This is the only way to read the payload; the
+        raw bytes are intentionally not exposed, so a decode cannot drop refs.
+        """
         ...
     @property
     def kind(self) -> PythonMessageKind: ...

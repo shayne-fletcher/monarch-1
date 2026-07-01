@@ -143,12 +143,9 @@ pub(crate) trait ActorMeshProtocol: Send + Sync {
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)>;
 
     /// The serializable reference for this mesh, for the out-of-band `refs`
-    /// table. Defaults to an error; impls that hold a resolved ref override.
-    fn mesh_ref(&self) -> PyResult<ActorMeshRef<PythonActor>> {
-        Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "mesh_ref() is not available for this actor mesh",
-        ))
-    }
+    /// table. Required so every impl chooses: hold a resolved ref and return
+    /// it, or (a pending mesh) have none and error explicitly.
+    fn mesh_ref(&self) -> PyResult<ActorMeshRef<PythonActor>>;
 
     /// Stop the actor mesh asynchronously.
     /// Default implementation raises NotImplementedError for types that don't support stopping.
@@ -475,6 +472,15 @@ impl ActorMeshProtocol for AsyncActorMesh {
                 Ok((block_on, args.into_any()))
             }
         }
+    }
+
+    fn mesh_ref(&self) -> PyResult<ActorMeshRef<PythonActor>> {
+        // A pending mesh has no serializable ref of its own; the reserve/fill
+        // slot carries it out-of-band. This is a backstop: the happy path never
+        // asks a pending mesh for a ref.
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "pending actor mesh has no serializable ref; it is carried via the reserve/fill slot",
+        ))
     }
 
     fn stop(&self, instance: &PyInstance, reason: String) -> PyResult<PyPythonTask> {

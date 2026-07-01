@@ -736,7 +736,10 @@ def _create_endpoint_message(
     """
     _check_endpoint_arguments(method_name, signature, args, kwargs)
     pickling_state = pickle(
-        (args, kwargs), allow_pending_pickles=True, allow_tensor_engine_references=True
+        (args, kwargs),
+        allow_pending_pickles=True,
+        allow_tensor_engine_references=True,
+        allow_mesh_references=True,
     )
     objects = pickling_state.tensor_engine_references()
     if not objects:
@@ -1068,7 +1071,10 @@ class Port(Generic[R]):
         # This is Port.send with deferred-pickle resolution inserted before the
         # already-serialized Result message is posted.
         state = pickle(
-            result, allow_pending_pickles=True, allow_tensor_engine_references=False
+            result,
+            allow_pending_pickles=True,
+            allow_tensor_engine_references=False,
+            allow_mesh_references=True,
         )
         kind = cast(PythonMessageKind, cast(Any, PythonMessageKind.Result)(self._rank))
         message = PendingMessage(kind, state)
@@ -1200,10 +1206,7 @@ class PortReceiver(Generic[R]):
         return self._process(result)
 
     def _process(self, msg: PythonMessage) -> R:
-        # TODO: Try to do something more structured than a cast here
-        payload = cast(
-            R, PicklingState(msg.message, mesh_references=msg.refs).unpickle()
-        )
+        payload = cast(R, msg.decode())
         match msg.kind:
             # pyrefly: ignore [invalid-pattern]
             case PythonMessageKind.Result():
