@@ -19,6 +19,19 @@ from typing import Any, Callable, Iterable, List, Tuple
 
 import cloudpickle
 from monarch._rust_bindings.monarch_hyperactor.buffers import Buffer, FrozenBuffer
+from monarch._rust_bindings.monarch_hyperactor.pickle import pop_mesh_reference
+
+
+class _MeshSlot:
+    """Placeholder whose unpickling pops a reserved mesh-reference slot.
+
+    A pending Proc/Host mesh reserves an out-of-band slot at pickle time and
+    emits this sentinel in its reduce; unpickling pops the resolved mesh that
+    the sender filled into that slot.
+    """
+
+    def __reduce__(self) -> Tuple[Any, Tuple[Any, ...]]:
+        return (pop_mesh_reference, ())
 
 
 def maybe_torch() -> types.ModuleType | None:

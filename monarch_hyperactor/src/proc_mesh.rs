@@ -154,7 +154,15 @@ impl PyProcMesh {
     }
 
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
-        let bytes = bincode::serde::encode_to_vec(&self.mesh_ref()?, bincode::config::legacy())
+        let mesh_ref = self.mesh_ref()?;
+        if crate::pickle::push_mesh_reference_if_active(crate::actor::MeshRef::Proc(Box::new(
+            mesh_ref.clone(),
+        ))) {
+            let pop_fn = PyModule::import(py, "monarch._rust_bindings.monarch_hyperactor.pickle")?
+                .getattr("pop_mesh_reference")?;
+            return Ok((pop_fn, pyo3::types::PyTuple::empty(py).into_any()));
+        }
+        let bytes = bincode::serde::encode_to_vec(&mesh_ref, bincode::config::legacy())
             .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
         let py_bytes = (PyBytes::new(py, &bytes),).into_bound_py_any(py).unwrap();
         let from_bytes =

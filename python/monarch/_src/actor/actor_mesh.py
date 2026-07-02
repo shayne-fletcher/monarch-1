@@ -1201,7 +1201,9 @@ class PortReceiver(Generic[R]):
 
     def _process(self, msg: PythonMessage) -> R:
         # TODO: Try to do something more structured than a cast here
-        payload = cast(R, PicklingState(msg.message).unpickle())
+        payload = cast(
+            R, PicklingState(msg.message, mesh_references=msg.refs).unpickle()
+        )
         match msg.kind:
             # pyrefly: ignore [invalid-pattern]
             case PythonMessageKind.Result():
@@ -1323,6 +1325,7 @@ async def _handle_queued_message(actor: Any, msg: "QueuedMessage") -> None:
         msg.bytes,
         panic_flag,  # pyre-ignore[6]: _QueuePanicFlag implements PanicFlag protocol
         msg.local_state,
+        msg.refs,
         msg.response_port,
     )
     # If a panic was signaled, re-raise it after handle() has cleaned up.
@@ -1358,6 +1361,7 @@ class _Actor:
         message: FrozenBuffer,
         panic_flag: PanicFlag,
         local_state: List[Any],
+        mesh_references: List[Any],
         response_port: "PortProtocol[Any]",
     ) -> None:
         MESSAGES_HANDLED.add(1)
@@ -1373,7 +1377,9 @@ class _Actor:
 
             DebugContext.set(DebugContext())
 
-            args, kwargs = PicklingState(message, local_state).unpickle()
+            args, kwargs = PicklingState(
+                message, local_state, mesh_references
+            ).unpickle()
 
             match method:
                 # pyrefly: ignore [invalid-pattern]

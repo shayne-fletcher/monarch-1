@@ -22,6 +22,8 @@ use pyo3::types::PyList;
 use pyo3::types::PyTuple;
 use serde_multipart::Part;
 
+use crate::actor::MeshRef;
+use crate::actor::PyMeshRef;
 use crate::actor::PythonMessage;
 use crate::actor::PythonMessageKind;
 use crate::buffers::Buffer;
@@ -88,6 +90,14 @@ py_global!(
 // Thread-local storage for the active pickling state.
 // Set by pickle/unpickle operations so free functions used in __reduce__
 // implementations can access it.
+//
+// It is thread-local by design: two threads pickling at once (even the same
+// mesh ref) collect into independent `mesh_references` / `pending_mesh_fills`,
+// so there is nothing shared to race on. `pickle()` then moves the state out of
+// the thread-local into an owned `PicklingState` before the GIL-releasing
+// `PicklingState::resolve`, so the sender-side slot fill mutates a single-owner
+// value across its awaits, never this thread-local. Both properties (thread-
+// local, and moved out before resolve) are what make releasing the GIL safe.
 thread_local! {
     static ACTIVE_PICKLING_STATE: RefCell<Option<ActivePicklingState>> = const { RefCell::new(None) };
 }
@@ -125,20 +135,35 @@ struct ActivePicklingState {
     tensor_engine_references: VecDeque<Py<PyAny>>,
     /// Pending pickles (PyShared values) that must be resolved.
     pending_pickles: VecDeque<Py<PyShared>>,
+    /// Mesh references collected out-of-band into the message's `refs` table.
+    /// A `None` is a slot reserved for a pending mesh, filled sender-side.
+    mesh_references: VecDeque<Option<MeshRef>>,
+    /// Pending mesh slots awaiting a sender-side fill: (index into
+    /// `mesh_references`, the handle whose resolved mesh supplies the ref).
+    pending_mesh_fills: Vec<(usize, Py<PyShared>)>,
     /// Whether pending pickles are allowed in this pickling context.
     allow_pending_pickles: bool,
     /// Whether tensor engine references are allowed in this pickling context.
     allow_tensor_engine_references: bool,
+    /// Whether mesh references are collected out-of-band in this context.
+    allow_mesh_references: bool,
 }
 
 impl ActivePicklingState {
     /// Create a new ActivePicklingState.
-    fn new(allow_pending_pickles: bool, allow_tensor_engine_references: bool) -> Self {
+    fn new(
+        allow_pending_pickles: bool,
+        allow_tensor_engine_references: bool,
+        allow_mesh_references: bool,
+    ) -> Self {
         Self {
             tensor_engine_references: VecDeque::new(),
             pending_pickles: VecDeque::new(),
+            mesh_references: VecDeque::new(),
+            pending_mesh_fills: Vec::new(),
             allow_pending_pickles,
             allow_tensor_engine_references,
+            allow_mesh_references,
         }
     }
 
@@ -148,6 +173,8 @@ impl ActivePicklingState {
             buffer,
             tensor_engine_references: self.tensor_engine_references,
             pending_pickles: self.pending_pickles,
+            mesh_references: self.mesh_references,
+            pending_mesh_fills: self.pending_mesh_fills,
         }
     }
 }
@@ -163,6 +190,11 @@ pub struct PicklingStateInner {
     tensor_engine_references: VecDeque<Py<PyAny>>,
     /// Pending pickles (PyShared values) that must be resolved.
     pending_pickles: VecDeque<Py<PyShared>>,
+    /// Mesh references carried out-of-band into the message's `refs` table.
+    /// A `None` is a slot reserved for a pending mesh, filled sender-side.
+    mesh_references: VecDeque<Option<MeshRef>>,
+    /// Pending mesh slots awaiting a sender-side fill.
+    pending_mesh_fills: Vec<(usize, Py<PyShared>)>,
 }
 
 impl PicklingStateInner {
@@ -207,13 +239,24 @@ impl PicklingState {
     /// This is used for unpickling received messages that may contain tensor engine
     /// references that need to be restored during deserialization.
     #[new]
-    #[pyo3(signature = (buffer, tensor_engine_references=None))]
+    #[pyo3(signature = (buffer, tensor_engine_references=None, mesh_references=None))]
     fn py_new(
+        py: Python<'_>,
         buffer: PyRef<'_, crate::buffers::FrozenBuffer>,
         tensor_engine_references: Option<&Bound<'_, PyList>>,
+        mesh_references: Option<Vec<Py<PyMeshRef>>>,
     ) -> PyResult<Self> {
         let refs: VecDeque<Py<PyAny>> = tensor_engine_references
             .map(|list| list.iter().map(|item| item.unbind()).collect())
+            .unwrap_or_default();
+
+        // pyo3 type-checks each element as a `PyMeshRef` during extraction.
+        let mesh_refs: VecDeque<Option<MeshRef>> = mesh_references
+            .map(|list| {
+                list.into_iter()
+                    .map(|m| Some(m.borrow(py).inner.clone()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         Ok(Self {
@@ -221,6 +264,8 @@ impl PicklingState {
                 buffer: Part::from(buffer.inner.clone()),
                 tensor_engine_references: refs,
                 pending_pickles: VecDeque::new(),
+                mesh_references: mesh_refs,
+                pending_mesh_fills: Vec::new(),
             }),
         })
     }
@@ -267,9 +312,11 @@ impl PicklingState {
 
         // Set up an active state for unpickling (to handle pop calls).
         // The guard restores any previous state on drop (including on panic).
-        let mut active = ActivePicklingState::new(false, false);
+        let mut active = ActivePicklingState::new(false, false, false);
         active.pending_pickles = inner.pending_pickles;
         active.tensor_engine_references = inner.tensor_engine_references;
+        active.mesh_references = inner.mesh_references;
+        active.pending_mesh_fills = inner.pending_mesh_fills;
 
         let _guard = ActivePicklingGuard::enter(active);
 
@@ -298,12 +345,46 @@ impl PicklingState {
     /// 3. Calls unpickle to reconstruct the object
     /// 4. Calls pickle again to get a new PicklingState without pending pickles
     pub async fn resolve(mut self) -> PyResult<PicklingState> {
-        // Short-circuit if there are no pending pickles
+        // Take the pending mesh fills out: a plain move, no GIL and no
+        // `clone_ref`. Each is a slot index plus the handle whose resolved mesh
+        // supplies the ref.
+        let fills = std::mem::take(
+            &mut self
+                .inner
+                .as_mut()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "PicklingState has already been consumed",
+                    )
+                })?
+                .pending_mesh_fills,
+        );
+
+        for (index, handle) in fills {
+            // Await the mesh's init task (these run concurrently, so the wait
+            // is the slowest init, not the sum).
+            let mut task =
+                monarch_with_gil_blocking(GilSite::AwaitDrive, |py| handle.borrow(py).task())?;
+            task.take_task()?.await?;
+
+            // Extract the `*MeshRef` from the now-resolved mesh and fill the slot.
+            monarch_with_gil_blocking(GilSite::Convert, |py| -> PyResult<()> {
+                let value = handle.borrow(py).poll()?.ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err("pending mesh handle did not resolve")
+                })?;
+                let mesh_ref = crate::actor::mesh_ref_from_pyobject(value.bind(py))?;
+                if let Some(inner) = self.inner.as_mut() {
+                    inner.mesh_references[index] = Some(mesh_ref);
+                }
+                Ok(())
+            })?;
+        }
+
+        // Resolve any deferred (non-mesh) pending pickles by re-pickling. Empty
+        // for mesh-only messages, where the table filled above is the result.
         if self.inner_ref()?.pending_pickles.is_empty() {
             return Ok(self);
         }
-
-        // Await all pending pickles to ensure they're resolved
         let pending: Vec<Py<PyShared>> = monarch_with_gil_blocking(GilSite::Convert, |py| {
             self.inner_ref().map(|inner| {
                 inner
@@ -313,18 +394,15 @@ impl PicklingState {
                     .collect()
             })
         })?;
-
         for pending_pickle in pending {
             let mut task = monarch_with_gil_blocking(GilSite::AwaitDrive, |py| {
                 pending_pickle.borrow(py).task()
             })?;
             task.take_task()?.await?;
         }
-
-        // Unpickle (pending pickles are now resolved) and re-pickle without allowing new ones
         monarch_with_gil_blocking(GilSite::Convert, |py| {
             let obj = self.unpickle(py)?;
-            pickle(py, obj, false, true)
+            pickle(py, obj, false, true, false)
         })
     }
 }
@@ -358,19 +436,34 @@ impl PendingMessage {
         })
     }
 
-    /// Resolve all pending pickles and convert this into a PythonMessage.
+    /// Resolve any reserved mesh slots and convert this into a PythonMessage.
     ///
     /// This is an async method that:
-    /// 1. Awaits all pending pickles in the PicklingState
-    /// 2. Re-pickles the resolved object
-    /// 3. Returns a PythonMessage with the resolved bytes (no GIL needed for final step)
+    /// 1. Fills the reserved mesh slots from their pending handles
+    /// 2. Builds a PythonMessage with the resolved bytes and `refs` table
     pub async fn resolve(self) -> PyResult<PythonMessage> {
-        // Resolve the pickling state (awaits all pending pickles and re-pickles)
+        // Fill any reserved mesh slots, then build the message with the
+        // finalized `refs` table. No GIL needed for the assembly: neither the
+        // Part nor the MeshRef table holds Py<> values.
         let mut resolved_state = self.state.resolve().await?;
 
-        // Take the Part directly - no GIL needed since Part doesn't contain Py<>
         let inner = resolved_state.take_inner()?;
-        Ok(PythonMessage::new_from_buf(self.kind, inner.take_buffer()))
+        let refs: Vec<MeshRef> = inner
+            .mesh_references
+            .into_iter()
+            .map(|r| {
+                r.ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "mesh reference slot was never filled",
+                    )
+                })
+            })
+            .collect::<PyResult<_>>()?;
+        Ok(PythonMessage::new_from_buf_with_refs(
+            self.kind,
+            inner.buffer,
+            refs,
+        ))
     }
 }
 
@@ -476,6 +569,75 @@ fn pop_pending_pickle(py: Python<'_>) -> PyResult<Py<PyShared>> {
     })
 }
 
+/// Pop a mesh reference from the active pickling state and rebuild its
+/// Python mesh wrapper.
+///
+/// Called from the unpickle stream wherever a mesh slot was emitted in
+/// place of inline bytes.
+#[pyfunction]
+fn pop_mesh_reference(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let mesh_ref = ACTIVE_PICKLING_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        match state.as_mut() {
+            Some(s) => s.mesh_references.pop_front().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("No mesh references remaining")
+            }),
+            None => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "No active pickling state",
+            )),
+        }
+    })?;
+    let mesh_ref = mesh_ref.ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("mesh reference slot was never filled")
+    })?;
+    mesh_ref.reconstruct(py)
+}
+
+/// Push a mesh reference to the active pickling state if mesh-reference
+/// collection is active in this context.
+///
+/// Returns true if the reference was collected (the caller emits a slot);
+/// false otherwise (the caller inlines the reference as usual).
+pub fn push_mesh_reference_if_active(mesh_ref: MeshRef) -> bool {
+    ACTIVE_PICKLING_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        match state.as_mut() {
+            Some(s) if s.allow_mesh_references => {
+                s.mesh_references.push_back(Some(mesh_ref));
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+/// Reserve a slot for a *pending* mesh whose `*MeshRef` is not available yet,
+/// registering `handle` for a sender-side fill once the mesh resolves.
+///
+/// Returns true if a slot was reserved (the caller emits a `pop_mesh_reference`
+/// placeholder); false otherwise (the caller keeps its current behavior).
+pub fn reserve_mesh_reference_if_active(handle: Py<PyShared>) -> bool {
+    ACTIVE_PICKLING_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        match state.as_mut() {
+            Some(s) if s.allow_mesh_references => {
+                let index = s.mesh_references.len();
+                s.mesh_references.push_back(None);
+                s.pending_mesh_fills.push((index, handle));
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+/// Python-callable wrapper over [`reserve_mesh_reference_if_active`] for the
+/// typed Proc/Host reduces, which reserve their pending slot from Python.
+#[pyfunction]
+fn reserve_mesh_reference(handle: Py<PyShared>) -> bool {
+    reserve_mesh_reference_if_active(handle)
+}
+
 /// Push a pending pickle to the active pickling state (Rust-only).
 ///
 /// This is used by __reduce__ implementations to register a PyShared
@@ -507,7 +669,7 @@ pub fn push_pending_pickle(py_shared: Py<PyShared>) -> PyResult<()> {
 ///
 /// This function implements the pickle protocol for PyShared:
 /// 1. If the shared is already finished, return (Shared.from_value, (value,))
-/// 2. If pending pickles are allowed, push it as a pending pickle and return (pop_pending_pickle, ())
+/// 2. If pending pickles are allowed, defer it and return (pop_pending_pickle, ())
 /// 3. Otherwise, block on the shared and return (Shared.from_value, (value,))
 pub fn reduce_shared<'py>(
     py: Python<'py>,
@@ -520,12 +682,13 @@ pub fn reduce_shared<'py>(
         return Ok((from_value, args));
     }
 
-    // Try to push as a pending pickle (will fail if not allowed or no active state)
+    // Pending: defer it (resolved sender-side in `PicklingState::resolve`).
+    // Meshes ride the out-of-band table via their own type-specific reducers;
+    // this generic path is the fallback for any other pending `PyShared`.
     let py_shared_py: Py<PyShared> = py_shared.clone().unbind();
     if push_pending_pickle(py_shared_py).is_ok() {
         let pop_fn = pop_pending_pickle_fn(py);
-        let args = PyTuple::empty(py);
-        return Ok((pop_fn, args));
+        return Ok((pop_fn, PyTuple::empty(py)));
     }
 
     // Fall back to blocking on the shared
@@ -563,7 +726,7 @@ fn pickle_into_buffer(py: Python<'_>, obj: &Py<PyAny>, buffer: &Py<Buffer>) -> P
 /// and tensor engine references, and returns the raw serialized bytes instead
 /// of a [`PicklingState`].
 pub fn pickle_to_part(py: Python<'_>, obj: &Py<PyAny>) -> PyResult<Part> {
-    let active = ActivePicklingState::new(false, false);
+    let active = ActivePicklingState::new(false, false, false);
     let buffer = Py::new(py, Buffer::default())?;
     let _guard = ActivePicklingGuard::enter(active);
 
@@ -586,14 +749,19 @@ pub fn pickle_to_part(py: Python<'_>, obj: &Py<PyAny>) -> PyResult<Part> {
 /// # Returns
 /// A PicklingState containing the pickled buffer and any registered references/pending pickles
 #[pyfunction]
-#[pyo3(signature = (obj, allow_pending_pickles=true, allow_tensor_engine_references=true))]
+#[pyo3(signature = (obj, allow_pending_pickles=true, allow_tensor_engine_references=true, allow_mesh_references=false))]
 pub fn pickle(
     py: Python<'_>,
     obj: Py<PyAny>,
     allow_pending_pickles: bool,
     allow_tensor_engine_references: bool,
+    allow_mesh_references: bool,
 ) -> PyResult<PicklingState> {
-    let active = ActivePicklingState::new(allow_pending_pickles, allow_tensor_engine_references);
+    let active = ActivePicklingState::new(
+        allow_pending_pickles,
+        allow_tensor_engine_references,
+        allow_mesh_references,
+    );
     let buffer = Py::new(py, Buffer::default())?;
     let _guard = ActivePicklingGuard::enter(active);
 
@@ -629,5 +797,7 @@ pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(pop_tensor_engine_reference, module)?)?;
     module.add_function(wrap_pyfunction!(pop_pending_pickle, module)?)?;
+    module.add_function(wrap_pyfunction!(pop_mesh_reference, module)?)?;
+    module.add_function(wrap_pyfunction!(reserve_mesh_reference, module)?)?;
     Ok(())
 }
