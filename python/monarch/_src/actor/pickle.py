@@ -221,26 +221,3 @@ def unflatten(data: FrozenBuffer | bytes, values: Iterable[Any]) -> Any:
             stack.enter_context(torch.utils._python_dispatch._disable_current_modes())
         up = _Unpickler(data, values)
         return up.load()
-
-
-_allow_pending_pickle: ContextVar[bool] = ContextVar("_allow_pending_pickle")
-
-
-@contextmanager
-def allow_pending_pickle_mesh() -> Generator[None, None, None]:
-    """
-    When this context manager is active, pickling a mesh that hasn't finished
-    initializing will return PendingPickle object to be resolved later. When
-    it is not active, pickling a mesh that hasn't finished initializing will
-    block the tokio runtime until the mesh is initialized.
-    """
-    prev = _allow_pending_pickle.get(False)
-    try:
-        _allow_pending_pickle.set(True)
-        yield
-    finally:
-        _allow_pending_pickle.set(prev)
-
-
-def is_pending_pickle_allowed() -> bool:
-    return _allow_pending_pickle.get(False)
