@@ -13,6 +13,7 @@ import pytest
 from monarch._rust_bindings.monarch_hyperactor.actor import (
     MethodSpecifier,
     PanicFlag,
+    PythonMessage,
     PythonMessageKind,
 )
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
@@ -41,6 +42,29 @@ def _to_frozen_buffer(data: bytes) -> FrozenBuffer:
     buf = Buffer()
     buf.write(data)
     return buf.freeze()
+
+
+def test_python_message_reunion_invariant() -> None:
+    """Decode cannot bypass the out-of-band refs table. The raw payload bytes
+    are not exposed, construction requires refs, and decode() is the only way
+    to read the payload back (functional mesh-ref reunion is covered end-to-end
+    by test_deferred_pickle_characterization)."""
+    # pyrefly: ignore [bad-argument-count]
+    kind = PythonMessageKind.Result(None)
+
+    # A 2-arg construction (missing refs) is rejected at runtime. Routed through
+    # an Any-typed alias so the deliberate error isn't analyzed statically.
+    ctor: Any = PythonMessage
+    with pytest.raises(TypeError):
+        ctor(kind, _to_frozen_buffer(pickle.dumps("x")))
+
+    # pyrefly: ignore [bad-argument-type]
+    msg = PythonMessage(kind, _to_frozen_buffer(pickle.dumps("payload")), [])
+
+    # No raw-bytes accessor, so a bare pickle.loads(msg.message) is impossible;
+    # decode() reunites refs (empty here) and is the only path in.
+    assert not hasattr(msg, "message")
+    assert msg.decode() == "payload"
 
 
 def run_on_tokio(
@@ -195,8 +219,7 @@ async def verify_cast_to_call(
         # pyrefly: ignore [missing-attribute]
         cast_rank = result_kind.rank
         assert cast_rank is not None
-        # pyrefly: ignore [bad-argument-type]
-        root_rank = cast(int, pickle.loads(message.message))
+        root_rank = cast(int, message.decode())
         rcv_ranks.append((cast_rank, root_rank))
     rcv_ranks.sort(key=lambda pair: pair[0])
     recv_cast_ranks, recv_root_ranks = zip(*rcv_ranks)

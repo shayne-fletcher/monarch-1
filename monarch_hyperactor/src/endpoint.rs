@@ -7,6 +7,7 @@
  */
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -30,6 +31,7 @@ use pyo3::types::PyTuple;
 use serde_multipart::Part;
 use typeuri::Named;
 
+use crate::actor::MeshRef;
 use crate::actor::MethodSpecifier;
 use crate::actor::PythonActor;
 use crate::actor::PythonMessage;
@@ -39,7 +41,6 @@ use crate::actor_mesh::AllOrChoose;
 use crate::actor_mesh::PythonActorMesh;
 use crate::actor_mesh::SupervisableActorMesh;
 use crate::actor_mesh::to_all_or_choose;
-use crate::buffers::FrozenBuffer;
 use crate::context::PyInstance;
 use crate::mailbox::EitherPortRef;
 use crate::mailbox::PythonOncePortRef;
@@ -59,7 +60,7 @@ use crate::metrics::ENDPOINT_STREAM_ERROR;
 use crate::metrics::ENDPOINT_STREAM_LATENCY_US_HISTOGRAM;
 use crate::metrics::ENDPOINT_STREAM_THROUGHPUT;
 use crate::pickle::PendingMessage;
-use crate::pickle::unpickle;
+use crate::pickle::PicklingState;
 use crate::pytokio::PyPythonTask;
 use crate::pytokio::PythonTask;
 use crate::runtime::GilSite;
@@ -82,15 +83,6 @@ py_global!(
     "_dispatch_actor_rref"
 );
 py_global!(make_future, "monarch._src.actor.future", "Future");
-
-fn unpickle_from_part(py: Python<'_>, part: Part) -> PyResult<Bound<'_, PyAny>> {
-    unpickle(
-        py,
-        FrozenBuffer {
-            inner: part.into_bytes(),
-        },
-    )
-}
 
 /// The type of endpoint operation being performed.
 ///
@@ -289,7 +281,7 @@ async fn collect_value(
     supervision_monitor: &Option<Arc<dyn Supervisable>>,
     instance: &Instance<PythonActor>,
     qualified_endpoint_name: &Option<String>,
-) -> PyResult<(Part, Option<usize>)> {
+) -> PyResult<(Part, Vec<MeshRef>, Option<usize>)> {
     enum RaceResult {
         Message(Box<PythonMessage>),
         SupervisionError(PyErr),
@@ -327,12 +319,20 @@ async fn collect_value(
 
     match race_result {
         RaceResult::Message(boxed) => {
-            let PythonMessage { kind, message, .. } = *boxed;
+            let PythonMessage {
+                kind,
+                message,
+                refs,
+            } = *boxed;
             match kind {
-                PythonMessageKind::Result { rank, .. } => Ok((message, rank)),
+                PythonMessageKind::Result { rank, .. } => Ok((message, refs, rank)),
                 PythonMessageKind::Exception { .. } => {
                     monarch_with_gil_blocking(GilSite::Traceback, |py| {
-                        Err(PyErr::from_value(unpickle_from_part(py, message)?))
+                        let mesh_references: VecDeque<Option<MeshRef>> =
+                            refs.into_iter().map(Some).collect();
+                        let mut state =
+                            PicklingState::from_parts(message, VecDeque::new(), mesh_references);
+                        Err(PyErr::from_value(state.unpickle(py)?.into_bound(py)))
                     })
                 }
                 other => Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -412,27 +412,64 @@ async fn collect_valuemesh(
                 ))
             })?;
             monarch_with_gil_blocking(GilSite::ReplyConvert, |py| {
-                Ok(PyValueMesh::build_from_parts(
-                    &extent,
-                    overlay.runs().try_fold(
-                        Vec::with_capacity(expected_count),
-                        |mut parts, (range, payload)| match payload {
+                // Out-of-band mesh refs reunite only while the `PicklingState` is
+                // live, i.e. during decode, so a ref-carrying response must be
+                // decoded here (eagerly, at accumulation): a lazy decode on access
+                // would have no state to reunite against, the REFS-1 failure. But
+                // decoding *every* response here would revert D96180139, which made
+                // valuemesh values unpickle lazily on access so a large
+                // OnceBuffer-accumulated `.call()` does not pay one big unpickle
+                // burst at the end of collection.
+                //
+                // Reconcile the two by gating on refs. A `.call()` fans one
+                // endpoint over the mesh, so the batch is uniform: either every
+                // response carries refs (the endpoint returns a mesh, the minority)
+                // or none does (plain values, the common case). With no refs we
+                // keep the raw parts and let them unpickle on access (D96180139,
+                // preserved); only with refs present do we decode eagerly to
+                // reunite them.
+                let has_refs = overlay.runs().any(|(_, payload)| {
+                    let (PythonResponseMessage::Result { refs, .. }
+                    | PythonResponseMessage::Exception { refs, .. }) = payload;
+                    !refs.is_empty()
+                });
+
+                if !has_refs {
+                    let mut parts = Vec::with_capacity(expected_count);
+                    for (range, payload) in overlay.runs() {
+                        match payload {
                             PythonResponseMessage::Result { part, .. } => {
                                 parts.extend(range.clone().map(|_| part.clone()));
-                                Ok(parts)
                             }
-                            PythonResponseMessage::Exception { part, .. } => {
+                            PythonResponseMessage::Exception { .. } => {
                                 record_guard.mark_error();
-                                monarch_with_gil_blocking(GilSite::Traceback, |py| {
-                                    Err(PyErr::from_value(unpickle_from_part(py, part.clone())?))
-                                })
+                                return Err(PyErr::from_value(payload.decode(py)?.into_bound(py)));
                             }
-                        },
-                    )?,
-                )?
-                .into_pyobject(py)?
-                .into_any()
-                .unbind())
+                        }
+                    }
+                    return Ok(PyValueMesh::build_from_parts(&extent, parts)?
+                        .into_pyobject(py)?
+                        .into_any()
+                        .unbind());
+                }
+
+                let mut objects: Vec<Py<PyAny>> = Vec::with_capacity(expected_count);
+                for (range, payload) in overlay.runs() {
+                    match payload {
+                        PythonResponseMessage::Result { .. } => {
+                            let obj = payload.decode(py)?;
+                            objects.extend(range.clone().map(|_| obj.clone_ref(py)));
+                        }
+                        PythonResponseMessage::Exception { .. } => {
+                            record_guard.mark_error();
+                            return Err(PyErr::from_value(payload.decode(py)?.into_bound(py)));
+                        }
+                    }
+                }
+                Ok(PyValueMesh::build_from_objects(&extent, objects)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
             })
         }
         RaceResult::RecvError(e) => {
@@ -472,8 +509,12 @@ fn value_collector(
         )
         .await
         {
-            Ok((message, _)) => monarch_with_gil_blocking(GilSite::ReplyConvert, |py| {
-                unpickle_from_part(py, message).map(|obj| obj.unbind())
+            Ok((message, refs, _)) => monarch_with_gil_blocking(GilSite::ReplyConvert, |py| {
+                let mesh_references: VecDeque<Option<MeshRef>> =
+                    refs.into_iter().map(Some).collect();
+                let mut state =
+                    PicklingState::from_parts(message, VecDeque::new(), mesh_references);
+                state.unpickle(py)
             }),
             Err(e) => {
                 record_guard.mark_error();
@@ -540,8 +581,12 @@ impl PyValueStream {
             )
             .await
             {
-                Ok((message, _)) => monarch_with_gil_blocking(GilSite::ReplyConvert, |py| {
-                    unpickle_from_part(py, message).map(|obj| obj.unbind())
+                Ok((message, refs, _)) => monarch_with_gil_blocking(GilSite::ReplyConvert, |py| {
+                    let mesh_references: VecDeque<Option<MeshRef>> =
+                        refs.into_iter().map(Some).collect();
+                    let mut state =
+                        PicklingState::from_parts(message, VecDeque::new(), mesh_references);
+                    state.unpickle(py)
                 }),
                 Err(e) => {
                     record_guard.mark_error();

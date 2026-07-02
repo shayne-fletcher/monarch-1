@@ -171,3 +171,19 @@ def reserve_mesh_reference(handle: Shared[Any]) -> bool:
     is active), False otherwise.
     """
     ...
+
+def _get_pending_reserve_count() -> int:
+    """Test helper: number of pending-mesh slots reserved (send side)."""
+    ...
+
+def _reset_pending_reserve_count() -> None:
+    """Test helper: reset the pending-reserve counter to zero."""
+    ...
+
+def _get_mesh_pop_count() -> int:
+    """Test helper: number of mesh references reunited (decode side)."""
+    ...
+
+def _reset_mesh_pop_count() -> None:
+    """Test helper: reset the mesh-pop counter to zero."""
+    ...
