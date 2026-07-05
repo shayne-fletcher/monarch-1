@@ -46,7 +46,7 @@ erased-serde = "0.4.10"
 fastrand = "2.4.1"
 futures = { version = "0.3.31", features = ["async-await", "compat"] }
 hostname = "0.4.2"
-humantime = "2.1"
+humantime = "2.4.0"
 hyperactor_config = { version = "0.0.0", path = "../hyperactor_config" }
 hyperactor_macros = { version = "0.0.0", path = "../hyperactor_macros" }
 hyperactor_telemetry = { version = "0.0.0", path = "../hyperactor_telemetry" }
