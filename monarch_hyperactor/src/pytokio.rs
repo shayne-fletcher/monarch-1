@@ -902,10 +902,12 @@ impl PyShared {
 
     /// Pickle protocol support for PyShared.
     ///
-    /// This implements the pickle reduce protocol:
-    /// - If the shared is finished, pickle as (Shared.from_value, (value,))
-    /// - If pending pickles are allowed, defer pickling and return (pop_pending_pickle, ())
-    /// - Otherwise, block on the shared and pickle as (Shared.from_value, (value,))
+    /// Delegates to `reduce_shared`: a finished shared pickles as
+    /// `(Shared.from_value, (value,))`; a pending one blocks on the shared and
+    /// then pickles the resolved value. Mesh references do not take this generic
+    /// path -- their own reducers record a `MeshRef` in the message's
+    /// out-of-band `refs` table, a pending mesh's slot filled sender-side (by
+    /// awaiting the handle) before the send.
     fn __reduce__<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
