@@ -1183,25 +1183,7 @@ class PortReceiver(Generic[R]):
             error.endpoint = self._endpoint
 
     async def _recv(self) -> R:
-        awaitable = self._receiver.recv_task()
-        if self._monitor is None:
-            result = await awaitable
-        else:
-            try:
-                result, i = await PythonTask.select_one(
-                    # type: ignore
-                    [self._monitor.task(), awaitable]
-                )
-            except Exception as e:
-                self._tag_supervision_error(e)
-                raise e
-            if i == 0:
-                # pyrefly: ignore [bad-argument-type]
-                self._tag_supervision_error(result)
-                # pyrefly: ignore [bad-raise]
-                raise result
-        # pyrefly: ignore [bad-argument-type]
-        return self._process(result)
+        return self._process(await self._receiver.recv_task())
 
     def _process(self, msg: PythonMessage) -> R:
         payload = cast(R, msg.decode())
