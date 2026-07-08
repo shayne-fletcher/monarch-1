@@ -26,6 +26,10 @@ Actors:
     so a held invocation is never released through a second endpoint call
     (that would deadlock the dispatch loop); the test asserts
     ``count == 1`` then tears the proc down.
+  - ``ConcurrentActor`` (queue dispatch): ``hold`` uses
+    ``@concurrent_endpoint``, so multiple held invocations overlap and
+    ``control`` can release them while they wait. This covers the
+    queue-dispatch-compatible pattern used by resource managers.
 
 Each proc pins its dispatch mode explicitly via a ``bootstrap`` callable
 that sets ``MONARCH_ACTOR_QUEUE_DISPATCH`` and calls
@@ -41,15 +45,15 @@ Stdin command protocol, one command per line::
     RELEASE <actor> <id>  let a held invocation return; prints EXEC_ACK release <id>
     RAISE <actor> <id>    make a held invocation raise; prints EXEC_ACK raise <id>
 
-``<actor>`` is ``busy`` or ``queue``. Each ``hold`` signals "entered"
-from inside the handler body -- after the framework's ``_execution_start``
-has recorded the invocation and before the handler blocks -- so the
-signal means "mesh-admin now reports this invocation", not merely "user
-code started". The signal travels over a monarch ``Port`` rather than
-handler stdout: a spawned proc's stdout reaches the client on a
-multi-second aggregation window, too coarse for a handshake. The main
-task receives on the port and echoes ``EXEC_ENTERED <id>`` to its own
-unbuffered stdout.
+``<actor>`` is ``busy``, ``queue``, or ``concurrent``. Each ``hold`` signals
+"entered" from inside the handler body -- after the framework's
+``_execution_start`` has recorded the invocation and before the handler
+blocks -- so the signal means "mesh-admin now reports this invocation", not
+merely "user code started". The signal travels over a monarch ``Port`` rather
+than handler stdout: a spawned proc's stdout reaches the client on a
+multi-second aggregation window, too coarse for a handshake. The main task
+receives on the port and echoes ``EXEC_ENTERED <id>`` to its own unbuffered
+stdout.
 """
 
 import asyncio
@@ -62,7 +66,7 @@ from monarch._rust_bindings.monarch_hyperactor.config import (  # @manual=//mona
 )
 from monarch._src.actor.actor_mesh import Channel, Port, PortReceiver
 from monarch._src.actor.telemetry import TracingForwarder
-from monarch.actor import Actor, context, endpoint
+from monarch.actor import Actor, concurrent_endpoint, context, endpoint
 from monarch.job import ProcessJob
 
 logger: logging.Logger = logging.getLogger("execution_workload")
@@ -159,6 +163,39 @@ class QueueActor(Actor):
         return str(context().actor_instance.actor_id)
 
 
+class ConcurrentActor(Actor):
+    """Queue-dispatch actor whose held work runs through @concurrent_endpoint."""
+
+    def __init__(self) -> None:
+        self._events: dict[str, asyncio.Event] = {}
+        self._raise: dict[str, bool] = {}
+
+    @concurrent_endpoint
+    async def hold(self, id: str, entered: "Port[str]") -> None:
+        self._events[id] = asyncio.Event()
+        self._raise[id] = False
+        logger.info("concurrent hold %s", id)
+        entered.send(id)
+        await self._events[id].wait()
+        if self._raise[id]:
+            raise RuntimeError("requested")
+
+    @endpoint
+    async def control(self, id: str, op: str) -> None:
+        logger.info("concurrent control %s %s", op, id)
+        if op == "release":
+            self._events[id].set()
+        elif op == "raise":
+            self._raise[id] = True
+            self._events[id].set()
+        else:
+            raise ValueError(f"unknown op: {op}")
+
+    @endpoint
+    async def whoami(self) -> str:
+        return str(context().actor_instance.actor_id)
+
+
 async def _stdin_reader() -> asyncio.StreamReader:
     """An asyncio reader over this process's stdin."""
     loop = asyncio.get_running_loop()
@@ -201,16 +238,21 @@ async def async_main() -> None:
     queue_proc = host.spawn_procs(
         name="execution_queue", bootstrap=_enable_queue_dispatch
     )
+    concurrent_proc = host.spawn_procs(
+        name="execution_concurrent", bootstrap=_enable_queue_dispatch
+    )
 
     busy = busy_proc.spawn("busy_actor", BusyActor)
     idle = idle_proc.spawn("idle_actor", BusyActor)
     queue = queue_proc.spawn("queue_actor", QueueActor)
+    concurrent = concurrent_proc.spawn("concurrent_actor", ConcurrentActor)
 
-    actors = {"busy": busy, "queue": queue}
+    actors = {"busy": busy, "queue": queue, "concurrent": concurrent}
 
     busy_ref = await busy.whoami.call_one()
     idle_ref = await idle.whoami.call_one()
     queue_ref = await queue.whoami.call_one()
+    concurrent_ref = await concurrent.whoami.call_one()
 
     # Held invocations send their id over this port from inside the handler
     # body; a background task drains it and echoes EXEC_ENTERED to stdout.
@@ -229,6 +271,7 @@ async def async_main() -> None:
     print(f"  - Busy actor:  {busy_ref}", flush=True)
     print(f"  - Idle actor:  {idle_ref}", flush=True)
     print(f"  - Queue actor: {queue_ref}", flush=True)
+    print(f"  - Concurrent actor: {concurrent_ref}", flush=True)
 
     reader = await _stdin_reader()
     # In-flight held invocations, tracked so they can be cancelled at
@@ -270,6 +313,7 @@ async def async_main() -> None:
         await busy_proc.stop()
         await idle_proc.stop()
         await queue_proc.stop()
+        await concurrent_proc.stop()
 
 
 def main() -> None:

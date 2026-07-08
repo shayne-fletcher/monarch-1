@@ -18,9 +18,9 @@
 //! ordering, truncation, the `0` sentinel, idempotent `finish`) and the
 //! DTO json-shape tests, this proves the *real* `_Actor.handle` bracket
 //! increments the `execution` surface on entry and decrements on exit
-//! (completion and exception), across direct AND queue dispatch, visible
-//! end-to-end through `GET /v1/{actor}` and the typed
-//! `NodeProperties::Actor { execution: Some(_), .. }`.
+//! (completion and exception), across direct dispatch, queue dispatch,
+//! and `@concurrent_endpoint`, visible end-to-end through
+//! `GET /v1/{actor}` and the typed actor node payload.
 //!
 //! Cancellation is actor-fatal in the current runtime (`CancelledError`
 //! is a `BaseException` -> the `except BaseException` arm re-raises -> a
@@ -40,6 +40,9 @@
 //!     -> count drops back to the idle shape.
 //!   - queue dispatch: one held invocation -> `active_count` 1 (the
 //!     bracket fires in queue mode too).
+//!   - concurrent endpoint under queue dispatch: two held `hold`s overlap,
+//!     aggregate to one row with `active_count == 2`, and can be released by
+//!     a later control message on the same actor without deadlocking.
 //!   - idle sibling: `Some` with `active_count == 0` (EX-1: a supported
 //!     actor that is idle is `Some`, not `None`).
 
@@ -161,6 +164,7 @@ async fn run_inner(fixture: &WorkloadFixture) {
     let busy = find_actor_by_label(fixture, "busy_actor").await;
     let idle = find_actor_by_label(fixture, "idle_actor").await;
     let queue = find_actor_by_label(fixture, "queue_actor").await;
+    let concurrent = find_actor_by_label(fixture, "concurrent_actor").await;
 
     // --- Direct dispatch: one held invocation -> count 1. ---
     fixture
@@ -351,6 +355,83 @@ async fn run_inner(fixture: &WorkloadFixture) {
         exec.active_handlers[0].name, "hold",
         "execution: queue-dispatch active row name must be `hold`; got {exec:?}",
     );
+
+    // --- @concurrent_endpoint under queue dispatch: overlap + release. ---
+    // This is the queue-compatible resource-manager pattern: a held endpoint
+    // does not monopolize the actor dispatch loop, so a later control message
+    // can run on the same actor and release it.
+    fixture
+        .send_command("HOLD concurrent ca")
+        .await
+        .expect("execution: send HOLD concurrent ca");
+    fixture
+        .wait_for_stdout("EXEC_ENTERED ca", SENTINEL_TIMEOUT)
+        .await
+        .expect("execution: wait EXEC_ENTERED ca");
+    fixture
+        .send_command("HOLD concurrent cb")
+        .await
+        .expect("execution: send HOLD concurrent cb");
+    fixture
+        .wait_for_stdout("EXEC_ENTERED cb", SENTINEL_TIMEOUT)
+        .await
+        .expect("execution: wait EXEC_ENTERED cb");
+
+    let exec = execution_of(fixture, &concurrent).await;
+    assert_eq!(
+        exec.active_count, 2,
+        "execution: two held @concurrent_endpoint invocations must report \
+         active_count == 2; got {exec:?}",
+    );
+    assert_eq!(
+        exec.active_handlers.len(),
+        1,
+        "execution: two @concurrent_endpoint invocations of the SAME endpoint \
+         must aggregate into ONE row; got {exec:?}",
+    );
+    assert_eq!(
+        exec.active_handlers[0].name, "hold",
+        "execution: the @concurrent_endpoint active row name must be `hold`; got {exec:?}",
+    );
+    assert_eq!(
+        exec.active_handlers[0].active_count, 2,
+        "execution: the @concurrent_endpoint aggregated row active_count must be 2; got {exec:?}",
+    );
+
+    fixture
+        .send_command("RELEASE concurrent ca")
+        .await
+        .expect("execution: send RELEASE concurrent ca");
+    fixture
+        .wait_for_stdout("EXEC_ACK release ca", SENTINEL_TIMEOUT)
+        .await
+        .expect("execution: wait EXEC_ACK release ca");
+    let exec = poll_until(fixture, &concurrent, |e| e.active_count == 1).await;
+    assert_eq!(
+        exec.active_count, 1,
+        "execution: after releasing one @concurrent_endpoint invocation, \
+         count must drop to 1; got {exec:?}",
+    );
+    assert_eq!(
+        exec.active_handlers.len(),
+        1,
+        "execution: one @concurrent_endpoint invocation should remain in one row; got {exec:?}",
+    );
+    assert_eq!(
+        exec.active_handlers[0].active_count, 1,
+        "execution: the remaining @concurrent_endpoint row active_count must be 1; got {exec:?}",
+    );
+
+    fixture
+        .send_command("RELEASE concurrent cb")
+        .await
+        .expect("execution: send RELEASE concurrent cb");
+    fixture
+        .wait_for_stdout("EXEC_ACK release cb", SENTINEL_TIMEOUT)
+        .await
+        .expect("execution: wait EXEC_ACK release cb");
+    let exec = poll_until(fixture, &concurrent, |e| e.active_count == 0).await;
+    assert_idle_shape(&exec, "@concurrent_endpoint post-release clear");
 
     // --- Idle sibling: Some with count 0 (never invoked). ---
     let exec = execution_of(fixture, &idle).await;
