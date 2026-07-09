@@ -81,9 +81,9 @@
 //!
 //! TLS and transport invariants:
 //!
-//! - **TUI-T1 (tls-auto-detect):** `client::build_client` probes
-//!   for TLS material in priority order: explicit CLI paths →
-//!   `try_tls_pem_bundle` → plain HTTP fallback.
+//! - **TUI-T1 (tls-auto-detect):** `client::build_client` selects the
+//!   transport in priority order: `--plaintext` (force plain HTTP) →
+//!   explicit CLI paths → `try_tls_pem_bundle` → plain HTTP fallback.
 //! - **TUI-T2 (prebuilt-client):** `App::new` receives a pre-built
 //!   `reqwest::Client` and `base_url` (including scheme). TLS
 //!   configuration is external to the app state.
@@ -243,6 +243,8 @@ pub struct TuiConfig {
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
     pub diagnose: bool,
+    /// Disable TLS and use plain HTTP, overriding TLS auto-detection.
+    pub plaintext: bool,
 }
 
 // Terminal setup / teardown
