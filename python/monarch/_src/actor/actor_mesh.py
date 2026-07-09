@@ -67,12 +67,9 @@ from monarch._rust_bindings.monarch_hyperactor.pickle import (
     PicklingState,
 )
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorAddr
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.shape import Point as HyPoint, Shape
-from monarch._rust_bindings.monarch_hyperactor.supervision import (
-    MeshFailure,
-    SupervisionError,
-)
+from monarch._rust_bindings.monarch_hyperactor.supervision import MeshFailure
 from monarch._src.actor import config
 from monarch._src.actor.debugger.pdb_wrapper import PdbWrapper
 from monarch._src.actor.endpoint import (
@@ -1161,26 +1158,15 @@ class PortReceiver(Generic[R]):
     Receiver for messages sent through a communication channel.
 
     Handles receiving R-typed objects sent from a corresponding Port.
-    Asynchronously message reception with optional supervision
-    monitoring for error handling.
     """
 
     def __init__(
         self,
         mailbox: Mailbox,
         receiver: "PortReceiverBase",
-        monitor: "Optional[Shared[Exception]]" = None,
-        endpoint: Optional[str] = None,
     ) -> None:
         self._mailbox: Mailbox = mailbox
-        self._monitor = monitor
         self._receiver = receiver
-        self._endpoint = endpoint
-
-    def _tag_supervision_error(self, error: Exception) -> None:
-        """Tag supervision error with endpoint name if available."""
-        if self._endpoint is not None and isinstance(error, SupervisionError):
-            error.endpoint = self._endpoint
 
     async def _recv(self) -> R:
         return self._process(await self._receiver.recv_task())
@@ -1194,7 +1180,6 @@ class PortReceiver(Generic[R]):
             # pyrefly: ignore [invalid-pattern]
             case PythonMessageKind.Exception():
                 e = cast(Exception, payload)
-                self._tag_supervision_error(e)
                 raise e
             case _:
                 raise ValueError(f"Unexpected message kind: {msg.kind}")
@@ -1203,25 +1188,7 @@ class PortReceiver(Generic[R]):
         return Future(coro=self._recv())
 
     def ranked(self) -> "RankedPortReceiver[R]":
-        return RankedPortReceiver[R](
-            self._mailbox, self._receiver, self._monitor, self._endpoint
-        )
-
-    def _attach_supervision(
-        self, monitor: "Optional[Shared[Exception]]", endpoint: str
-    ) -> None:
-        """
-        Attach supervision monitoring to this port receiver.
-
-        Enables the receiver to detect and report errors on any supervision events.
-
-        Args:
-            monitor: Shared exception monitor that signals supervision errors
-                from the actor mesh. None if supervision is not enabled.
-            endpoint: Full endpoint name
-        """
-        self._monitor = monitor
-        self._endpoint = endpoint
+        return RankedPortReceiver[R](self._mailbox, self._receiver)
 
 
 class RankedPortReceiver(PortReceiver[Tuple[int, R]]):
