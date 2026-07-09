@@ -14,17 +14,21 @@
 //!
 //! Admin handle resolution (`mast_conda:///` and bare `host:port`) is
 //! performed in the binary via `AdminHandle::parse` before calling
-//! this library. By the time [`build_client`] is called, `addr` is
-//! always a concrete `https://host:port` URL.
+//! this library. By the time [`build_client`] is called, `addr` is a
+//! concrete URL: `https://host:port`, or `http://host:port` for an
+//! explicit `http` scheme.
 //!
 //! # Address handling
 //!
 //! - `--addr` may be `host:port` (no scheme) or an explicit
 //!   `http://...` / `https://...`.
-//! - If a scheme is provided, it is treated as authoritative.
+//! - An explicit `https://` uses TLS; an explicit `http://` is a hint
+//!   that auto-detected TLS material can still upgrade. `--plaintext`
+//!   forces plain HTTP unconditionally.
 //!
 //! # TLS configuration (highest priority first)
 //!
+//! 0. `--plaintext`: disable TLS entirely and use plain HTTP.
 //! 1. Explicit CLI paths: `--tls-ca` (required to enable TLS), with
 //!    optional `--tls-cert` + `--tls-key` for mutual TLS.
 //! 2. Auto-detection via [`hyperactor::channel::try_tls_pem_bundle`],
@@ -152,6 +156,7 @@ fn add_tls_from_bundle(
 /// is provided, that scheme is honored.
 ///
 /// TLS configuration is applied in priority order:
+/// 0. If `config.plaintext` is set, disable TLS and use plain HTTP.
 /// 1. If `--tls-ca` is provided, attempt to load the CA (and
 ///    optionally `--tls-cert` + `--tls-key` for a client identity)
 ///    from those paths.
@@ -170,10 +175,12 @@ pub(crate) fn build_client(config: &TuiConfig) -> (String, reqwest::Client) {
     // TP-7: no client-level timeout. All timeout enforcement is
     // per-operation via tokio::time::timeout at the call boundary.
     let mut builder = reqwest::Client::builder();
-    let mut use_tls = explicit_scheme == Some("https");
+    let mut use_tls = !config.plaintext && explicit_scheme == Some("https");
 
-    // 1. Explicit CLI cert paths.
-    if let Some(ca_path) = &config.tls_ca {
+    // 1. Explicit CLI cert paths (skipped when --plaintext).
+    if !config.plaintext
+        && let Some(ca_path) = &config.tls_ca
+    {
         let (b, ok) = add_tls_from_paths(
             builder,
             ca_path,
@@ -187,7 +194,8 @@ pub(crate) fn build_client(config: &TuiConfig) -> (String, reqwest::Client) {
     // 2. Auto-detect (when no CLI certs were provided).
     // This runs even with an explicit https:// scheme, so the client
     // picks up the mTLS identity from Meta well-known paths.
-    if config.tls_ca.is_none()
+    if !config.plaintext
+        && config.tls_ca.is_none()
         && let Some(bundle) = hyperactor::channel::try_tls_pem_bundle()
     {
         let (b, ok) = add_tls_from_bundle(builder, &bundle);
@@ -200,4 +208,92 @@ pub(crate) fn build_client(config: &TuiConfig) -> (String, reqwest::Client) {
     let client = builder.build().unwrap_or_else(|_| reqwest::Client::new());
 
     (base_url, client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A valid self-signed CA PEM, copied from hyperactor's test suite.
+    /// `reqwest::Certificate::from_pem` parses it regardless of expiry, so
+    /// it exercises the real "CA installs, TLS enabled" path.
+    const TEST_CA_CERT: &str = "-----BEGIN CERTIFICATE-----
+MIIDBTCCAe2gAwIBAgIUaGNmboiIosG+8Up0vgDr/+cg+2IwDQYJKoZIhvcNAQEL
+BQAwEjEQMA4GA1UEAwwHVGVzdCBDQTAeFw0yNjAxMjgxNzA4MzlaFw0yNzAxMjgx
+NzA4MzlaMBIxEDAOBgNVBAMMB1Rlc3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IB
+DwAwggEKAoIBAQC9RBoMYXCajklswt8Vi1JI1lEYzic0WNOmz45vG/7H6jTWkgL3
+K5Ri+Seg3MobDNc48YHWXYm4hP9wCzkx8ih3ntT5XiY1My/G3jLUuoIEE9pF/BoJ
+YQwZVoPNFhA9WhXNRsINf1cXFf8NzRfXpxBfKWtQJxYXU4JiDBQ6rLnQQABo8JmQ
+vYFhJbBaYip5jTSiVNn7mB1zNr5jsVxuoSF53Pb7xQ76bwBdOq4zd6PSxL5/lr4G
+cHSoxwZQdZMG7PL6hbxDQ2S2YI2lYVET1zwc2WPKCfjbEXBC/jzx828CInQtuksk
+18gJt6xHkTFEA8CSA29GM3lejnwYWf51xyyBAgMBAAGjUzBRMB0GA1UdDgQWBBRX
+cbxSZ70NsUkAS3Hhy6irugywJDAfBgNVHSMEGDAWgBRXcbxSZ70NsUkAS3Hhy6ir
+ugywJDAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQA7aAFfyW67
+Z+uGSVYhpsT/uH/3Z3nr7X1smTz5CGEfq2czEcTC7gbYI2l8GZ47GPfnAvHTBZVm
+V/XncBCsj7/thOh2jYEHFyCbPckoaSCRyCOnK7LPUlr4HN5uP9EFe45qBLCJDEoY
+GTTw7MtzwdovfjchNfKQCTtkBJCXQ95WLCf6UOh02Sn28UTlgfXzF0X0FrcWqWa3
+uJZd4XOo4O6hKKlHaBaQPiEr++1xc3SWPV7jZHbckI/vKBnDdEZ9JQX5fFZuypUI
+sgomYHxvxrU2hWx+7k53CRdjfaIvT9Ie44z9sSdsU/+blw2S8f/ZTmuECoIAAXYO
+0qpzlxZMdr7T
+-----END CERTIFICATE-----
+";
+
+    fn config(addr: &str, plaintext: bool, tls_ca: Option<String>) -> TuiConfig {
+        TuiConfig {
+            addr: addr.to_string(),
+            refresh_ms: 2000,
+            theme: crate::ThemeName::Nord,
+            lang: crate::theme::LangName::En,
+            tls_ca,
+            tls_cert: None,
+            tls_key: None,
+            diagnose: false,
+            plaintext,
+        }
+    }
+
+    #[test]
+    fn plaintext_forces_http_over_https_scheme() {
+        // upholds: TUI-T1 -- --plaintext is the top-priority transport override.
+        let (base_url, _) = build_client(&config("https://host:1729", true, None));
+        assert!(
+            base_url.starts_with("http://"),
+            "plaintext must force plain HTTP even for an https:// addr, got {base_url}"
+        );
+    }
+
+    #[test]
+    fn without_plaintext_https_scheme_stays_https() {
+        // negative: default posture is unchanged when the flag is off.
+        let (base_url, _) = build_client(&config("https://host:1729", false, None));
+        assert!(
+            base_url.starts_with("https://"),
+            "https:// must stay TLS when --plaintext is unset, got {base_url}"
+        );
+    }
+
+    #[test]
+    fn plaintext_beats_a_valid_explicit_ca() {
+        // A genuinely loadable CA sets use_tls without the guard, so a bogus
+        // path would pass vacuously; the CA must actually parse to prove
+        // --plaintext wins.
+        let path =
+            std::env::temp_dir().join(format!("tui_admin_test_ca_{}.pem", std::process::id()));
+        std::fs::write(&path, TEST_CA_CERT).expect("write temp CA");
+        let ca = path.to_string_lossy().into_owned();
+
+        let (tls_url, _) = build_client(&config("host:1729", false, Some(ca.clone())));
+        assert!(
+            tls_url.starts_with("https://"),
+            "a valid --tls-ca should enable TLS, got {tls_url}"
+        );
+
+        let (plain_url, _) = build_client(&config("host:1729", true, Some(ca)));
+        assert!(
+            plain_url.starts_with("http://"),
+            "plaintext must win over a valid --tls-ca, got {plain_url}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
 }
