@@ -35,6 +35,7 @@ fn test_policy() -> TuiTimeoutPolicy {
         tls_cert: None,
         tls_key: None,
         diagnose: false,
+        plaintext: false,
     })
 }
 
