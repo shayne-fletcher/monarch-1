@@ -43,11 +43,17 @@
 //!   - concurrent endpoint under queue dispatch: two held `hold`s overlap,
 //!     aggregate to one row with `active_count == 2`, and can be released by
 //!     a later control message on the same actor without deadlocking.
+//!   - queue-dispatch deadlock: a blocking plain `@endpoint` monopolizes the
+//!     Python dispatch loop, so a later release can never run; the API surfaces
+//!     the wedge as `execution.active_count` pinned at 1 on the same invocation
+//!     (the stuck release is not introspectable -- `queue_depth` is the Rust
+//!     work queue, which drains before the handler runs).
 //!   - idle sibling: `Some` with `active_count == 0` (EX-1: a supported
 //!     actor that is idle is `Some`, not `None`).
 
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
 
 use hyperactor_mesh::introspect::Execution;
 use hyperactor_mesh::introspect::NodePayload;
@@ -64,6 +70,11 @@ const SENTINEL_TIMEOUT: Duration = Duration::from_secs(30);
 /// so we poll rather than assume immediate.
 const DECREMENT_POLL_TIMEOUT: Duration = Duration::from_secs(15);
 const DECREMENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// A wedged queue-dispatch handler has no positive "still stuck" sentinel, so
+/// the deadlock proof bounds a negative window: for this whole span the joint
+/// snapshot must stay wedged and the release ACK must never arrive.
+const DEADLOCK_NEGATIVE_TIMEOUT: Duration = Duration::from_secs(5);
+const DEADLOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn enc(s: &str) -> String {
     urlencoding::encode(s).into_owned()
@@ -140,6 +151,50 @@ async fn poll_until(
     }
 }
 
+/// Assert the wedged handler stays in-flight for the whole
+/// `DEADLOCK_NEGATIVE_TIMEOUT` window: every snapshot must show exactly one
+/// in-flight `handler` row (`active_count == 1`) that is the SAME invocation
+/// (`oldest_since == started` -- it was never released and re-held). A plain
+/// poll-until-wedged would pass on the first match and prove nothing about the
+/// handler *never completing*; the deadlock proof is that no snapshot in the
+/// window ever recovers. `queue_depth` is deliberately NOT checked: it is the
+/// Rust work queue, drained before the handler runs, so a Python-side dispatch
+/// wedge leaves it at 0 (see the deadlock scenario).
+async fn assert_stays_wedged(
+    fixture: &WorkloadFixture,
+    actor_ref: &str,
+    handler: &str,
+    started: SystemTime,
+) {
+    let deadline = Instant::now() + DEADLOCK_NEGATIVE_TIMEOUT;
+    loop {
+        let exec = execution_of(fixture, actor_ref).await;
+        assert_eq!(
+            exec.active_count, 1,
+            "deadlock: the wedged handler must stay in-flight (active_count == 1) for the whole \
+             window; completion would drop it. got {exec:?}",
+        );
+        assert_eq!(
+            exec.active_handlers.len(),
+            1,
+            "deadlock: exactly one stuck handler row expected; got {exec:?}",
+        );
+        assert_eq!(
+            exec.active_handlers[0].name, handler,
+            "deadlock: the stuck row must be `{handler}`; got {exec:?}",
+        );
+        assert_eq!(
+            exec.active_handlers[0].oldest_since, started,
+            "deadlock: the SAME invocation must stay stuck (oldest_since unchanged) -- a release \
+             would have dropped it, and a new hold would restart the clock; got {exec:?}",
+        );
+        if Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(DEADLOCK_POLL_INTERVAL).await;
+    }
+}
+
 /// Assert the supported-but-idle shape: `Some` with no in-flight work.
 fn assert_idle_shape(exec: &Execution, ctx: &str) {
     assert_eq!(
@@ -165,6 +220,7 @@ async fn run_inner(fixture: &WorkloadFixture) {
     let idle = find_actor_by_label(fixture, "idle_actor").await;
     let queue = find_actor_by_label(fixture, "queue_actor").await;
     let concurrent = find_actor_by_label(fixture, "concurrent_actor").await;
+    let deadlock = find_actor_by_label(fixture, "deadlock_actor").await;
 
     // --- Direct dispatch: one held invocation -> count 1. ---
     fixture
@@ -432,6 +488,78 @@ async fn run_inner(fixture: &WorkloadFixture) {
         .expect("execution: wait EXEC_ACK release cb");
     let exec = poll_until(fixture, &concurrent, |e| e.active_count == 0).await;
     assert_idle_shape(&exec, "@concurrent_endpoint post-release clear");
+
+    // --- Queue-dispatch DEADLOCK: the API surfaces a wedged actor. ---
+    // A plain @endpoint under queue dispatch monopolizes the Python dispatch
+    // loop: `hold` blocks, so the later `control` release is stuck behind it in
+    // the per-actor dispatch queue and can never run. This is the failure the
+    // airport turnaround demo hits under the default (queue) dispatch.
+    //
+    // The API-visible signal is `execution.active_count`: the wedged `hold`
+    // never completes, so its bracket never decrements and active_count stays
+    // pinned at 1 on the same invocation -- even after a release that would free
+    // a healthy actor. `queue_depth` does NOT show this: it is the Rust actor
+    // work queue, drained before the handler runs (in queue mode the message is
+    // handed to a Python-side channel and the Rust loop returns), so it sits at
+    // 0; the stuck release waits in the Python dispatch queue, which
+    // introspection does not expose. (Contrast: `concurrent_actor` above, same
+    // queue dispatch, releases cleanly and drops to 0 -- so the signal is the
+    // wedge, not queue dispatch per se.)
+    //
+    // Last driven block: the command loop wedges on the inline `control.call_one`
+    // after the release. The admin server is Rust-served, so `/v1` stays live.
+    fixture
+        .send_command("HOLD deadlock d")
+        .await
+        .expect("deadlock: send HOLD deadlock d");
+    fixture
+        .wait_for_stdout("EXEC_ENTERED d", SENTINEL_TIMEOUT)
+        .await
+        .expect("deadlock: wait EXEC_ENTERED d");
+
+    let exec = execution_of(fixture, &deadlock).await;
+    assert_eq!(
+        exec.active_count, 1,
+        "deadlock: held queue-dispatch invocation must report active_count == 1; got {exec:?}",
+    );
+    assert_eq!(
+        exec.active_handlers[0].name, "hold",
+        "deadlock: the stuck row name must be `hold`; got {exec:?}",
+    );
+    // Pin the exact invocation so the sustained check proves the SAME hold stays
+    // stuck (not released-and-re-held).
+    let started = exec.active_handlers[0].oldest_since;
+
+    // Send the release and positively confirm the workload dispatched it: the
+    // command loop prints `EXEC_SENDING release d` immediately before the
+    // (wedging) `control.call_one`, so a missing ACK later cannot be explained
+    // by "the release was never sent".
+    fixture
+        .send_command("RELEASE deadlock d")
+        .await
+        .expect("deadlock: send RELEASE deadlock d");
+    fixture
+        .wait_for_stdout("EXEC_SENDING release d", SENTINEL_TIMEOUT)
+        .await
+        .expect("deadlock: wait EXEC_SENDING release d (release must be dispatched)");
+
+    // The proof: across the whole window the same `hold` invocation stays
+    // in-flight (active_count == 1, oldest_since unchanged) despite the release.
+    assert_stays_wedged(fixture, &deadlock, "hold", started).await;
+
+    // Corroboration: the release ACK never arrives within the window -- the
+    // command loop is wedged in `control.call_one` -- and it is a *timeout*, not
+    // the workload dying (which would close stdout and surface a different error).
+    let acked = fixture
+        .wait_for_stdout("EXEC_ACK release d", DEADLOCK_NEGATIVE_TIMEOUT)
+        .await;
+    let err = acked.expect_err("deadlock: release ACK must NOT arrive (the loop is wedged)");
+    let msg = format!("{err:#}");
+    assert!(
+        !msg.contains("stdout closed"),
+        "deadlock: the release-ACK wait must time out (loop wedged), not fail from workload \
+         death; got: {msg}",
+    );
 
     // --- Idle sibling: Some with count 0 (never invoked). ---
     let exec = execution_of(fixture, &idle).await;
