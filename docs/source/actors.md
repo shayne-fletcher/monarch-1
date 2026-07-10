@@ -256,12 +256,15 @@ Call a single actor and get response.
 ```python
 calc = this_proc().spawn("calc", Calculator)
 
-# Synchronous wait for result
+# Synchronous wait for result (blocks the calling thread)
 result = calc.add.call_one(5, 3).get()
 print(result)  # 8
 
-# Async await
+# Async await (on an asyncio event loop)
 result = await calc.add.call_one(5, 3)
+
+# Or bridge to a standard asyncio.Future explicitly
+result = await calc.add.call_one(5, 3).as_asyncio()
 ```
 
 **Use When:**
