@@ -293,6 +293,17 @@ pub struct PyHandle {
     core: HandleCore,
 }
 
+impl PyHandle {
+    /// Wrap an already-built `HandleCore` in a `PyHandle`.
+    ///
+    /// Producers in `pytokio.rs` build the core (watch channel + spawned task)
+    /// and hand back an observe-only `Handle` through this; `PyHandle`'s field
+    /// is private to this module.
+    pub(crate) fn from_core(core: HandleCore) -> Self {
+        Self { core }
+    }
+}
+
 #[cfg(test)]
 impl PyHandle {
     /// Construct a resolved `Handle` from `value`.
