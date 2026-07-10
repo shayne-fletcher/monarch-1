@@ -338,13 +338,13 @@ def test_get_in_asyncio_loop_warns_and_still_returns(monkeypatch):
     assert calls[0]["extra"]["context"] == "asyncio"
 
 
-def test_get_in_tokio_thread_warns_then_cannot_block(monkeypatch):
-    """On a real tokio thread get() warns (context='tokio') but then cannot
-    block within the runtime, so it raises rather than returning -- the
-    asymmetry with the asyncio branch, and precisely the case WouldBlockRuntime
-    is meant to replace. The warning must advise awaiting inside a PythonTask
-    coroutine, NOT as_asyncio() (which needs an asyncio loop a tokio thread
-    lacks)."""
+def test_get_in_tokio_thread_raises_would_block_and_is_non_consuming(monkeypatch):
+    """On a real tokio thread no-timeout get() raises WouldBlockRuntime up front
+    (aligned with Handle.get()) WITHOUT consuming the task: no UserWarning fires,
+    the tracing event still forwards (context='tokio'), the Future stays
+    _Unawaited, and a later get() from a sync context still drives it to a
+    value. (Previously it warned, then block_on() consumed the task and panicked
+    'from within a runtime', losing the work and bricking the Future.)"""
     calls = []
     warned = []
     monkeypatch.setattr(future_mod, "log_with_tracing", lambda *a, **k: calls.append(k))
@@ -357,24 +357,23 @@ def test_get_in_tokio_thread_warns_then_cannot_block(monkeypatch):
         assert is_tokio_thread()
         return fut.get()
 
-    with pytest.raises(BaseException, match="from within a runtime"):
+    with pytest.raises(WouldBlockRuntime):
         _run_in_tokio(attempt())
     assert len(calls) == 1
     assert calls[0]["extra"]["context"] == "tokio"
-    # filter to get()'s own warning; the global warnings.warn patch also catches
-    # the incidental "coroutine '_value' was never awaited" warning from the task
-    # that block_on() abandons when it panics.
-    tokio_warnings = [w for w in warned if "Tokio runtime" in w]
-    assert len(tokio_warnings) == 1
-    assert "PythonTask coroutine" in tokio_warnings[0]
-    assert "as_asyncio" not in tokio_warnings[0]
+    assert warned == []  # tokio get() refuses instead of warning
+    assert isinstance(fut._status, future_mod._Unawaited)  # task not consumed
+    assert fut.get() == 5  # still drivable from a sync context
 
 
-def test_get_timeout_in_tokio_thread_raises_would_block_without_warning(monkeypatch):
-    """get(timeout=...) on a tokio thread routes through a Handle, so Handle.get()
-    refuses with WouldBlockRuntime up front. The tracing event still forwards
-    (context='tokio'), but -- unlike the no-timeout path -- NO UserWarning fires,
-    because Handle.get() raises before it would warn."""
+def test_get_timeout_in_tokio_thread_raises_would_block_and_is_non_consuming(
+    monkeypatch,
+):
+    """get(timeout=...) on a tokio thread is refused by the in_tokio check up
+    front -- BEFORE spawning a Handle -- so it raises WouldBlockRuntime without
+    starting work or flipping state: no UserWarning, the trace still forwards
+    (context='tokio'), the Future stays _Unawaited, and a later sync get() still
+    drives it."""
     calls = []
     warned = []
     monkeypatch.setattr(future_mod, "log_with_tracing", lambda *a, **k: calls.append(k))
@@ -392,6 +391,20 @@ def test_get_timeout_in_tokio_thread_raises_would_block_without_warning(monkeypa
     assert len(calls) == 1
     assert calls[0]["extra"]["context"] == "tokio"
     assert warned == []
+    assert isinstance(fut._status, future_mod._Unawaited)  # not spawned/consumed
+    assert fut.get() == 5  # still drivable from a sync context
+
+
+def test_get_invalid_timeout_does_not_spawn_or_mutate():
+    """An invalid timeout (NaN/negative/non-finite) is rejected with ValueError
+    BEFORE spawning a Handle, so a bad argument never starts work or flips state:
+    the Future stays _Unawaited and a later valid get() still drives it."""
+    for bad in (float("nan"), -1.0, float("inf")):
+        fut: Future[int] = Future(coro=_value(8))
+        with pytest.raises(ValueError, match="invalid timeout"):
+            fut.get(timeout=bad)
+        assert isinstance(fut._status, future_mod._Unawaited)
+        assert fut.get() == 8  # still drivable after a rejected bad-timeout call
 
 
 def test_get_on_handle_in_asyncio_loop_warns_and_forwards_once(monkeypatch):
