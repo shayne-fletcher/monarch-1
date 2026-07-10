@@ -1055,6 +1055,51 @@ async def test_flush_on_disable_aggregation() -> None:
         await pm.stop()
 
 
+# oss_skip: same log-forwarding rig as the sibling flush tests (broken in GitHub
+# by D86994420; passes internally).
+@pytest.mark.oss_skip
+async def test_flush_async_drives_flush_on_asyncio_loop() -> None:
+    """`LoggingManager.flush_async` must actually drive the flush when awaited on
+    an asyncio loop.
+
+    Regression guard: `flush_async` awaits the flush and swallows exceptions. If
+    it awaited a bare PythonTask, the pytokio gate would raise under a running
+    asyncio loop and the `except` would eat it -- a silent no-op. Here we buffer
+    logs under a long aggregation window, `await flush_async()` directly on the
+    test's asyncio loop, and require the aggregated lines to appear. With the
+    silent-no-op bug this assertion fails (the lines stay buffered).
+    """
+    with configured_with_redirected_stdio(
+        capture_stderr=False,
+        enable_log_forwarding=True,
+        enable_file_capture=True,
+        tail_log_lines=100,
+    ) as (_, paths):
+        pm = this_host().spawn_procs(per_host={"gpus": 2})
+        am = pm.spawn("printer", Printer)
+
+        # Long window so nothing auto-flushes; only our explicit flush_async can.
+        await pm.logging_option(stream_to_client=True, aggregate_window_sec=60)
+        for _ in range(5):
+            await am.print.call("flush_async driven log line")
+        await asyncio.sleep(1)
+
+        # System under test: flush_async on the test's asyncio loop.
+        await pm._logging_manager.flush_async()
+
+        await asyncio.sleep(1)
+        sys.stdout.flush()
+        with open(paths.stdout, "r") as f:
+            stdout_content = f.read()
+
+        # 10 = 5 log lines * 2 procs; present only if flush_async actually drove
+        # the flush (otherwise still buffered under the 60s window).
+        assert re.search(
+            r"\[10 similar log lines\].*flush_async driven log line", stdout_content
+        ), stdout_content
+        await pm.stop()
+
+
 @pytest.mark.timeout(120)
 @parametrize_config(actor_queue_dispatch={True, False})
 @isolate_in_subprocess
