@@ -323,7 +323,7 @@ async fn run_diagnose(
 /// or diagnostics complete.
 pub async fn run(config: TuiConfig) -> io::Result<()> {
     let policy = timeouts::TuiTimeoutPolicy::from_config(&config);
-    let (base_url, client) = client::build_client(&config);
+    let (base_url, client) = client::build_client(&config)?;
 
     if config.diagnose {
         return run_diagnose(client, base_url, policy).await;
