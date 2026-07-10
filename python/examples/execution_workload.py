@@ -30,6 +30,13 @@ Actors:
     ``@concurrent_endpoint``, so multiple held invocations overlap and
     ``control`` can release them while they wait. This covers the
     queue-dispatch-compatible pattern used by resource managers.
+  - ``deadlock_actor`` (queue dispatch): a ``BusyActor`` reused under queue
+    dispatch. Its blocking plain ``@endpoint`` ``hold`` monopolizes the Python
+    dispatch loop, so a later ``control`` release is stuck behind it and can
+    never run -- a genuine deadlock (the failure the airport turnaround demo
+    hits under the default queue dispatch). ``execution.rs`` drives it to prove
+    the mesh-admin API surfaces the wedge (``execution.active_count`` stays
+    pinned at 1 on the wedged invocation).
 
 Each proc pins its dispatch mode explicitly via a ``bootstrap`` callable
 that sets ``MONARCH_ACTOR_QUEUE_DISPATCH`` and calls
@@ -42,10 +49,12 @@ setting the variable in the bootstrap only takes effect after the reload.
 Stdin command protocol, one command per line::
 
     HOLD <actor> <id>     start a held invocation;      prints EXEC_ACK HOLD <id>
-    RELEASE <actor> <id>  let a held invocation return; prints EXEC_ACK release <id>
-    RAISE <actor> <id>    make a held invocation raise; prints EXEC_ACK raise <id>
+    RELEASE <actor> <id>  let a held invocation return; prints EXEC_SENDING then
+                          EXEC_ACK release <id>
+    RAISE <actor> <id>    make a held invocation raise; prints EXEC_SENDING then
+                          EXEC_ACK raise <id>
 
-``<actor>`` is ``busy``, ``queue``, or ``concurrent``. Each ``hold`` signals
+``<actor>`` is ``busy``, ``queue``, ``concurrent``, or ``deadlock``. Each ``hold`` signals
 "entered" from inside the handler body -- after the framework's
 ``_execution_start`` has recorded the invocation and before the handler
 blocks -- so the signal means "mesh-admin now reports this invocation", not
@@ -241,18 +250,31 @@ async def async_main() -> None:
     concurrent_proc = host.spawn_procs(
         name="execution_concurrent", bootstrap=_enable_queue_dispatch
     )
+    deadlock_proc = host.spawn_procs(
+        name="execution_deadlock", bootstrap=_enable_queue_dispatch
+    )
 
     busy = busy_proc.spawn("busy_actor", BusyActor)
     idle = idle_proc.spawn("idle_actor", BusyActor)
     queue = queue_proc.spawn("queue_actor", QueueActor)
     concurrent = concurrent_proc.spawn("concurrent_actor", ConcurrentActor)
+    # A queue-dispatch BusyActor: its blocking plain @endpoint `hold`
+    # monopolizes the serial dispatch loop, so a later `control` release
+    # queues behind it and can never run -- a deadlock the admin API surfaces.
+    deadlock = deadlock_proc.spawn("deadlock_actor", BusyActor)
 
-    actors = {"busy": busy, "queue": queue, "concurrent": concurrent}
+    actors = {
+        "busy": busy,
+        "queue": queue,
+        "concurrent": concurrent,
+        "deadlock": deadlock,
+    }
 
     busy_ref = await busy.whoami.call_one()
     idle_ref = await idle.whoami.call_one()
     queue_ref = await queue.whoami.call_one()
     concurrent_ref = await concurrent.whoami.call_one()
+    deadlock_ref = await deadlock.whoami.call_one()
 
     # Held invocations send their id over this port from inside the handler
     # body; a background task drains it and echoes EXEC_ENTERED to stdout.
@@ -272,6 +294,7 @@ async def async_main() -> None:
     print(f"  - Idle actor:  {idle_ref}", flush=True)
     print(f"  - Queue actor: {queue_ref}", flush=True)
     print(f"  - Concurrent actor: {concurrent_ref}", flush=True)
+    print(f"  - Deadlock actor: {deadlock_ref}", flush=True)
 
     reader = await _stdin_reader()
     # In-flight held invocations, tracked so they can be cancelled at
@@ -299,6 +322,10 @@ async def async_main() -> None:
             elif cmd in ("RELEASE", "RAISE"):
                 _, which, id = parts
                 op = cmd.lower()
+                # Signal dispatch *before* the call: under queue dispatch a
+                # release can wedge behind a blocked hold and never return, so
+                # this positive sentinel lets the test rule out "never sent".
+                print(f"EXEC_SENDING {op} {id}", flush=True)
                 await actors[which].control.call_one(id, op)
                 print(f"EXEC_ACK {op} {id}", flush=True)
             else:
@@ -314,6 +341,7 @@ async def async_main() -> None:
         await idle_proc.stop()
         await queue_proc.stop()
         await concurrent_proc.stop()
+        await deadlock_proc.stop()
 
 
 def main() -> None:
