@@ -5,6 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 # Re-export the job module directly
+from monarch._src.job._process_job_async_lifecycle import (
+    cancel_async_tasks,
+    run_async_main,
+    scoped_async_state,
+)
 from monarch._src.job.job import (
     DEFAULT_JOB_PATH,
     exec_command,
@@ -24,6 +29,7 @@ from monarch._src.job.slurm import SlurmJob
 # Define exports
 __all__ = [
     "DEFAULT_JOB_PATH",
+    "cancel_async_tasks",
     "exec_command",
     "JobTrait",
     "job_load",
@@ -33,6 +39,8 @@ __all__ = [
     "LocalJob",
     "MeshAdminConfig",
     "ProcessJob",
+    "run_async_main",
+    "scoped_async_state",
     "set_current_job",
     "SlurmJob",
     "TelemetryConfig",

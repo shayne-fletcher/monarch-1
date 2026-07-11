@@ -336,12 +336,19 @@ class JobState:
     def __repr__(self) -> str:
         return f"JobState(hosts={self._hosts})"
 
+    def host_meshes(self) -> List[HostMesh]:
+        """All host meshes in this state, e.g. for teardown to enumerate."""
+        return list(self._hosts.values())
+
 
 class CachedRunning(NamedTuple):
     job: "JobTrait"
 
 
 logger = logging.getLogger(__name__)
+DEFAULT_JOB_PATH: str = ".monarch/job_state.pkl"
+
+
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler(sys.stderr))
 logger.propagate = False
@@ -610,12 +617,40 @@ class JobTrait(ABC):
     def kill(self):
         apply_id = self.apply_id
         running = self._running
-        self._components.reset_runtime()
-        if apply_id is not None:
-            stop_job_sidecar(apply_id)
-        if running is not None:
-            running._kill()
-        self._status = "not_running"
+        # Run every teardown step, but do not let a later bookkeeping failure
+        # mask a worker-reap failure, and keep running state when the reap itself
+        # failed (workers may still be alive) so a caller can retry.
+        errors: List[Exception] = []
+        kill_ok = True
+        try:
+            if running is not None:
+                running._kill()
+        except Exception as e:
+            kill_ok = False
+            errors.append(e)
+        try:
+            self._components.reset_runtime()
+        except Exception as e:
+            errors.append(e)
+        try:
+            if apply_id is not None:
+                stop_job_sidecar(apply_id)
+        except Exception as e:
+            errors.append(e)
+        if kill_ok:
+            self._status = "not_running"
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise ExceptionGroup("job kill failed", errors)
+
+    def cleanup(self) -> None:  # noqa: B027 - optional override hook; default no-op
+        """Release job-owned local resources after a graceful teardown.
+
+        Default is a no-op; subclasses that hold local scratch (e.g.
+        ``ProcessJob`` with its tmpdir/sockets) override this so the graceful
+        path releases them too, not only ``kill()``.
+        """
 
     def remote_mount(
         self,
@@ -721,9 +756,6 @@ def job_loads(data: bytes) -> JobTrait:
     """
     # @lint-ignore PYTHONPICKLEISBAD
     return pickle.loads(data)
-
-
-DEFAULT_JOB_PATH: str = ".monarch/job_state.pkl"
 
 
 def job_load(filename: str = DEFAULT_JOB_PATH) -> JobTrait:

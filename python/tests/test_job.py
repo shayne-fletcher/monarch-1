@@ -6,14 +6,17 @@
 
 # pyre-unsafe
 
+import asyncio
 import contextlib
 import os
 import pickle
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 from dataclasses import dataclass
 from typing import cast, Dict, Optional, Sequence
@@ -24,6 +27,11 @@ import monarch._src.job.job_sidecar as js
 import pytest
 
 # Import directly from _src since job module isn't properly exposed
+from monarch._src.job._process_job_async_lifecycle import (
+    cancel_async_tasks,
+    run_async_main,
+    scoped_async_state,
+)
 from monarch._src.job.job import (
     BatchJob,
     job_load,
@@ -32,6 +40,7 @@ from monarch._src.job.job import (
     JobTrait,
     LocalJob,
     MeshAdminConfig,
+    ProcessState,
     TelemetryConfig,
 )
 from monarch._src.job.job_components import JobComponent, JobComponents, MountComponent
@@ -573,6 +582,271 @@ def test_kill():
     # kill_called should now be True
     assert job.kill_called
     stop_sidecar.assert_called_once_with(apply_id)
+
+
+def test_kill_stops_running_job_even_if_runtime_reset_fails():
+    """The scheduler/job kill must not be skipped by metadata cleanup failure."""
+    job = MockJobTrait()
+    job.apply()
+    apply_id = job.apply_id
+    assert apply_id is not None
+
+    with (
+        patch.object(
+            job._components,
+            "reset_runtime",
+            side_effect=RuntimeError("reset failed"),
+        ),
+        patch("monarch._src.job.job.stop_job_sidecar") as stop_sidecar,
+        pytest.raises(RuntimeError, match="reset failed"),
+    ):
+        job.kill()
+
+    assert job.kill_called
+    assert not job.active
+    stop_sidecar.assert_called_once_with(apply_id)
+
+
+def test_process_job_create_cleans_up_on_baseexception():
+    """Interrupts during ProcessJob._create must not leak spawned workers."""
+    job = ProcessJob({"hosts": 2})
+
+    with (
+        patch(
+            "monarch._src.job.process.subprocess.Popen",
+            side_effect=[types.SimpleNamespace(pid=987654321), KeyboardInterrupt],
+        ),
+        patch.object(ProcessJob, "_watch_process"),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        job._create(client_script=None)
+
+    assert job._host_to_pid == {}
+    assert job._tmpdir is None
+
+
+def test_kill_preserves_running_state_when_reap_fails():
+    """A failed worker reap keeps the job's running state so a caller can retry,
+    and surfaces the reap error rather than masking it with later cleanup."""
+    job = MockJobTrait()
+    job.apply()
+    apply_id = job.apply_id
+    assert apply_id is not None
+    assert job.active
+
+    with (
+        patch.object(MockJobTrait, "_kill", side_effect=RuntimeError("reap failed")),
+        patch.object(job._components, "reset_runtime"),
+        patch("monarch._src.job.job.stop_job_sidecar") as stop_sidecar,
+        pytest.raises(RuntimeError, match="reap failed"),
+    ):
+        job.kill()
+
+    # Reap failed: running state is preserved so the caller can retry the kill.
+    assert job.active
+    # The remaining teardown steps still ran best-effort.
+    stop_sidecar.assert_called_once_with(apply_id)
+
+
+def test_process_kill_escalates_to_sigkill_for_surviving_group():
+    """SIGKILL escalation fires while the worker process GROUP is still alive,
+    even when the bare leader pid would look dead -- liveness is per-group."""
+    job = ProcessJob({"hosts": 1})
+    job._host_to_pid = {"hosts_0": ProcessState(4242, "ipc://x")}
+    job._tmpdir = None
+    killpg_calls: list[tuple[int, int]] = []
+
+    def fake_killpg(pgid: int, sig: int) -> None:
+        # signal 0 is the liveness probe; the group stays alive through the grace
+        # window, so escalation must reach SIGKILL.
+        if sig != 0:
+            killpg_calls.append((pgid, sig))
+
+    def fake_kill(pid: int, sig: int) -> None:
+        # The bare leader pid reads dead; only the per-group probe keeps it
+        # pending -- exactly the case the fix addresses.
+        raise ProcessLookupError()
+
+    with (
+        patch("monarch._src.job.process.os.killpg", side_effect=fake_killpg),
+        patch("monarch._src.job.process.os.kill", side_effect=fake_kill),
+        patch("monarch._src.job.process._KILL_GRACE_SECONDS", 0.01),
+        patch("monarch._src.job.process.time.sleep"),
+    ):
+        job._kill()
+
+    assert (4242, signal.SIGTERM) in killpg_calls
+    assert (4242, signal.SIGKILL) in killpg_calls
+    assert job._host_to_pid == {}
+
+
+def test_scoped_async_state_graceful_shutdown_does_not_kill():
+    """The async state helper shuts down owned hosts without killing the job."""
+
+    class ShutdownHost:
+        shutdown_called = False
+
+        async def _shutdown(self) -> None:
+            self.shutdown_called = True
+
+        def shutdown(self):
+            return self._shutdown()
+
+    host = ShutdownHost()
+
+    class AsyncStateJob(MockJobTrait):
+        def _state(self) -> JobState:
+            return JobState({"hosts": cast("HostMesh", host)})
+
+    async def run() -> None:
+        job = AsyncStateJob()
+        async with scoped_async_state(job, cached_path=None) as state:
+            assert state.hosts is host
+        assert host.shutdown_called
+        assert not job.kill_called
+
+    asyncio.run(run())
+
+
+def test_scoped_async_state_kills_job_when_shutdown_hangs():
+    """If graceful host shutdown cannot finish, the owning job is killed."""
+
+    class HangingHost:
+        def shutdown(self):
+            return asyncio.sleep(3600)
+
+    host = HangingHost()
+
+    class AsyncStateJob(MockJobTrait):
+        def _state(self) -> JobState:
+            return JobState({"hosts": cast("HostMesh", host)})
+
+    async def run() -> None:
+        job = AsyncStateJob()
+        async with scoped_async_state(
+            job,
+            cached_path=None,
+            shutdown_timeout=0.01,
+        ):
+            pass
+        assert job.kill_called
+
+    asyncio.run(run())
+
+
+def test_scoped_async_state_kills_job_when_shutdown_ignores_cancellation():
+    """The shutdown timeout does not depend on cooperative cancellation."""
+
+    class StubbornHost:
+        async def _shutdown(self) -> None:
+            while True:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    pass
+
+        def shutdown(self):
+            return self._shutdown()
+
+    host = StubbornHost()
+
+    class AsyncStateJob(MockJobTrait):
+        def _state(self) -> JobState:
+            return JobState({"hosts": cast("HostMesh", host)})
+
+    async def run() -> None:
+        job = AsyncStateJob()
+        async with scoped_async_state(
+            job,
+            cached_path=None,
+            shutdown_timeout=0.01,
+        ):
+            pass
+        assert job.kill_called
+
+    start = time.monotonic()
+    run_async_main(run(), cancel_timeout=0.01)
+    assert time.monotonic() - start < 2.0
+
+
+def test_scoped_async_state_kills_and_reraises_cleanup_cancellation():
+    """Second-interrupt style cancellation kills the job and keeps propagating."""
+
+    class CancellingHost:
+        async def _shutdown(self) -> None:
+            raise asyncio.CancelledError()
+
+        def shutdown(self):
+            return self._shutdown()
+
+    host = CancellingHost()
+
+    class AsyncStateJob(MockJobTrait):
+        def _state(self) -> JobState:
+            return JobState({"hosts": cast("HostMesh", host)})
+
+    async def run() -> None:
+        job = AsyncStateJob()
+        with pytest.raises(asyncio.CancelledError):
+            async with scoped_async_state(job, cached_path=None):
+                pass
+        assert job.kill_called
+
+    asyncio.run(run())
+
+
+def test_run_async_main_bounds_pending_task_cancellation():
+    """Pending tasks that ignore cancellation cannot hang process teardown."""
+
+    async def stubborn() -> None:
+        while True:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                pass
+
+    async def run() -> None:
+        asyncio.create_task(stubborn())
+
+    start = time.monotonic()
+    run_async_main(run(), cancel_timeout=0.01)
+    assert time.monotonic() - start < 2.0
+
+
+def test_cancel_async_tasks_bounds_uncooperative_task_cancellation():
+    """Demo cleanup drains what it can without waiting forever."""
+
+    async def stubborn() -> None:
+        while True:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                pass
+
+    async def run() -> None:
+        task = asyncio.create_task(stubborn())
+        await cancel_async_tasks([task], timeout=0.01)
+
+    start = time.monotonic()
+    run_async_main(run(), cancel_timeout=0.01)
+    assert time.monotonic() - start < 2.0
+
+
+def test_scoped_async_state_kills_job_when_state_fails_after_apply():
+    """A state construction failure after apply must not leak job resources."""
+
+    class FailingStateJob(MockJobTrait):
+        def _state(self) -> JobState:
+            raise RuntimeError("failed to build state")
+
+    async def run() -> None:
+        job = FailingStateJob()
+        with pytest.raises(RuntimeError, match="failed to build state"):
+            async with scoped_async_state(job, cached_path=None):
+                pass
+        assert job.kill_called
+
+    asyncio.run(run())
 
 
 def test_state_query_engine_none_without_telemetry():

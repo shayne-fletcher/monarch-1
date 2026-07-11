@@ -6,6 +6,7 @@
 
 # pyre-unsafe
 
+import contextlib
 import logging
 import os
 import shutil
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from typing import Dict, List, Optional, Union
 
 from monarch._src.actor.bootstrap import attach_to_workers
@@ -30,6 +32,20 @@ except ImportError:
     _IN_PAR = False
 
 _PROCESS_WORKER_MODULE = "monarch._src.job._process_worker"
+_KILL_GRACE_SECONDS = 1.0
+
+
+def _group_active(pgid: int) -> bool:
+    # Liveness of the whole process group, not just the leader. A group leader
+    # can exit on SIGTERM while children that ignored it keep running, and
+    # os.kill(leader, 0) would wrongly report the group gone (and reads a
+    # not-yet-reaped zombie leader as alive). os.killpg(pgid, 0) succeeds while
+    # any process in the group remains.
+    try:
+        os.killpg(pgid, 0)
+    except OSError:
+        return False
+    return True
 
 
 class ProcessJob(JobTrait):
@@ -111,7 +127,7 @@ class ProcessJob(JobTrait):
                         addr,
                     )
                     self._watch_process(proc, mesh_name, i, addr)
-        except Exception:
+        except BaseException:
             self._kill()
             raise
 
@@ -198,14 +214,39 @@ class ProcessJob(JobTrait):
         return True
 
     def _kill(self) -> None:
-        # Use SIGTERM to allow worker processes to shut down gracefully.
-        # The HostMesh objects are not stored here (they're returned to callers),
-        # so we rely on the worker processes handling SIGTERM for clean shutdown.
-        for p in self._host_to_pid.values():
+        # Workers are launched with start_new_session=True, so the root worker
+        # pid is also the process-group id. Signal the group so fallback cleanup
+        # matches the detached topology rather than only nudging the leader.
+        pids = [p.pid for p in self._host_to_pid.values()]
+        for pid in pids:
             try:
-                os.kill(p.pid, signal.SIGTERM)
+                os.killpg(pid, signal.SIGTERM)
             except OSError:
-                pass
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGTERM)
+
+        deadline = time.monotonic() + _KILL_GRACE_SECONDS
+        remaining = pids
+        while remaining and time.monotonic() < deadline:
+            remaining = [pid for pid in remaining if _group_active(pid)]
+            if remaining:
+                time.sleep(0.05)
+        for pid in remaining:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGKILL)
+        self.cleanup()
+
+    def cleanup(self) -> None:
+        """Release job-owned local resources: worker bookkeeping and the scratch
+        tmpdir (which holds the ipc:// sockets).
+
+        Signals no processes, so it is safe to run after a graceful mesh
+        shutdown as well as from ``_kill``. This closes the tmpdir/socket leak
+        on the graceful teardown path, where ``_kill`` never runs.
+        """
         self._host_to_pid.clear()
         if self._tmpdir is not None:
             shutil.rmtree(self._tmpdir, ignore_errors=True)

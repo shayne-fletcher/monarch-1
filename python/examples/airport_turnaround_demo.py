@@ -35,6 +35,7 @@ What to watch in the TUI:
 Usage::
 
     buck2 run fbcode//monarch/python/examples:airport_turnaround_demo -- --flights 8
+    buck2 run fbcode//monarch/python/examples:airport_turnaround_demo -- --startup-check
 """
 
 import argparse
@@ -45,7 +46,13 @@ import random
 
 from monarch._src.actor.telemetry import TracingForwarder
 from monarch.actor import Actor, concurrent_endpoint, context, endpoint
-from monarch.job import ProcessJob
+from monarch.config import configure
+from monarch.job import (
+    cancel_async_tasks,
+    ProcessJob,
+    run_async_main,
+    scoped_async_state,
+)
 
 logger: logging.Logger = logging.getLogger("airport_turnaround_demo")
 logger.addHandler(TracingForwarder())
@@ -253,113 +260,121 @@ class FlightActor(Actor):
 
 
 async def async_main(args: argparse.Namespace) -> None:
+    configure(mesh_proc_spawn_max_idle="120s")
     job = ProcessJob({"hosts": 1}).enable_admin()
-    state = job.state(cached_path=None)
-    host = state.hosts
+    async with scoped_async_state(job, cached_path=None) as state:
+        admin_url = state.admin_url
+        assert admin_url is not None
+        mtls_flags = (
+            "--cacert /var/facebook/rootcanal/ca.pem "
+            "--cert /var/facebook/x509_identities/server.pem "
+            "--key /var/facebook/x509_identities/server.pem "
+            if admin_url.startswith("https")
+            else ""
+        )
+        tui = "buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui"
+        print(f"\nMesh admin server listening on {admin_url}", flush=True)
+        print(f"  - Mesh tree:  curl {mtls_flags}{admin_url}/v1/tree", flush=True)
+        print(f"  - TUI:        {tui} -- --addr {admin_url}", flush=True)
 
-    # Flights are one named proc mesh sliced per replica; each manager is its
-    # own named singleton proc mesh — all distinct, findable nodes in the TUI.
-    # (Without `name=`, the flight procs show up anonymous, e.g. `anon-1`.)
-    flight_procs = host.spawn_procs(per_host={"replica": args.flights}, name="flights")
-    gate_proc = host.spawn_procs(name="gate_manager")
-    runway_proc = host.spawn_procs(name="runway_controller")
-    fuel_proc = host.spawn_procs(name="fuel_truck_pool")
-    baggage_proc = host.spawn_procs(name="baggage_crew_pool")
+        host = state.hosts
+        loops = []
+        try:
+            gate_proc = host.spawn_procs(name="gate_manager")
+            gates = gate_proc.spawn("gate_manager", GateManager, args.gates)
+            gate_ref = await gates.whoami.call_one()
 
-    gates = gate_proc.spawn("gate_manager", GateManager, args.gates)
-    runways = runway_proc.spawn(
-        "runway_controller", RunwayController, args.runways, tuple(args.runway)
-    )
-    fuel = fuel_proc.spawn(
-        "fuel_truck_pool", FuelTruckPool, args.fuel_trucks, tuple(args.refuel)
-    )
-    baggage = baggage_proc.spawn(
-        "baggage_crew_pool", BaggageCrewPool, args.baggage_crews, tuple(args.baggage)
-    )
+            runway_proc = host.spawn_procs(name="runway_controller")
+            runways = runway_proc.spawn(
+                "runway_controller", RunwayController, args.runways, tuple(args.runway)
+            )
+            await runways.whoami.call_one()
 
-    durations = {
-        "approach": tuple(args.approach),
-        "taxi": tuple(args.taxi),
-        "deplane": tuple(args.deplane),
-        "board": tuple(args.board),
-        "depart": tuple(args.depart),
-    }
-    flights = flight_procs.spawn(
-        "flight", FlightActor, gates, runways, fuel, baggage, durations
-    )
+            fuel_proc = host.spawn_procs(name="fuel_truck_pool")
+            fuel = fuel_proc.spawn(
+                "fuel_truck_pool", FuelTruckPool, args.fuel_trucks, tuple(args.refuel)
+            )
+            await fuel.whoami.call_one()
 
-    gate_ref = await gates.whoami.call_one()
-    flight0_ref = await flights.slice(replica=0).whoami.call_one()
+            baggage_proc = host.spawn_procs(name="baggage_crew_pool")
+            baggage = baggage_proc.spawn(
+                "baggage_crew_pool",
+                BaggageCrewPool,
+                args.baggage_crews,
+                tuple(args.baggage),
+            )
+            await baggage.whoami.call_one()
 
-    admin_url = state.admin_url
-    assert admin_url is not None
-    mtls_flags = (
-        "--cacert /var/facebook/rootcanal/ca.pem "
-        "--cert /var/facebook/x509_identities/server.pem "
-        "--key /var/facebook/x509_identities/server.pem "
-        if admin_url.startswith("https")
-        else ""
-    )
-    tui = (
-        "buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui"
-    )
-    print(f"\nMesh admin server listening on {admin_url}")
-    print(f"  - Mesh tree:  curl {mtls_flags}{admin_url}/v1/tree")
-    print(f"  - TUI:        {tui} -- --addr {admin_url}")
-    print("\nOpen these nodes in the TUI tree (by label):")
-    print(f"  - flight (replicas 0..{args.flights - 1}) -> Execution: phase turnover")
-    print("  - gate_manager        -> Execution: assign_gate xK when gates are full")
-    print("  - runway_controller   -> Execution: request_landing / request_takeoff xK")
-    print("  - fuel_truck_pool     -> Execution: request_refuel xK")
-    print("  - baggage_crew_pool   -> Execution: request_baggage_service xK")
-    print(f"  raw ids: gate_manager={gate_ref}  flight[0]={flight0_ref}")
-    print(
-        f"\n{args.flights} flights; {args.gates} gates, {args.runways} runways, "
-        f"{args.fuel_trucks} fuel trucks, {args.baggage_crews} baggage crews. "
-        "Press Ctrl+C to stop.\n",
-        flush=True,
-    )
+            # Flights are one named proc mesh sliced per replica. Spawn them after the
+            # singleton managers so later manager readiness waits do not time out while
+            # queued behind the larger flight mesh.
+            flight_procs = host.spawn_procs(
+                per_host={"replica": args.flights},
+                name="flights",
+            )
 
-    async def run_flight(i: int) -> None:
-        f = flights.slice(replica=i)
-        await asyncio.sleep(i * _STARTUP_STAGGER_S)
-        while True:
-            await f.approach.call_one()
-            await f.request_landing.call_one()
-            await f.taxi_to_gate.call_one()
-            await f.acquire_gate.call_one()
-            await f.deplane.call_one()
-            await f.request_refuel.call_one()
-            await f.request_baggage_service.call_one()
-            await f.board.call_one()
-            await f.release_gate.call_one()
-            await f.request_takeoff.call_one()
-            await f.depart.call_one()
+            durations = {
+                "approach": tuple(args.approach),
+                "taxi": tuple(args.taxi),
+                "deplane": tuple(args.deplane),
+                "board": tuple(args.board),
+                "depart": tuple(args.depart),
+            }
+            flights = flight_procs.spawn(
+                "flight", FlightActor, gates, runways, fuel, baggage, durations
+            )
+            flight0_ref = await flights.slice(replica=0).whoami.call_one()
 
-    # Fail-fast: gather propagates the first loop's failure and tears the demo
-    # down, surfacing bugs loudly rather than silently degrading.
-    loops = [asyncio.ensure_future(run_flight(i)) for i in range(args.flights)]
-    try:
-        await asyncio.gather(*loops)
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        pass
-    finally:
-        print("\nShutting down...", flush=True)
-        # Fixed order: cancel and drain the drivers, then stop flights, then the
-        # managers -- so a flight blocked in a request_* call never has its
-        # manager vanish first (which would make shutdown look broken).
-        for loop in loops:
-            loop.cancel()
-        await asyncio.gather(*loops, return_exceptions=True)
-        await flight_procs.stop()
-        await gate_proc.stop()
-        await runway_proc.stop()
-        await fuel_proc.stop()
-        await baggage_proc.stop()
-        # Tear down the host last: ProcessJob spawns a host subprocess
-        # (run_worker_loop_forever) that stopping the proc meshes alone leaves
-        # orphaned; shutdown() stops the host and every process on it.
-        await host.shutdown()
+            print("\nOpen these nodes in the TUI tree (by label):")
+            print(
+                f"  - flight (replicas 0..{args.flights - 1}) -> Execution: phase turnover"
+            )
+            print(
+                "  - gate_manager        -> Execution: assign_gate xK when gates are full"
+            )
+            print(
+                "  - runway_controller   -> Execution: request_landing / request_takeoff xK"
+            )
+            print("  - fuel_truck_pool     -> Execution: request_refuel xK")
+            print("  - baggage_crew_pool   -> Execution: request_baggage_service xK")
+            print(f"  raw ids: gate_manager={gate_ref}  flight[0]={flight0_ref}")
+            print(
+                f"\n{args.flights} flights; {args.gates} gates, {args.runways} runways, "
+                f"{args.fuel_trucks} fuel trucks, {args.baggage_crews} baggage crews. "
+                "Press Ctrl+C to stop.\n",
+                flush=True,
+            )
+
+            if args.startup_check:
+                print("Startup check complete.", flush=True)
+                return
+
+            async def run_flight(i: int) -> None:
+                f = flights.slice(replica=i)
+                await asyncio.sleep(i * _STARTUP_STAGGER_S)
+                while True:
+                    await f.approach.call_one()
+                    await f.request_landing.call_one()
+                    await f.taxi_to_gate.call_one()
+                    await f.acquire_gate.call_one()
+                    await f.deplane.call_one()
+                    await f.request_refuel.call_one()
+                    await f.request_baggage_service.call_one()
+                    await f.board.call_one()
+                    await f.release_gate.call_one()
+                    await f.request_takeoff.call_one()
+                    await f.depart.call_one()
+
+            # Fail-fast: gather propagates the first loop's failure and tears the demo
+            # down, surfacing bugs loudly rather than silently degrading.
+            loops = [asyncio.ensure_future(run_flight(i)) for i in range(args.flights)]
+            await asyncio.gather(*loops)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            print("\nShutting down...", flush=True)
+            if loops:
+                await cancel_async_tasks(loops)
 
 
 def main() -> None:
@@ -371,6 +386,11 @@ def main() -> None:
     parser.add_argument("--runways", type=int, default=2)
     parser.add_argument("--fuel-trucks", type=int, default=2)
     parser.add_argument("--baggage-crews", type=int, default=2)
+    parser.add_argument(
+        "--startup-check",
+        action="store_true",
+        help="start the mesh, resolve one manager and flight actor, then exit",
+    )
     # Per-phase duration ranges, in seconds, given as MIN MAX.
     for flag, lo, hi in (
         ("approach", 1.0, 3.0),
@@ -415,7 +435,7 @@ def main() -> None:
             parser.error(f"--{name} MIN must be > 0 and <= MAX")
 
     try:
-        asyncio.run(async_main(args))
+        run_async_main(async_main(args))
     except KeyboardInterrupt:
         pass
 
