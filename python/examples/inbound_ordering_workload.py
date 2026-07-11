@@ -51,7 +51,7 @@ import urllib.parse
 
 from monarch._src.actor.telemetry import TracingForwarder
 from monarch.actor import Actor, context, endpoint
-from monarch.job import ProcessJob
+from monarch.job import ProcessJob, run_async_main, scoped_async_state
 
 logger: logging.Logger = logging.getLogger("inbound_ordering_workload")
 logger.addHandler(TracingForwarder())
@@ -103,88 +103,86 @@ class Sender(Actor):
 
 async def async_main(args: argparse.Namespace) -> None:
     job = ProcessJob({"hosts": 1}).enable_admin()
-    state = job.state(cached_path=None)
-    host = state.hosts
+    async with scoped_async_state(job, cached_path=None) as state:
+        host = state.hosts
+        receiver_proc = host.spawn_procs(name="inbound_ordering_receiver")
+        # Two separate singleton proc meshes for the two senders so each
+        # sender has its own Instance (and therefore its own Sequencer and
+        # SEQ_INFO session_id) by construction. Using one shared proc mesh
+        # with two spawns relies on subtler ActorMesh semantics; two procs
+        # makes the "two distinct session owners" promise structural.
+        sender_a_proc = host.spawn_procs(name="inbound_ordering_sender_a")
+        sender_b_proc = host.spawn_procs(name="inbound_ordering_sender_b")
 
-    receiver_proc = host.spawn_procs(name="inbound_ordering_receiver")
-    # Two separate singleton proc meshes for the two senders so each
-    # sender has its own Instance (and therefore its own Sequencer and
-    # SEQ_INFO session_id) by construction. Using one shared proc mesh
-    # with two spawns relies on subtler ActorMesh semantics; two procs
-    # makes the "two distinct session owners" promise structural.
-    sender_a_proc = host.spawn_procs(name="inbound_ordering_sender_a")
-    sender_b_proc = host.spawn_procs(name="inbound_ordering_sender_b")
+        receiver = receiver_proc.spawn("stalled_receiver", StalledReceiver)
+        # Get the receiver's address by asking it -- there's no direct
+        # Python-side accessor on ``ActorMesh`` that returns a rank's
+        # ``ActorAddr``. ``PyActorAddr`` is picklable via ``__reduce__``,
+        # so it can be passed back over the endpoint result and forward
+        # as a constructor argument to the senders.
+        receiver_addr = await receiver.whoami.call_one()
 
-    receiver = receiver_proc.spawn("stalled_receiver", StalledReceiver)
-    # Get the receiver's address by asking it -- there's no direct
-    # Python-side accessor on ``ActorMesh`` that returns a rank's
-    # ``ActorAddr``. ``PyActorAddr`` is picklable via ``__reduce__``,
-    # so it can be passed back over the endpoint result and forward
-    # as a constructor argument to the senders.
-    receiver_addr = await receiver.whoami.call_one()
+        sender_a = sender_a_proc.spawn("sender_a", Sender, receiver, receiver_addr)
+        sender_b = sender_b_proc.spawn("sender_b", Sender, receiver, receiver_addr)
 
-    sender_a = sender_a_proc.spawn("sender_a", Sender, receiver, receiver_addr)
-    sender_b = sender_b_proc.spawn("sender_b", Sender, receiver, receiver_addr)
+        # Two distinct senders -> receiver shows 2 stalled sessions
+        # (different session_ids, one per sender Instance's Sequencer).
+        await sender_a.stall_and_send.call_one(skip_count=1, send_count=5)
+        await sender_b.stall_and_send.call_one(skip_count=1, send_count=3)
 
-    # Two distinct senders -> receiver shows 2 stalled sessions
-    # (different session_ids, one per sender Instance's Sequencer).
-    await sender_a.stall_and_send.call_one(skip_count=1, send_count=5)
-    await sender_b.stall_and_send.call_one(skip_count=1, send_count=3)
+        admin_url = state.admin_url
+        assert admin_url is not None
+        # Match pyspy_workload.py: emit mTLS flags conditionally when the
+        # admin URL is HTTPS so the printed commands are paste-ready in
+        # both local and production environments.
+        mtls_flags = (
+            " --cacert /var/facebook/rootcanal/ca.pem"
+            " --cert /var/facebook/x509_identities/server.pem"
+            " --key /var/facebook/x509_identities/server.pem"
+            if admin_url.startswith("https")
+            else ""
+        )
 
-    # Match pyspy_workload.py: emit mTLS flags conditionally when the
-    # admin URL is HTTPS so the printed commands are paste-ready in
-    # both local and production environments.
-    mtls_flags = (
-        " --cacert /var/facebook/rootcanal/ca.pem"
-        " --cert /var/facebook/x509_identities/server.pem"
-        " --key /var/facebook/x509_identities/server.pem"
-        if state.admin_url.startswith("https://")
-        else ""
-    )
+        # Actor refs contain '/' and must be percent-encoded in URL path
+        # positions. Single source of truth is the ``receiver_addr``
+        # PyActorAddr obtained from ``whoami`` above; Python ``ActorMesh``
+        # does not expose an ``actor_addr()`` accessor.
+        receiver_ref = str(receiver_addr)
+        receiver_ref_encoded = urllib.parse.quote(receiver_ref, safe="")
 
-    # Actor refs contain '/' and must be percent-encoded in URL path
-    # positions. Single source of truth is the ``receiver_addr``
-    # PyActorAddr obtained from ``whoami`` above; Python ``ActorMesh``
-    # does not expose an ``actor_addr()`` accessor.
-    receiver_ref = str(receiver_addr)
-    receiver_ref_encoded = urllib.parse.quote(receiver_ref, safe="")
+        print(f"Mesh admin server listening on {admin_url}", flush=True)
+        print(f"  - Stalled receiver: {receiver_ref}", flush=True)
+        print(
+            f"  - curl: curl{mtls_flags} {admin_url}/v1/{receiver_ref_encoded}",
+            flush=True,
+        )
+        print(
+            "  - TUI:   "
+            f"buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui "
+            f"-- --addr {admin_url}",
+            flush=True,
+        )
+        print(
+            "  - Verifier: "
+            f"buck2 run fbcode//monarch/python/examples:verify_inbound_ordering "
+            f"-- --admin-url {admin_url}"
+            f"{mtls_flags}",
+            flush=True,
+        )
 
-    print(f"Mesh admin server listening on {state.admin_url}", flush=True)
-    print(f"  - Stalled receiver: {receiver_ref}", flush=True)
-    print(
-        f"  - curl: curl{mtls_flags} {state.admin_url}/v1/{receiver_ref_encoded}",
-        flush=True,
-    )
-    print(
-        "  - TUI:   "
-        f"buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui "
-        f"-- --addr {state.admin_url}",
-        flush=True,
-    )
-    print(
-        "  - Verifier: "
-        f"buck2 run fbcode//monarch/python/examples:verify_inbound_ordering "
-        f"-- --admin-url {state.admin_url}"
-        f"{mtls_flags}",
-        flush=True,
-    )
-
-    try:
-        await asyncio.sleep(float("inf"))
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        pass
-    finally:
-        print("\nShutting down...", flush=True)
-        await sender_a_proc.stop()
-        await sender_b_proc.stop()
-        await receiver_proc.stop()
+        try:
+            await asyncio.sleep(float("inf"))
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            print("\nShutting down...", flush=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     args = parser.parse_args()
     try:
-        asyncio.run(async_main(args))
+        run_async_main(async_main(args))
     except KeyboardInterrupt:
         pass
 

@@ -42,7 +42,7 @@ import time
 
 from monarch._src.actor.telemetry import TracingForwarder
 from monarch.actor import Actor, endpoint
-from monarch.job import ProcessJob, TelemetryConfig
+from monarch.job import ProcessJob, run_async_main, scoped_async_state, TelemetryConfig
 
 logger = logging.getLogger("pyspy_workload")
 logger.addHandler(TracingForwarder())
@@ -146,54 +146,52 @@ async def async_main() -> None:
         )
         .enable_admin()
     )
-    state = job.state(cached_path=None)
-    host = state.hosts
+    async with scoped_async_state(job, cached_path=None) as state:
+        admin_url = state.admin_url
+        assert admin_url is not None
+        mtls_flags = (
+            "--cacert /var/facebook/rootcanal/ca.pem "
+            "--cert /var/facebook/x509_identities/server.pem "
+            "--key /var/facebook/x509_identities/server.pem "
+            if admin_url.startswith("https")
+            else ""
+        )
+        print(
+            f"\npy-spy workload: mode={args.mode}, "
+            f"work_ms={args.work_ms}, concurrency={args.concurrency}"
+        )
+        print(f"\nMesh admin server listening on {admin_url}")
+        print(f"  - Mesh tree:     curl {mtls_flags}{admin_url}/v1/tree")
+        print(f"  - API docs:      curl {mtls_flags}{admin_url}/SKILL.md")
+        print("\nVerify with:")
+        print("  buck2 run fbcode//monarch/python/examples:verify_pyspy -- \\")
+        if mtls_flags:
+            print(f"    --admin-url {admin_url} --mode {args.mode} --samples 10 \\")
+            print(f"    {mtls_flags.strip()}")
+        else:
+            print(f"    --admin-url {admin_url} --mode {args.mode} --samples 10")
+        print("\nPress Ctrl+C to stop.\n", flush=True)
 
-    admin_url = state.admin_url
-    assert admin_url is not None
-    mtls_flags = (
-        "--cacert /var/facebook/rootcanal/ca.pem "
-        "--cert /var/facebook/x509_identities/server.pem "
-        "--key /var/facebook/x509_identities/server.pem "
-        if admin_url.startswith("https")
-        else ""
-    )
-    print(
-        f"\npy-spy workload: mode={args.mode}, "
-        f"work_ms={args.work_ms}, concurrency={args.concurrency}"
-    )
-    print(f"\nMesh admin server listening on {admin_url}")
-    print(f"  - Mesh tree:     curl {mtls_flags}{admin_url}/v1/tree")
-    print(f"  - API docs:      curl {mtls_flags}{admin_url}/SKILL.md")
-    print("\nVerify with:")
-    print("  buck2 run fbcode//monarch/python/examples:verify_pyspy -- \\")
-    if mtls_flags:
-        print(f"    --admin-url {admin_url} --mode {args.mode} --samples 10 \\")
-        print(f"    {mtls_flags.strip()}")
-    else:
-        print(f"    --admin-url {admin_url} --mode {args.mode} --samples 10")
-    print("\nPress Ctrl+C to stop.\n", flush=True)
+        host = state.hosts
+        # Spawn worker procs. The actor name pyspy_worker lets the
+        # verifier filter to workload procs by prefix.
+        procs = host.spawn_procs(per_host={"replica": args.concurrency})
+        workers = procs.spawn("pyspy_worker", Worker, args.mode, args.work_ms)
 
-    # Spawn worker procs. The actor name pyspy_worker lets the
-    # verifier filter to workload procs by prefix.
-    procs = host.spawn_procs(per_host={"replica": args.concurrency})
-    workers = procs.spawn("pyspy_worker", Worker, args.mode, args.work_ms)
+        # Start all workers.
+        workers.work_forever.broadcast()
 
-    # Start all workers.
-    workers.work_forever.broadcast()
-
-    try:
-        await asyncio.sleep(float("inf"))
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        pass
-    finally:
-        print("\nShutting down...", flush=True)
-        await procs.stop()
+        try:
+            await asyncio.sleep(float("inf"))
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            print("\nShutting down...", flush=True)
 
 
 def main() -> None:
     try:
-        asyncio.run(async_main())
+        run_async_main(async_main())
     except KeyboardInterrupt:
         pass
 

@@ -76,7 +76,12 @@ from monarch._rust_bindings.monarch_hyperactor.config import (  # @manual=//mona
 from monarch._src.actor.actor_mesh import Channel, Port, PortReceiver
 from monarch._src.actor.telemetry import TracingForwarder
 from monarch.actor import Actor, concurrent_endpoint, context, endpoint
-from monarch.job import ProcessJob
+from monarch.job import (
+    cancel_async_tasks,
+    ProcessJob,
+    run_async_main,
+    scoped_async_state,
+)
 
 logger: logging.Logger = logging.getLogger("execution_workload")
 logger.addHandler(TracingForwarder())
@@ -235,118 +240,112 @@ async def _hold_task(actor, id: str, entered_port: "Port[str]") -> None:
 
 async def async_main() -> None:
     job = ProcessJob({"hosts": 1}).enable_admin()
-    state = job.state(cached_path=None)
-    host = state.hosts
+    async with scoped_async_state(job, cached_path=None) as state:
+        host = state.hosts
+        busy_proc = host.spawn_procs(
+            name="execution_busy", bootstrap=_disable_queue_dispatch
+        )
+        idle_proc = host.spawn_procs(
+            name="execution_idle", bootstrap=_disable_queue_dispatch
+        )
+        queue_proc = host.spawn_procs(
+            name="execution_queue", bootstrap=_enable_queue_dispatch
+        )
+        concurrent_proc = host.spawn_procs(
+            name="execution_concurrent", bootstrap=_enable_queue_dispatch
+        )
+        deadlock_proc = host.spawn_procs(
+            name="execution_deadlock", bootstrap=_enable_queue_dispatch
+        )
 
-    busy_proc = host.spawn_procs(
-        name="execution_busy", bootstrap=_disable_queue_dispatch
-    )
-    idle_proc = host.spawn_procs(
-        name="execution_idle", bootstrap=_disable_queue_dispatch
-    )
-    queue_proc = host.spawn_procs(
-        name="execution_queue", bootstrap=_enable_queue_dispatch
-    )
-    concurrent_proc = host.spawn_procs(
-        name="execution_concurrent", bootstrap=_enable_queue_dispatch
-    )
-    deadlock_proc = host.spawn_procs(
-        name="execution_deadlock", bootstrap=_enable_queue_dispatch
-    )
+        busy = busy_proc.spawn("busy_actor", BusyActor)
+        idle = idle_proc.spawn("idle_actor", BusyActor)
+        queue = queue_proc.spawn("queue_actor", QueueActor)
+        concurrent = concurrent_proc.spawn("concurrent_actor", ConcurrentActor)
+        # A queue-dispatch BusyActor: its blocking plain @endpoint `hold`
+        # monopolizes the serial dispatch loop, so a later `control` release
+        # queues behind it and can never run -- a deadlock the admin API surfaces.
+        deadlock = deadlock_proc.spawn("deadlock_actor", BusyActor)
 
-    busy = busy_proc.spawn("busy_actor", BusyActor)
-    idle = idle_proc.spawn("idle_actor", BusyActor)
-    queue = queue_proc.spawn("queue_actor", QueueActor)
-    concurrent = concurrent_proc.spawn("concurrent_actor", ConcurrentActor)
-    # A queue-dispatch BusyActor: its blocking plain @endpoint `hold`
-    # monopolizes the serial dispatch loop, so a later `control` release
-    # queues behind it and can never run -- a deadlock the admin API surfaces.
-    deadlock = deadlock_proc.spawn("deadlock_actor", BusyActor)
+        actors = {
+            "busy": busy,
+            "queue": queue,
+            "concurrent": concurrent,
+            "deadlock": deadlock,
+        }
 
-    actors = {
-        "busy": busy,
-        "queue": queue,
-        "concurrent": concurrent,
-        "deadlock": deadlock,
-    }
+        busy_ref = await busy.whoami.call_one()
+        idle_ref = await idle.whoami.call_one()
+        queue_ref = await queue.whoami.call_one()
+        concurrent_ref = await concurrent.whoami.call_one()
+        deadlock_ref = await deadlock.whoami.call_one()
 
-    busy_ref = await busy.whoami.call_one()
-    idle_ref = await idle.whoami.call_one()
-    queue_ref = await queue.whoami.call_one()
-    concurrent_ref = await concurrent.whoami.call_one()
-    deadlock_ref = await deadlock.whoami.call_one()
+        # Held invocations send their id over this port from inside the handler
+        # body; a background task drains it and echoes EXEC_ENTERED to stdout.
+        entered_port: Port[str]
+        entered_recv: PortReceiver[str]
+        entered_port, entered_recv = Channel[str].open()
 
-    # Held invocations send their id over this port from inside the handler
-    # body; a background task drains it and echoes EXEC_ENTERED to stdout.
-    entered_port: Port[str]
-    entered_recv: PortReceiver[str]
-    entered_port, entered_recv = Channel[str].open()
+        async def drain_entered() -> None:
+            while True:
+                entered_id = await entered_recv.recv()
+                print(f"EXEC_ENTERED {entered_id}", flush=True)
 
-    async def drain_entered() -> None:
-        while True:
-            entered_id = await entered_recv.recv()
-            print(f"EXEC_ENTERED {entered_id}", flush=True)
+        drainer = asyncio.ensure_future(drain_entered())
 
-    drainer = asyncio.ensure_future(drain_entered())
+        print(f"Mesh admin server listening on {state.admin_url}", flush=True)
+        print(f"  - Busy actor:  {busy_ref}", flush=True)
+        print(f"  - Idle actor:  {idle_ref}", flush=True)
+        print(f"  - Queue actor: {queue_ref}", flush=True)
+        print(f"  - Concurrent actor: {concurrent_ref}", flush=True)
+        print(f"  - Deadlock actor: {deadlock_ref}", flush=True)
 
-    print(f"Mesh admin server listening on {state.admin_url}", flush=True)
-    print(f"  - Busy actor:  {busy_ref}", flush=True)
-    print(f"  - Idle actor:  {idle_ref}", flush=True)
-    print(f"  - Queue actor: {queue_ref}", flush=True)
-    print(f"  - Concurrent actor: {concurrent_ref}", flush=True)
-    print(f"  - Deadlock actor: {deadlock_ref}", flush=True)
-
-    reader = await _stdin_reader()
-    # In-flight held invocations, tracked so they can be cancelled at
-    # shutdown.
-    holds: dict[str, asyncio.Task] = {}
-    try:
-        while True:
-            raw = await reader.readline()
-            if not raw:
-                break  # stdin EOF
-            line = raw.decode().strip()
-            if not line:
-                continue
-            parts = line.split()
-            cmd = parts[0].upper()
-            if cmd == "HOLD":
-                _, which, id = parts
-                # hold blocks until released, so run it as a background task
-                # (via call_one -- see _hold_task). The "entered" signal
-                # still arrives mid-handler over entered_port.
-                holds[id] = asyncio.ensure_future(
-                    _hold_task(actors[which], id, entered_port)
-                )
-                print(f"EXEC_ACK HOLD {id}", flush=True)
-            elif cmd in ("RELEASE", "RAISE"):
-                _, which, id = parts
-                op = cmd.lower()
-                # Signal dispatch *before* the call: under queue dispatch a
-                # release can wedge behind a blocked hold and never return, so
-                # this positive sentinel lets the test rule out "never sent".
-                print(f"EXEC_SENDING {op} {id}", flush=True)
-                await actors[which].control.call_one(id, op)
-                print(f"EXEC_ACK {op} {id}", flush=True)
-            else:
-                print(f"EXEC_ERR unknown command {cmd}", flush=True)
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        pass
-    finally:
-        print("\nShutting down...", flush=True)
-        for task in holds.values():
-            task.cancel()
-        drainer.cancel()
-        await busy_proc.stop()
-        await idle_proc.stop()
-        await queue_proc.stop()
-        await concurrent_proc.stop()
-        await deadlock_proc.stop()
+        reader = await _stdin_reader()
+        # In-flight held invocations, tracked so they can be cancelled at
+        # shutdown.
+        holds: dict[str, asyncio.Task] = {}
+        try:
+            while True:
+                raw = await reader.readline()
+                if not raw:
+                    break  # stdin EOF
+                line = raw.decode().strip()
+                if not line:
+                    continue
+                parts = line.split()
+                cmd = parts[0].upper()
+                if cmd == "HOLD":
+                    _, which, id = parts
+                    # hold blocks until released, so run it as a background task
+                    # (via call_one -- see _hold_task). The "entered" signal
+                    # still arrives mid-handler over entered_port.
+                    holds[id] = asyncio.ensure_future(
+                        _hold_task(actors[which], id, entered_port)
+                    )
+                    print(f"EXEC_ACK HOLD {id}", flush=True)
+                elif cmd in ("RELEASE", "RAISE"):
+                    _, which, id = parts
+                    op = cmd.lower()
+                    # Signal dispatch *before* the call: under queue dispatch a
+                    # release can wedge behind a blocked hold and never return, so
+                    # this positive sentinel lets the test rule out "never sent".
+                    print(f"EXEC_SENDING {op} {id}", flush=True)
+                    # pyre-ignore[16]: only control-capable actors reach RELEASE/RAISE; queue is hold-only
+                    await actors[which].control.call_one(id, op)
+                    print(f"EXEC_ACK {op} {id}", flush=True)
+                else:
+                    print(f"EXEC_ERR unknown command {cmd}", flush=True)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            print("\nShutting down...", flush=True)
+            tasks = list(holds.values()) + [drainer]
+            await cancel_async_tasks(tasks)
 
 
 def main() -> None:
     try:
-        asyncio.run(async_main())
+        run_async_main(async_main())
     except KeyboardInterrupt:
         pass
 

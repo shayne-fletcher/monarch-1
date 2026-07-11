@@ -31,7 +31,7 @@ import asyncio
 import random
 
 from monarch.actor import Actor, context, current_rank, endpoint
-from monarch.job import ProcessJob, TelemetryConfig
+from monarch.job import ProcessJob, run_async_main, scoped_async_state, TelemetryConfig
 
 
 class Sleeper(Actor):
@@ -64,54 +64,52 @@ async def async_main(num_procs: int) -> None:
         )
         .enable_admin()
     )
-    state = job.state(cached_path=None)
-    host = state.hosts
+    async with scoped_async_state(job, cached_path=None) as state:
+        admin_url = state.admin_url
+        assert admin_url is not None
+        mtls_flags = (
+            "--cacert /var/facebook/rootcanal/ca.pem "
+            "--cert /var/facebook/x509_identities/server.pem "
+            "--key /var/facebook/x509_identities/server.pem "
+            if admin_url.startswith("https")
+            else ""
+        )
+        print(f"\nMesh admin server listening on {admin_url}")
+        print(f"  - Root node:     curl {mtls_flags}{admin_url}/v1/root")
+        print(f"  - Mesh tree:     curl {mtls_flags}{admin_url}/v1/tree")
+        print(f"  - API docs:      curl {mtls_flags}{admin_url}/SKILL.md")
+        print(
+            f"  - TUI:           buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui -- --addr {admin_url}"
+        )
+        print(f"\nSpawning batches of sleepers across {num_procs} procs.")
+        print("Press Ctrl+C to stop.\n", flush=True)
 
-    admin_url = state.admin_url
-    assert admin_url is not None
-    mtls_flags = (
-        "--cacert /var/facebook/rootcanal/ca.pem "
-        "--cert /var/facebook/x509_identities/server.pem "
-        "--key /var/facebook/x509_identities/server.pem "
-        if admin_url.startswith("https")
-        else ""
-    )
-    print(f"\nMesh admin server listening on {admin_url}")
-    print(f"  - Root node:     curl {mtls_flags}{admin_url}/v1/root")
-    print(f"  - Mesh tree:     curl {mtls_flags}{admin_url}/v1/tree")
-    print(f"  - API docs:      curl {mtls_flags}{admin_url}/SKILL.md")
-    print(
-        f"  - TUI:           buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui -- --addr {admin_url}"
-    )
-    print(f"\nSpawning batches of sleepers across {num_procs} procs.")
-    print("Press Ctrl+C to stop.\n", flush=True)
+        host = state.hosts
+        procs = host.spawn_procs(per_host={"replica": num_procs})
 
-    procs = host.spawn_procs(per_host={"replica": num_procs})
+        batch = 0
+        # Keep references alive so actors aren't torn down prematurely.
+        batches = []
+        try:
+            while True:
+                name = f"sleeper_batch_{batch}"
+                actors = procs.spawn(name, Sleeper, MIN_SLEEP, MAX_SLEEP)
+                batches.append(actors)
+                print(
+                    f"batch {batch}: spawned {num_procs} sleepers",
+                    flush=True,
+                )
 
-    batch = 0
-    # Keep references alive so actors aren't torn down prematurely.
-    batches = []
-    try:
-        while True:
-            name = f"sleeper_batch_{batch}"
-            actors = procs.spawn(name, Sleeper, MIN_SLEEP, MAX_SLEEP)
-            batches.append(actors)
-            print(
-                f"batch {batch}: spawned {num_procs} sleepers",
-                flush=True,
-            )
+                # Fire-and-forget: tell each actor to sleep then exit.
+                actors.go.broadcast()
 
-            # Fire-and-forget: tell each actor to sleep then exit.
-            actors.go.broadcast()
-
-            # Wait a bit before the next batch so waves overlap.
-            await asyncio.sleep(2.0)
-            batch += 1
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        pass
-    finally:
-        print("\nShutting down...", flush=True)
-        await procs.stop()
+                # Wait a bit before the next batch so waves overlap.
+                await asyncio.sleep(2.0)
+                batch += 1
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            print("\nShutting down...", flush=True)
 
 
 def main() -> None:
@@ -121,7 +119,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     try:
-        asyncio.run(async_main(args.procs))
+        run_async_main(async_main(args.procs))
     except KeyboardInterrupt:
         pass
 

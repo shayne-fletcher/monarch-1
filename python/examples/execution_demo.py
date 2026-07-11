@@ -39,7 +39,12 @@ import random
 
 from monarch._src.actor.telemetry import TracingForwarder
 from monarch.actor import Actor, context, endpoint
-from monarch.job import ProcessJob
+from monarch.job import (
+    cancel_async_tasks,
+    ProcessJob,
+    run_async_main,
+    scoped_async_state,
+)
 
 logger: logging.Logger = logging.getLogger("execution_demo")
 logger.addHandler(TracingForwarder())
@@ -128,70 +133,65 @@ async def async_main(args: argparse.Namespace) -> None:
     eat_ms = (args.eat_ms_min, args.eat_ms_max)
 
     job = ProcessJob({"hosts": 1}).enable_admin()
-    state = job.state(cached_path=None)
-    host = state.hosts
+    async with scoped_async_state(job, cached_path=None) as state:
+        host = state.hosts
+        # N philosophers (one per replica) + a single fork manager on its own proc
+        # so it is a distinct, easy-to-find node in the TUI tree.
+        phil_procs = host.spawn_procs(per_host={"replica": n})
+        fork_proc = host.spawn_procs(name="fork_manager")
 
-    # N philosophers (one per replica) + a single fork manager on its own proc
-    # so it is a distinct, easy-to-find node in the TUI tree.
-    phil_procs = host.spawn_procs(per_host={"replica": n})
-    fork_proc = host.spawn_procs(name="fork_manager")
+        fork_manager = fork_proc.spawn("fork_manager", ForkManager, n)
+        philosophers = phil_procs.spawn(
+            "philosopher", Philosopher, fork_manager, n, think_ms, eat_ms
+        )
 
-    fork_manager = fork_proc.spawn("fork_manager", ForkManager, n)
-    philosophers = phil_procs.spawn(
-        "philosopher", Philosopher, fork_manager, n, think_ms, eat_ms
-    )
+        fork_ref = await fork_manager.whoami.call_one()
+        phil0_ref = await philosophers.slice(replica=0).whoami.call_one()
 
-    fork_ref = await fork_manager.whoami.call_one()
-    phil0_ref = await philosophers.slice(replica=0).whoami.call_one()
+        admin_url = state.admin_url
+        assert admin_url is not None
+        mtls_flags = (
+            "--cacert /var/facebook/rootcanal/ca.pem "
+            "--cert /var/facebook/x509_identities/server.pem "
+            "--key /var/facebook/x509_identities/server.pem "
+            if admin_url.startswith("https")
+            else ""
+        )
+        tui = "buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui"
+        print(f"\nMesh admin server listening on {admin_url}")
+        print(f"  - Mesh tree:  curl {mtls_flags}{admin_url}/v1/tree")
+        print(f"  - TUI:        {tui} -- --addr {admin_url}")
+        print("\nWatch list (find these in the TUI tree by label):")
+        print(
+            "  - actor `fork_manager`  -> Execution: `acquire xK` (live contention) + flight recorder"
+        )
+        print(
+            f"  - actor `philosopher` (replicas 0..{n - 1}) -> Execution: `think`/`eat` turnover + flight recorder"
+        )
+        print(f"  raw ids: fork_manager={fork_ref}  philosopher[0]={phil0_ref}")
+        print(
+            f"\n{n} philosophers; think {think_ms[0]}-{think_ms[1]}ms, "
+            f"eat {eat_ms[0]}-{eat_ms[1]}ms. Press Ctrl+C to stop.\n",
+            flush=True,
+        )
 
-    admin_url = state.admin_url
-    assert admin_url is not None
-    mtls_flags = (
-        "--cacert /var/facebook/rootcanal/ca.pem "
-        "--cert /var/facebook/x509_identities/server.pem "
-        "--key /var/facebook/x509_identities/server.pem "
-        if admin_url.startswith("https")
-        else ""
-    )
-    tui = (
-        "buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui"
-    )
-    print(f"\nMesh admin server listening on {admin_url}")
-    print(f"  - Mesh tree:  curl {mtls_flags}{admin_url}/v1/tree")
-    print(f"  - TUI:        {tui} -- --addr {admin_url}")
-    print("\nWatch list (find these in the TUI tree by label):")
-    print(
-        "  - actor `fork_manager`  -> Execution: `acquire xK` (live contention) + flight recorder"
-    )
-    print(
-        f"  - actor `philosopher` (replicas 0..{n - 1}) -> Execution: `think`/`eat` turnover + flight recorder"
-    )
-    print(f"  raw ids: fork_manager={fork_ref}  philosopher[0]={phil0_ref}")
-    print(
-        f"\n{n} philosophers; think {think_ms[0]}-{think_ms[1]}ms, "
-        f"eat {eat_ms[0]}-{eat_ms[1]}ms. Press Ctrl+C to stop.\n",
-        flush=True,
-    )
+        async def run_philosopher(i: int) -> None:
+            seat = philosophers.slice(replica=i)
+            while True:
+                await seat.think.call_one(i)
+                await seat.eat.call_one(i)
 
-    async def run_philosopher(i: int) -> None:
-        seat = philosophers.slice(replica=i)
-        while True:
-            await seat.think.call_one(i)
-            await seat.eat.call_one(i)
-
-    # Fail-fast: gather propagates the first loop's failure and tears the demo
-    # down, surfacing bugs loudly rather than silently degrading.
-    loops = [asyncio.ensure_future(run_philosopher(i)) for i in range(n)]
-    try:
-        await asyncio.gather(*loops)
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        pass
-    finally:
-        print("\nShutting down...", flush=True)
-        for loop in loops:
-            loop.cancel()
-        await phil_procs.stop()
-        await fork_proc.stop()
+        # Fail-fast: gather propagates the first loop's failure and tears the demo
+        # down, surfacing bugs loudly rather than silently degrading.
+        loops = [asyncio.ensure_future(run_philosopher(i)) for i in range(n)]
+        try:
+            await asyncio.gather(*loops)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            print("\nShutting down...", flush=True)
+            if loops:
+                await cancel_async_tasks(loops)
 
 
 def main() -> None:
@@ -216,7 +216,7 @@ def main() -> None:
         if lo <= 0 or lo > hi:
             parser.error(f"--{name}-ms-min must be > 0 and <= --{name}-ms-max")
     try:
-        asyncio.run(async_main(args))
+        run_async_main(async_main(args))
     except KeyboardInterrupt:
         pass
 

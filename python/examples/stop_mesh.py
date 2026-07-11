@@ -31,7 +31,7 @@ import argparse
 import asyncio
 
 from monarch.actor import Actor, current_rank, endpoint
-from monarch.job import ProcessJob, TelemetryConfig
+from monarch.job import ProcessJob, run_async_main, scoped_async_state, TelemetryConfig
 
 
 class Worker(Actor):
@@ -51,48 +51,46 @@ async def async_main(num_procs: int) -> None:
         )
         .enable_admin()
     )
-    state = job.state(cached_path=None)
-    host = state.hosts
+    async with scoped_async_state(job, cached_path=None) as state:
+        admin_url = state.admin_url
+        assert admin_url is not None
+        mtls_flags = (
+            "--cacert /var/facebook/rootcanal/ca.pem "
+            "--cert /var/facebook/x509_identities/server.pem "
+            "--key /var/facebook/x509_identities/server.pem "
+            if admin_url.startswith("https")
+            else ""
+        )
+        print(f"\nMesh admin server listening on {admin_url}")
+        print(f"  - Root node:     curl {mtls_flags}{admin_url}/v1/root")
+        print(f"  - Mesh tree:     curl {mtls_flags}{admin_url}/v1/tree")
+        print(f"  - API docs:      curl {mtls_flags}{admin_url}/SKILL.md")
+        print(
+            f"  - TUI:           buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui -- --addr {admin_url}"
+        )
+        print(flush=True)
 
-    admin_url = state.admin_url
-    assert admin_url is not None
-    mtls_flags = (
-        "--cacert /var/facebook/rootcanal/ca.pem "
-        "--cert /var/facebook/x509_identities/server.pem "
-        "--key /var/facebook/x509_identities/server.pem "
-        if admin_url.startswith("https")
-        else ""
-    )
-    print(f"\nMesh admin server listening on {admin_url}")
-    print(f"  - Root node:     curl {mtls_flags}{admin_url}/v1/root")
-    print(f"  - Mesh tree:     curl {mtls_flags}{admin_url}/v1/tree")
-    print(f"  - API docs:      curl {mtls_flags}{admin_url}/SKILL.md")
-    print(
-        f"  - TUI:           buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui -- --addr {admin_url}"
-    )
-    print(flush=True)
+        host = state.hosts
+        procs = host.spawn_procs(per_host={"replica": num_procs})
+        workers = procs.spawn("worker", Worker)
 
-    procs = host.spawn_procs(per_host={"replica": num_procs})
-    workers = procs.spawn("worker", Worker)
+        # Let each actor announce itself.
+        await workers.hello.call()
+        print(f"\n{num_procs} workers alive. Stopping the actor mesh...", flush=True)
 
-    # Let each actor announce itself.
-    await workers.hello.call()
-    print(f"\n{num_procs} workers alive. Stopping the actor mesh...", flush=True)
+        # Coordinated mesh-level stop.
+        # pyre-ignore[16]: `stop` is on `ActorMesh`, not the proxy type.
+        await workers.stop("mesh stopped by example")
 
-    # Coordinated mesh-level stop.
-    # pyre-ignore[16]: `stop` is on `ActorMesh`, not the proxy type.
-    await workers.stop("mesh stopped by example")
+        print("Actor mesh stopped. Tombstones are now visible in the TUI (press h).")
+        print("Press Ctrl+C to exit.\n", flush=True)
 
-    print("Actor mesh stopped. Tombstones are now visible in the TUI (press h).")
-    print("Press Ctrl+C to exit.\n", flush=True)
-
-    try:
-        await asyncio.sleep(float("inf"))
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        pass
-    finally:
-        print("\nShutting down...", flush=True)
-        await procs.stop()
+        try:
+            await asyncio.sleep(float("inf"))
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            print("\nShutting down...", flush=True)
 
 
 def main() -> None:
@@ -102,7 +100,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     try:
-        asyncio.run(async_main(args.procs))
+        run_async_main(async_main(args.procs))
     except KeyboardInterrupt:
         pass
 

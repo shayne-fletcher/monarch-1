@@ -47,7 +47,7 @@ from typing import Any, cast
 from monarch._src.actor.actor_mesh import ActorMesh
 from monarch._src.actor.telemetry import TracingForwarder
 from monarch.actor import Actor, current_rank, endpoint
-from monarch.job import ProcessJob, TelemetryConfig
+from monarch.job import ProcessJob, run_async_main, scoped_async_state, TelemetryConfig
 
 logger = logging.getLogger("dining_philosophers")
 logger.addHandler(TracingForwarder())
@@ -185,55 +185,48 @@ async def async_main(
                 snapshot_interval_secs=30.0,
             )
         )
-    state = job.state(cached_path=None)
-    host = state.hosts
+    async with scoped_async_state(job, cached_path=None) as state:
+        admin_url = state.admin_url
+        assert admin_url is not None
+        mtls_flags = (
+            "--cacert /var/facebook/rootcanal/ca.pem "
+            "--cert /var/facebook/x509_identities/server.pem "
+            "--key /var/facebook/x509_identities/server.pem "
+            if admin_url.startswith("https")
+            else ""
+        )
+        print(f"\nMesh admin server listening on {admin_url}")
+        print(f"  - Root node:     curl {mtls_flags}{admin_url}/v1/root")
+        print(f"  - Mesh tree:     curl {mtls_flags}{admin_url}/v1/tree")
+        print(f"  - API docs:      curl {mtls_flags}{admin_url}/SKILL.md")
+        print(
+            f"  - TUI:           buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui -- --addr {admin_url}"
+        )
+        print("\nPress Ctrl+C to stop.\n", flush=True)
 
-    admin_url = state.admin_url
-    assert admin_url is not None
-    mtls_flags = (
-        "--cacert /var/facebook/rootcanal/ca.pem "
-        "--cert /var/facebook/x509_identities/server.pem "
-        "--key /var/facebook/x509_identities/server.pem "
-        if admin_url.startswith("https")
-        else ""
-    )
-    print(f"\nMesh admin server listening on {admin_url}")
-    print(f"  - Root node:     curl {mtls_flags}{admin_url}/v1/root")
-    print(f"  - Mesh tree:     curl {mtls_flags}{admin_url}/v1/tree")
-    print(f"  - API docs:      curl {mtls_flags}{admin_url}/SKILL.md")
-    print(
-        f"  - TUI:           buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui -- --addr {admin_url}"
-    )
-    print("\nPress Ctrl+C to stop.\n", flush=True)
+        # Spawn philosopher processes and actors.
+        host = state.hosts
+        procs = host.spawn_procs(per_host={"replica": NUM_PHILOSOPHERS})
 
-    # Spawn philosopher processes and actors.
-    procs = host.spawn_procs(per_host={"replica": NUM_PHILOSOPHERS})
+        # Spawn waiter on its own proc mesh so it appears in the dashboard hierarchy.
+        waiter_proc = host.spawn_procs(name="waiter")
+        philosophers = procs.spawn("philosopher", Philosopher, NUM_PHILOSOPHERS)
+        waiter = waiter_proc.spawn("waiter", Waiter, philosophers)
 
-    # Spawn waiter on its own proc mesh so it appears in the dashboard hierarchy.
-    waiter_proc = host.spawn_procs(name="waiter")
-    philosophers = procs.spawn("philosopher", Philosopher, NUM_PHILOSOPHERS)
-    waiter = waiter_proc.spawn("waiter", Waiter, philosophers)
+        # Start all philosophers — each will begin requesting chopsticks.
+        philosophers.start.broadcast(waiter)
 
-    # Start all philosophers — each will begin requesting chopsticks.
-    philosophers.start.broadcast(waiter)
-
-    # Run until interrupted.
-    try:
-        if kill_waiter_after is not None:
-            await asyncio.sleep(kill_waiter_after)
-            print("Killing the waiter...")
-            cast(ActorMesh[Waiter], waiter).stop().get()
-        await asyncio.sleep(float("inf"))
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        pass
-    finally:
-        print("\nShutting down...", flush=True)
-        await waiter_proc.stop()
-        await procs.stop()
-        # Tear down the host last: ProcessJob spawns a host subprocess
-        # (run_worker_loop_forever) that stopping the proc meshes alone leaves
-        # orphaned; shutdown() stops the host and every process on it.
-        await host.shutdown()
+        # Run until interrupted.
+        try:
+            if kill_waiter_after is not None:
+                await asyncio.sleep(kill_waiter_after)
+                print("Killing the waiter...")
+                cast(ActorMesh[Waiter], waiter).stop().get()
+            await asyncio.sleep(float("inf"))
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            print("\nShutting down...", flush=True)
 
 
 def main() -> None:
@@ -263,7 +256,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        asyncio.run(
+        run_async_main(
             async_main(
                 dashboard=args.dashboard,
                 dashboard_port=args.dashboard_port,
