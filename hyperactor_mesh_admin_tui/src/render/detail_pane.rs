@@ -41,6 +41,7 @@ use crate::format::format_system_time_iso;
 use crate::format::format_system_time_local;
 use crate::format::format_system_time_relative;
 use crate::format::format_system_time_uptime;
+use crate::format::sanitize_control;
 use crate::format_bytes;
 use crate::theme::ColorScheme;
 use crate::theme::Labels;
@@ -730,7 +731,6 @@ fn render_actor_detail(
     } else {
         recorded_events
             .iter()
-            .take(20)
             .map(|event| {
                 let level_style = match event.level.as_str() {
                     "ERROR" => scheme.error,
@@ -739,24 +739,50 @@ fn render_actor_detail(
                     "DEBUG" => scheme.info,
                     _ => scheme.detail_label,
                 };
+                // Event text is less-trusted mesh data; strip control bytes so a
+                // crafted event cannot emit terminal escape/OSC sequences into
+                // the operator's terminal.
+                let level_char = event
+                    .level
+                    .chars()
+                    .next()
+                    .filter(|c| !c.is_control())
+                    .unwrap_or('?');
                 Line::from(vec![
+                    Span::styled(format!("{level_char} "), level_style),
                     Span::styled(
-                        format!("{} ", event.level.chars().next().unwrap_or('?')),
-                        level_style,
-                    ),
-                    Span::styled(
-                        format!("{} ", format_local_time(&event.timestamp)),
+                        format!(
+                            "{} ",
+                            sanitize_control(&format_local_time(&event.timestamp))
+                        ),
                         scheme.detail_label,
                     ),
-                    Span::raw(format_event_summary(&event.name, &event.fields)),
+                    Span::raw(sanitize_control(&format_event_summary(
+                        &event.name,
+                        &event.fields,
+                    ))),
                 ])
             })
             .collect()
     };
 
-    let recorder = Paragraph::new(events)
-        .block(recorder_block)
-        .wrap(Wrap { trim: true });
+    // TUI-FR-1 (flight-recorder-autoscroll): events render chronologically
+    // (oldest at top) and auto-scroll so the newest row sits on the bottom line.
+    // Read line_count before attaching the block; a Paragraph carrying the block
+    // subtracts the border from the width again, over-counting and scrolling past
+    // the newest line.
+    let inner_width = chunks[3].width.saturating_sub(2);
+    let inner_height = chunks[3].height.saturating_sub(2);
+    let recorder = Paragraph::new(events).wrap(Wrap { trim: true });
+    // Guard the degenerate zero-width case: nothing renders at zero inner width,
+    // and line_count(0) has no well-defined wrap.
+    let total_rows = if inner_width == 0 {
+        0
+    } else {
+        recorder.line_count(inner_width) as u16
+    };
+    let scroll = total_rows.saturating_sub(inner_height);
+    let recorder = recorder.block(recorder_block).scroll((scroll, 0));
     frame.render_widget(recorder, chunks[3]);
 }
 
@@ -2002,6 +2028,113 @@ mod tests {
         assert!(
             text.contains("Flight Recorder"),
             "expected flight recorder pane still visible under cramped height: {text}"
+        );
+    }
+
+    /// Serialize `count` flight-recorder events named `evt000`..`evt{count-1}`
+    /// (oldest first). Empty `fields` make `format_event_summary` fall back to
+    /// the name, so each event renders as its own identifier.
+    fn recorder_json(count: usize) -> String {
+        let events: Vec<serde_json::Value> = (0..count)
+            .map(|i| {
+                serde_json::json!({
+                    "timestamp": "2026-07-11T00:00:00.000Z",
+                    "level": "INFO",
+                    "name": format!("evt{i:03}"),
+                    "fields": {},
+                })
+            })
+            .collect();
+        serde_json::to_string(&events).unwrap()
+    }
+
+    fn actor_payload_with_recorder(json: String) -> NodePayload {
+        let mut payload = actor_payload(None);
+        if let NodeProperties::Actor {
+            flight_recorder, ..
+        } = &mut payload.properties
+        {
+            *flight_recorder = Some(json);
+        }
+        payload
+    }
+
+    // TUI-FR-1: with more events than fit, the recorder drops the old take(20)
+    // cap, renders every event, and auto-scrolls so the newest sits on the
+    // bottom line while the oldest scrolls off. Height 24 leaves the recorder
+    // 9 inner rows for 30 events, so rows evt021..evt029 are visible.
+    #[test]
+    fn flight_recorder_autoscrolls_to_newest() {
+        let text = render_detail_to_string_with_size(
+            &actor_payload_with_recorder(recorder_json(30)),
+            120,
+            24,
+        );
+        assert!(
+            text.contains("evt029"),
+            "newest event pinned to the bottom line: {text}"
+        );
+        assert!(
+            text.contains("evt025"),
+            "an event past the old take(20) cap surfaces: {text}"
+        );
+        assert!(
+            !text.contains("evt000"),
+            "oldest event scrolled off the top: {text}"
+        );
+    }
+
+    // TUI-FR-1: when every event fits, none scroll off and they render
+    // chronologically (oldest above newest).
+    #[test]
+    fn flight_recorder_renders_chronological_without_scroll() {
+        let text = render_detail_to_string_with_size(
+            &actor_payload_with_recorder(recorder_json(3)),
+            120,
+            40,
+        );
+        let oldest = text
+            .find("evt000")
+            .expect("oldest event visible when it fits");
+        let newest = text
+            .find("evt002")
+            .expect("newest event visible when it fits");
+        assert!(
+            oldest < newest,
+            "oldest renders above newest (chronological order): {text}"
+        );
+    }
+
+    // TUI-FR-1: event text is less-trusted, so control/escape bytes are replaced
+    // with a sentinel and cannot drive the operator's terminal.
+    #[test]
+    fn flight_recorder_sanitizes_control_bytes() {
+        let json = serde_json::to_string(&vec![serde_json::json!({
+            "timestamp": "2026-07-11T00:00:00.000Z",
+            "level": "INFO",
+            "name": "n",
+            "fields": {"message": "a\u{1b}]0;pwn\u{7}b"},
+        })])
+        .unwrap();
+        let text = render_detail_to_string_with_size(&actor_payload_with_recorder(json), 120, 24);
+        assert!(
+            !text.contains('\u{1b}'),
+            "ESC byte must not reach the terminal: {text:?}"
+        );
+        assert!(
+            text.contains('\u{fffd}'),
+            "control bytes replaced with the sentinel: {text:?}"
+        );
+    }
+
+    // TUI-FR-1: a terminal so narrow the recorder has zero inner width must not
+    // panic (line_count(0) is guarded).
+    #[test]
+    fn flight_recorder_survives_zero_inner_width() {
+        let _ = render_detail_to_string_with_size(
+            &actor_payload_with_recorder(recorder_json(5)),
+            2,
+            24,
         );
     }
 }
