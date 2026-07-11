@@ -19,8 +19,10 @@ import asyncio
 
 import pytest
 from monarch._rust_bindings.monarch_hyperactor.pytokio import (
+    Handle,
     is_tokio_thread,
     PythonTask,
+    WouldBlockRuntime,
 )
 from monarch._src.actor import future as future_mod
 from monarch._src.actor.future import Future
@@ -263,6 +265,13 @@ def test_get_in_tokio_thread_warns_then_cannot_block(monkeypatch):
         _run_in_tokio(attempt())
     assert len(calls) == 1
     assert calls[0]["extra"]["context"] == "tokio"
+
+
+def test_handle_and_would_block_runtime_are_importable():
+    """``Handle`` and ``WouldBlockRuntime`` import from the pytokio bindings, and
+    ``WouldBlockRuntime`` subclasses ``RuntimeError``."""
+    assert issubclass(WouldBlockRuntime, RuntimeError)
+    assert isinstance(Handle, type)
 
 
 # ---------------------------------------------------------------------------
