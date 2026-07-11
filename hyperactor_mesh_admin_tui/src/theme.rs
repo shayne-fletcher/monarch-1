@@ -106,8 +106,6 @@ pub(crate) struct Labels {
     // Inbound ordering pane labels. `{n}` / `{id}` placeholders are
     // substituted with `String::replace` at render time.
     pub(crate) pane_inbound_ordering: &'static str,
-    pub(crate) ordering_not_available: &'static str,
-    pub(crate) ordering_buffering_disabled: &'static str,
     pub(crate) ordering_buffering_enabled: &'static str,
     pub(crate) ordering_sessions_label: &'static str,
     pub(crate) ordering_sessions_known: &'static str,
@@ -223,8 +221,6 @@ impl Labels {
             last_busy: "Last busy: ",
             instance_id_label: "Instance: ",
             pane_inbound_ordering: "Inbound ordering",
-            ordering_not_available: "not available",
-            ordering_buffering_disabled: "disabled (direct_send)",
             ordering_buffering_enabled: "enabled",
             ordering_sessions_label: "sessions",
             ordering_sessions_known: "of",
@@ -328,8 +324,6 @@ impl Labels {
             last_busy: "最近繁忙: ",
             instance_id_label: "实例: ",
             pane_inbound_ordering: "入站排序",
-            ordering_not_available: "不可用",
-            ordering_buffering_disabled: "已禁用 (direct_send)",
             ordering_buffering_enabled: "已启用",
             ordering_sessions_label: "会话",
             ordering_sessions_known: "共",

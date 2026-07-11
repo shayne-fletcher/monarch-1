@@ -786,33 +786,50 @@ fn render_actor_detail(
     frame.render_widget(recorder, chunks[3]);
 }
 
-/// Compute the desired height for the inbound-ordering section, capped
-/// against the available area so the flight recorder's minimum height
-/// (`MIN_FLIGHT_RECORDER_HEIGHT`) is preserved even when the desired
-/// height would otherwise overflow.
+/// TUI-IO-1 (ordering-visibility): the inbound-ordering pane is drawn iff
+/// buffering is enabled AND either a session is stalled (`buffered_count > 0`) or
+/// the snapshot is partial. The partial case matters: the sessions we could not
+/// read (mutex held at snapshot time) may be the stalled ones, so the
+/// "(partial: N skipped)" warning must still surface. This is the single source
+/// of truth for `render_inbound_ordering` and `compute_ordering_height` so their
+/// visibility decisions cannot drift. It is a TUI presentation invariant (like
+/// the execution pane's EX-1), distinct from the external `IO-1` whose "not
+/// available" placeholder this stack removed.
+fn ordering_has_content(io: &InboundOrdering) -> bool {
+    io.enabled && (io.sessions.iter().any(|s| s.buffered_count > 0) || !io.snapshot_complete)
+}
+
+/// Compute the desired height for the inbound-ordering section, or 0 to hide it
+/// (per `ordering_has_content`), capped so the flight recorder keeps
+/// `MIN_FLIGHT_RECORDER_HEIGHT`. The row budget mirrors `build_inbound_ordering_lines`
+/// exactly, the way `compute_execution_height` mirrors `build_execution_lines`.
 fn compute_ordering_height(
     area_height: u16,
     info_height: u16,
     inbound_ordering: Option<&InboundOrdering>,
 ) -> u16 {
+    let Some(io) = inbound_ordering else {
+        return 0;
+    };
+    if !ordering_has_content(io) {
+        return 0;
+    }
+    let stalled = io.sessions.iter().filter(|s| s.buffered_count > 0).count();
+    // border(2) + rollup line 1(1) + rollup line 2(0/1). A partial snapshot with
+    // no returned stalls stops there; otherwise add the table: spacer(1) +
+    // header(1) + rows + more(0/1) + footer spacer(1) + footer(1).
+    let rollup2 = u16::from(io.returned_buffered_message_count > 0);
+    let table = if stalled == 0 {
+        0
+    } else {
+        let rows = stalled.min(TOP_N) as u16;
+        let more_row = u16::from(stalled > TOP_N);
+        1 + 1 + rows + more_row + 1 + 1
+    };
+    let want = 2 + 1 + rollup2 + table;
     let budget = area_height
         .saturating_sub(info_height)
         .saturating_sub(MIN_FLIGHT_RECORDER_HEIGHT);
-    let want: u16 = match inbound_ordering {
-        None => 3,
-        Some(io) if !io.enabled => 3,
-        Some(io) => {
-            let stalled = io.sessions.iter().filter(|s| s.buffered_count > 0).count();
-            if stalled == 0 {
-                3 // border(2) + rollup line 1 only
-            } else {
-                let rows = stalled.min(TOP_N) as u16;
-                let more_row = if stalled > TOP_N { 1 } else { 0 };
-                // border(2) + rollup(2) + spacer(1) + header(1) + rows + footer(3)
-                2 + 2 + 1 + 1 + rows + more_row + 3
-            }
-        }
-    };
     want.min(budget)
 }
 
@@ -936,6 +953,9 @@ fn build_execution_lines<'a>(
 const OWNER_COL_WIDTH: usize = 30;
 const NEED_SEQ_COL_WIDTH: usize = 8;
 
+/// Drawn only when `ordering_has_content` (enabled, and either a stalled session
+/// or a partial snapshot); the caller gives this a zero-height chunk otherwise,
+/// mirroring the execution pane. Hidden states show no placeholder line.
 fn render_inbound_ordering(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -943,32 +963,25 @@ fn render_inbound_ordering(
     scheme: &ColorScheme,
     l: &Labels,
 ) {
+    let Some(io) = inbound_ordering else {
+        return;
+    };
+    if !ordering_has_content(io) {
+        return;
+    }
     // Red border when actionable stalls are present; otherwise
     // matches the rest of the chrome.
-    let border_style = match inbound_ordering {
-        Some(io) if io.enabled && io.returned_buffered_session_count > 0 => {
-            scheme.detail_alert_border
-        }
-        _ => scheme.border,
+    let border_style = if io.returned_buffered_session_count > 0 {
+        scheme.detail_alert_border
+    } else {
+        scheme.border
     };
     let block = Block::default()
         .title(l.pane_inbound_ordering)
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    let lines: Vec<Line> = match inbound_ordering {
-        None => vec![Line::from(Span::styled(
-            l.ordering_not_available,
-            scheme.detail_label,
-        ))],
-        Some(io) if !io.enabled => vec![Line::from(Span::styled(
-            l.ordering_buffering_disabled,
-            scheme.detail_label,
-        ))],
-        Some(io) => build_inbound_ordering_lines(io, scheme, l),
-    };
-
-    let p = Paragraph::new(lines)
+    let p = Paragraph::new(build_inbound_ordering_lines(io, scheme, l))
         .block(block)
         .wrap(Wrap { trim: false });
     frame.render_widget(p, area);
@@ -1021,8 +1034,8 @@ fn build_inbound_ordering_lines<'a>(
         )),
     ]));
 
-    // Rollup line 2 only when there's actually something buffered;
-    // for clean snapshots line 1 already conveys "0 of N stalled".
+    // Rollup line 2 only when something is buffered; a partial snapshot with no
+    // returned stalls shows just line 1 ("0 of N stalled (partial: M skipped)").
     if io.returned_buffered_message_count > 0 {
         lines.push(Line::from(Span::raw(format!(
             "{} {}, {} {}{}",
@@ -1034,6 +1047,9 @@ fn build_inbound_ordering_lines<'a>(
         ))));
     }
 
+    // Partial snapshot with nothing returned as stalled: the rollup (with its
+    // "(partial: N skipped)" suffix) is why the pane is shown, so stop before the
+    // per-session table.
     if stalled.is_empty() {
         return lines;
     }
@@ -1508,7 +1524,7 @@ mod tests {
         );
     }
 
-    // ---- inbound-ordering render tests (IO-1 / IO-2 / IO-6 / IO-7) ----
+    // ---- inbound-ordering render tests (TUI-IO-1 / IO-2 / IO-6 / IO-7) ----
 
     fn mock_actor_addr(name: &str, proc_name: &str) -> hyperactor::ActorAddr {
         let proc_id = hyperactor_mesh::mesh_id::ResourceId::proc_addr_from_name(
@@ -1657,21 +1673,18 @@ mod tests {
         }
     }
 
-    // IO-1: structural absence renders "not available".
+    // TUI-IO-1: the pane is shown iff enabled AND (a session is stalled OR the
+    // snapshot is partial); every other state hides it. This arm: None hides it.
     #[test]
     fn render_actor_detail_inbound_ordering_none() {
         let text = render_detail_to_string_with_size(&actor_payload(None), 120, 45);
         assert!(
-            text.contains("not available"),
-            "expected 'not available' in output: {text}"
-        );
-        assert!(
-            !text.contains("Owner"),
-            "no per-session header in None state: {text}"
+            !text.contains("Inbound ordering"),
+            "None hides the inbound-ordering pane: {text}"
         );
     }
 
-    // IO-1 enabled=false: shows compact "disabled (direct_send)" line.
+    // TUI-IO-1: buffering disabled hides the pane (nothing to surface).
     #[test]
     fn render_actor_detail_inbound_ordering_disabled() {
         let io = InboundOrdering {
@@ -1686,16 +1699,13 @@ mod tests {
         };
         let text = render_detail_to_string_with_size(&actor_payload(Some(Box::new(io))), 120, 45);
         assert!(
-            text.contains("disabled (direct_send)"),
-            "expected compact disabled message: {text}"
-        );
-        assert!(
-            !text.contains("Need seq"),
-            "no per-session header in disabled state: {text}"
+            !text.contains("Inbound ordering"),
+            "buffering disabled hides the inbound-ordering pane: {text}"
         );
     }
 
-    // Enabled but no stalled sessions: line 1 only; no buffered totals line; no table.
+    // TUI-IO-1: enabled, a complete snapshot, and no stalled sessions hides the pane,
+    // mirroring the execution pane. (Contrast the partial-snapshot case below.)
     #[test]
     fn render_actor_detail_inbound_ordering_enabled_no_stalled() {
         let io = InboundOrdering {
@@ -1712,15 +1722,92 @@ mod tests {
             ],
         };
         let text = render_detail_to_string_with_size(&actor_payload(Some(Box::new(io))), 120, 45);
-        assert!(text.contains("enabled"), "expected enabled label: {text}");
         assert!(
-            text.contains("0 of 2 sessions stalled"),
-            "expected rollup '0 of 2 sessions stalled': {text}"
+            !text.contains("Inbound ordering"),
+            "no stalled sessions hides the inbound-ordering pane: {text}"
+        );
+        assert!(
+            !text.contains("sessions stalled"),
+            "no rollup line when the pane is hidden: {text}"
+        );
+    }
+
+    // TUI-IO-1: a partial snapshot with no returned stalls still shows the pane so the
+    // "(partial: N skipped)" warning survives -- the sessions we could not read
+    // may be the stalled ones.
+    #[test]
+    fn render_actor_detail_inbound_ordering_partial_no_stalls_shown() {
+        let io = InboundOrdering {
+            enabled: true,
+            snapshot_complete: false,
+            skipped_session_count: 2,
+            known_session_count: 3,
+            returned_buffered_session_count: 0,
+            returned_buffered_message_count: 0,
+            returned_max_buffered_count: 0,
+            sessions: vec![session(uuid::Uuid::nil(), None, 0, 5, None, None)],
+        };
+        let text = render_detail_to_string_with_size(&actor_payload(Some(Box::new(io))), 120, 45);
+        assert!(
+            text.contains("Inbound ordering"),
+            "partial snapshot keeps the pane visible: {text}"
+        );
+        assert!(
+            text.contains("(partial: 2 skipped)"),
+            "the skipped-session warning survives: {text}"
         );
         assert!(
             !text.contains("Need seq"),
-            "no per-session table header in clean state: {text}"
+            "no per-session table when nothing returned is stalled: {text}"
         );
+    }
+
+    // TUI-IO-1: buffering disabled hides the pane even when a session still carries a
+    // buffered count, so the enabled gate stays load-bearing.
+    #[test]
+    fn render_actor_detail_inbound_ordering_disabled_with_buffered() {
+        let io = InboundOrdering {
+            enabled: false,
+            snapshot_complete: true,
+            skipped_session_count: 0,
+            known_session_count: 1,
+            returned_buffered_session_count: 1,
+            returned_buffered_message_count: 5,
+            returned_max_buffered_count: 5,
+            sessions: vec![session(uuid::Uuid::nil(), None, 5, 0, Some(2), Some(6))],
+        };
+        let text = render_detail_to_string_with_size(&actor_payload(Some(Box::new(io))), 120, 45);
+        assert!(
+            !text.contains("Inbound ordering"),
+            "disabled buffering hides the pane regardless of buffered sessions: {text}"
+        );
+    }
+
+    // TUI-IO-1 height side: compute_ordering_height must agree with
+    // render_inbound_ordering's visibility (0 when hidden, > 0 when shown) so a
+    // reserve-but-hide layout drift cannot slip past the render-only string tests.
+    #[test]
+    fn compute_ordering_height_matches_visibility() {
+        let mk = |enabled: bool, complete: bool, buffered: usize| InboundOrdering {
+            enabled,
+            snapshot_complete: complete,
+            skipped_session_count: if complete { 0 } else { 1 },
+            known_session_count: 1,
+            returned_buffered_session_count: if buffered > 0 { 1 } else { 0 },
+            returned_buffered_message_count: 0,
+            returned_max_buffered_count: 0,
+            sessions: vec![session(uuid::Uuid::nil(), None, buffered, 0, None, None)],
+        };
+        // Hidden -> 0.
+        assert_eq!(compute_ordering_height(45, 13, None), 0);
+        assert_eq!(
+            compute_ordering_height(45, 13, Some(&mk(false, true, 0))),
+            0
+        );
+        assert_eq!(compute_ordering_height(45, 13, Some(&mk(true, true, 0))), 0);
+        // Shown -> non-zero: a stalled session, or a partial snapshot.
+        assert!(compute_ordering_height(45, 13, Some(&mk(true, true, 5))) > 0);
+        assert!(compute_ordering_height(45, 13, Some(&mk(true, false, 0))) > 0);
     }
 
     // One stalled session: rollup, table row, footer all present.
