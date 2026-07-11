@@ -8,6 +8,7 @@
 
 import asyncio
 import logging
+import math
 import warnings
 from typing import (
     Any,
@@ -25,6 +26,7 @@ from monarch._rust_bindings.monarch_hyperactor.pytokio import (
     is_tokio_thread,
     PythonTask,
     Shared,
+    WouldBlockRuntime,
 )
 from monarch._src.actor.telemetry import log_with_tracing
 
@@ -173,12 +175,13 @@ class Future(Generic[R]):
         if in_asyncio or in_tokio:
             # Forward the event to Rust tracing for every in-loop/tokio caller,
             # including non-actor driver processes where no `TracingForwarder`
-            # handler is on the Python logging chain. The UserWarning (separate
-            # from this trace) is emitted at most once, never doubled: the inline
-            # `warnings.warn` below for the no-timeout `_Unawaited` path, else
-            # `Handle.get()` for the `get(timeout=...)`/`_Handle` paths -- which
-            # on a Tokio thread raise `WouldBlockRuntime` before warning, so no
-            # UserWarning fires there.
+            # handler is on the Python logging chain. A UserWarning (separate
+            # from this trace) fires only on a running asyncio loop, never on a
+            # Tokio thread: the blocking `_Unawaited`/`_Handle` paths raise
+            # `WouldBlockRuntime` before warning, and cached `_Complete`/
+            # `_Exception` reads don't block or warn. On asyncio it fires once,
+            # inline below for the no-timeout `_Unawaited` path, else via
+            # `Handle.get()` for the `get(timeout=...)`/`_Handle` paths.
             log_with_tracing(
                 logging.WARNING,
                 "Future.get() called from within an active event loop",
@@ -187,11 +190,31 @@ class Future(Generic[R]):
             )
         match self._status:
             case _Unawaited(coro=coro):
+                if in_tokio:
+                    # Cannot block inside a Tokio runtime. Refuse cleanly BEFORE
+                    # spawning or consuming the task (mirroring Handle.get()), for
+                    # BOTH the timeout and no-timeout paths, so a rejected call
+                    # never starts work or flips state and a later get()/await
+                    # from a valid context still drives the Future. (Otherwise the
+                    # no-timeout path's block_on() takes the task then panics, and
+                    # the timeout path spawns a Handle then raises -- both mutate.)
+                    raise WouldBlockRuntime(
+                        "Future.get() cannot block from within a Tokio runtime; "
+                        "await the Future inside a PythonTask coroutine instead."
+                    )
                 if timeout is not None:
+                    # Validate the timeout BEFORE spawning: an invalid value must
+                    # not start work or flip state to _Handle. Handle.get()
+                    # re-validates authoritatively; this only avoids the spawn on
+                    # a bad argument.
+                    if not math.isfinite(timeout) or timeout < 0:
+                        raise ValueError(
+                            f"invalid timeout {timeout}: expected a non-negative, finite number of seconds"
+                        )
                     # A timeout must not destroy the Future. Observe the task
                     # through a Handle, which is non-cancelling on timeout, so a
-                    # later get()/poll()/await still resolves. Handle.get()
-                    # applies the context policy and emits the warning itself.
+                    # later get()/poll()/await still resolves. Handle.get() applies
+                    # the context policy and emits the warning itself.
                     handle = coro.spawn_handle()
                     self._status = _Handle(handle)
                     return cast("R", handle.get(timeout))
@@ -201,16 +224,6 @@ class Future(Generic[R]):
                         "synchronously and does not yield control, it may degrade performance by preventing "
                         "other tasks from running, and can potentially cause deadlocks if this future depends "
                         "on them. It is encouraged to use as_asyncio() (or await) instead.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-                elif in_tokio:
-                    # as_asyncio() needs an asyncio loop, which a Tokio worker
-                    # thread lacks; the only in-context option is to await inside
-                    # a PythonTask coroutine (block_on() below then raises).
-                    warnings.warn(
-                        "Future.get() was called from within a Tokio runtime; it cannot block there "
-                        "and will raise. Await the Future inside a PythonTask coroutine instead.",
                         UserWarning,
                         stacklevel=2,
                     )
