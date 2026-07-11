@@ -164,6 +164,16 @@ pub(crate) fn format_value(v: &Value) -> String {
     }
 }
 
+/// Replace control characters (C0/C1 controls and DEL) with the Unicode
+/// replacement character. Flight-recorder event text is less-trusted mesh data
+/// rendered straight into the operator's terminal; stripping controls keeps a
+/// crafted event from emitting escape/OSC sequences.
+pub(crate) fn sanitize_control(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+        .collect()
+}
+
 /// Convert an ISO 8601 UTC timestamp (e.g.
 /// "2026-02-11T19:11:01.265Z") to a local-timezone HH:MM:SS string.
 /// Falls back to extracting the raw UTC time portion if parsing
@@ -745,5 +755,14 @@ mod tests {
     #[test]
     fn format_local_time_too_short_fallback() {
         assert_eq!(format_local_time("short"), "short");
+    }
+
+    #[test]
+    fn sanitize_control_replaces_control_bytes() {
+        assert_eq!(
+            sanitize_control("a\u{1b}]0;x\u{7}b\n"),
+            "a\u{fffd}]0;x\u{fffd}b\u{fffd}"
+        );
+        assert_eq!(sanitize_control("plain text"), "plain text");
     }
 }
