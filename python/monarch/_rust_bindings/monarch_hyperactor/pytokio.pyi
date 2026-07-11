@@ -42,6 +42,13 @@ class PythonTask(Generic[T], Awaitable[T]):
         """
         ...
 
+    def spawn_handle(self) -> "Handle[T]":
+        """
+        Spawn this task on the tokio runtime and return an observe-only Handle
+        (get/poll/as_asyncio/await). Consumes the PythonTask.
+        """
+        ...
+
     @staticmethod
     def from_coroutine(coro: Coroutine[Any, Any, T]) -> PythonTask[T]:
         """

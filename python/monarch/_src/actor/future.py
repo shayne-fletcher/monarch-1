@@ -21,6 +21,7 @@ from typing import (
 )
 
 from monarch._rust_bindings.monarch_hyperactor.pytokio import (
+    Handle,
     is_tokio_thread,
     PythonTask,
     Shared,
@@ -78,8 +79,8 @@ class _Exception(NamedTuple):
     exe: Exception
 
 
-class _Asyncio(NamedTuple):
-    fut: asyncio.Future
+class _Handle(NamedTuple):
+    handle: Handle[Any]
 
 
 class _Tokio(NamedTuple):
@@ -90,7 +91,16 @@ class _Taken(NamedTuple):
     pass
 
 
-_Status = _Unawaited | _Complete | _Exception | _Asyncio | _Tokio | _Taken
+_Status = _Unawaited | _Complete | _Exception | _Handle | _Tokio | _Taken
+
+
+# The `_Tokio` state means the task was bridged to a pytokio `Shared` on a
+# tokio-thread await; `get()` and `as_asyncio()` both refuse it because that
+# value is only awaitable from a PythonTask coroutine.
+_ALREADY_TOKIO_MSG = (
+    "already converted into a pytokio.Shared object, use 'await' from a "
+    "PythonTask coroutine to get the value."
+)
 
 
 class Future(Generic[R]):
@@ -129,9 +139,11 @@ class Future(Generic[R]):
         Caveats:
 
         This method is designed to be used in places where event loops are not available. Besides that, you should
-        avoid using this method if possible. Instead, use `await`. This is because when Future.get() is called from
+        avoid using this method if possible. Instead, use `as_asyncio()` (or `await`). This is because when Future.get() is called from
         within an active event loop, it blocks synchronously and does not yield control. That may degrade performance
         by preventing other tasks from running, and can potentially cause deadlocks if this future depends on them.
+
+        A `timeout` never consumes the Future: on `TimeoutError` the underlying task keeps running, so a later `get()`/`await` still observes its result.
 
         examples:
 
@@ -159,17 +171,14 @@ class Future(Generic[R]):
         in_asyncio = asyncio._get_running_loop() is not None
         in_tokio = is_tokio_thread()
         if in_asyncio or in_tokio:
-            warnings.warn(
-                "Future.get() was called from within an active event loop. Because this method blocks "
-                "synchronously and does not yield control, it may degrade performance by preventing "
-                "other tasks from running, and can potentially cause deadlocks if this future depends "
-                "on them. It is encouraged to use 'await' instead.",
-                UserWarning,
-                stacklevel=2,
-            )
-            # Forward the event directly to Rust tracing so we capture it in
-            # non-actor driver processes too, where no `TracingForwarder`
-            # handler is attached to the Python logging chain.
+            # Forward the event to Rust tracing for every in-loop/tokio caller,
+            # including non-actor driver processes where no `TracingForwarder`
+            # handler is on the Python logging chain. The UserWarning (separate
+            # from this trace) is emitted at most once, never doubled: the inline
+            # `warnings.warn` below for the no-timeout `_Unawaited` path, else
+            # `Handle.get()` for the `get(timeout=...)`/`_Handle` paths -- which
+            # on a Tokio thread raise `WouldBlockRuntime` before warning, so no
+            # UserWarning fires there.
             log_with_tracing(
                 logging.WARNING,
                 "Future.get() called from within an active event loop",
@@ -178,27 +187,52 @@ class Future(Generic[R]):
             )
         match self._status:
             case _Unawaited(coro=coro):
+                if timeout is not None:
+                    # A timeout must not destroy the Future. Observe the task
+                    # through a Handle, which is non-cancelling on timeout, so a
+                    # later get()/poll()/await still resolves. Handle.get()
+                    # applies the context policy and emits the warning itself.
+                    handle = coro.spawn_handle()
+                    self._status = _Handle(handle)
+                    return cast("R", handle.get(timeout))
+                if in_asyncio:
+                    warnings.warn(
+                        "Future.get() was called from within an active event loop. Because this method blocks "
+                        "synchronously and does not yield control, it may degrade performance by preventing "
+                        "other tasks from running, and can potentially cause deadlocks if this future depends "
+                        "on them. It is encouraged to use as_asyncio() (or await) instead.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                elif in_tokio:
+                    # as_asyncio() needs an asyncio loop, which a Tokio worker
+                    # thread lacks; the only in-context option is to await inside
+                    # a PythonTask coroutine (block_on() below then raises).
+                    warnings.warn(
+                        "Future.get() was called from within a Tokio runtime; it cannot block there "
+                        "and will raise. Await the Future inside a PythonTask coroutine instead.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
                 try:
-                    if timeout is not None:
-                        coro = coro.with_timeout(timeout)
                     v = coro.block_on()
                     self._status = _Complete(v)
                     return cast("R", v)
                 except Exception as e:
                     self._status = _Exception(e)
                     raise e from None
-            case _Asyncio(_):
-                raise ValueError(
-                    "already converted into an asyncio.Future, use 'await' to get the value."
-                )
+            case _Handle(handle=handle):
+                # Observe the shared Handle. `Handle.get()` applies its own
+                # context policy (warn on a live loop, `WouldBlockRuntime` in a
+                # Tokio runtime context, block on a sync thread) and emits the
+                # Python warning itself, so we do not warn again here.
+                return cast("R", handle.get(timeout))
             case _Complete(value=value):
                 return cast("R", value)
             case _Exception(exe=exe):
                 raise exe
             case _Tokio(_):
-                raise ValueError(
-                    "already converted into a pytokio.Shared object, use 'await' from a PythonTask coroutine to get the value."
-                )
+                raise ValueError(_ALREADY_TOKIO_MSG)
             case _Taken():
                 raise ValueError("Future was consumed.")
             case _:
@@ -206,42 +240,9 @@ class Future(Generic[R]):
 
     def __await__(self) -> Generator[Any, Any, R]:
         if asyncio._get_running_loop() is not None:
-            match self._status:
-                case _Unawaited(coro=coro):
-                    loop = asyncio.get_running_loop()
-                    fut = loop.create_future()
-                    self._status = _Asyncio(fut)
-
-                    def set_result(fut: asyncio.Future[R], value: R) -> None:
-                        if not fut.cancelled():
-                            fut.set_result(value)
-
-                    def set_exception(fut: asyncio.Future[R], e: Exception) -> None:
-                        if not fut.cancelled():
-                            fut.set_exception(e)
-
-                    async def mark_complete() -> None:
-                        try:
-                            func, value = set_result, await coro
-                        except Exception as e:
-                            func, value = set_exception, e
-                        # pyrefly: ignore [bad-argument-type]
-                        loop.call_soon_threadsafe(func, fut, value)
-
-                    PythonTask.from_coroutine(mark_complete()).spawn()
-                    return fut.__await__()
-                case _Asyncio(fut=fut):
-                    return fut.__await__()
-                case _Tokio(_):
-                    raise ValueError(
-                        "already converted into a tokio future, but being awaited from the asyncio loop."
-                    )
-                case _Taken():
-                    raise ValueError("Future was consumed.")
-                case _:
-                    raise ValueError(
-                        "already converted into a synchronous future, use 'get' to get the value."
-                    )
+            # Asyncio callers observe through the Handle; `__await__` delegates
+            # to `as_asyncio()`.
+            return self.as_asyncio().__await__()
         elif is_tokio_thread():
             match self._status:
                 case _Unawaited(coro=coro):
@@ -250,9 +251,10 @@ class Future(Generic[R]):
                     return shared.__await__()
                 case _Tokio(shared=shared):
                     return shared.__await__()
-                case _Asyncio(_):
+                case _Handle(_):
                     raise ValueError(
-                        "already converted into asyncio future, but being awaited from the tokio loop."
+                        "Future is backed by a Handle and is not awaitable on a tokio thread; "
+                        "use get() or as_asyncio() from a sync/asyncio context."
                     )
                 case _Taken():
                     raise ValueError("Future was consumed.")
@@ -264,6 +266,50 @@ class Future(Generic[R]):
             raise ValueError(
                 "__await__ with no active event loop (either asyncio or tokio)"
             )
+
+    def as_asyncio(self) -> "asyncio.Future[R]":
+        """Return a standard ``asyncio.Future`` that resolves when this Future
+        does.
+
+        Requires a running event loop; off a loop it raises ``RuntimeError``
+        **without** consuming the underlying task (the Future stays unawaited, so
+        a later ``get()`` still drives it). Observation is non-consuming:
+        repeated ``as_asyncio()``/``await`` each return a fresh loop-local future
+        observing the same result.
+        """
+        loop = asyncio._get_running_loop()
+        if loop is None:
+            raise RuntimeError("as_asyncio() requires a running asyncio event loop.")
+        match self._status:
+            case _Unawaited(coro=coro):
+                # The loop is confirmed above, so spawning is safe: an off-loop
+                # call raised already, leaving the Future in `_Unawaited`.
+                handle = coro.spawn_handle()
+                self._status = _Handle(handle)
+                return handle.as_asyncio()
+            case _Handle(handle=handle):
+                return handle.as_asyncio()
+            case _Complete(value=value):
+                done = loop.create_future()
+                done.set_result(value)
+                return cast("asyncio.Future[R]", done)
+            case _Exception(exe=exe):
+                failed = loop.create_future()
+                # asyncio.Future.set_exception rejects StopIteration (PEP 479);
+                # surface it as `raise StopIteration` already does out of a
+                # coroutine, matching the Handle observer path.
+                failed.set_exception(
+                    RuntimeError("coroutine raised StopIteration")
+                    if isinstance(exe, StopIteration)
+                    else exe
+                )
+                return cast("asyncio.Future[R]", failed)
+            case _Tokio(_):
+                raise ValueError(_ALREADY_TOKIO_MSG)
+            case _Taken():
+                raise ValueError("Future was consumed.")
+            case _:
+                raise RuntimeError("unknown status")
 
     # compatibility with old tensor engine Future objects
     # hopefully we do not need done(), add_callback because

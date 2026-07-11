@@ -8,14 +8,16 @@
 
 """Characterization oracle for the public ``monarch`` ``Future`` state machine.
 
-Pins the *current* behavior of ``monarch._src.actor.future.Future`` -- its
-internal states and every transition between them, its conversion-error
-strings, the ``get()``-inside-a-loop warning, and the ``_take_inner()``
-accessor with its ``_Taken`` terminal state -- so that any change to that
-behavior is caught here and made explicit.
+Pins the behavior of ``monarch._src.actor.future.Future`` -- its internal
+states and the transitions between them, ``as_asyncio()`` and the ``__await__``
+shim over it, the residual ``_Tokio`` cross-world guards, the
+``get()``-inside-a-loop warning, and the ``_take_inner()`` accessor with its
+``_Taken`` terminal state -- so that any change to that behavior is caught here
+and made explicit.
 """
 
 import asyncio
+import warnings
 
 import pytest
 from monarch._rust_bindings.monarch_hyperactor.pytokio import (
@@ -36,6 +38,11 @@ async def _raise(exc: BaseException):
     raise exc
 
 
+async def _sleep_then(seconds: float, v):
+    await PythonTask.sleep(seconds)
+    return v
+
+
 async def _await_once(fut: Future):
     return await fut
 
@@ -52,12 +59,10 @@ def _run_in_tokio(coro):
 # States and transitions
 #
 # A fresh Future is _Unawaited; the first access drives the underlying task
-# exactly once and moves it to a terminal/converted state (_Complete,
-# _Exception, _Asyncio, or _Tokio). These pin that lifecycle and its
-# idempotency. The two-state redesign must preserve resolve-and-cache for
-# results and errors; the two *awaitable* branches (_Asyncio/_Tokio) are the
-# dual-world machinery it removes -- after D1 a Future is not awaitable and
-# callers use as_asyncio().
+# exactly once. Sync get() caches into _Complete/_Exception; as_asyncio() and
+# the asyncio __await__ shim spawn a Handle and move to the observe-only
+# _Handle; a tokio-thread await still spawns a Shared and moves to _Tokio.
+# These pin that lifecycle and its idempotency.
 # ---------------------------------------------------------------------------
 
 
@@ -88,29 +93,52 @@ def test_get_exception_transitions_to_exception_and_reraises_stored():
 
 
 def test_get_timeout_raises_timeout_error():
-    """get(timeout=...) wraps the task in with_timeout, so an unfinished task
-    surfaces a TimeoutError (caught, stored as _Exception, raised) rather than
-    hanging."""
+    """get(timeout=...) observes the task through a Handle with the given
+    deadline, so an unfinished task surfaces a TimeoutError rather than hanging.
+    The timeout is non-cancelling (state becomes _Handle); the sibling
+    test_get_timeout_is_non_poisoning_and_reobservable pins re-observation."""
     fut: Future[None] = Future(coro=PythonTask.sleep(3600))
     with pytest.raises(TimeoutError):
         fut.get(timeout=0.1)
 
 
-async def test_await_asyncio_transitions_to_asyncio_and_is_idempotent():
-    """Awaiting under an asyncio loop transitions _Unawaited -> _Asyncio
-    (bridging the task to an asyncio.Future) and yields the value; re-awaiting
-    reuses the _Asyncio future. This is one of the two awaitable branches the
-    redesign removes."""
+def test_get_timeout_is_non_poisoning_and_reobservable():
+    """get(timeout=...) that times out routes through a Handle and does NOT
+    poison the Future: it transitions to _Handle, and a later get() (no timeout)
+    still resolves the same task (the timeout is non-cancelling)."""
+    fut: Future[int] = Future(coro=_sleep_then(0.2, 11))
+    with pytest.raises(TimeoutError):
+        fut.get(timeout=0.01)  # too short: task still running
+    assert isinstance(fut._status, future_mod._Handle)
+    assert fut.get() == 11  # later get() still observes completion
+
+
+def test_get_timeout_success_returns_and_transitions_to_handle():
+    """get(timeout=...) whose task finishes within the timeout returns the value
+    and transitions to the observe-only _Handle (not _Complete): the timed get
+    routes through a Handle, so a later no-timeout get() re-observes the result."""
+    fut: Future[int] = Future(coro=_sleep_then(0.01, 7))
+    assert fut.get(timeout=5) == 7
+    assert isinstance(fut._status, future_mod._Handle)
+    assert fut.get() == 7
+
+
+async def test_await_asyncio_transitions_to_handle_and_is_reobservable():
+    """Awaiting under an asyncio loop bridges through as_asyncio(), transitions
+    _Unawaited -> the observe-only _Handle, and yields the value; re-awaiting
+    observes the same Handle (a fresh loop-local future each time)."""
     fut: Future[int] = Future(coro=_value(7))
-    assert await fut == 7  # _Unawaited -> _Asyncio
-    assert await fut == 7  # idempotent re-await of the _Asyncio state
+    assert await fut == 7  # _Unawaited -> _Handle
+    assert isinstance(fut._status, future_mod._Handle)
+    assert await fut == 7  # re-observe the same Handle
 
 
 def test_await_tokio_transitions_to_tokio_and_is_idempotent():
     """Awaiting on a tokio thread (inside from_coroutine, where
     is_tokio_thread() is True) transitions _Unawaited -> _Tokio (spawning a
-    Shared) and yields the value; re-awaiting reuses it. The _Asyncio-vs-_Tokio
-    split is exactly the "which async world am I in" duality P1/D1 collapse."""
+    Shared) and yields the value; re-awaiting reuses it. The _Handle-vs-_Tokio
+    split is by which async world the await runs in (asyncio loop vs tokio
+    thread)."""
     fut: Future[int] = Future(coro=_value(9))
 
     async def driver():
@@ -123,34 +151,46 @@ def test_await_tokio_transitions_to_tokio_and_is_idempotent():
 
 
 # ---------------------------------------------------------------------------
-# Conversion errors -- the seven state-tied raises, pinned verbatim. (The
-# numbers follow the source's raises; #3, the unreachable RuntimeError
-# "unknown status" fallthrough, is intentionally not pinned.)
-#
-# These are the five-state machine's "which async world / already-converted"
-# mixing guards -- the errors the RFC's Motivation quotes ("already converted
-# into an asyncio.Future, ..."). Each is keyed off the *state*, not the data: a
-# Future can hold a fully-resolved value and still refuse the wrong accessor.
-# The two-state, non-awaitable redesign deletes all of them (no _Asyncio/_Tokio
-# states and no await => none of these errors); this oracle is what flags any
-# change to them before stage 6 intends it.
+# Observation is non-consuming now: get()/as_asyncio()/await mix freely on the
+# asyncio+sync side (get after await, await after get, repeated as_asyncio all
+# resolve). The only remaining "already converted" guards are the cross-world
+# ones involving the residual _Tokio state (and _Handle-awaited-on-a-tokio-
+# thread), which remain while the pytokio-driving from_coroutine path exists.
+# These pin that: the formerly-erroring same-world cases now resolve; the
+# cross-world ones still raise.
 # ---------------------------------------------------------------------------
 
 
-def test_error1_get_after_asyncio_conversion():
-    """get() after an asyncio await (_Asyncio). The value is fully available in
-    the bridged asyncio.Future, yet get() refuses it and says to use 'await' --
-    the guard is on state, not data."""
+def test_get_after_asyncio_await_returns():
+    """get() after an asyncio await (_Handle) now returns the value instead of
+    raising -- observation is non-consuming, so the sync get() observes the same
+    Handle."""
     fut: Future[int] = Future(coro=_value(1))
-    asyncio.run(_await_once(fut))  # -> _Asyncio
-    with pytest.raises(ValueError, match=r"already converted into an asyncio\.Future"):
+    asyncio.run(_await_once(fut))  # -> _Handle
+    assert fut.get() == 1
+
+
+def test_get_after_asyncio_await_error_reraises():
+    """Failure mirror of the previous: get() on a _Handle whose live producer
+    FAILED re-raises the stored exception through handle.get(). Drives the live
+    spawn_handle producer (not a pre-resolved get())."""
+    fut: Future[int] = Future(coro=_raise(ValueError("boom")))
+
+    async def bridge():
+        # Drive _Unawaited -> _Handle via the live producer; swallow the failure
+        # so we can re-observe it via get() below.
+        with pytest.raises(ValueError, match="boom"):
+            await fut
+
+    asyncio.run(bridge())
+    assert isinstance(fut._status, future_mod._Handle)
+    with pytest.raises(ValueError, match="boom"):
         fut.get()
 
 
-def test_error2_get_after_tokio_conversion():
-    """get() after a tokio await (_Tokio): symmetric to error1 -- once converted
-    to a pytokio Shared, get() refuses and points at awaiting inside a
-    from_coroutine coroutine."""
+def test_get_after_tokio_conversion_raises():
+    """get() after a tokio await (_Tokio): once converted to a pytokio Shared,
+    get() refuses and points at awaiting inside a from_coroutine coroutine."""
     fut: Future[int] = Future(coro=_value(1))
     _run_in_tokio(_await_once(fut))  # -> _Tokio
     with pytest.raises(
@@ -159,50 +199,82 @@ def test_error2_get_after_tokio_conversion():
         fut.get()
 
 
-def test_error4_await_asyncio_on_tokio_converted():
-    """Cross-runtime: convert on tokio (_Tokio), then await under asyncio -- the
-    asyncio branch refuses a tokio-converted Future."""
+def test_await_asyncio_on_tokio_converted_raises():
+    """Cross-world: convert on tokio (_Tokio), then await under asyncio -- the
+    asyncio path (as_asyncio) refuses a tokio-converted Future."""
     fut: Future[int] = Future(coro=_value(1))
     _run_in_tokio(_await_once(fut))  # -> _Tokio
 
     async def attempt():
-        with pytest.raises(ValueError, match="already converted into a tokio future"):
-            await fut
-
-    asyncio.run(attempt())
-
-
-def test_error5_await_asyncio_after_resolved():
-    """await under asyncio after a sync get() resolved it (_Complete): the
-    synchronous world was already chosen, so the asyncio await is refused."""
-    fut: Future[int] = Future(coro=_value(1))
-    assert fut.get() == 1  # -> _Complete
-
-    async def attempt():
         with pytest.raises(
-            ValueError, match="already converted into a synchronous future"
+            ValueError, match=r"already converted into a pytokio\.Shared object"
         ):
             await fut
 
     asyncio.run(attempt())
 
 
-def test_error6_await_tokio_on_asyncio_converted():
-    """Cross-runtime mirror of error4: convert on asyncio (_Asyncio), then await
-    on a tokio thread -- the tokio branch refuses an asyncio-converted Future."""
+def test_await_asyncio_after_get_returns():
+    """await under asyncio after a sync get() resolved it (_Complete) now returns
+    the value -- as_asyncio() hands back a settled loop future instead of
+    raising."""
     fut: Future[int] = Future(coro=_value(1))
-    asyncio.run(_await_once(fut))  # -> _Asyncio
+    assert fut.get() == 1  # -> _Complete
+
+    async def attempt():
+        return await fut
+
+    assert asyncio.run(attempt()) == 1
+
+
+def test_await_asyncio_after_get_exception_reraises_stored():
+    """Failure mirror of the previous: await under asyncio after a failed sync
+    get() (_Exception) hands back a settled failed loop future that re-raises the
+    *same* stored exception object."""
+    boom = ValueError("boom")
+    fut: Future[int] = Future(coro=_raise(boom))
+    with pytest.raises(ValueError, match="boom"):
+        fut.get()  # -> _Exception
+
+    async def attempt():
+        with pytest.raises(ValueError, match="boom") as caught:
+            await fut
+        return caught.value
+
+    assert asyncio.run(attempt()) is boom
+
+
+def test_await_asyncio_live_handle_error_propagates():
+    """A failing coroutine driven LIVE through the Handle producer (spawn_handle
+    via as_asyncio, from _Unawaited -- not pre-resolved) surfaces the exception
+    through the bridged asyncio future: exercises send_result(Err) -> observer ->
+    set_exception, which the pre-resolved settled-future path does not."""
+    fut: Future[int] = Future(coro=_raise(ValueError("boom")))
+
+    async def attempt():
+        with pytest.raises(ValueError, match="boom"):
+            await fut  # _Unawaited -> live _Handle, error via the observer
+
+    asyncio.run(attempt())
+
+
+def test_await_tokio_on_handle_bridged_raises():
+    """Convert on asyncio (_Handle), then await on a tokio thread: the tokio
+    branch intentionally refuses a Future already bridged to asyncio."""
+    fut: Future[int] = Future(coro=_value(1))
+    asyncio.run(_await_once(fut))  # -> _Handle
 
     async def attempt():
         await fut
 
-    with pytest.raises(ValueError, match="already converted into asyncio future"):
+    with pytest.raises(ValueError, match="not awaitable on a tokio thread"):
         _run_in_tokio(attempt())
 
 
-def test_error7_await_tokio_after_resolved():
+def test_await_tokio_after_get_raises_synchronous_future():
     """await on a tokio thread after a sync get() resolved it (_Complete): the
-    same refusal as error5 (same message), reached from the tokio branch."""
+    tokio branch refuses with the 'already converted into a synchronous future'
+    guard."""
     fut: Future[int] = Future(coro=_value(1))
     assert fut.get() == 1  # -> _Complete
 
@@ -213,7 +285,22 @@ def test_error7_await_tokio_after_resolved():
         _run_in_tokio(attempt())
 
 
-def test_error8_await_with_no_event_loop():
+def test_await_tokio_after_get_exception_raises_synchronous_future():
+    """Failure mirror of test_await_tokio_after_get_raises_synchronous_future:
+    await on a tokio thread after a failed sync get() (_Exception) hits the same
+    'synchronous future' guard as _Complete."""
+    fut: Future[int] = Future(coro=_raise(ValueError("boom")))
+    with pytest.raises(ValueError, match="boom"):
+        fut.get()  # -> _Exception
+
+    async def attempt():
+        await fut
+
+    with pytest.raises(ValueError, match="already converted into a synchronous future"):
+        _run_in_tokio(attempt())
+
+
+def test_await_with_no_event_loop_raises():
     """await with neither an asyncio loop nor a tokio runtime active: there is no
     driver, so __await__ refuses outright."""
     fut: Future[int] = Future(coro=_value(1))
@@ -240,8 +327,11 @@ def test_get_in_asyncio_loop_warns_and_still_returns(monkeypatch):
 
     async def runner():
         fut: Future[int] = Future(coro=_value(5))
-        with pytest.warns(UserWarning, match="active event loop"):
-            return fut.get()
+        with pytest.warns(UserWarning, match="active event loop") as record:
+            value = fut.get()
+        # the asyncio-context advice is as_asyncio()/await (both valid on a loop)
+        assert any("as_asyncio" in str(w.message) for w in record)
+        return value
 
     assert asyncio.run(runner()) == 5
     assert len(calls) == 1
@@ -252,9 +342,15 @@ def test_get_in_tokio_thread_warns_then_cannot_block(monkeypatch):
     """On a real tokio thread get() warns (context='tokio') but then cannot
     block within the runtime, so it raises rather than returning -- the
     asymmetry with the asyncio branch, and precisely the case WouldBlockRuntime
-    is meant to replace."""
+    is meant to replace. The warning must advise awaiting inside a PythonTask
+    coroutine, NOT as_asyncio() (which needs an asyncio loop a tokio thread
+    lacks)."""
     calls = []
+    warned = []
     monkeypatch.setattr(future_mod, "log_with_tracing", lambda *a, **k: calls.append(k))
+    monkeypatch.setattr(
+        future_mod.warnings, "warn", lambda msg, *a, **k: warned.append(str(msg))
+    )
     fut: Future[int] = Future(coro=_value(5))
 
     async def attempt():
@@ -265,6 +361,88 @@ def test_get_in_tokio_thread_warns_then_cannot_block(monkeypatch):
         _run_in_tokio(attempt())
     assert len(calls) == 1
     assert calls[0]["extra"]["context"] == "tokio"
+    # filter to get()'s own warning; the global warnings.warn patch also catches
+    # the incidental "coroutine '_value' was never awaited" warning from the task
+    # that block_on() abandons when it panics.
+    tokio_warnings = [w for w in warned if "Tokio runtime" in w]
+    assert len(tokio_warnings) == 1
+    assert "PythonTask coroutine" in tokio_warnings[0]
+    assert "as_asyncio" not in tokio_warnings[0]
+
+
+def test_get_timeout_in_tokio_thread_raises_would_block_without_warning(monkeypatch):
+    """get(timeout=...) on a tokio thread routes through a Handle, so Handle.get()
+    refuses with WouldBlockRuntime up front. The tracing event still forwards
+    (context='tokio'), but -- unlike the no-timeout path -- NO UserWarning fires,
+    because Handle.get() raises before it would warn."""
+    calls = []
+    warned = []
+    monkeypatch.setattr(future_mod, "log_with_tracing", lambda *a, **k: calls.append(k))
+    monkeypatch.setattr(
+        future_mod.warnings, "warn", lambda msg, *a, **k: warned.append(str(msg))
+    )
+    fut: Future[int] = Future(coro=_value(5))
+
+    async def attempt():
+        assert is_tokio_thread()
+        return fut.get(timeout=0.1)
+
+    with pytest.raises(WouldBlockRuntime):
+        _run_in_tokio(attempt())
+    assert len(calls) == 1
+    assert calls[0]["extra"]["context"] == "tokio"
+    assert warned == []
+
+
+def test_get_on_handle_in_asyncio_loop_warns_and_forwards_once(monkeypatch):
+    """get() on an already-bridged Future (_Handle) from inside an asyncio loop
+    forwards exactly one tracing event (context='asyncio') and warns exactly
+    once: Future.get() forwards the trace, Handle.get() emits the UserWarning,
+    and the _Handle branch does not re-warn."""
+    calls = []
+    monkeypatch.setattr(future_mod, "log_with_tracing", lambda *a, **k: calls.append(k))
+
+    async def runner():
+        fut: Future[int] = Future(coro=_value(5))
+        fut.as_asyncio()  # -> _Handle
+        with pytest.warns(UserWarning) as caught:
+            value = fut.get()
+        user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+        return value, len(user_warnings)
+
+    value, n_user_warnings = asyncio.run(runner())
+    assert value == 5
+    assert n_user_warnings == 1
+    assert len(calls) == 1
+    assert calls[0]["extra"]["context"] == "asyncio"
+
+
+def test_get_in_loop_on_cached_state_traces_without_warning(monkeypatch):
+    """get() inside an asyncio loop on an already-cached Future (_Complete or
+    _Exception) forwards exactly one tracing event per call and emits NO
+    UserWarning: the warning is reserved for paths that actually block the loop,
+    and a cached read does not."""
+    calls = []
+    monkeypatch.setattr(future_mod, "log_with_tracing", lambda *a, **k: calls.append(k))
+
+    done: Future[int] = Future(coro=_value(5))
+    assert done.get() == 5  # off loop -> _Complete
+    failed: Future[int] = Future(coro=_raise(ValueError("boom")))
+    with pytest.raises(ValueError, match="boom"):
+        failed.get()  # off loop -> _Exception
+    calls.clear()
+
+    async def runner():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert done.get() == 5  # cached _Complete, inside the loop
+            with pytest.raises(ValueError, match="boom"):
+                failed.get()  # cached _Exception, inside the loop
+        return [w for w in caught if issubclass(w.category, UserWarning)]
+
+    assert asyncio.run(runner()) == []
+    assert len(calls) == 2  # one tracing forward per in-loop get()
+    assert all(c["extra"]["context"] == "asyncio" for c in calls)
 
 
 def test_handle_and_would_block_runtime_are_importable():
@@ -344,10 +522,10 @@ def test_take_inner_after_get_raises():
 
 
 def test_take_inner_after_asyncio_await_raises():
-    """Once an asyncio await has converted the Future (_Asyncio), _take_inner()
-    is refused."""
+    """Once an asyncio await has bridged the Future (_Handle), _take_inner() is
+    refused."""
     fut: Future[int] = Future(coro=_value(1))
-    asyncio.run(_await_once(fut))  # -> _Asyncio
+    asyncio.run(_await_once(fut))  # -> _Handle
     with pytest.raises(ValueError, match="already been awaited"):
         fut._take_inner()
 
@@ -359,3 +537,69 @@ def test_take_inner_after_tokio_await_raises():
     _run_in_tokio(_await_once(fut))  # -> _Tokio
     with pytest.raises(ValueError, match="already been awaited"):
         fut._take_inner()
+
+
+# ---------------------------------------------------------------------------
+# as_asyncio() observation semantics
+#
+# as_asyncio() spawns a Handle once and observes it: observation is
+# non-consuming, each call returns a fresh loop-local future, it requires a
+# running loop, and it must not consume the task when there is none.
+# ---------------------------------------------------------------------------
+
+
+def test_as_asyncio_off_loop_raises_and_is_non_consuming():
+    """Off a running loop, as_asyncio() raises RuntimeError WITHOUT spawning: the
+    Future stays _Unawaited, so a later get() still drives the task."""
+    fut: Future[int] = Future(coro=_value(3))
+    with pytest.raises(RuntimeError):
+        fut.as_asyncio()
+    assert isinstance(fut._status, future_mod._Unawaited)
+    assert fut.get() == 3
+
+
+async def test_as_asyncio_twice_same_loop_both_resolve():
+    """Two as_asyncio() futures from one Future on the same loop both resolve to
+    the value (ordinary multi-observer case); the Future is _Handle after the
+    first."""
+    fut: Future[int] = Future(coro=_value(4))
+    f1 = fut.as_asyncio()
+    assert isinstance(fut._status, future_mod._Handle)
+    f2 = fut.as_asyncio()
+    assert await f1 == 4
+    assert await f2 == 4
+
+
+async def test_as_asyncio_cancel_one_then_await_again_resolves():
+    """Cancelling one as_asyncio() observer does not poison the Future: a later
+    await still resolves (each observer is a fresh loop-local future)."""
+    fut: Future[int] = Future(coro=_value(5))
+    f1 = fut.as_asyncio()
+    f1.cancel()
+    assert await fut == 5
+
+
+def test_as_asyncio_across_two_loops_both_resolve():
+    """The same Future observed from two different event loops resolves in each
+    (each as_asyncio() binds a fresh future to the current loop)."""
+    fut: Future[int] = Future(coro=_value(6))
+
+    async def observe():
+        return await fut
+
+    assert asyncio.run(observe()) == 6
+    assert asyncio.run(observe()) == 6
+
+
+async def test_as_asyncio_on_cached_stop_iteration_wraps_in_runtime_error():
+    """as_asyncio() on a cached _Exception must wrap a StopIteration in
+    RuntimeError before set_exception: asyncio.Future.set_exception rejects
+    StopIteration (PEP 479) with TypeError, which would otherwise brick the
+    returned future. Mirrors the Handle observer path (HDL-7). A StopIteration
+    can't reach _Exception via from_coroutine (it becomes a normal return), so
+    the cached state is set directly."""
+    fut: Future[int] = Future(coro=_value(1))
+    fut._status = future_mod._Exception(StopIteration("done"))
+    settled = fut.as_asyncio()
+    with pytest.raises(RuntimeError, match="StopIteration"):
+        await settled

@@ -119,6 +119,7 @@ use tokio::sync::Mutex;
 use tokio::sync::watch;
 
 use crate::handle::HandleCore;
+use crate::handle::PyHandle;
 use crate::pickle::reduce_shared;
 use crate::runtime::GilSite;
 use crate::runtime::get_tokio_runtime;
@@ -414,6 +415,18 @@ impl PyPythonTask {
     /// Like `spawn()`, this consumes the `PyPythonTask` (it can only
     /// be spawned once).
     pub(crate) fn spawn_abortable(&mut self) -> PyResult<PyShared> {
+        Ok(PyShared {
+            core: self.spawn_core(true)?,
+        })
+    }
+
+    /// Spawn this task onto the Tokio runtime and return the shared
+    /// `HandleCore` that observes its completion via the `watch` channel.
+    ///
+    /// `abort` decides whether dropping the core aborts the producing task
+    /// (`spawn_abortable`) or leaves it running (`spawn`/`spawn_handle`).
+    /// Consumes the task. Shared by `spawn`/`spawn_abortable`/`spawn_handle`.
+    fn spawn_core(&mut self, abort: bool) -> PyResult<HandleCore> {
         let (tx, rx) = watch::channel(None);
         let traceback = self.traceback()?;
         // Clone the second owned copy under the same (single) GIL section, and
@@ -426,9 +439,11 @@ impl PyPythonTask {
         let handle = get_tokio_runtime().spawn(async move {
             send_result(tx, task.await, traceback1);
         });
-        Ok(PyShared {
-            core: HandleCore::new(rx, Some(handle.abort_handle()), traceback),
-        })
+        Ok(HandleCore::new(
+            rx,
+            abort.then(|| handle.abort_handle()),
+            traceback,
+        ))
     }
 }
 
@@ -490,21 +505,19 @@ impl PyPythonTask {
     /// `from_coroutine` world, or may be waited on synchronously via
     /// `Shared.block_on()`. Consumes the task.
     pub(crate) fn spawn(&mut self) -> PyResult<PyShared> {
-        let (tx, rx) = watch::channel(None);
-        let traceback = self.traceback()?;
-        // Clone the second owned copy under the same (single) GIL section, and
-        // only when a traceback was actually captured -- avoids a second GIL
-        // round-trip per spawn in the common (capture-disabled) case.
-        let traceback1 = traceback
-            .as_ref()
-            .map(|t| monarch_with_gil_blocking(GilSite::Traceback, |py| t.clone_ref(py)));
-        let task = self.take_task()?;
-        get_tokio_runtime().spawn(async move {
-            send_result(tx, task.await, traceback1);
-        });
         Ok(PyShared {
-            core: HandleCore::new(rx, None, traceback),
+            core: self.spawn_core(false)?,
         })
+    }
+
+    /// Spawn this task onto the Tokio runtime and return an observe-only
+    /// `Handle`.
+    ///
+    /// Like `spawn`, but hands back the clean `Handle` (`get`/`poll`/
+    /// `as_asyncio`/`await`) rather than `Shared`; non-abortable on drop.
+    /// Consumes the task.
+    pub(crate) fn spawn_handle(&mut self) -> PyResult<PyHandle> {
+        Ok(PyHandle::from_core(self.spawn_core(false)?))
     }
 
     /// Implement Python's `await` protocol for `PythonTask`.
