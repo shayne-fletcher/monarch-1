@@ -2641,3 +2641,115 @@ fn footer_zh_idle_contains_help_hint() {
     assert!(zh.footer_help_text.contains("帮助"));
     assert!(zh.footer_help_text.contains("?"));
 }
+
+// TUI-CLIP-1: detail_content_clipped fires the header alert only for a starved
+// actor detail; it suppresses the alert while help or an overlay owns the pane,
+// and for absent / non-actor selections.
+#[test]
+fn detail_content_clipped_guards() {
+    use hyperactor_mesh::introspect::Execution;
+
+    use crate::render::detail_pane::detail_content_clipped;
+
+    let mut app = make_app_with_cursor(vec![actor_node("a")], 0);
+    app.detail = Some(NodePayload {
+        identity: actor("a"),
+        properties: NodeProperties::Actor {
+            actor_status: "running".into(),
+            actor_type: "TestActor".into(),
+            instance_id: String::new(),
+            messages_processed: 0,
+            created_at: Some(SystemTime::UNIX_EPOCH),
+            last_message_handler: None,
+            total_processing_time_us: 0,
+            queue_depth: 0,
+            flight_recorder: None,
+            is_system: false,
+            inbound_ordering: None,
+            failure_info: None,
+            execution: Some(Box::new(Execution {
+                active_count: 2,
+                active_handlers: vec![],
+                complete: true,
+                truncated: false,
+            })),
+        },
+        children: vec![],
+        parent: Some(proc_ref("worker")),
+        as_of: SystemTime::now(),
+    });
+    // Live execution starved to zero height -> alert; roomy -> no alert.
+    assert!(detail_content_clipped(&app, 18));
+    assert!(!detail_content_clipped(&app, 45));
+
+    // Help glossary owns the pane -> suppressed even when starved.
+    app.show_help = true;
+    assert!(!detail_content_clipped(&app, 18));
+    app.show_help = false;
+
+    // An overlay (diagnostics / py-spy) owns the pane -> suppressed.
+    app.set_job(ActiveJob::Diagnostics {
+        results: Vec::new(),
+        running: true,
+        rx: None,
+        completed_at: None,
+    });
+    assert!(app.overlay.is_some());
+    assert!(!detail_content_clipped(&app, 18));
+
+    // No selection detail -> no alert.
+    let no_detail = make_app_with_cursor(vec![], 0);
+    assert!(!detail_content_clipped(&no_detail, 18));
+
+    // Non-actor selection -> no alert.
+    let mut host_app = make_app_with_cursor(vec![], 0);
+    host_app.detail = Some(NodePayload {
+        identity: host("h"),
+        properties: NodeProperties::Host {
+            addr: "10.0.0.1:8080".into(),
+            num_procs: 1,
+            system_children: vec![],
+            memory: hyperactor_mesh::introspect::ProcessMemoryStats {
+                process_rss_bytes: None,
+                process_vm_size_bytes: None,
+            },
+        },
+        children: vec![],
+        parent: Some(NodeRef::Root),
+        as_of: SystemTime::now(),
+    });
+    assert!(!detail_content_clipped(&host_app, 18));
+}
+
+// TUI-CLIP-1: render_header prepends the content-hidden alert to line 1 when
+// detail_clipped is set, and omits it otherwise.
+#[test]
+fn render_header_shows_content_clipped_alert() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let app = make_app_with_cursor(vec![], 0);
+    let render = |clipped: bool| {
+        let backend = TestBackend::new(120, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| crate::render::status_bar::render_header(f, f.area(), &app, clipped))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        text
+    };
+    assert!(
+        render(true).contains("content hidden"),
+        "alert present when detail is clipped"
+    );
+    assert!(
+        !render(false).contains("content hidden"),
+        "no alert when detail is not clipped"
+    );
+}

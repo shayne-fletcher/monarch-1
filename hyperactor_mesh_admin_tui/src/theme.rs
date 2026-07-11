@@ -74,6 +74,7 @@ pub(crate) struct Labels {
     pub(crate) stopped: &'static str,
     pub(crate) stopped_on: &'static str,
     pub(crate) stopped_off: &'static str,
+    pub(crate) header_content_clipped: &'static str,
 
     // Detail pane labels
     pub(crate) hosts: &'static str,
@@ -198,6 +199,7 @@ impl Labels {
             stopped: "stopped:",
             stopped_on: "on",
             stopped_off: "off",
+            header_content_clipped: "⚠ content hidden — resize",
             hosts: "Hosts: ",
             started_by: "Started by: ",
             uptime_detail: "Uptime: ",
@@ -301,6 +303,7 @@ impl Labels {
             stopped: "已停止:",
             stopped_on: "开",
             stopped_off: "关",
+            header_content_clipped: "⚠ 内容已隐藏 — 请放大终端",
             hosts: "主机: ",
             started_by: "启动者: ",
             uptime_detail: "运行时间: ",
