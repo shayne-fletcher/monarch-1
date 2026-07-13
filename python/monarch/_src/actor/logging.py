@@ -202,8 +202,15 @@ class LoggingManager:
         if self._logging_mesh_client is None:
             return
         try:
-            await (
-                self._logging_mesh_client.flush(context().actor_instance._as_rust())
+            # Drive the flush through Future so it works on an asyncio loop too:
+            # a bare `await` of the PythonTask hits the pytokio gate there and is
+            # swallowed below (a silent no-op). Future.__await__ bridges to an
+            # asyncio.Future on a loop and awaits the spawned Shared on a tokio
+            # thread. Mirrors the sync flush().
+            await Future(
+                coro=self._logging_mesh_client.flush(
+                    context().actor_instance._as_rust()
+                )
                 .spawn()
                 .task()
             )
