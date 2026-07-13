@@ -128,61 +128,60 @@ async def async_main(args: argparse.Namespace) -> None:
     eat_ms = (args.eat_ms_min, args.eat_ms_max)
 
     job = ProcessJob({"hosts": 1}).enable_admin()
-    state = job.state(cached_path=None)
-    host = state.hosts
-
-    # N philosophers (one per replica) + a single fork manager on its own proc
-    # so it is a distinct, easy-to-find node in the TUI tree.
-    phil_procs = host.spawn_procs(per_host={"replica": n})
-    fork_proc = host.spawn_procs(name="fork_manager")
-
-    fork_manager = fork_proc.spawn("fork_manager", ForkManager, n)
-    philosophers = phil_procs.spawn(
-        "philosopher", Philosopher, fork_manager, n, think_ms, eat_ms
-    )
-
-    fork_ref = await fork_manager.whoami.call_one()
-    phil0_ref = await philosophers.slice(replica=0).whoami.call_one()
-
-    admin_url = state.admin_url
-    assert admin_url is not None
-    mtls_flags = (
-        "--cacert /var/facebook/rootcanal/ca.pem "
-        "--cert /var/facebook/x509_identities/server.pem "
-        "--key /var/facebook/x509_identities/server.pem "
-        if admin_url.startswith("https")
-        else ""
-    )
-    tui = (
-        "buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui"
-    )
-    print(f"\nMesh admin server listening on {admin_url}")
-    print(f"  - Mesh tree:  curl {mtls_flags}{admin_url}/v1/tree")
-    print(f"  - TUI:        {tui} -- --addr {admin_url}")
-    print("\nWatch list (find these in the TUI tree by label):")
-    print(
-        "  - actor `fork_manager`  -> Execution: `acquire xK` (live contention) + flight recorder"
-    )
-    print(
-        f"  - actor `philosopher` (replicas 0..{n - 1}) -> Execution: `think`/`eat` turnover + flight recorder"
-    )
-    print(f"  raw ids: fork_manager={fork_ref}  philosopher[0]={phil0_ref}")
-    print(
-        f"\n{n} philosophers; think {think_ms[0]}-{think_ms[1]}ms, "
-        f"eat {eat_ms[0]}-{eat_ms[1]}ms. Press Ctrl+C to stop.\n",
-        flush=True,
-    )
-
-    async def run_philosopher(i: int) -> None:
-        seat = philosophers.slice(replica=i)
-        while True:
-            await seat.think.call_one(i)
-            await seat.eat.call_one(i)
-
-    # Fail-fast: gather propagates the first loop's failure and tears the demo
-    # down, surfacing bugs loudly rather than silently degrading.
-    loops = [asyncio.ensure_future(run_philosopher(i)) for i in range(n)]
+    loops = []
     try:
+        state = job.state(cached_path=None)
+        host = state.hosts
+
+        # N philosophers (one per replica) + a single fork manager on its own proc
+        # so it is a distinct, easy-to-find node in the TUI tree.
+        phil_procs = host.spawn_procs(per_host={"replica": n})
+        fork_proc = host.spawn_procs(name="fork_manager")
+
+        fork_manager = fork_proc.spawn("fork_manager", ForkManager, n)
+        philosophers = phil_procs.spawn(
+            "philosopher", Philosopher, fork_manager, n, think_ms, eat_ms
+        )
+
+        fork_ref = await fork_manager.whoami.call_one()
+        phil0_ref = await philosophers.slice(replica=0).whoami.call_one()
+
+        admin_url = state.admin_url
+        assert admin_url is not None
+        mtls_flags = (
+            "--cacert /var/facebook/rootcanal/ca.pem "
+            "--cert /var/facebook/x509_identities/server.pem "
+            "--key /var/facebook/x509_identities/server.pem "
+            if admin_url.startswith("https")
+            else ""
+        )
+        tui = "buck2 run fbcode//monarch/hyperactor_mesh_admin_tui:hyperactor_mesh_admin_tui"
+        print(f"\nMesh admin server listening on {admin_url}")
+        print(f"  - Mesh tree:  curl {mtls_flags}{admin_url}/v1/tree")
+        print(f"  - TUI:        {tui} -- --addr {admin_url}")
+        print("\nWatch list (find these in the TUI tree by label):")
+        print(
+            "  - actor `fork_manager`  -> Execution: `acquire xK` (live contention) + flight recorder"
+        )
+        print(
+            f"  - actor `philosopher` (replicas 0..{n - 1}) -> Execution: `think`/`eat` turnover + flight recorder"
+        )
+        print(f"  raw ids: fork_manager={fork_ref}  philosopher[0]={phil0_ref}")
+        print(
+            f"\n{n} philosophers; think {think_ms[0]}-{think_ms[1]}ms, "
+            f"eat {eat_ms[0]}-{eat_ms[1]}ms. Press Ctrl+C to stop.\n",
+            flush=True,
+        )
+
+        async def run_philosopher(i: int) -> None:
+            seat = philosophers.slice(replica=i)
+            while True:
+                await seat.think.call_one(i)
+                await seat.eat.call_one(i)
+
+        # Fail-fast: gather propagates the first loop's failure and tears the demo
+        # down, surfacing bugs loudly rather than silently degrading.
+        loops = [asyncio.create_task(run_philosopher(i)) for i in range(n)]
         await asyncio.gather(*loops)
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
@@ -190,8 +189,10 @@ async def async_main(args: argparse.Namespace) -> None:
         print("\nShutting down...", flush=True)
         for loop in loops:
             loop.cancel()
-        await phil_procs.stop()
-        await fork_proc.stop()
+        await asyncio.gather(*loops, return_exceptions=True)
+        # Each ProcessJob worker runs in its own detached session; job.kill()
+        # reaps the whole session -- the worker and every proc it spawned.
+        job.kill()
 
 
 def main() -> None:

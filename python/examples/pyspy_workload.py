@@ -146,49 +146,51 @@ async def async_main() -> None:
         )
         .enable_admin()
     )
-    state = job.state(cached_path=None)
-    host = state.hosts
-
-    admin_url = state.admin_url
-    assert admin_url is not None
-    mtls_flags = (
-        "--cacert /var/facebook/rootcanal/ca.pem "
-        "--cert /var/facebook/x509_identities/server.pem "
-        "--key /var/facebook/x509_identities/server.pem "
-        if admin_url.startswith("https")
-        else ""
-    )
-    print(
-        f"\npy-spy workload: mode={args.mode}, "
-        f"work_ms={args.work_ms}, concurrency={args.concurrency}"
-    )
-    print(f"\nMesh admin server listening on {admin_url}")
-    print(f"  - Mesh tree:     curl {mtls_flags}{admin_url}/v1/tree")
-    print(f"  - API docs:      curl {mtls_flags}{admin_url}/SKILL.md")
-    print("\nVerify with:")
-    print("  buck2 run fbcode//monarch/python/examples:verify_pyspy -- \\")
-    if mtls_flags:
-        print(f"    --admin-url {admin_url} --mode {args.mode} --samples 10 \\")
-        print(f"    {mtls_flags.strip()}")
-    else:
-        print(f"    --admin-url {admin_url} --mode {args.mode} --samples 10")
-    print("\nPress Ctrl+C to stop.\n", flush=True)
-
-    # Spawn worker procs. The actor name pyspy_worker lets the
-    # verifier filter to workload procs by prefix.
-    procs = host.spawn_procs(per_host={"replica": args.concurrency})
-    workers = procs.spawn("pyspy_worker", Worker, args.mode, args.work_ms)
-
-    # Start all workers.
-    workers.work_forever.broadcast()
-
     try:
+        state = job.state(cached_path=None)
+        host = state.hosts
+
+        admin_url = state.admin_url
+        assert admin_url is not None
+        mtls_flags = (
+            "--cacert /var/facebook/rootcanal/ca.pem "
+            "--cert /var/facebook/x509_identities/server.pem "
+            "--key /var/facebook/x509_identities/server.pem "
+            if admin_url.startswith("https")
+            else ""
+        )
+        print(
+            f"\npy-spy workload: mode={args.mode}, "
+            f"work_ms={args.work_ms}, concurrency={args.concurrency}"
+        )
+        print(f"\nMesh admin server listening on {admin_url}")
+        print(f"  - Mesh tree:     curl {mtls_flags}{admin_url}/v1/tree")
+        print(f"  - API docs:      curl {mtls_flags}{admin_url}/SKILL.md")
+        print("\nVerify with:")
+        print("  buck2 run fbcode//monarch/python/examples:verify_pyspy -- \\")
+        if mtls_flags:
+            print(f"    --admin-url {admin_url} --mode {args.mode} --samples 10 \\")
+            print(f"    {mtls_flags.strip()}")
+        else:
+            print(f"    --admin-url {admin_url} --mode {args.mode} --samples 10")
+        print("\nPress Ctrl+C to stop.\n", flush=True)
+
+        # Spawn worker procs. The actor name pyspy_worker lets the
+        # verifier filter to workload procs by prefix.
+        procs = host.spawn_procs(per_host={"replica": args.concurrency})
+        workers = procs.spawn("pyspy_worker", Worker, args.mode, args.work_ms)
+
+        # Start all workers.
+        workers.work_forever.broadcast()
+
         await asyncio.sleep(float("inf"))
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
         print("\nShutting down...", flush=True)
-        await procs.stop()
+        # Each ProcessJob worker runs in its own detached session; job.kill()
+        # reaps the whole session -- the worker and every proc it spawned.
+        job.kill()
 
 
 def main() -> None:
