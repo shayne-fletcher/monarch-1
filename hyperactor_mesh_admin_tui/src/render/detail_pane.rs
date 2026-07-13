@@ -595,6 +595,9 @@ fn render_proc_detail(
 /// compact, timestamped list of recent events.
 const TOP_N: usize = 10;
 const MIN_FLIGHT_RECORDER_HEIGHT: u16 = 5;
+/// A bordered pane needs border(2) + 1 row to show any content; below this it
+/// draws only a border sliver, so treat it as hidden (0 height + clip alert).
+const MIN_VISIBLE_PANE_HEIGHT: u16 = 3;
 const RED_STALL_THRESHOLD: usize = 100; // placeholder; tune later.
 
 #[allow(clippy::too_many_arguments)]
@@ -617,9 +620,7 @@ fn render_actor_detail(
     scheme: &ColorScheme,
     l: &Labels,
 ) {
-    // info_height grew from 11/15 to 13/17 to accommodate two new
-    // lines (Instance, Queue depth) in the info block.
-    let info_height: u16 = if failure_info.is_some() { 17 } else { 13 };
+    let info_height = actor_info_height(failure_info);
     let ordering_height = compute_ordering_height(area.height, info_height, inbound_ordering);
     // Execution section is hidden (height 0) when the actor reports no
     // execution (None = unsupported) or nothing is in flight; its budget
@@ -799,11 +800,68 @@ fn ordering_has_content(io: &InboundOrdering) -> bool {
     io.enabled && (io.sessions.iter().any(|s| s.buffered_count > 0) || !io.snapshot_complete)
 }
 
+/// Height of the actor info block. Base = 13: 10 content rows (status, instance,
+/// queue depth, data-as-of, type, messages, processing time, created, last
+/// handler, children) + 2 borders + 1 slack row. A failure block adds 5 rows
+/// (spacer, error message, root cause, failed-at, propagated) and absorbs the
+/// slack: 15 content + 2 borders = 17.
+pub(crate) fn actor_info_height(failure_info: Option<&FailureInfo>) -> u16 {
+    if failure_info.is_some() { 17 } else { 13 }
+}
+
+/// TUI-CLIP-1 (content-clipped-alert): true when a content-bearing detail pane
+/// was starved below its content-visible height by a short terminal -- Execution
+/// with live handlers, or Inbound Ordering per `ordering_has_content`. Uses the
+/// same height math as `render_actor_detail` (which floors a pane with no room to
+/// 0), so the header alert can never disagree with what the layout draws.
+pub(crate) fn actor_detail_clipped(
+    area_height: u16,
+    inbound_ordering: Option<&InboundOrdering>,
+    execution: Option<&Execution>,
+    failure_info: Option<&FailureInfo>,
+) -> bool {
+    let info_height = actor_info_height(failure_info);
+    let ordering_height = compute_ordering_height(area_height, info_height, inbound_ordering);
+    let execution_height =
+        compute_execution_height(area_height, info_height, ordering_height, execution);
+    let execution_hidden = execution.is_some_and(|e| e.active_count > 0) && execution_height == 0;
+    let ordering_hidden =
+        inbound_ordering.is_some_and(ordering_has_content) && ordering_height == 0;
+    execution_hidden || ordering_hidden
+}
+
+/// Whether the current selection's detail view has content a short terminal
+/// starved to zero height (drives the header alert). False for non-actor
+/// selections and while help / an overlay replaces the detail pane.
+pub(crate) fn detail_content_clipped(app: &App, detail_height: u16) -> bool {
+    if app.show_help || app.overlay.is_some() {
+        return false;
+    }
+    let Some(payload) = app.detail.as_ref() else {
+        return false;
+    };
+    let NodeProperties::Actor {
+        inbound_ordering,
+        execution,
+        failure_info,
+        ..
+    } = &payload.properties
+    else {
+        return false;
+    };
+    actor_detail_clipped(
+        detail_height,
+        inbound_ordering.as_deref(),
+        execution.as_deref(),
+        failure_info.as_ref(),
+    )
+}
+
 /// Compute the desired height for the inbound-ordering section, or 0 to hide it
 /// (per `ordering_has_content`), capped so the flight recorder keeps
 /// `MIN_FLIGHT_RECORDER_HEIGHT`. The row budget mirrors `build_inbound_ordering_lines`
 /// exactly, the way `compute_execution_height` mirrors `build_execution_lines`.
-fn compute_ordering_height(
+pub(crate) fn compute_ordering_height(
     area_height: u16,
     info_height: u16,
     inbound_ordering: Option<&InboundOrdering>,
@@ -830,7 +888,14 @@ fn compute_ordering_height(
     let budget = area_height
         .saturating_sub(info_height)
         .saturating_sub(MIN_FLIGHT_RECORDER_HEIGHT);
-    want.min(budget)
+    let height = want.min(budget);
+    // Below one content row it is a border-only sliver -> hide it (0), so the
+    // header clip-alert fires instead of drawing a content-less box.
+    if height < MIN_VISIBLE_PANE_HEIGHT {
+        0
+    } else {
+        height
+    }
 }
 
 /// Compute the desired height for the Execution section.
@@ -840,7 +905,7 @@ fn compute_ordering_height(
 /// Otherwise sizes to the rendered line count, capped against the remaining
 /// budget so the flight recorder keeps its minimum height. Must match the
 /// line count produced by `build_execution_lines`.
-fn compute_execution_height(
+pub(crate) fn compute_execution_height(
     area_height: u16,
     info_height: u16,
     ordering_height: u16,
@@ -862,7 +927,14 @@ fn compute_execution_height(
     let rows = e.active_handlers.len() as u16;
     let more_row = u16::from(e.truncated);
     let want = 2 + 1 + oldest_line + rows + more_row;
-    want.min(budget)
+    let height = want.min(budget);
+    // Below one content row it is a border-only sliver -> hide it (0), so the
+    // header clip-alert fires instead of drawing a content-less box.
+    if height < MIN_VISIBLE_PANE_HEIGHT {
+        0
+    } else {
+        height
+    }
 }
 
 /// Render the Execution section: the second plane to lifecycle status,
@@ -2223,5 +2295,84 @@ mod tests {
             2,
             24,
         );
+    }
+
+    // A short terminal that starves the Execution pane to zero height must set
+    // the header "content hidden" flag; a roomy terminal must not; and an idle
+    // actor (no live handlers) must never flag, even when tiny.
+    #[test]
+    fn actor_detail_clipped_flags_starved_execution() {
+        let active = Execution {
+            active_count: 2,
+            active_handlers: vec![ActiveHandler {
+                name: "hold".to_string(),
+                active_count: 2,
+                oldest_since: SystemTime::now(),
+            }],
+            complete: true,
+            truncated: false,
+        };
+        // area 18 = info(13) + min_flight(5): no budget left, Execution starved.
+        assert!(actor_detail_clipped(18, None, Some(&active), None));
+        // Roomy terminal: Execution fits, no alert.
+        assert!(!actor_detail_clipped(45, None, Some(&active), None));
+        // Idle actor has nothing to hide -- never alert, even when tiny.
+        let idle = Execution {
+            active_count: 0,
+            active_handlers: vec![],
+            complete: true,
+            truncated: false,
+        };
+        assert!(!actor_detail_clipped(18, None, Some(&idle), None));
+    }
+
+    // TUI-CLIP-1: the ordering arm must track render_inbound_ordering
+    // (ordering_has_content) -- a stalled pane AND a partial-but-clean pane are
+    // both content-bearing; starved to zero height each flags, a roomy terminal
+    // does not, and disabled buffering never flags.
+    #[test]
+    fn actor_detail_clipped_flags_starved_ordering() {
+        let stalled = InboundOrdering {
+            enabled: true,
+            snapshot_complete: true,
+            skipped_session_count: 0,
+            known_session_count: 1,
+            returned_buffered_session_count: 1,
+            returned_buffered_message_count: 5,
+            returned_max_buffered_count: 5,
+            sessions: vec![session(uuid::Uuid::nil(), None, 5, 0, Some(2), Some(6))],
+        };
+        // area 18 = info(13) + min_flight(5): no budget, ordering starved.
+        assert!(actor_detail_clipped(18, Some(&stalled), None, None));
+        assert!(!actor_detail_clipped(45, Some(&stalled), None, None));
+
+        // Partial-but-clean snapshot is content-bearing (the "(partial: N
+        // skipped)" warning), so a starved one must also flag.
+        let partial = InboundOrdering {
+            enabled: true,
+            snapshot_complete: false,
+            skipped_session_count: 2,
+            known_session_count: 3,
+            returned_buffered_session_count: 0,
+            returned_buffered_message_count: 0,
+            returned_max_buffered_count: 0,
+            sessions: vec![],
+        };
+        assert!(actor_detail_clipped(18, Some(&partial), None, None));
+        assert!(!actor_detail_clipped(45, Some(&partial), None, None));
+
+        // Floor boundary (pins MIN_VISIBLE_PANE_HEIGHT): the partial pane wants 3
+        // rows. area 20 -> budget 2 -> a content-less sliver floored to 0 ->
+        // clipped (fails without the floor); area 21 -> budget 3 -> one content
+        // row shown -> not clipped (pins the threshold at < 3, not <= 3).
+        assert!(actor_detail_clipped(20, Some(&partial), None, None));
+        assert!(!actor_detail_clipped(21, Some(&partial), None, None));
+
+        // Disabled buffering is never content-bearing.
+        let disabled = InboundOrdering {
+            enabled: false,
+            ..partial
+        };
+        assert!(!actor_detail_clipped(18, Some(&disabled), None, None));
     }
 }
