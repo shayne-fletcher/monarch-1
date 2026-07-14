@@ -235,72 +235,73 @@ async def _hold_task(actor, id: str, entered_port: "Port[str]") -> None:
 
 async def async_main() -> None:
     job = ProcessJob({"hosts": 1}).enable_admin()
-    state = job.state(cached_path=None)
-    host = state.hosts
-
-    busy_proc = host.spawn_procs(
-        name="execution_busy", bootstrap=_disable_queue_dispatch
-    )
-    idle_proc = host.spawn_procs(
-        name="execution_idle", bootstrap=_disable_queue_dispatch
-    )
-    queue_proc = host.spawn_procs(
-        name="execution_queue", bootstrap=_enable_queue_dispatch
-    )
-    concurrent_proc = host.spawn_procs(
-        name="execution_concurrent", bootstrap=_enable_queue_dispatch
-    )
-    deadlock_proc = host.spawn_procs(
-        name="execution_deadlock", bootstrap=_enable_queue_dispatch
-    )
-
-    busy = busy_proc.spawn("busy_actor", BusyActor)
-    idle = idle_proc.spawn("idle_actor", BusyActor)
-    queue = queue_proc.spawn("queue_actor", QueueActor)
-    concurrent = concurrent_proc.spawn("concurrent_actor", ConcurrentActor)
-    # A queue-dispatch BusyActor: its blocking plain @endpoint `hold`
-    # monopolizes the serial dispatch loop, so a later `control` release
-    # queues behind it and can never run -- a deadlock the admin API surfaces.
-    deadlock = deadlock_proc.spawn("deadlock_actor", BusyActor)
-
-    actors = {
-        "busy": busy,
-        "queue": queue,
-        "concurrent": concurrent,
-        "deadlock": deadlock,
-    }
-
-    busy_ref = await busy.whoami.call_one()
-    idle_ref = await idle.whoami.call_one()
-    queue_ref = await queue.whoami.call_one()
-    concurrent_ref = await concurrent.whoami.call_one()
-    deadlock_ref = await deadlock.whoami.call_one()
-
-    # Held invocations send their id over this port from inside the handler
-    # body; a background task drains it and echoes EXEC_ENTERED to stdout.
-    entered_port: Port[str]
-    entered_recv: PortReceiver[str]
-    entered_port, entered_recv = Channel[str].open()
-
-    async def drain_entered() -> None:
-        while True:
-            entered_id = await entered_recv.recv()
-            print(f"EXEC_ENTERED {entered_id}", flush=True)
-
-    drainer = asyncio.ensure_future(drain_entered())
-
-    print(f"Mesh admin server listening on {state.admin_url}", flush=True)
-    print(f"  - Busy actor:  {busy_ref}", flush=True)
-    print(f"  - Idle actor:  {idle_ref}", flush=True)
-    print(f"  - Queue actor: {queue_ref}", flush=True)
-    print(f"  - Concurrent actor: {concurrent_ref}", flush=True)
-    print(f"  - Deadlock actor: {deadlock_ref}", flush=True)
-
-    reader = await _stdin_reader()
     # In-flight held invocations, tracked so they can be cancelled at
     # shutdown.
     holds: dict[str, asyncio.Task] = {}
+    drainer: asyncio.Task | None = None
     try:
+        state = job.state(cached_path=None)
+        host = state.hosts
+
+        busy_proc = host.spawn_procs(
+            name="execution_busy", bootstrap=_disable_queue_dispatch
+        )
+        idle_proc = host.spawn_procs(
+            name="execution_idle", bootstrap=_disable_queue_dispatch
+        )
+        queue_proc = host.spawn_procs(
+            name="execution_queue", bootstrap=_enable_queue_dispatch
+        )
+        concurrent_proc = host.spawn_procs(
+            name="execution_concurrent", bootstrap=_enable_queue_dispatch
+        )
+        deadlock_proc = host.spawn_procs(
+            name="execution_deadlock", bootstrap=_enable_queue_dispatch
+        )
+
+        busy = busy_proc.spawn("busy_actor", BusyActor)
+        idle = idle_proc.spawn("idle_actor", BusyActor)
+        queue = queue_proc.spawn("queue_actor", QueueActor)
+        concurrent = concurrent_proc.spawn("concurrent_actor", ConcurrentActor)
+        # A queue-dispatch BusyActor: its blocking plain @endpoint `hold`
+        # monopolizes the serial dispatch loop, so a later `control` release
+        # queues behind it and can never run -- a deadlock the admin API surfaces.
+        deadlock = deadlock_proc.spawn("deadlock_actor", BusyActor)
+
+        actors = {
+            "busy": busy,
+            "queue": queue,
+            "concurrent": concurrent,
+            "deadlock": deadlock,
+        }
+
+        busy_ref = await busy.whoami.call_one()
+        idle_ref = await idle.whoami.call_one()
+        queue_ref = await queue.whoami.call_one()
+        concurrent_ref = await concurrent.whoami.call_one()
+        deadlock_ref = await deadlock.whoami.call_one()
+
+        # Held invocations send their id over this port from inside the handler
+        # body; a background task drains it and echoes EXEC_ENTERED to stdout.
+        entered_port: Port[str]
+        entered_recv: PortReceiver[str]
+        entered_port, entered_recv = Channel[str].open()
+
+        async def drain_entered() -> None:
+            while True:
+                entered_id = await entered_recv.recv()
+                print(f"EXEC_ENTERED {entered_id}", flush=True)
+
+        drainer = asyncio.create_task(drain_entered())
+
+        print(f"Mesh admin server listening on {state.admin_url}", flush=True)
+        print(f"  - Busy actor:  {busy_ref}", flush=True)
+        print(f"  - Idle actor:  {idle_ref}", flush=True)
+        print(f"  - Queue actor: {queue_ref}", flush=True)
+        print(f"  - Concurrent actor: {concurrent_ref}", flush=True)
+        print(f"  - Deadlock actor: {deadlock_ref}", flush=True)
+
+        reader = await _stdin_reader()
         while True:
             raw = await reader.readline()
             if not raw:
@@ -315,7 +316,7 @@ async def async_main() -> None:
                 # hold blocks until released, so run it as a background task
                 # (via call_one -- see _hold_task). The "entered" signal
                 # still arrives mid-handler over entered_port.
-                holds[id] = asyncio.ensure_future(
+                holds[id] = asyncio.create_task(
                     _hold_task(actors[which], id, entered_port)
                 )
                 print(f"EXEC_ACK HOLD {id}", flush=True)
@@ -336,12 +337,11 @@ async def async_main() -> None:
         print("\nShutting down...", flush=True)
         for task in holds.values():
             task.cancel()
-        drainer.cancel()
-        await busy_proc.stop()
-        await idle_proc.stop()
-        await queue_proc.stop()
-        await concurrent_proc.stop()
-        await deadlock_proc.stop()
+        if drainer is not None:
+            drainer.cancel()
+        # Each ProcessJob worker runs in its own detached session; job.kill()
+        # reaps the whole session -- the worker and every proc it spawned.
+        job.kill()
 
 
 def main() -> None:
