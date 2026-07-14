@@ -9,11 +9,14 @@
 import contextlib
 import os
 import pickle
+import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 from dataclasses import dataclass
 from typing import cast, Dict, Optional, Sequence
@@ -32,6 +35,7 @@ from monarch._src.job.job import (
     JobTrait,
     LocalJob,
     MeshAdminConfig,
+    ProcessState,
     TelemetryConfig,
 )
 from monarch._src.job.job_components import JobComponent, JobComponents, MountComponent
@@ -573,6 +577,74 @@ def test_kill():
     # kill_called should now be True
     assert job.kill_called
     stop_sidecar.assert_called_once_with(apply_id)
+
+
+def test_process_job_kill_reaps_worker_session():
+    """_kill reaps the worker's whole session, including procs the worker spawns
+    into their own process groups -- which killpg of the worker alone orphans."""
+    if not os.path.isdir("/proc"):
+        pytest.skip("session reap requires /proc")
+
+    def session_members(sid):
+        alive = []
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            try:
+                if os.getsid(pid) != sid:
+                    continue
+                with open(f"/proc/{pid}/stat") as stat:
+                    state = stat.read().rsplit(")", 1)[1].split()[0]
+            except OSError:
+                continue
+            if state not in ("Z", "X", "x"):
+                alive.append(pid)
+        return alive
+
+    # A worker mimicking ProcessJob's: its own session (start_new_session=True)
+    # with children in their own process groups, all ignoring SIGTERM so _kill
+    # must escalate to SIGKILL to reap them.
+    worker_src = (
+        "import os, signal, time\n"
+        "for _ in range(3):\n"
+        "    if os.fork() == 0:\n"
+        "        os.setpgid(0, 0)\n"
+        "        signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "        while True: time.sleep(0.5)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "while True: time.sleep(0.5)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", worker_src], start_new_session=True)
+    worker = proc.pid
+    tmpdir = None
+
+    try:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and len(session_members(worker)) < 4:
+            time.sleep(0.05)
+        assert len(session_members(worker)) == 4  # worker + 3 children
+
+        tmpdir = tempfile.mkdtemp(prefix="test_process_job_kill_")
+        job = ProcessJob({"hosts": 1})
+        job._host_to_pid = {"h_0": ProcessState(worker, f"ipc://{tmpdir}/h_0")}
+        job._tmpdir = tmpdir
+
+        job._kill()
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and session_members(worker):
+            time.sleep(0.05)
+        assert session_members(worker) == []
+        assert not os.path.isdir(tmpdir)
+    finally:
+        for pid in session_members(worker):
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            proc.wait(timeout=2)
+        if tmpdir is not None:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def test_state_query_engine_none_without_telemetry():
