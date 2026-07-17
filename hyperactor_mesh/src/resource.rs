@@ -479,15 +479,19 @@ where
 }
 
 /// Subscribe to streaming state updates for a named resource.
-/// The subscriber port will receive `State<S>` whenever the resource's
+/// The subscriber port will receive `RankedState<S>` whenever the resource's
 /// state changes. The current state is sent immediately upon subscription.
 #[derive(Debug, Serialize, Deserialize, Named, Handler, HandleClient, RefClient)]
 #[serde(bound(serialize = "S: Named", deserialize = "S: Named"))]
 pub struct StreamState<S> {
     /// The resource identifier.
     pub id: ResourceId,
+    /// The recipient's rank in the subscriber's view. Cast callers leave this
+    /// unset so the comm layer can fill it for each recipient; direct callers
+    /// set it explicitly.
+    pub subscriber_rank: Rank,
     /// A streaming port that will receive state updates.
-    pub subscriber: PortRef<State<S>>,
+    pub subscriber: PortRef<RankedState<S>>,
 }
 wirevalue::register_type!(StreamState<ActorState>);
 wirevalue::register_type!(StreamState<ProcState>);
@@ -499,10 +503,22 @@ where
     fn clone(&self) -> Self {
         Self {
             id: self.id.clone(),
+            subscriber_rank: self.subscriber_rank.clone(),
             subscriber: self.subscriber.clone(),
         }
     }
 }
+
+/// A state update positioned in the subscriber's current view.
+#[derive(Clone, Debug, Serialize, Deserialize, Named, PartialEq, Eq, Handler)]
+pub struct RankedState<S> {
+    /// The resource's rank in the consuming view.
+    pub rank: Rank,
+    /// The state observed at that rank.
+    pub state: State<S>,
+}
+wirevalue::register_type!(RankedState<ActorState>);
+wirevalue::register_type!(RankedState<ProcState>);
 
 /// List the set of resources managed by the controller.
 #[derive(Debug, Serialize, Deserialize, Named, Handler, HandleClient, RefClient)]

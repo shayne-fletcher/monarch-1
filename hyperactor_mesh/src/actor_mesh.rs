@@ -1273,12 +1273,14 @@ mod tests {
     use std::ops::Deref;
     use std::sync::Arc;
 
+    use hyperactor::ActorRef;
     use hyperactor::Endpoint as _;
     use hyperactor::actor::ActorErrorKind;
     use hyperactor::actor::ActorStatus;
     use hyperactor::context::Mailbox as _;
     use hyperactor::id::Label;
     use hyperactor::mailbox;
+    use hyperactor::supervision::ActorSupervisionEvent;
     use ndslice::Extent;
     use ndslice::Region;
     use ndslice::Slice;
@@ -1295,11 +1297,16 @@ mod tests {
     use crate::ProcMesh;
     use crate::host_mesh::GET_PROC_STATE_MAX_IDLE;
     use crate::host_mesh::PROC_SPAWN_MAX_IDLE;
+    use crate::mesh_controller::ActorMeshControlPlane;
+    use crate::mesh_controller::ActorMeshController;
     use crate::mesh_controller::SUPERVISION_POLL_FREQUENCY;
     use crate::mesh_id::ActorMeshId;
+    use crate::proc_agent::ActorState;
     use crate::proc_mesh::ACTOR_SPAWN_MAX_IDLE;
     use crate::proc_mesh::GET_ACTOR_STATE_MAX_IDLE;
+    use crate::resource;
     use crate::supervision::MeshFailure;
+    use crate::test_utils::local_host_mesh;
     use crate::testactor;
     use crate::testing;
 
@@ -1811,6 +1818,149 @@ mod tests {
                 panic!("actor status is not failed: {}", event.actor_status);
             }
         }
+
+        let _ = hm.shutdown(instance).await;
+    }
+
+    /// Streamed supervision over a renumbered slice must attribute a failure to
+    /// the actor's rank in *that* view, not its first-creation rank. The child
+    /// singleton is first created over the whole (so the shared proc, gpu 1, has
+    /// `create_rank` 1), then observed by a controller over the slice (gpu 1 ->
+    /// rank 0). A streamed failure at slice rank 0 must reach the owner attributed
+    /// to rank 0 even though its payload retains `create_rank` 1.
+    ///
+    /// The whole-view child is spawned controllerless and kept alive through the
+    /// assertion. The test posts the streamed update directly to the slice
+    /// controller so polling cannot mask an incorrect streamed attribution.
+    #[async_timed_test(timeout_secs = 30)]
+    #[cfg(fbcode_build)]
+    async fn test_streamed_supervision_uses_current_view_rank() {
+        let instance = testing::instance();
+        let (supervision_port, mut supervision_receiver) = instance.open_port::<MeshFailure>();
+        let supervisor = supervision_port.bind();
+
+        let mut hm = local_host_mesh(1).await;
+        let proc_mesh = hm
+            .spawn(instance, "test", extent!(gpus = 2), None, None)
+            .await
+            .unwrap();
+        let whole = proc_mesh.deref().clone();
+        // gpu 1 is rank 1 in the whole and rank 0 in this slice.
+        let slice = proc_mesh.range("gpus", 1..2).unwrap();
+
+        // One singleton id shared by the whole-view actor and slice controller.
+        let child_id = ActorMeshId::singleton(Label::strip("svc_sup"));
+
+        // Pre-create the child over the whole, controllerless so no whole-view
+        // controller also reports the panic; gpu 1's child gets create_rank 1.
+        // Keep it alive through the assertion so the shared actor persists.
+        let _whole_child: ActorMesh<testactor::TestActor> = whole
+            .spawn_with_name(instance, child_id.clone(), &(), None, true)
+            .await
+            .unwrap();
+
+        let child_slice_region = _whole_child
+            .region()
+            .range("gpus", 1..2)
+            .expect("child slice should exist");
+        let child_slice = _whole_child.sliced(child_slice_region);
+
+        let (stream_port, mut stream_rx) =
+            instance.open_port::<resource::RankedState<ActorState>>();
+        slice
+            .agent_mesh()
+            .cast(
+                instance,
+                resource::StreamState::<ActorState> {
+                    id: child_id.resource_id().clone(),
+                    subscriber_rank: resource::Rank::default(),
+                    subscriber: stream_port.bind(),
+                },
+            )
+            .unwrap();
+        let streamed = tokio::time::timeout(Duration::from_secs(10), stream_rx.recv())
+            .await
+            .expect("no initial streamed state before timeout")
+            .unwrap();
+        assert_eq!(streamed.rank.unwrap(), 0);
+        assert_eq!(
+            streamed
+                .state
+                .state
+                .as_ref()
+                .expect("running actor should carry ActorState")
+                .create_rank,
+            1,
+        );
+
+        let controller: ActorMeshController<testactor::TestActor> = ActorMeshController::new(
+            ActorMeshControlPlane::new(child_slice.clone(), slice),
+            Some("svc_sup".to_string()),
+            Some(supervisor),
+            crate::StatusMesh::from_single(child_slice.region().clone(), resource::Status::Running),
+        );
+        let controller_handle = instance.spawn_with_label("stream_rank_controller", controller);
+        controller_handle
+            .status()
+            .wait_for(|status| matches!(status, ActorStatus::Idle))
+            .await
+            .unwrap();
+        let controller: ActorRef<ActorMeshController<testactor::TestActor>> =
+            controller_handle.bind();
+
+        let actor_id = child_slice
+            .get(0)
+            .expect("slice actor should exist")
+            .actor_addr()
+            .clone();
+        let event = ActorSupervisionEvent::new(
+            actor_id.clone(),
+            None,
+            ActorStatus::generic_failure("streamed test failure"),
+            None,
+        );
+        controller.post(
+            instance,
+            resource::RankedState {
+                rank: resource::Rank::new(0),
+                state: resource::State {
+                    id: child_id.resource_id().clone(),
+                    status: resource::Status::Failed("streamed test failure".to_string()),
+                    state: Some(ActorState {
+                        actor_id,
+                        create_rank: 1,
+                        supervision_events: vec![event],
+                    }),
+                    generation: u64::MAX,
+                    timestamp: std::time::SystemTime::now(),
+                },
+            },
+        );
+
+        let failure = tokio::time::timeout(Duration::from_secs(10), supervision_receiver.recv())
+            .await
+            .expect("no supervision failure delivered before timeout")
+            .unwrap();
+        assert_eq!(
+            failure.crashed_ranks,
+            vec![0],
+            "failure attributed to slice-local rank 0: {failure:?}",
+        );
+        assert!(
+            failure
+                .actor_mesh_name
+                .as_deref()
+                .is_some_and(|name| name.contains("svc_sup")),
+            "failure names the child mesh: {:?}",
+            failure.actor_mesh_name,
+        );
+
+        controller_handle.stop("test complete").unwrap();
+        controller_handle
+            .status()
+            .wait_for(ActorStatus::is_terminal)
+            .await
+            .unwrap();
 
         let _ = hm.shutdown(instance).await;
     }
