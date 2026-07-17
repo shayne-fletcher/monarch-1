@@ -94,6 +94,7 @@ use crate::ProcMesh;
 use crate::ValueMesh;
 use crate::bootstrap::BootstrapCommand;
 use crate::bootstrap::BootstrapProcManager;
+use crate::bootstrap::HostBootstrapReady;
 use crate::bootstrap::ProcBind;
 use crate::host::Host;
 use crate::host::LocalProcManager;
@@ -455,11 +456,13 @@ impl HostMesh {
 
         let bind_spec = hyperactor_config::global::get_cloned(DEFAULT_TRANSPORT);
         let mut host_addrs = Vec::with_capacity(extent.num_ranks());
+        let mut ready = Vec::with_capacity(extent.num_ranks());
         for _ in 0..extent.num_ranks() {
-            // Note: this can be racy. Possibly we should have a callback channel.
             let addr = bind_spec.binding_addr();
+            let callback = HostBootstrapReady::new(addr.clone())?;
             let bootstrap = Bootstrap::Host {
                 addr: addr.clone(),
+                callback_addr: callback.callback_addr(),
                 command: Some(command.clone()),
                 config: Some(hyperactor_config::global::attrs()),
                 exit_on_shutdown: false,
@@ -469,6 +472,10 @@ impl HostMesh {
             bootstrap.to_env(&mut cmd);
             cmd.spawn()?;
             host_addrs.push(addr);
+            ready.push(callback);
+        }
+        for callback in ready {
+            callback.wait().await?;
         }
 
         let host_mesh_ref = HostMeshRef::new(
@@ -1955,10 +1962,13 @@ mod tests {
         let hosts = vec![free_localhost_addr(), free_localhost_addr()];
 
         let mut children = Vec::new();
+        let mut ready = Vec::new();
         for host in hosts.iter() {
+            let callback = HostBootstrapReady::new(host.clone()).unwrap();
             let mut cmd = Command::new(program.clone());
             let boot = Bootstrap::Host {
                 addr: host.clone(),
+                callback_addr: callback.callback_addr(),
                 command: None, // use current binary
                 config: None,
                 exit_on_shutdown: false,
@@ -1966,6 +1976,10 @@ mod tests {
             boot.to_env(&mut cmd);
             cmd.kill_on_drop(true);
             children.push(cmd.spawn().unwrap());
+            ready.push(callback);
+        }
+        for callback in ready {
+            callback.wait().await.unwrap();
         }
 
         let instance = testing::instance();
@@ -2039,10 +2053,13 @@ mod tests {
         let hosts = vec![free_localhost_addr(), free_localhost_addr()];
 
         let mut children = Vec::new();
+        let mut ready = Vec::new();
         for host in hosts.iter() {
+            let callback = HostBootstrapReady::new(host.clone()).unwrap();
             let mut cmd = Command::new(program.clone());
             let boot = Bootstrap::Host {
                 addr: host.clone(),
+                callback_addr: callback.callback_addr(),
                 config: None,
                 // The entire purpose of this is to fail:
                 command: Some(BootstrapCommand::from("false")),
@@ -2051,6 +2068,10 @@ mod tests {
             boot.to_env(&mut cmd);
             cmd.kill_on_drop(true);
             children.push(cmd.spawn().unwrap());
+            ready.push(callback);
+        }
+        for callback in ready {
+            callback.wait().await.unwrap();
         }
         let host_mesh =
             HostMeshRef::from_hosts(HostMeshId::singleton(Label::new("test").unwrap()), hosts);
@@ -2080,8 +2101,10 @@ mod tests {
         let hosts = vec![free_localhost_addr(), free_localhost_addr()];
 
         let mut children = Vec::new();
+        let mut ready = Vec::new();
 
         for (index, host) in hosts.iter().enumerate() {
+            let callback = HostBootstrapReady::new(host.clone()).unwrap();
             let mut cmd = Command::new(program.clone());
             let command = if index == 0 {
                 let mut command = BootstrapCommand::from("sleep");
@@ -2092,6 +2115,7 @@ mod tests {
             };
             let boot = Bootstrap::Host {
                 addr: host.clone(),
+                callback_addr: callback.callback_addr(),
                 config: None,
                 command,
                 exit_on_shutdown: false,
@@ -2099,6 +2123,10 @@ mod tests {
             boot.to_env(&mut cmd);
             cmd.kill_on_drop(true);
             children.push(cmd.spawn().unwrap());
+            ready.push(callback);
+        }
+        for callback in ready {
+            callback.wait().await.unwrap();
         }
         let host_mesh =
             HostMeshRef::from_hosts(HostMeshId::singleton(Label::new("test").unwrap()), hosts);

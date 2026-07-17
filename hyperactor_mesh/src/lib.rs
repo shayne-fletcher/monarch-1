@@ -64,6 +64,7 @@ use std::io;
 pub use actor_mesh::ActorMesh;
 pub use actor_mesh::ActorMeshRef;
 pub use bootstrap::Bootstrap;
+pub use bootstrap::HostBootstrapReady;
 pub use bootstrap::bootstrap;
 pub use bootstrap::bootstrap_or_die;
 pub use casting::CastError;

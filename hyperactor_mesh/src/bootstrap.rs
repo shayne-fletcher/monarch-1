@@ -373,6 +373,9 @@ pub enum Bootstrap {
     Host {
         /// The address on which to serve the host.
         addr: ChannelAddr,
+        /// Callback used to publish host readiness after the [`HostAgent`] and
+        /// cast actor are bound.
+        callback_addr: ChannelAddr,
         /// If specified, use the provided command instead of
         /// [`BootstrapCommand::current`].
         command: Option<BootstrapCommand>,
@@ -384,6 +387,51 @@ pub enum Bootstrap {
         /// If true, exit the process after handling a shutdown request.
         exit_on_shutdown: bool,
     },
+}
+
+/// Parent side of the host-bootstrap readiness callback.
+pub struct HostBootstrapReady {
+    host_addr: ChannelAddr,
+    callback_addr: ChannelAddr,
+    callback_rx: hyperactor::channel::ChannelRx<()>,
+}
+
+impl HostBootstrapReady {
+    pub fn new(host_addr: ChannelAddr) -> Result<Self, ChannelError> {
+        let (callback_addr, callback_rx) =
+            channel::serve(ChannelAddr::any(ChannelTransport::Unix))?;
+        Ok(Self {
+            host_addr,
+            callback_addr,
+            callback_rx,
+        })
+    }
+
+    pub fn callback_addr(&self) -> ChannelAddr {
+        self.callback_addr.clone()
+    }
+
+    pub async fn wait(mut self) -> anyhow::Result<()> {
+        let timeout = hyperactor_config::global::get(hyperactor::config::HOST_SPAWN_READY_TIMEOUT);
+        if timeout.is_zero() {
+            self.callback_rx.recv().await.with_context(|| {
+                format!("host {} closed its bootstrap callback", self.host_addr)
+            })?;
+        } else {
+            tokio::time::timeout(timeout, self.callback_rx.recv())
+                .await
+                .with_context(|| {
+                    format!(
+                        "host {} did not become ready within {:?}",
+                        self.host_addr, timeout
+                    )
+                })?
+                .with_context(|| {
+                    format!("host {} closed its bootstrap callback", self.host_addr)
+                })?;
+        }
+        Ok(())
+    }
 }
 
 impl Bootstrap {
@@ -550,6 +598,7 @@ impl Bootstrap {
             }
             Bootstrap::Host {
                 addr,
+                callback_addr,
                 command,
                 config,
                 exit_on_shutdown,
@@ -564,6 +613,10 @@ impl Bootstrap {
                     None,
                 )
                 .await?;
+                channel::dial(callback_addr)?
+                    .send(())
+                    .await
+                    .map_err(ChannelError::from)?;
                 shutdown.join().await;
                 halt().await
             }
@@ -2375,6 +2428,43 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn test_host_bootstrap_ready_callback() {
+        let host_addr = ChannelAddr::any(ChannelTransport::Unix);
+        let ready = HostBootstrapReady::new(host_addr).expect("open readiness callback");
+        let callback_addr = ready.callback_addr();
+        let sender = tokio::spawn(async move {
+            channel::dial(callback_addr)
+                .expect("dial readiness callback")
+                .send(())
+                .await
+                .expect("send readiness callback");
+        });
+
+        ready.wait().await.expect("receive readiness callback");
+        sender.await.expect("readiness sender task");
+    }
+
+    #[tokio::test]
+    async fn test_host_bootstrap_ready_times_out_without_callback() {
+        let config = hyperactor_config::global::lock();
+        let _timeout = config.override_key(
+            hyperactor::config::HOST_SPAWN_READY_TIMEOUT,
+            Duration::from_millis(20),
+        );
+        let host_addr = ChannelAddr::any(ChannelTransport::Unix);
+        let ready = HostBootstrapReady::new(host_addr).expect("open readiness callback");
+
+        let error = ready
+            .wait()
+            .await
+            .expect_err("missing callback must fail closed");
+        assert!(
+            error.to_string().contains("did not become ready"),
+            "unexpected readiness error: {error:#}"
+        );
+    }
+
     #[test]
     fn test_bootstrap_mode_env_string_none_config_proc() {
         let value = Bootstrap::Proc {
@@ -2404,6 +2494,7 @@ mod tests {
     fn test_bootstrap_mode_env_string_none_config_host() {
         let value = Bootstrap::Host {
             addr: ChannelAddr::any(ChannelTransport::Unix),
+            callback_addr: ChannelAddr::any(ChannelTransport::Unix),
             command: None,
             config: None,
             exit_on_shutdown: false,
@@ -2463,6 +2554,7 @@ mod tests {
         {
             let original = Bootstrap::Host {
                 addr: ChannelAddr::any(ChannelTransport::Unix),
+                callback_addr: ChannelAddr::any(ChannelTransport::Unix),
                 command: None,
                 config: Some(attrs.clone()),
                 exit_on_shutdown: false,

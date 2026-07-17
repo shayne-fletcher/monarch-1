@@ -73,6 +73,7 @@ use hyperactor::supervision::ActorSupervisionEvent;
 use hyperactor_config::Flattrs;
 use hyperactor_mesh::ActorMesh;
 use hyperactor_mesh::Bootstrap;
+use hyperactor_mesh::HostBootstrapReady;
 use hyperactor_mesh::HostMeshRef;
 use hyperactor_mesh::comm::multicast::CastInfo;
 use hyperactor_mesh::context;
@@ -505,8 +506,10 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
         buck_resources::get("monarch/monarch_rdma/examples/parameter_server/bootstrap").unwrap(),
     );
     let host_addr = ChannelTransport::Unix.any();
+    let callback = HostBootstrapReady::new(host_addr.clone())?;
     let boot = Bootstrap::Host {
         addr: host_addr.clone(),
+        callback_addr: callback.callback_addr(),
         command: None, // use current binary
         config: None,
         exit_on_shutdown: false,
@@ -514,6 +517,7 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
     boot.to_env(&mut command);
     command.kill_on_drop(true);
     let _child = command.spawn().unwrap();
+    callback.wait().await?;
 
     let host_mesh = HostMeshRef::from_hosts(
         HostMeshId::instance(Label::new("test").unwrap()),

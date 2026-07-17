@@ -74,6 +74,7 @@ use hyperactor::supervision::ActorSupervisionEvent;
 use hyperactor_config::Flattrs;
 use hyperactor_mesh::ActorMesh;
 use hyperactor_mesh::Bootstrap;
+use hyperactor_mesh::HostBootstrapReady;
 use hyperactor_mesh::HostMeshRef;
 use hyperactor_mesh::ProcMesh;
 use hyperactor_mesh::context;
@@ -846,10 +847,13 @@ pub async fn run() -> Result<(), anyhow::Error> {
 
     let host_addrs = [free_localhost_addr(), free_localhost_addr()];
     let mut children = Vec::new();
+    let mut ready = Vec::new();
     for host in host_addrs.iter() {
+        let callback = HostBootstrapReady::new(host.clone())?;
         let mut cmd = Command::new(program.clone());
         let boot = Bootstrap::Host {
             addr: host.clone(),
+            callback_addr: callback.callback_addr(),
             command: None,
             config: None,
             exit_on_shutdown: false,
@@ -857,6 +861,10 @@ pub async fn run() -> Result<(), anyhow::Error> {
         boot.to_env(&mut cmd);
         cmd.kill_on_drop(true);
         children.push(cmd.spawn().unwrap());
+        ready.push(callback);
+    }
+    for callback in ready {
+        callback.wait().await?;
     }
 
     // Create separate host meshes for each device to maintain different configs
