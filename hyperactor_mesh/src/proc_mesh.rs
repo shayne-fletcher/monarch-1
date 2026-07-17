@@ -825,6 +825,8 @@ impl ProcMeshRef {
             cx,
             resource::GetRankStatus {
                 id: actor_mesh_id.resource_id().clone(),
+                // Filled by the cast layer with this recipient's dense view rank.
+                rank: Default::default(),
                 reply,
             },
         )?;
@@ -1036,6 +1038,8 @@ impl ProcMeshRef {
             cx,
             resource::WaitRankStatus {
                 id: actor_mesh_id.resource_id().clone(),
+                // Filled by the cast layer with this recipient's dense view rank.
+                rank: Default::default(),
                 min_status: Status::Stopped,
                 reply: port.bind(),
             },
@@ -1151,6 +1155,8 @@ fn python_class_from_supervision_name(sdn: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     #[cfg(fbcode_build)]
+    use std::collections::HashSet;
+    #[cfg(fbcode_build)]
     use std::ops::Deref;
     #[cfg(fbcode_build)]
     use std::time::Duration;
@@ -1158,11 +1164,17 @@ mod tests {
     #[cfg(fbcode_build)]
     use hyperactor::Instance;
     #[cfg(fbcode_build)]
+    use hyperactor::accum::StreamingReducerOpts;
+    #[cfg(fbcode_build)]
     use hyperactor::config::ENABLE_DEST_ACTOR_REORDERING_BUFFER;
+    #[cfg(fbcode_build)]
+    use hyperactor::context::Mailbox;
     #[cfg(fbcode_build)]
     use ndslice::ViewExt as _;
     #[cfg(fbcode_build)]
     use ndslice::extent;
+    #[cfg(fbcode_build)]
+    use ndslice::view::Ranked as _;
     #[cfg(fbcode_build)]
     use timed_test::assert_no_process_leak;
     #[cfg(fbcode_build)]
@@ -1170,6 +1182,8 @@ mod tests {
     #[cfg(fbcode_build)]
     use uuid::Uuid;
 
+    #[cfg(fbcode_build)]
+    use super::ACTOR_SPAWN_MAX_IDLE;
     #[cfg(fbcode_build)]
     use crate::ActorMesh;
     #[cfg(fbcode_build)]
@@ -1200,6 +1214,146 @@ mod tests {
         testactor::assert_mesh_shape(actor_mesh).await;
 
         let _ = hm.shutdown(instance).await;
+    }
+
+    /// Reuse a per-proc singleton service across two overlapping proc-mesh views
+    /// whose shared proc is renumbered — a whole view and a `gpus` sub-slice, so
+    /// the shared proc (gpu 1) is rank 1 in the whole and rank 0 in the slice.
+    /// `spawn_service` creates one deduped actor per proc, so the slice must
+    /// keep the whole's actor on the shared proc.
+    ///
+    /// One `host_mesh(1)` fixture drives three uniquely-named scenarios to keep
+    /// the harness footprint minimal (one Tokio runtime, one host process, no
+    /// process-global config override): reuse whole-then-slice, reuse
+    /// slice-then-whole, and a deferred `WaitRankStatus` over the slice. Each
+    /// spawn must resolve (a reused spawn positions its readiness overlay at the
+    /// consuming-view rank, so the accumulator completes), the slice must
+    /// reference the whole's shared actor with no new actors, and a Stopped-waiter
+    /// registered while the service runs must flush at slice-local ranks.
+    /// The assertions exercise the ProcAgent readiness path; the per-view
+    /// controllers remain idle because this test does not trigger supervision.
+    #[async_timed_test(timeout_secs = 120)]
+    #[cfg(fbcode_build)]
+    async fn test_singleton_service_reuse_over_overlapping_views() {
+        let instance = testing::instance();
+        let mut hm = testing::host_mesh(1).await;
+        let proc_mesh = hm
+            .spawn(&instance, "test", extent!(gpus = 2), None, None)
+            .await
+            .unwrap();
+        let whole = proc_mesh.deref().clone();
+        let slice = proc_mesh.range("gpus", 1..2).unwrap();
+
+        // The slice reuses the whole's actor on the shared proc; no new actors.
+        fn assert_shared(
+            whole_mesh: &ActorMesh<testactor::TestActor>,
+            slice_mesh: &ActorMesh<testactor::TestActor>,
+        ) {
+            let whole_ids: HashSet<_> = whole_mesh
+                .values()
+                .map(|actor_ref| actor_ref.actor_addr().id().clone())
+                .collect();
+            let slice_ids: HashSet<_> = slice_mesh
+                .values()
+                .map(|actor_ref| actor_ref.actor_addr().id().clone())
+                .collect();
+            assert_eq!(whole_ids.len(), 2, "whole view spans two procs");
+            assert_eq!(slice_ids.len(), 1, "slice spans one proc");
+            assert!(
+                slice_ids.is_subset(&whole_ids),
+                "slice reuses the shared proc's actor: {slice_ids:?} vs {whole_ids:?}",
+            );
+            assert_eq!(
+                whole_ids.union(&slice_ids).count(),
+                2,
+                "no new actors created for the overlapping slice",
+            );
+        }
+
+        // Scenario 1: spawn over the whole, then reuse over the renumbered slice.
+        let w1 = whole
+            .spawn_service::<testactor::TestActor, _>(instance, "svc_whole_first", &())
+            .await
+            .unwrap();
+        let s1 = slice
+            .spawn_service::<testactor::TestActor, _>(instance, "svc_whole_first", &())
+            .await
+            .unwrap();
+        assert_shared(&w1, &s1);
+
+        // Scenario 2: spawn over the slice first, then reuse over the whole.
+        let s2 = slice
+            .spawn_service::<testactor::TestActor, _>(instance, "svc_slice_first", &())
+            .await
+            .unwrap();
+        let w2 = whole
+            .spawn_service::<testactor::TestActor, _>(instance, "svc_slice_first", &())
+            .await
+            .unwrap();
+        assert_shared(&w2, &s2);
+
+        // Scenario 3: a `WaitRankStatus{Stopped}` registered over the renumbered
+        // slice while the service runs is deferred and flushed on stop. The
+        // flushed overlays land at slice-local ranks, within the slice region the
+        // accumulator was opened over, so the wait completes. Registering before
+        // the stop makes the deferred branch deterministic.
+        whole
+            .spawn_service::<testactor::TestActor, _>(instance, "svc_wait", &())
+            .await
+            .unwrap();
+        let sw = slice
+            .spawn_service::<testactor::TestActor, _>(instance, "svc_wait", &())
+            .await
+            .unwrap();
+        let id = sw.id().resource_id().clone();
+        let region = slice.region().clone();
+        let num_ranks = region.num_ranks();
+        let (port, rx) = instance.mailbox().open_accum_port_opts(
+            crate::StatusMesh::from_single(region.clone(), Status::NotExist),
+            StreamingReducerOpts {
+                max_update_interval: Some(Duration::from_millis(50)),
+                initial_update_interval: None,
+            },
+        );
+        slice
+            .agent_mesh()
+            .cast(
+                instance,
+                crate::resource::WaitRankStatus {
+                    id: id.clone(),
+                    // Filled by the cast layer with this recipient's dense view rank.
+                    rank: Default::default(),
+                    min_status: Status::Stopped,
+                    reply: port.bind(),
+                },
+            )
+            .unwrap();
+        slice
+            .agent_mesh()
+            .cast(
+                instance,
+                crate::resource::Stop {
+                    id: id.clone(),
+                    reason: "test".to_string(),
+                },
+            )
+            .unwrap();
+        let statuses = crate::resource::GetRankStatus::wait(
+            rx,
+            num_ranks,
+            hyperactor_config::global::get(ACTOR_SPAWN_MAX_IDLE),
+            region,
+        )
+        .await
+        .unwrap();
+        assert!(
+            statuses.values().all(|s| s.is_terminating()),
+            "deferred waiters flushed at slice-local ranks: {statuses:?}",
+        );
+
+        hm.shutdown(instance)
+            .await
+            .expect("host mesh shutdown should complete");
     }
 
     #[async_timed_test(timeout_secs = 120)]

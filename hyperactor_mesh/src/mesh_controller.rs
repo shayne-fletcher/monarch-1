@@ -1401,8 +1401,14 @@ impl Controlled for ProcMeshRef {
         cx: &impl context::Actor,
         msg: resource::WaitRankStatus,
     ) -> anyhow::Result<()> {
-        for proc_id in self.proc_ids() {
-            crate::host_mesh::host_agent_ref(proc_id.addr().clone()).post(cx, msg.clone());
+        // Direct fan-out (not a cast): one scalar rank cannot identify every
+        // recipient, so stamp each clone with the proc's rank in this view
+        // (RSP-2). `proc_ids()` follows the current-view `ranks` order, so the
+        // enumeration index is each recipient's consuming-view rank (RSP-1).
+        for (view_rank, proc_id) in self.proc_ids().enumerate() {
+            let mut msg = msg.clone();
+            msg.rank = resource::Rank::new(view_rank);
+            crate::host_mesh::host_agent_ref(proc_id.addr().clone()).post(cx, msg);
         }
         Ok(())
     }

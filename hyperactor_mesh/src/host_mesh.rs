@@ -1575,7 +1575,11 @@ impl HostMeshRef {
                 initial_update_interval: None,
             },
         );
-        for proc_id in procs.into_iter() {
+        // `procs` follows the current-view `ranks` order, so the enumeration
+        // index is each proc's rank in this view (RSP-1). Direct delivery stamps
+        // it explicitly (RSP-2); each HostAgent positions its reply overlay
+        // there.
+        for (view_rank, proc_id) in procs.into_iter().enumerate() {
             let addr = proc_id.addr().clone();
             // The name stored in HostAgent is not the same as the
             // one stored in the ProcMesh. We instead take each proc id
@@ -1594,7 +1598,13 @@ impl HostMeshRef {
                 },
             );
             host_agent
-                .wait_rank_status(cx, proc_resource_id, Status::Stopped, port.bind())
+                .wait_rank_status(
+                    cx,
+                    proc_resource_id,
+                    resource::Rank::new(view_rank),
+                    Status::Stopped,
+                    port.bind(),
+                )
                 .await
                 .map_err(|e| crate::Error::CallError(host_agent.actor_addr().clone(), e))?;
 

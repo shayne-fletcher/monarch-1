@@ -8,6 +8,32 @@
 
 //! This modules defines a set of common message types used for managing resources
 //! in hyperactor meshes.
+//!
+//! # Rank-status positioning (`RSP-*`)
+//!
+//! Status queries ([`GetRankStatus`], [`WaitRankStatus`]) reply with a
+//! [`StatusOverlay`] — a sparse, rank-indexed patch the caller merges into an
+//! accumulator over its own view. Positioning that overlay is the contract this
+//! registry names; each invariant is cited at the sites that must uphold it.
+//!
+//! - **RSP-1** — an overlay is positioned at the recipient's dense rank in the
+//!   *consuming* view (the one the caller accumulates over), never the rank the
+//!   resource was first created under. Reusing the creation rank mis-attributes
+//!   or drops the reply over a renumbered or sliced view.
+//! - **RSP-2** — the positioning rank travels as the [`Rank`] message field. Cast
+//!   sites leave it `Rank::default()` and the cast layer late-binds it in transit
+//!   with the delivered dense rank; direct (non-cast) delivery supplies it
+//!   explicitly with `Rank::new(view_rank)`.
+//! - **RSP-3** — a deferred waiter (a [`WaitRankStatus`] below its threshold, or
+//!   one registered before its resource exists) retains its registration rank
+//!   until it is flushed; the flush never rewrites it to a creation rank.
+//! - **RSP-4** — when a handler reports absence *immediately*, it returns an
+//!   empty overlay; the message's [`Rank`] is never overloaded as an absence
+//!   signal. `WaitRankStatus` may instead defer when later creation is expected
+//!   (RSP-3), replying once the resource exists.
+//!
+//! `ActorState` streaming supervision must satisfy the analogous positioning
+//! contract; extending this registry to cover `ActorState` is future work.
 
 pub mod mesh;
 
@@ -196,12 +222,12 @@ impl Rank {
     }
 }
 
-/// Get the status of a resource across the mesh.
+/// Get the status of a resource.
 ///
-/// This message is cast to all ranks; each rank replies with a sparse
-/// status **overlay**. The comm reducer merges overlays (right-wins)
-/// and the accumulator applies them to produce **full StatusMesh
-/// snapshots** on the receiver side.
+/// Delivered either by cast to every rank or by direct point-to-point send to a
+/// chosen recipient. Each recipient replies with a sparse status **overlay**.
+/// The comm reducer merges overlays (right-wins) and the accumulator applies
+/// them to produce **full StatusMesh snapshots** on the receiver side.
 #[derive(
     Clone,
     Debug,
@@ -215,6 +241,11 @@ impl Rank {
 pub struct GetRankStatus {
     /// The resource identifier.
     pub id: ResourceId,
+    /// The rank at which the recipient positions its reply overlay, in the
+    /// caller's view (RSP-1, RSP-2). Cast sites leave this `Rank::default()` and
+    /// the cast layer rewrites it in transit with the delivered dense rank;
+    /// direct (non-cast) callers set it explicitly with `Rank::new(...)`.
+    pub rank: Rank,
     /// Sparse status updates (overlays) from a rank.
     pub reply: PortRef<StatusOverlay>,
 }
@@ -235,6 +266,12 @@ pub struct GetRankStatus {
 pub struct WaitRankStatus {
     /// The resource identifier.
     pub id: ResourceId,
+    /// The rank at which the recipient positions its reply overlay, in the
+    /// caller's view (RSP-1, RSP-2). Cast sites leave this `Rank::default()` and
+    /// the cast layer rewrites it in transit with the delivered dense rank;
+    /// direct (non-cast) callers set it explicitly with `Rank::new(...)`. A
+    /// deferred waiter retains this rank until it is flushed (RSP-3).
+    pub rank: Rank,
     /// The minimum status the caller wants to observe.
     /// The handler will not reply until the resource's status
     /// is >= this threshold.

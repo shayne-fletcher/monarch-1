@@ -953,26 +953,15 @@ impl Handler<resource::CreateOrUpdate<ProcSpec>> for HostAgent {
             self.state = HostAgentState::Attached(host);
         }
 
-        // If any WaitRankStatus messages arrived before this proc
-        // existed, their waiters were stashed with a sentinel rank.
-        // Now that we know the real rank, fix them up and start a
-        // watch bridge.
-        // Extract the proc_id before mutably borrowing pending_proc_waiters.
+        // A WaitRankStatus stashed before this proc existed carries its own reply
+        // rank (RSP-3); starting a status watch bridge for it needs the proc_id.
         let proc_id = self
             .created
             .get(&create_or_update.id)
             .and_then(|s| s.created.as_ref().ok())
             .map(|(pid, _)| pid.clone());
 
-        if let Some(waiters) = self.pending_proc_waiters.get_mut(&create_or_update.id) {
-            for (_, waiter_rank, _) in waiters.iter_mut() {
-                if *waiter_rank == usize::MAX {
-                    *waiter_rank = rank;
-                }
-            }
-        }
-
-        // Start a bridge and send ourselves an initial check.
+        // Bridge status changes to any pending waiters, then flush once now.
         if self.pending_proc_waiters.contains_key(&create_or_update.id) {
             if let Some(proc_id) = &proc_id {
                 self.start_watch_bridge(&create_or_update.id, proc_id).await;
@@ -1057,11 +1046,15 @@ impl Handler<resource::GetRankStatus> for HostAgent {
         cx: &Context<Self>,
         get_rank_status: resource::GetRankStatus,
     ) -> anyhow::Result<()> {
-        let (rank, status) = self.proc_rank_status(&get_rank_status.id).await;
-
-        let overlay = if rank == usize::MAX {
+        // `proc_rank_status` returns `usize::MAX` for a proc unknown to this
+        // host, which still yields an empty overlay (RSP-4). A *known* proc is
+        // positioned at the rank the request carries (the caller's view), not
+        // the stored creation rank (RSP-1).
+        let (found_rank, status) = self.proc_rank_status(&get_rank_status.id).await;
+        let overlay = if found_rank == usize::MAX {
             StatusOverlay::new()
         } else {
+            let rank = get_rank_status.rank.unwrap();
             StatusOverlay::try_from_runs(vec![(rank..(rank + 1), status)])
                 .expect("valid single-run overlay")
         };
@@ -1080,13 +1073,15 @@ impl Handler<resource::WaitRankStatus> for HostAgent {
         use crate::StatusOverlay;
         use crate::resource::Status;
 
+        // Position from the rank the request carries (the caller's view), not the
+        // stored creation rank (RSP-1). A deferred / pre-create waiter retains it
+        // (RSP-3).
+        let rank = msg.rank.unwrap();
         match self.created.get(&msg.id) {
             Some(ProcCreationState {
-                rank,
                 created: Ok((proc_id, _)),
                 ..
             }) => {
-                let rank = *rank;
                 let status = match self.host() {
                     Some(host) => host.proc_status(proc_id).await.0,
                     None => Status::Stopped,
@@ -1110,26 +1105,24 @@ impl Handler<resource::WaitRankStatus> for HostAgent {
                 self.start_watch_bridge(&msg.id, &proc_id).await;
             }
             Some(ProcCreationState {
-                rank,
-                created: Err(e),
-                ..
+                created: Err(e), ..
             }) => {
                 // Creation failed — reply immediately with Failed status.
                 let overlay = StatusOverlay::try_from_runs(vec![(
-                    *rank..(*rank + 1),
+                    rank..(rank + 1),
                     Status::Failed(e.to_string()),
                 )])
                 .expect("valid single-run overlay");
                 let _ = msg.reply.post(cx, overlay);
             }
             None => {
-                // Proc doesn't exist yet. Stash the waiter with a
-                // sentinel rank; CreateOrUpdate will fill it in and
-                // start the watch bridge.
+                // Proc doesn't exist yet. Stash the waiter with the rank the
+                // request carries (RSP-3); `CreateOrUpdate` starts the watch
+                // bridge.
                 self.pending_proc_waiters
                     .entry(msg.id.clone())
                     .or_default()
-                    .push((msg.min_status, usize::MAX, msg.reply));
+                    .push((msg.min_status, rank, msg.reply));
             }
         }
 
@@ -1178,6 +1171,8 @@ impl HostAgent {
         let remaining = std::mem::take(waiters);
         for (min_status, rank, reply) in remaining {
             if status >= min_status {
+                // Each waiter keeps the reply rank it registered with (RSP-3),
+                // positioned in the caller's view (RSP-1).
                 let overlay =
                     StatusOverlay::try_from_runs(vec![(rank..(rank + 1), status.clone())])
                         .expect("valid single-run overlay");
@@ -1938,9 +1933,49 @@ mod tests {
     use crate::host::LocalProcManager;
     use crate::mesh_id::ResourceId;
     use crate::resource::CreateOrUpdateClient;
+    use crate::resource::GetRankStatusClient;
     use crate::resource::GetStateClient;
     use crate::resource::Rank;
     use crate::resource::WaitRankStatusClient;
+
+    /// Assert `overlay` holds exactly one run covering `rank..rank+1`. The
+    /// reply must land at the message rank the caller requested, not at any
+    /// rank the proc was created under.
+    fn assert_overlay_at_rank(overlay: &crate::StatusOverlay, rank: usize) {
+        assert_eq!(overlay.len(), 1, "expected exactly one run: {overlay:?}");
+        let (range, _) = overlay.runs().next().unwrap();
+        assert_eq!(*range, rank..rank + 1, "overlay positioned at wrong rank");
+    }
+
+    /// Like [`assert_overlay_at_rank`], but also require the single run to carry
+    /// a `Failed` status.
+    fn assert_overlay_failed_at_rank(overlay: &crate::StatusOverlay, rank: usize) {
+        assert_eq!(overlay.len(), 1, "expected exactly one run: {overlay:?}");
+        let (range, status) = overlay.runs().next().unwrap();
+        assert_eq!(*range, rank..rank + 1, "overlay positioned at wrong rank");
+        assert_matches!(status, resource::Status::Failed(_));
+    }
+
+    // RSP-* coverage map for the HostAgent rank-status tests. Each deliberately
+    // uses `message_rank != creation_rank`, so a handler that read the creation
+    // rank would fail:
+    // - RSP-1 (position at the message rank, not creation rank):
+    //   `test_wait_rank_status_already_running` (immediate WaitRankStatus and
+    //   GetRankStatus on a known proc), `test_wait_rank_status_stop`,
+    //   `test_wait_rank_status_before_proc_exists`, `test_spawn_procs_many_per_host`;
+    //   `test_rank_status_created_error` covers the created-error branch (Failed
+    //   overlay at the message rank).
+    // - RSP-2 (direct delivery supplies the rank explicitly): every test above
+    //   calls the generated client with `Rank::new(...)`; the cast half
+    //   (`Rank::default()` late-bound in transit) is covered by the library
+    //   regression in `proc_mesh.rs`.
+    // - RSP-3 (deferred / pre-create waiter retains its registration rank):
+    //   `test_wait_rank_status_stop` (deferred until stop),
+    //   `test_wait_rank_status_before_proc_exists` (registered before the proc
+    //   exists, then the proc is created at a different rank; the waiter keeps its
+    //   own rank rather than adopting the creation rank).
+    // - RSP-4 (absence yields an empty overlay): the unknown-proc GetRankStatus
+    //   assertion in `test_wait_rank_status_already_running`.
 
     #[tokio::test]
     async fn test_basic() {
@@ -2060,7 +2095,12 @@ mod tests {
         );
     }
 
-    /// WaitRankStatus on a running proc replies immediately with Running.
+    /// Immediate status queries on one host fixture: WaitRankStatus and
+    /// GetRankStatus on a running proc reply immediately, each positioning the
+    /// overlay at the message rank (not the proc's creation rank); GetRankStatus
+    /// for an unknown proc replies with an empty overlay. These share a single
+    /// created proc to avoid standing up extra host/proc fixtures under parallel
+    /// test execution.
     #[tokio::test]
     async fn test_wait_rank_status_already_running() {
         let host = Host::new(
@@ -2083,6 +2123,8 @@ mod tests {
         let client = client_proc.client("client");
 
         let id = ResourceId::instance(Label::new("proc1").unwrap());
+        // Create at rank 0, but query at different message ranks so a handler that
+        // read the creation rank instead of the message rank would fail.
         host_agent
             .create_or_update(
                 &client,
@@ -2093,18 +2135,55 @@ mod tests {
             .await
             .unwrap();
 
-        // Proc is Running; wait for Running should reply immediately.
+        // Proc is Running; WaitRankStatus for Running replies immediately, at its
+        // own message rank.
+        let wait_rank = 7;
         let (port, mut rx) = client.open_port::<crate::StatusOverlay>();
         host_agent
-            .wait_rank_status(&client, id, resource::Status::Running, port.bind())
+            .wait_rank_status(
+                &client,
+                id.clone(),
+                resource::Rank::new(wait_rank),
+                resource::Status::Running,
+                port.bind(),
+            )
             .await
             .unwrap();
-
         let overlay = tokio::time::timeout(Duration::from_secs(30), rx.recv())
             .await
             .expect("reply timed out")
             .expect("reply channel closed");
-        assert!(!overlay.is_empty(), "expected non-empty overlay");
+        assert_overlay_at_rank(&overlay, wait_rank);
+
+        // GetRankStatus for the same known proc positions at its own message rank.
+        let get_rank = 4;
+        let (port, mut rx) = client.open_port::<crate::StatusOverlay>();
+        host_agent
+            .get_rank_status(&client, id, resource::Rank::new(get_rank), port.bind())
+            .await
+            .unwrap();
+        let overlay = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("reply timed out")
+            .expect("reply channel closed");
+        assert_overlay_at_rank(&overlay, get_rank);
+
+        // GetRankStatus for an unknown proc replies with an empty overlay,
+        // regardless of the message rank.
+        let unknown = ResourceId::instance(Label::new("never-created").unwrap());
+        let (port, mut rx) = client.open_port::<crate::StatusOverlay>();
+        host_agent
+            .get_rank_status(&client, unknown, resource::Rank::new(4), port.bind())
+            .await
+            .unwrap();
+        let overlay = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("reply timed out")
+            .expect("reply channel closed");
+        assert!(
+            overlay.is_empty(),
+            "expected empty overlay for unknown proc: {overlay:?}",
+        );
     }
 
     /// WaitRankStatus for Stopped, then stop the proc — reply should
@@ -2131,6 +2210,9 @@ mod tests {
         let client = client_proc.client("client");
 
         let id = ResourceId::instance(Label::new("proc1").unwrap());
+        // Create at rank 0, defer at a different message rank; the deferred
+        // waiter must retain the message rank through to its flush on stop.
+        let message_rank = 5;
         host_agent
             .create_or_update(
                 &client,
@@ -2144,7 +2226,13 @@ mod tests {
         // Wait for Stopped — should not reply yet.
         let (port, mut rx) = client.open_port::<crate::StatusOverlay>();
         host_agent
-            .wait_rank_status(&client, id.clone(), resource::Status::Stopped, port.bind())
+            .wait_rank_status(
+                &client,
+                id.clone(),
+                resource::Rank::new(message_rank),
+                resource::Status::Stopped,
+                port.bind(),
+            )
             .await
             .unwrap();
 
@@ -2158,11 +2246,14 @@ mod tests {
             .await
             .expect("reply timed out — proc did not reach Stopped")
             .expect("reply channel closed");
-        assert!(!overlay.is_empty(), "expected non-empty overlay");
+        assert_overlay_at_rank(&overlay, message_rank);
     }
 
-    /// WaitRankStatus sent before the proc is created — the waiter is
-    /// stashed and replied to once CreateOrUpdate runs.
+    /// WaitRankStatus sent before the proc is created — the waiter is stashed
+    /// and replied to once CreateOrUpdate runs. The waiter's message rank is
+    /// chosen before creation and survives unchanged even though the proc is
+    /// later created at a different rank: the reply is positioned at the waiter's
+    /// own rank, never the creation rank.
     #[tokio::test]
     async fn test_wait_rank_status_before_proc_exists() {
         let host = Host::new(
@@ -2185,16 +2276,24 @@ mod tests {
         let client = client_proc.client("client");
 
         let id = ResourceId::instance(Label::new("proc1").unwrap());
+        // Waiter rank is chosen now, before the proc exists.
+        let message_rank = 9;
 
         // Wait for Running on a proc that doesn't exist yet.
         let (port, mut rx) = client.open_port::<crate::StatusOverlay>();
         host_agent
-            .wait_rank_status(&client, id.clone(), resource::Status::Running, port.bind())
+            .wait_rank_status(
+                &client,
+                id.clone(),
+                resource::Rank::new(message_rank),
+                resource::Status::Running,
+                port.bind(),
+            )
             .await
             .unwrap();
 
-        // Now create the proc — the stashed waiter should get its
-        // sentinel rank fixed and be flushed once the proc is Running.
+        // Now create the proc at a different rank — the stashed waiter is
+        // flushed once the proc is Running, keeping its own message rank.
         host_agent
             .create_or_update(&client, id, resource::Rank::new(0), ProcSpec::default())
             .await
@@ -2204,7 +2303,83 @@ mod tests {
             .await
             .expect("reply timed out — waiter was not flushed after CreateOrUpdate")
             .expect("reply channel closed");
-        assert!(!overlay.is_empty(), "expected non-empty overlay");
+        assert_overlay_at_rank(&overlay, message_rank);
+    }
+
+    /// A proc whose creation failed is cached as `created: Err` and reported as a
+    /// `Failed` overlay positioned at the message rank, on both immediate query
+    /// paths — GetRankStatus and (non-deferred) WaitRankStatus.
+    #[tokio::test]
+    async fn test_rank_status_created_error() {
+        // A local, in-process host whose proc spawn deterministically fails, so
+        // CreateOrUpdate caches `created: Err(..)` for the requested proc.
+        let spawn: ProcManagerSpawnFn = Box::new(|_proc| {
+            Box::pin(std::future::ready(Err::<ActorHandle<ProcAgent>, _>(
+                anyhow::anyhow!("test failure"),
+            )))
+        });
+        let host = Host::new(LocalProcManager::new(spawn), ChannelTransport::Unix.any())
+            .await
+            .unwrap();
+
+        let system_proc = host.system_proc().clone();
+        let host_agent = system_proc
+            .spawn_with_uid(
+                Uid::singleton(Label::new(HOST_MESH_AGENT_ACTOR_NAME).unwrap()),
+                HostAgent::new_local(host),
+            )
+            .unwrap();
+        HostAgent::wait_initialized(&host_agent).await.unwrap();
+
+        let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
+        let client = client_proc.client("client");
+
+        let id = ResourceId::instance(Label::new("proc1").unwrap());
+        // Creation is attempted at rank 0; the spawn fails and is cached. The
+        // client call still returns Ok — the handler swallows the spawn error.
+        host_agent
+            .create_or_update(
+                &client,
+                id.clone(),
+                resource::Rank::new(0),
+                ProcSpec::default(),
+            )
+            .await
+            .unwrap();
+
+        // WaitRankStatus for a known-but-failed proc replies immediately (no
+        // deferral) with a Failed overlay at the message rank.
+        let wait_rank = 6;
+        let (port, mut rx) = client.open_port::<crate::StatusOverlay>();
+        host_agent
+            .wait_rank_status(
+                &client,
+                id.clone(),
+                resource::Rank::new(wait_rank),
+                resource::Status::Running,
+                port.bind(),
+            )
+            .await
+            .unwrap();
+        let overlay = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("reply timed out")
+            .expect("reply channel closed");
+        assert_overlay_failed_at_rank(&overlay, wait_rank);
+
+        // GetRankStatus for the same failed proc reports Failed at its own
+        // message rank.
+        let get_rank = 3;
+        let (port, mut rx) = client.open_port::<crate::StatusOverlay>();
+        host_agent
+            .get_rank_status(&client, id, resource::Rank::new(get_rank), port.bind())
+            .await
+            .unwrap();
+        let overlay = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("reply timed out")
+            .expect("reply channel closed");
+        assert_overlay_failed_at_rank(&overlay, get_rank);
     }
 
     /// DrainHost with a host_mesh_id filter only stops procs
@@ -2542,22 +2717,28 @@ mod tests {
             },
         );
 
-        // Each of the num_per_host procs should reach Running.
+        // Each of the num_per_host procs should reach Running. Query each at a
+        // message rank distinct from its creation rank to prove positioning
+        // follows the message.
         for rank in 0..num_per_host {
             let id = proc_name(&proc_mesh_id, rank);
+            let message_rank = rank + 100;
             let (port, mut rx) = client.open_port::<crate::StatusOverlay>();
             host_agent
-                .wait_rank_status(&client, id.clone(), resource::Status::Running, port.bind())
+                .wait_rank_status(
+                    &client,
+                    id.clone(),
+                    resource::Rank::new(message_rank),
+                    resource::Status::Running,
+                    port.bind(),
+                )
                 .await
                 .unwrap();
             let overlay = tokio::time::timeout(Duration::from_secs(30), rx.recv())
                 .await
                 .unwrap_or_else(|_| panic!("proc {rank} did not reach Running"))
                 .expect("reply channel closed");
-            assert!(
-                !overlay.is_empty(),
-                "expected non-empty Running overlay for proc {rank}",
-            );
+            assert_overlay_at_rank(&overlay, message_rank);
 
             assert_matches!(
                 host_agent.get_state(&client, id).await.unwrap(),
