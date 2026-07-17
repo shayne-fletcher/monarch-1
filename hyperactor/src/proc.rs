@@ -3815,8 +3815,10 @@ struct InstanceCellState {
     /// See S7 in `introspect` module doc.
     query_child_handler: RwLock<Option<Box<dyn (Fn(&Addr) -> IntrospectResult) + Send + Sync>>>,
 
-    /// The supervision event for this actor's failure, if any.
-    /// See FI-1, FI-2 in `introspect` module doc.
+    /// The terminal supervision event recorded by the serving loop: a
+    /// non-error `Stopped` event after a clean stop, an error event
+    /// after a failure. `None` while running, or for instances dropped
+    /// before they served. See FI-1, FI-2, FI-6 in `introspect` module doc.
     supervision_event: std::sync::Mutex<Option<crate::supervision::ActorSupervisionEvent>>,
 
     /// Whether this actor is infrastructure/system (hidden by default
@@ -4172,8 +4174,11 @@ impl InstanceCell {
         });
     }
 
-    /// The supervision event stored when this actor failed.
-    /// `None` for actors that stopped cleanly or are still running.
+    /// The terminal supervision event recorded by the serving loop: a
+    /// non-error `Stopped` event after a clean stop, an error event
+    /// after a failure. `None` while the actor is running, and for
+    /// instances dropped before they served (the drop path publishes a
+    /// terminal status without writing an event). See FI-6.
     pub fn supervision_event(&self) -> Option<crate::supervision::ActorSupervisionEvent> {
         self.inner.supervision_event.lock().unwrap().clone()
     }
@@ -6290,7 +6295,7 @@ mod tests {
     }
 
     // FI-9: stored-terminal and delivered-zombie intentionally diverge.
-    #[async_timed_test(timeout_secs = 30)]
+    #[async_timed_test(timeout_secs = 60)]
     async fn zombie_task_failure_stores_terminal_event_and_reports_zombie() {
         let proc = Proc::isolated();
         let client = proc.client("client");
@@ -6340,14 +6345,46 @@ mod tests {
             "zombie supervision event should remain non-error"
         );
 
-        let snapshot = wait_for_terminated_snapshot(&proc, &actor_id).await;
-        let attrs: hyperactor_config::Attrs =
-            serde_json::from_str(&snapshot.attrs).expect("snapshot attrs must be valid");
+        let view = wait_for_terminated_actor_view(&proc, &actor_id).await;
+        assert_eq!(
+            view.status, "failed",
+            "zombie terminal snapshot must be failed"
+        );
+        let failure = view
+            .failure
+            .expect("failed zombie snapshot must retain failure information");
+        assert_eq!(failure.root_cause_actor, actor_id);
         assert!(
-            attrs
-                .get(crate::introspect::FAILURE_ERROR_MESSAGE)
-                .is_some(),
-            "failed zombie snapshot must retain failure information"
+            !failure.is_propagated,
+            "direct zombie failure must not be marked propagated"
+        );
+    }
+
+    // A zombie actor that then stops cleanly must not surface failure attrs.
+    #[async_timed_test(timeout_secs = 60)]
+    async fn zombie_then_clean_stop_snapshot_has_no_failure() {
+        let proc = Proc::isolated();
+        let _client = proc.client("client");
+        let handle = proc.spawn_with_label::<TestActor>("alive", TestActor);
+        let actor_id = handle.actor_addr().clone();
+        let cell = handle.cell().clone();
+        handle
+            .status()
+            .clone()
+            .wait_for(ActorStatus::is_idle)
+            .await
+            .unwrap();
+        cell.change_status(ActorStatus::zombie("hard kill did not finish"));
+        assert!(cell.status().borrow().is_zombie());
+
+        handle.drain_and_stop("test").unwrap();
+        assert_matches!(handle.await, ActorStatus::Stopped(reason) if reason == "test");
+
+        let view = wait_for_terminated_actor_view(&proc, &actor_id).await;
+        assert_eq!(view.status, "stopped", "zombie clean stop must be stopped");
+        assert!(
+            view.failure.is_none(),
+            "zombie clean stop must not manufacture failure attrs"
         );
     }
 
@@ -7162,13 +7199,29 @@ mod tests {
         panic!("timed out waiting for terminated snapshot for {}", actor_id);
     }
 
+    /// Wait for the terminated snapshot, then decode it through the
+    /// typed `ActorAttrsView`. The decode is the producer-side guard:
+    /// it fails if `build_actor_attrs` emitted a bag that violates the
+    /// view invariants (IA-4: failure attrs present iff status is
+    /// `"failed"`). Callers assert on the returned view.
+    async fn wait_for_terminated_actor_view(
+        proc: &Proc,
+        actor_id: &ActorAddr,
+    ) -> crate::introspect::ActorAttrsView {
+        let snapshot = wait_for_terminated_snapshot(proc, actor_id).await;
+        let attrs: hyperactor_config::Attrs =
+            serde_json::from_str(&snapshot.attrs).expect("snapshot attrs must be valid");
+        crate::introspect::ActorAttrsView::from_attrs(&attrs)
+            .expect("terminated snapshot must decode as an actor view (producer-side FI-3/IA-4)")
+    }
+
     // Verifies that when an actor is stopped, the proc eventually
     // records a "terminated snapshot" for it (written by the
     // introspect task, which runs asynchronously). The test asserts
     // the snapshot is absent while the actor is live, then stops the
     // actor, waits for the introspect task to observe the terminal
     // state, and confirms:
-    //   - the stored snapshot reports a `stopped:*` actor_status, and
+    //   - the stored snapshot decodes with status "stopped", and
     //   - the actor id moves from the live set to the terminated set.
     #[async_timed_test(timeout_secs = 60)]
     async fn test_terminated_snapshot_stored_on_stop() {
@@ -7188,16 +7241,11 @@ mod tests {
 
         // The introspect task runs in a separate tokio task; wait for
         // it to observe the terminal status and store the snapshot.
-        let snapshot = wait_for_terminated_snapshot(&proc, &actor_id).await;
-        let attrs: hyperactor_config::Attrs =
-            serde_json::from_str(&snapshot.attrs).expect("snapshot attrs must be valid");
-        let status = attrs
-            .get(crate::introspect::STATUS)
-            .expect("must have status");
+        let view = wait_for_terminated_actor_view(&proc, &actor_id).await;
+        assert_eq!(view.status, "stopped", "expected stopped status");
         assert!(
-            status.starts_with("stopped"),
-            "expected stopped status, got: {}",
-            status
+            view.failure.is_none(),
+            "clean stop must not carry failure attrs"
         );
 
         // Actor should appear in terminated IDs but not in live IDs.
@@ -7213,13 +7261,13 @@ mod tests {
     // (required for failure handling), spawns an actor, triggers a
     // failure via a message, waits for the actor to terminate, then
     // waits for the introspect task to persist the terminal snapshot
-    // and asserts the snapshot reports a `failed:*` actor_status.
+    // and asserts the decoded snapshot has status "failed".
     #[async_timed_test(timeout_secs = 60)]
     async fn test_terminated_snapshot_stored_on_failure() {
         let proc = Proc::isolated();
         let client = proc.client("client");
         // Supervision coordinator required for actor failure handling.
-        ProcSupervisionCoordinator::set(&proc).await.unwrap();
+        let (_reported_event, _coordinator) = ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
         let handle = proc.spawn(TestActor);
         let actor_id = handle.actor_addr().clone();
@@ -7228,16 +7276,11 @@ mod tests {
         handle.post(&client, TestActorMessage::Fail(anyhow::anyhow!("boom")));
         handle.await;
 
-        let snapshot = wait_for_terminated_snapshot(&proc, &actor_id).await;
-        let attrs: hyperactor_config::Attrs =
-            serde_json::from_str(&snapshot.attrs).expect("snapshot attrs must be valid");
-        let status = attrs
-            .get(crate::introspect::STATUS)
-            .expect("must have status");
+        let view = wait_for_terminated_actor_view(&proc, &actor_id).await;
+        assert_eq!(view.status, "failed", "expected failed status");
         assert!(
-            status.starts_with("failed"),
-            "expected failed status, got: {}",
-            status
+            view.failure.is_some(),
+            "failed actor snapshot must carry failure attrs"
         );
     }
 
@@ -7419,7 +7462,7 @@ mod tests {
     async fn test_terminated_snapshot_has_failure_info() {
         let proc = Proc::isolated();
         let client = proc.client("client");
-        ProcSupervisionCoordinator::set(&proc).await.unwrap();
+        let (_reported_event, _coordinator) = ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
         let handle = proc.spawn(TestActor);
         let actor_id = handle.actor_addr().clone();
@@ -7427,32 +7470,16 @@ mod tests {
         handle.post(&client, TestActorMessage::Fail(anyhow::anyhow!("kaboom")));
         handle.await;
 
-        let snapshot = wait_for_terminated_snapshot(&proc, &actor_id).await;
-        let attrs: hyperactor_config::Attrs =
-            serde_json::from_str(&snapshot.attrs).expect("snapshot attrs must be valid");
-        let status = attrs
-            .get(crate::introspect::STATUS)
-            .expect("must have status");
+        let view = wait_for_terminated_actor_view(&proc, &actor_id).await;
+        assert_eq!(view.status, "failed", "expected failed status");
+        let failure = view
+            .failure
+            .expect("failed actor snapshot must carry failure attrs");
+        assert!(!failure.error_message.is_empty());
+        assert_eq!(failure.root_cause_actor, actor_id);
         assert!(
-            status.starts_with("failed"),
-            "expected failed status, got: {}",
-            status
-        );
-        let err_msg = attrs
-            .get(crate::introspect::FAILURE_ERROR_MESSAGE)
-            .expect("failed actor must have failure_error_message");
-        assert!(!err_msg.is_empty());
-        let root_cause = attrs
-            .get(crate::introspect::FAILURE_ROOT_CAUSE_ACTOR)
-            .expect("must have root_cause_actor");
-        assert_eq!(root_cause, &actor_id);
-        assert_eq!(
-            attrs.get(crate::introspect::FAILURE_IS_PROPAGATED),
-            Some(&false)
-        );
-        assert!(
-            attrs.get(crate::introspect::FAILURE_OCCURRED_AT).is_some(),
-            "failed actor must have occurred_at"
+            !failure.is_propagated,
+            "direct failure must not be marked propagated"
         );
     }
 
@@ -7461,7 +7488,7 @@ mod tests {
     async fn test_propagated_failure_info() {
         let proc = Proc::isolated();
         let client = proc.client("client");
-        ProcSupervisionCoordinator::set(&proc).await.unwrap();
+        let (_reported_event, _coordinator) = ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
         let parent = proc.spawn_with_label::<TestActor>("parent", TestActor);
         let parent_id = parent.actor_addr().clone();
@@ -7477,16 +7504,15 @@ mod tests {
         );
         parent.await;
 
-        let snapshot = wait_for_terminated_snapshot(&proc, &parent_id).await;
-        let attrs: hyperactor_config::Attrs =
-            serde_json::from_str(&snapshot.attrs).expect("snapshot attrs must be valid");
-        let root_cause = attrs
-            .get(crate::introspect::FAILURE_ROOT_CAUSE_ACTOR)
-            .expect("propagated failure must have root_cause_actor");
-        assert_eq!(root_cause, &child_id);
-        assert_eq!(
-            attrs.get(crate::introspect::FAILURE_IS_PROPAGATED),
-            Some(&true)
+        let view = wait_for_terminated_actor_view(&proc, &parent_id).await;
+        assert_eq!(view.status, "failed", "expected failed status");
+        let failure = view
+            .failure
+            .expect("propagated failure snapshot must carry failure attrs");
+        assert_eq!(failure.root_cause_actor, child_id);
+        assert!(
+            failure.is_propagated,
+            "child-caused failure must be marked propagated"
         );
     }
 
@@ -7626,21 +7652,10 @@ mod tests {
         handle.drain_and_stop("test").unwrap();
         handle.await;
 
-        let snapshot = wait_for_terminated_snapshot(&proc, &actor_id).await;
-        let attrs: hyperactor_config::Attrs =
-            serde_json::from_str(&snapshot.attrs).expect("snapshot attrs must be valid");
-        let status = attrs
-            .get(crate::introspect::STATUS)
-            .expect("must have status");
+        let view = wait_for_terminated_actor_view(&proc, &actor_id).await;
+        assert_eq!(view.status, "stopped", "expected stopped status");
         assert!(
-            status.starts_with("stopped"),
-            "expected stopped, got: {}",
-            status
-        );
-        assert!(
-            attrs
-                .get(crate::introspect::FAILURE_ERROR_MESSAGE)
-                .is_none(),
+            view.failure.is_none(),
             "stopped actor must not have failure attrs"
         );
     }

@@ -93,10 +93,14 @@
 //!   this_actor_id`.
 //! - **FI-5 (is_poisoned <-> failed_actor_count):** `is_poisoned ==
 //!   true` iff `failed_actor_count > 0`.
-//! - **FI-6 (clean stop = no artifacts):** When an actor stops
-//!   cleanly, `supervision_event` is `None`, failure attrs are
-//!   absent, and the actor does not contribute to
-//!   `failed_actor_count`.
+//! - **FI-6 (clean stop leaves no failure artifacts):** When an
+//!   actor stops cleanly through the serving loop,
+//!   `supervision_event` holds a non-error terminal event
+//!   (`actor_status` is `Stopped`, so `is_error()` is `false`),
+//!   failure attrs are absent, and the actor does not contribute to
+//!   `failed_actor_count`. The field records the terminal supervision
+//!   event, not just failures; see the `supervision_event` accessor
+//!   for when the field is `None`.
 //! - **FI-7 (propagated-stopped-root-cause):** When a failed actor's
 //!   supervision chain bottoms out in a `Stopped` child event,
 //!   structured failure metadata must still name the stopped child as
