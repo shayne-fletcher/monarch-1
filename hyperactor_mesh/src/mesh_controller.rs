@@ -13,6 +13,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use hyperactor::Actor;
+use hyperactor::ActorAddr;
 use hyperactor::Context;
 use hyperactor::Endpoint as _;
 use hyperactor::Handler;
@@ -187,20 +188,23 @@ impl HealthState {
     }
 
     /// Apply status updates from polled resource states and invoke `on_change`
-    /// for each rank whose status actually changed. The point passed to
-    /// `on_change` is the created rank, *not* the rank of the possibly sliced
-    /// input mesh. Returns `true` if `on_change` reported at least one
-    /// notification (used to decide whether a heartbeat is needed).
+    /// for each rank whose status actually changed. The `Point` passed to
+    /// `on_change` is the rank in the *current* (possibly sliced) view — the
+    /// same key used to update health state — so callers position notifications
+    /// by it rather than by the payload's first-creation rank. Returns `true`
+    /// if `on_change` reported at least one notification (used to decide whether
+    /// a heartbeat is needed).
     pub(crate) fn apply_updates_and_notify<S: Clone + 'static>(
         &mut self,
         states: &ValueMesh<resource::State<S>>,
-        mut on_change: impl FnMut(resource::State<S>, &mut HealthState) -> bool,
+        mut on_change: impl FnMut(Point, resource::State<S>, &mut HealthState) -> bool,
     ) -> bool {
         let mut did_notify = false;
         for (point, state) in states.iter() {
             let status = state.status.clone();
             let generation = state.generation;
-            if self.maybe_update(point, status, generation) && on_change(state, self) {
+            if self.maybe_update(point.clone(), status, generation) && on_change(point, state, self)
+            {
                 did_notify = true;
             }
         }
@@ -362,42 +366,53 @@ fn send_poll_failure(
 
 fn actor_state_to_supervision_events(
     state: resource::State<ActorState>,
-) -> (usize, Vec<ActorSupervisionEvent>) {
-    let (rank, actor_id, events) = match state.state {
-        Some(inner) => (
-            inner.create_rank,
-            Some(inner.actor_id),
-            inner.supervision_events.clone(),
-        ),
-        None => (0, None, vec![]),
+    expected_actor_id: Option<ActorAddr>,
+) -> Vec<ActorSupervisionEvent> {
+    // Prefer the payload's actor id; fall back to the controller's expected
+    // actor at this rank when the payload carries no `ActorState` (a missing or
+    // spawn-failed proc), so a failure is still attributed to the right actor.
+    let (actor_id, events) = match state.state {
+        Some(inner) => (Some(inner.actor_id), inner.supervision_events.clone()),
+        None => (expected_actor_id, vec![]),
     };
-    let events = match state.status {
-        // If the actor was killed, it might not have a Failed status
-        // or supervision events, and it can't tell us which rank
+    if !events.is_empty() {
+        return events;
+    }
+    // No reported events: synthesize one for terminal/failed statuses. Without
+    // any actor identity there is nothing to attribute, so emit nothing.
+    let Some(actor_id) = actor_id else {
+        return vec![];
+    };
+    match state.status {
+        // Killed/stopped/missing/timeout: the actor may not report a Failed
+        // status or events, and can't tell us which rank it was.
         resource::Status::NotExist | resource::Status::Stopped | resource::Status::Timeout(_) => {
-            // it was.
-            if !events.is_empty() {
-                events
-            } else {
-                vec![ActorSupervisionEvent::new(
-                    actor_id.expect("actor_id is None"),
-                    None,
-                    ActorStatus::Stopped(
-                        format!(
-                            "actor status is {}; actor may have been killed",
-                            state.status
-                        )
-                        .to_string(),
-                    ),
-                    None,
-                )]
-            }
+            vec![ActorSupervisionEvent::new(
+                actor_id,
+                None,
+                ActorStatus::Stopped(
+                    format!(
+                        "actor status is {}; actor may have been killed",
+                        state.status
+                    )
+                    .to_string(),
+                ),
+                None,
+            )]
         }
-        resource::Status::Failed(_) => events,
+        // Failed with no reported event: synthesize one so the failure is not
+        // silently swallowed while health is updated.
+        resource::Status::Failed(ref reason) => {
+            vec![ActorSupervisionEvent::new(
+                actor_id,
+                None,
+                ActorStatus::generic_failure(reason.clone()),
+                None,
+            )]
+        }
         // All other states are successful.
         _ => vec![],
-    };
-    (rank, events)
+    }
 }
 
 /// Map a process-level [`ProcStatus`] to an actor-level [`ActorStatus`].
@@ -479,12 +494,12 @@ pub trait Controlled: Clone + Debug + Send + Sync + 'static {
     /// The region of ranks in this mesh.
     fn region(&self) -> &ndslice::Region;
 
-    /// Subscribe the given port to `StreamState<StateInner>` updates from
-    /// the underlying agents.
+    /// Subscribe the given port to positioned state updates from the
+    /// underlying agents.
     fn subscribe_to_stream(
         &self,
         cx: &impl context::Actor,
-        subscriber: hyperactor::PortRef<resource::State<Self::StateInner>>,
+        subscriber: hyperactor::PortRef<resource::RankedState<Self::StateInner>>,
     ) -> anyhow::Result<()>;
 
     /// Forward a `WaitRankStatus` message to the underlying agents.
@@ -512,7 +527,7 @@ pub trait Controlled: Clone + Debug + Send + Sync + 'static {
     fn process_state(
         &self,
         cx: &impl context::Actor,
-        state: resource::State<Self::StateInner>,
+        state: resource::RankedState<Self::StateInner>,
         health_state: &mut HealthState,
     ) -> bool;
 
@@ -543,7 +558,8 @@ pub trait Controlled: Clone + Debug + Send + Sync + 'static {
 /// outer layer: callers of `GetState` on the controller want the
 /// per-rank statuses and the mesh-wide status that `resource::mesh::State`
 /// already carries, not the inner `T::StateInner` payload (which is
-/// available rank-by-rank via the `resource::State<T::StateInner>` stream).
+/// available rank-by-rank via the
+/// `resource::RankedState<T::StateInner>` stream).
 /// The unit type is the explicit "no extra payload" choice.
 #[hyperactor::export(
     handlers=[
@@ -555,7 +571,7 @@ pub trait Controlled: Clone + Debug + Send + Sync + 'static {
         resource::CreateOrUpdate<resource::mesh::Spec<()>>,
         resource::GetState<resource::mesh::State<()>>,
         resource::Stop,
-        resource::State<T::StateInner>,
+        resource::RankedState<T::StateInner>,
     ]
 )]
 pub struct ResourceController<T: Controlled> {
@@ -1060,14 +1076,14 @@ where
 }
 
 #[async_trait]
-impl<T: Controlled> Handler<resource::State<T::StateInner>> for ResourceController<T>
+impl<T: Controlled> Handler<resource::RankedState<T::StateInner>> for ResourceController<T>
 where
-    resource::State<T::StateInner>: RemoteMessage,
+    resource::RankedState<T::StateInner>: RemoteMessage,
 {
     async fn handle(
         &mut self,
         cx: &Context<Self>,
-        state: resource::State<T::StateInner>,
+        state: resource::RankedState<T::StateInner>,
     ) -> anyhow::Result<()> {
         self.mesh.process_state(cx, state, &mut self.health_state);
         self.stop_if_all_terminating();
@@ -1095,12 +1111,13 @@ impl<A: Referable> Controlled for ActorMeshControlPlane<A> {
     fn subscribe_to_stream(
         &self,
         cx: &impl context::Actor,
-        subscriber: hyperactor::PortRef<resource::State<ActorState>>,
+        subscriber: hyperactor::PortRef<resource::RankedState<ActorState>>,
     ) -> anyhow::Result<()> {
         self.proc_mesh.agent_mesh().cast(
             cx,
             resource::StreamState::<ActorState> {
                 id: self.actor_mesh.id().resource_id().clone(),
+                subscriber_rank: resource::Rank::default(),
                 subscriber,
             },
         )?;
@@ -1205,14 +1222,20 @@ impl<A: Referable> Controlled for ActorMeshControlPlane<A> {
             ),
             Ok(states) => {
                 let did_notify =
-                    health_state.apply_updates_and_notify(&states, |state, health_state| {
-                        let (rank, events) = actor_state_to_supervision_events(state);
+                    health_state.apply_updates_and_notify(&states, |point, state, health_state| {
+                        let expected_actor_id = self
+                            .actor_mesh
+                            .get(point.rank())
+                            .map(|r| r.actor_addr().clone());
+                        let events = actor_state_to_supervision_events(state, expected_actor_id);
                         if events.is_empty() {
                             return false;
                         }
+                        // Notify at this update's current-view rank, not the
+                        // payload's historical `create_rank`.
                         send_state_change(
                             cx,
-                            rank,
+                            point.rank(),
                             events[0].clone(),
                             mesh_name,
                             false,
@@ -1228,13 +1251,18 @@ impl<A: Referable> Controlled for ActorMeshControlPlane<A> {
     fn process_state(
         &self,
         cx: &impl context::Actor,
-        state: resource::State<ActorState>,
+        state: resource::RankedState<ActorState>,
         health_state: &mut HealthState,
     ) -> bool {
-        let (rank, events) = actor_state_to_supervision_events(state.clone());
+        let resource::RankedState { rank, state } = state;
+        let rank = rank.unwrap();
         let Ok(point) = Controlled::region(self).extent().point_of_rank(rank) else {
             return false;
         };
+        // The controller's expected actor at this rank, used as the fallback
+        // identity when the payload carries no `ActorState`.
+        let expected_actor_id = self.actor_mesh.get(rank).map(|r| r.actor_addr().clone());
+        let events = actor_state_to_supervision_events(state.clone(), expected_actor_id);
 
         let changed = health_state.maybe_update(point, state.status, state.generation);
 
@@ -1377,7 +1405,7 @@ impl Controlled for ProcMeshRef {
     fn subscribe_to_stream(
         &self,
         cx: &impl context::Actor,
-        subscriber: hyperactor::PortRef<resource::State<Self::StateInner>>,
+        subscriber: hyperactor::PortRef<resource::RankedState<Self::StateInner>>,
     ) -> anyhow::Result<()> {
         // A `ProcMeshController` is only ever created for host-backed proc
         // meshes (host_mesh.rs spawn path), so a host mesh should always be
@@ -1438,15 +1466,17 @@ impl Controlled for ProcMeshRef {
             ),
             Ok(None) => PollResult::Processed { did_notify: false },
             Ok(Some(states)) => {
-                let did_notify =
-                    health_state.apply_updates_and_notify(&states, |state, health_state| {
+                let did_notify = health_state.apply_updates_and_notify(
+                    &states,
+                    |_point, state, health_state| {
                         self.notify_proc_state_change(
                             cx,
                             supervision_display_name,
                             state,
                             health_state,
                         )
-                    });
+                    },
+                );
                 PollResult::Processed { did_notify }
             }
         }
@@ -1455,16 +1485,14 @@ impl Controlled for ProcMeshRef {
     fn process_state(
         &self,
         cx: &impl context::Actor,
-        state: resource::State<Self::StateInner>,
+        state: resource::RankedState<Self::StateInner>,
         health_state: &mut HealthState,
     ) -> bool {
-        let Ok(point) = Controlled::region(self).extent().point_of_rank(
-            state
-                .state
-                .as_ref()
-                .map(|s| s.create_rank)
-                .unwrap_or(usize::MAX),
-        ) else {
+        let resource::RankedState { rank, state } = state;
+        let Ok(point) = Controlled::region(self)
+            .extent()
+            .point_of_rank(rank.unwrap())
+        else {
             return false;
         };
         let changed = health_state.maybe_update(point, state.status.clone(), state.generation);
@@ -1608,11 +1636,13 @@ mod tests {
     use hyperactor::supervision::ActorSupervisionEvent;
     use ndslice::Extent;
     use ndslice::ViewExt;
+    use ndslice::view::CollectMeshExt;
 
     use super::HealthState;
     use super::PollResult;
     #[cfg(fbcode_build)]
     use super::SUPERVISION_POLL_FREQUENCY;
+    use super::actor_state_to_supervision_events;
     use super::proc_status_to_actor_status;
     use super::send_poll_failure;
     use super::send_state_change;
@@ -1624,6 +1654,7 @@ mod tests {
     #[cfg(fbcode_build)]
     use crate::mesh_id::HostMeshId;
     use crate::mesh_id::ResourceId;
+    use crate::proc_agent::ActorState;
     use crate::proc_agent::MESH_ORPHAN_TIMEOUT;
     use crate::resource;
     use crate::supervision::MeshFailure;
@@ -1718,6 +1749,60 @@ mod tests {
             ActorStatus::Failed(ActorErrorKind::Generic(message.to_string())),
             None,
         )
+    }
+
+    #[test]
+    fn polled_actor_state_uses_current_view_point() {
+        let region: ndslice::Region = ndslice::extent!(gpus = 1).into();
+        let point = region.extent().point_of_rank(0).unwrap();
+        let actor_id = failed_event(0, "actor id").actor_id;
+        let states = vec![resource::State {
+            id: ResourceId::instance(Label::new("worker").unwrap()),
+            status: resource::Status::Running,
+            state: Some(ActorState {
+                actor_id,
+                create_rank: 9,
+                supervision_events: vec![],
+            }),
+            generation: 1,
+            timestamp: std::time::SystemTime::now(),
+        }]
+        .into_iter()
+        .collect_mesh::<crate::ValueMesh<_>>(region.clone())
+        .unwrap();
+        let mut health_state = HealthState::new(
+            vec![(point, resource::Status::Initializing)]
+                .into_iter()
+                .collect(),
+            None,
+        );
+        let mut observed_rank = None;
+
+        health_state.apply_updates_and_notify(&states, |point, state, _| {
+            observed_rank = Some(point.rank());
+            assert_eq!(state.state.unwrap().create_rank, 9);
+            true
+        });
+
+        assert_eq!(observed_rank, Some(0));
+    }
+
+    #[test]
+    fn failed_actor_state_without_payload_uses_expected_actor() {
+        let actor_id = failed_event(4, "actor id").actor_id;
+        let state = resource::State {
+            id: ResourceId::instance(Label::new("worker").unwrap()),
+            status: resource::Status::Failed("spawn failed".to_string()),
+            state: None,
+            generation: 1,
+            timestamp: std::time::SystemTime::now(),
+        };
+
+        let events = actor_state_to_supervision_events(state, Some(actor_id.clone()));
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].actor_id, actor_id);
+        assert!(matches!(events[0].actor_status, ActorStatus::Failed(_)));
     }
 
     /// Wraps a host mesh's shutdown guard and the spawned host child

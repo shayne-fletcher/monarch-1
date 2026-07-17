@@ -1769,9 +1769,14 @@ impl Handler<resource::StreamState<ProcState>> for HostAgent {
                 },
             };
 
-            stream_state
-                .subscriber
-                .post_with_headers(cx, headers.clone(), state);
+            stream_state.subscriber.post_with_headers(
+                cx,
+                headers.clone(),
+                resource::RankedState {
+                    rank: resource::Rank::new(proc.rank),
+                    state,
+                },
+            );
         }
         Ok(())
     }

@@ -7,6 +7,7 @@
  */
 
 use std::any::type_name;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::hash::Hash;
@@ -491,6 +492,17 @@ impl ProcMeshRef {
             self.proc_agent_mesh.cast(cx, get_state)?;
         }
         let expected = self.ranks.len();
+        // Map each managed-actor `ActorAddr` to its rank in *this* (current)
+        // view, so a reply is positioned by the current view rather than the
+        // payload's historical `create_rank` (a reused singleton's `create_rank`
+        // is its rank in the view it was first spawned over). Built once per
+        // query: O(N) to build, O(1) per reply.
+        let rank_of_actor: HashMap<ActorAddr, usize> = self
+            .ranks
+            .iter()
+            .enumerate()
+            .map(|(rank, proc_ref)| (proc_ref.actor_addr(&id), rank))
+            .collect();
         let mut states = Vec::with_capacity(expected);
         let timeout = hyperactor_config::global::get(GET_ACTOR_STATE_MAX_IDLE);
         for _ in 0..expected {
@@ -505,9 +517,20 @@ impl ProcMeshRef {
                 let state = state?;
                 match state.state {
                     Some(ref inner) => {
-                        states.push((inner.create_rank, state));
+                        // Position by this actor's rank in the current view, not
+                        // its historical `create_rank`.
+                        let rank = *rank_of_actor.get(&inner.actor_id).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "state reply from {} is not a member of the queried view",
+                                inner.actor_id,
+                            )
+                        })?;
+                        states.push((rank, state));
                     }
                     None => {
+                        // A received `None` is a definitive NotExist answer;
+                        // return immediately rather than waiting for the timeout
+                        // padding (which is only for ranks that never reply).
                         return Err(Error::NotExist(state.id));
                     }
                 }
@@ -1232,6 +1255,8 @@ mod tests {
     /// registered while the service runs must flush at slice-local ranks.
     /// The assertions exercise the ProcAgent readiness path; the per-view
     /// controllers remain idle because this test does not trigger supervision.
+    /// Snapshot assertions also verify that both reuse orders return actor state
+    /// in the queried view's rank order.
     #[async_timed_test(timeout_secs = 120)]
     #[cfg(fbcode_build)]
     async fn test_singleton_service_reuse_over_overlapping_views() {
@@ -1280,6 +1305,17 @@ mod tests {
             .await
             .unwrap();
         assert_shared(&w1, &s1);
+        let s1_states = slice.actor_states(instance, s1.id().clone()).await.unwrap();
+        for rank in 0..slice.region().num_ranks() {
+            assert_eq!(
+                s1_states
+                    .get(rank)
+                    .and_then(|state| state.state.as_ref())
+                    .map(|state| &state.actor_id),
+                s1.get(rank).map(|actor| actor.actor_addr()),
+                "whole-first state is positioned at slice rank {rank}",
+            );
+        }
 
         // Scenario 2: spawn over the slice first, then reuse over the whole.
         let s2 = slice
@@ -1291,6 +1327,17 @@ mod tests {
             .await
             .unwrap();
         assert_shared(&w2, &s2);
+        let w2_states = whole.actor_states(instance, w2.id().clone()).await.unwrap();
+        for rank in 0..whole.region().num_ranks() {
+            assert_eq!(
+                w2_states
+                    .get(rank)
+                    .and_then(|state| state.state.as_ref())
+                    .map(|state| &state.actor_id),
+                w2.get(rank).map(|actor| actor.actor_addr()),
+                "slice-first state is positioned at whole-view rank {rank}",
+            );
+        }
 
         // Scenario 3: a `WaitRankStatus{Stopped}` registered over the renumbered
         // slice while the service runs is deferred and flushed on stop. The

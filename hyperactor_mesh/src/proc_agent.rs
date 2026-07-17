@@ -156,9 +156,10 @@ struct ActorInstanceState {
     /// The supervision event observed for this actor, if it has reached
     /// terminal state.
     supervision_event: Option<ActorSupervisionEvent>,
-    /// Streaming subscribers that receive `State<ActorState>` on every
-    /// state change. Dead subscribers are removed via undeliverable handling.
-    subscribers: Vec<PortRef<resource::State<ActorState>>>,
+    /// Streaming subscribers that receive `RankedState<ActorState>` on every
+    /// state change, paired with the actor's rank in that subscriber's view.
+    /// Dead subscribers are removed via undeliverable handling.
+    subscribers: Vec<(usize, PortRef<resource::RankedState<ActorState>>)>,
     /// The time at which the actor should be considered expired if no further
     /// keepalive is received. `None` meaning it will never expire.
     expiry_time: Option<std::time::SystemTime>,
@@ -228,10 +229,17 @@ impl ActorInstanceState {
     fn notify_status_changed(&mut self, cx: &impl hyperactor::context::Actor, id: &ResourceId) {
         // Streaming subscribers (persistent).
         let state = self.to_state(id);
-        for subscriber in &self.subscribers {
+        for (view_rank, subscriber) in &self.subscribers {
             let mut headers = Flattrs::new();
             headers.set(STREAM_STATE_SUBSCRIBER, true);
-            subscriber.post_with_headers(cx, headers, state.clone());
+            subscriber.post_with_headers(
+                cx,
+                headers,
+                resource::RankedState {
+                    rank: resource::Rank::new(*view_rank),
+                    state: state.clone(),
+                },
+            );
         }
 
         // One-shot waiters (predicated). Each retains the reply rank it was
@@ -681,10 +689,10 @@ impl Actor for ProcAgent {
         };
         if let Some(true) = returned.headers().get(STREAM_STATE_SUBSCRIBER) {
             let dest_port_id: PortAddr = returned.dest().clone();
-            let port = PortRef::<resource::State<ActorState>>::attest(dest_port_id);
+            let port = PortRef::<resource::RankedState<ActorState>>::attest(dest_port_id);
             // Remove this subscriber from whichever actor instance holds it.
             for instance in self.actor_states.values_mut() {
-                instance.subscribers.retain(|s| s != &port);
+                instance.subscribers.retain(|(_, s)| s != &port);
             }
             Ok(())
         } else {
@@ -703,9 +711,9 @@ impl Actor for ProcAgent {
         };
         if let Some(true) = returned.headers().get(STREAM_STATE_SUBSCRIBER) {
             let dest_port_id: PortAddr = returned.dest().clone();
-            let port = PortRef::<resource::State<ActorState>>::attest(dest_port_id);
+            let port = PortRef::<resource::RankedState<ActorState>>::attest(dest_port_id);
             for instance in self.actor_states.values_mut() {
-                instance.subscribers.retain(|s| s != &port);
+                instance.subscribers.retain(|(_, s)| s != &port);
             }
             Ok(())
         } else {
@@ -1113,10 +1121,17 @@ impl Handler<resource::StreamState<ActorState>> for ProcAgent {
         cx: &Context<Self>,
         stream_state: resource::StreamState<ActorState>,
     ) -> anyhow::Result<()> {
+        // The cast layer fills each recipient's rank in the subscriber's view.
+        // Retain it because later notifications are direct posts, outside the
+        // subscription cast context.
+        let view_rank = stream_state.subscriber_rank.unwrap();
+
         let state = match self.actor_states.get_mut(&stream_state.id) {
             Some(instance) => {
                 let state = instance.to_state(&stream_state.id);
-                instance.subscribers.push(stream_state.subscriber.clone());
+                instance
+                    .subscribers
+                    .push((view_rank, stream_state.subscriber.clone()));
                 state
             }
             None => resource::State {
@@ -1128,12 +1143,17 @@ impl Handler<resource::StreamState<ActorState>> for ProcAgent {
             },
         };
 
-        // Send the current state immediately.
+        // Send the current state immediately at the subscriber's view rank.
         let mut headers = Flattrs::new();
         headers.set(STREAM_STATE_SUBSCRIBER, true);
-        stream_state
-            .subscriber
-            .post_with_headers(cx, headers, state);
+        stream_state.subscriber.post_with_headers(
+            cx,
+            headers,
+            resource::RankedState {
+                rank: resource::Rank::new(view_rank),
+                state,
+            },
+        );
         Ok(())
     }
 }
@@ -1523,6 +1543,26 @@ mod tests {
         let client = proc.client("client");
         let agent_ref: ActorRef<ProcAgent> = agent_handle.bind();
 
+        // A missing actor has no `ActorState` payload, so the streamed message
+        // itself must retain the subscription rank.
+        let missing_name =
+            ResourceId::singleton(hyperactor::id::Label::new("missing-actor").unwrap());
+        let (missing_port, mut missing_rx) =
+            client.open_port::<resource::RankedState<ActorState>>();
+        agent_ref
+            .stream_state(
+                &client,
+                missing_name,
+                resource::Rank::new(6),
+                missing_port.bind(),
+            )
+            .await
+            .unwrap();
+        let missing = missing_rx.recv().await.expect("missing state reply");
+        assert_eq!(missing.rank.unwrap(), 6);
+        assert_eq!(missing.state.status, resource::Status::NotExist);
+        assert_eq!(missing.state.state, None);
+
         let actor_type = hyperactor::actor::remote::Remote::collect()
             .name_of::<ExtraActor>()
             .unwrap()
@@ -1546,16 +1586,23 @@ mod tests {
             .unwrap();
 
         // 2. Subscribe to state updates.
-        let (sub_port, mut sub_rx) = client.open_port::<resource::State<ActorState>>();
+        let subscriber_rank = 7;
+        let (sub_port, mut sub_rx) = client.open_port::<resource::RankedState<ActorState>>();
         agent_ref
-            .stream_state(&client, actor_name.clone(), sub_port.bind())
+            .stream_state(
+                &client,
+                actor_name.clone(),
+                resource::Rank::new(subscriber_rank),
+                sub_port.bind(),
+            )
             .await
             .unwrap();
 
         // 3. Should receive the initial state (Running).
         let initial = sub_rx.recv().await.expect("subscriber channel error");
-        assert_eq!(initial.status, resource::Status::Running);
-        assert!(initial.state.is_some());
+        assert_eq!(initial.rank.unwrap(), subscriber_rank);
+        assert_eq!(initial.state.status, resource::Status::Running);
+        assert!(initial.state.state.is_some());
 
         // 4. Send Stop — should receive Stopping.
         agent_ref
@@ -1564,11 +1611,13 @@ mod tests {
             .unwrap();
 
         let stopping = sub_rx.recv().await.expect("subscriber channel error");
-        assert_eq!(stopping.status, resource::Status::Stopping);
+        assert_eq!(stopping.rank.unwrap(), subscriber_rank);
+        assert_eq!(stopping.state.status, resource::Status::Stopping);
 
         // 5. Wait for the Stopped supervision event update.
         let stopped = sub_rx.recv().await.expect("subscriber channel error");
-        assert_eq!(stopped.status, resource::Status::Stopped);
+        assert_eq!(stopped.rank.unwrap(), subscriber_rank);
+        assert_eq!(stopped.state.status, resource::Status::Stopped);
 
         // 6. Test implicit unsubscription via undeliverable.
         let actor_name_2 =
@@ -1586,14 +1635,20 @@ mod tests {
             .await
             .unwrap();
 
-        let (sub_port_2, mut sub_rx_2) = client.open_port::<resource::State<ActorState>>();
+        let (sub_port_2, mut sub_rx_2) = client.open_port::<resource::RankedState<ActorState>>();
         agent_ref
-            .stream_state(&client, actor_name_2.clone(), sub_port_2.bind())
+            .stream_state(
+                &client,
+                actor_name_2.clone(),
+                resource::Rank::new(8),
+                sub_port_2.bind(),
+            )
             .await
             .unwrap();
 
         let initial_2 = sub_rx_2.recv().await.expect("subscriber 2 channel error");
-        assert_eq!(initial_2.status, resource::Status::Running);
+        assert_eq!(initial_2.rank.unwrap(), 8);
+        assert_eq!(initial_2.state.status, resource::Status::Running);
 
         // Drop the receiver so the next send bounces as undeliverable.
         drop(sub_rx_2);
@@ -1611,14 +1666,20 @@ mod tests {
             .unwrap();
 
         // Wait for actor_2 to reach terminal state via a new stream subscription.
-        let (sub_port_3, mut sub_rx_3) = client.open_port::<resource::State<ActorState>>();
+        let (sub_port_3, mut sub_rx_3) = client.open_port::<resource::RankedState<ActorState>>();
         agent_ref
-            .stream_state(&client, actor_name_2.clone(), sub_port_3.bind())
+            .stream_state(
+                &client,
+                actor_name_2.clone(),
+                resource::Rank::new(9),
+                sub_port_3.bind(),
+            )
             .await
             .unwrap();
         loop {
             let state = sub_rx_3.recv().await.expect("subscriber 3 channel error");
-            if state.status.is_terminating() {
+            assert_eq!(state.rank.unwrap(), 9);
+            if state.state.status.is_terminating() {
                 break;
             }
         }

@@ -1086,11 +1086,16 @@ impl HostMeshRef {
         &self,
         cx: &impl context::Actor,
         id: ResourceId,
-        subscriber: hyperactor::PortRef<resource::State<ProcState>>,
+        subscriber: hyperactor::PortRef<resource::RankedState<ProcState>>,
     ) -> anyhow::Result<()> {
-        Ok(self
-            .host_agent_mesh
-            .cast(cx, resource::StreamState::<ProcState> { id, subscriber })?)
+        Ok(self.host_agent_mesh.cast(
+            cx,
+            resource::StreamState::<ProcState> {
+                id,
+                subscriber_rank: resource::Rank::default(),
+                subscriber,
+            },
+        )?)
     }
 
     /// Returns the host entries as `(addr_string, ActorRef<HostAgent>)` pairs.
