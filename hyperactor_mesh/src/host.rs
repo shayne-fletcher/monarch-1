@@ -427,6 +427,28 @@ impl<M: ProcManager> Host<M> {
     pub(crate) fn take_frontend_handle(&mut self) -> Option<GatewayServeHandle> {
         self.frontend_handle.take()
     }
+
+    /// Stop and join every gateway server owned by this host.
+    pub(crate) async fn shutdown_servers(&mut self) {
+        if let Some(mut handle) = self.frontend_handle.take() {
+            handle.stop("host shutdown");
+            if let Err(error) = handle.join().await {
+                tracing::warn!(%error, "failed to join host frontend server");
+            }
+        }
+        if let Some(mut handle) = self.backend_handle.take() {
+            handle.stop("host shutdown");
+            if let Err(error) = handle.join().await {
+                tracing::warn!(%error, "failed to join host backend server");
+            }
+        }
+        if let Some(mut handle) = self.via_handle.take() {
+            handle.stop("host shutdown");
+            if let Err(error) = handle.join().await {
+                tracing::warn!(%error, "failed to join host via server");
+            }
+        }
+    }
 }
 
 impl<M> Drop for Host<M> {

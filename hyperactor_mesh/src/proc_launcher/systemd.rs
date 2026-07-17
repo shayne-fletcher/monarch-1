@@ -1194,6 +1194,7 @@ mod tests {
         // The bootstrap payload content doesn't matter for this test.
         let bootstrap = Bootstrap::Host {
             addr: any_unix_addr(),
+            callback_addr: any_unix_addr(),
             command: None,
             config: None,
             exit_on_shutdown: false,
@@ -1295,6 +1296,7 @@ mod tests {
         // The bootstrap payload content doesn't matter for this test.
         let bootstrap = Bootstrap::Host {
             addr: any_unix_addr(),
+            callback_addr: any_unix_addr(),
             command: None,
             config: None,
             exit_on_shutdown: false,
@@ -1342,6 +1344,7 @@ mod tests {
         // The bootstrap payload content doesn't matter for this test.
         let bootstrap = Bootstrap::Host {
             addr: any_unix_addr(),
+            callback_addr: any_unix_addr(),
             command: None,
             config: None,
             exit_on_shutdown: false,
@@ -1409,6 +1412,7 @@ mod tests {
         // The bootstrap payload content doesn't matter for this test.
         let bootstrap = Bootstrap::Host {
             addr: any_unix_addr(),
+            callback_addr: any_unix_addr(),
             command: None,
             config: None,
             exit_on_shutdown: false,
@@ -1584,6 +1588,7 @@ mod tests {
         // The bootstrap payload content doesn't matter for this test.
         let bootstrap = Bootstrap::Host {
             addr: any_unix_addr(),
+            callback_addr: any_unix_addr(),
             command: None,
             config: None,
             exit_on_shutdown: false,
@@ -1691,6 +1696,7 @@ mod tests {
         // The bootstrap payload content doesn't matter for this test.
         let bootstrap = Bootstrap::Host {
             addr: any_unix_addr(),
+            callback_addr: any_unix_addr(),
             command: None,
             config: None,
             exit_on_shutdown: false,

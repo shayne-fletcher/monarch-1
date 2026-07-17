@@ -43,6 +43,8 @@ use crate::Bootstrap;
 #[cfg(fbcode_build)]
 use crate::HostMeshRef;
 #[cfg(fbcode_build)]
+use crate::bootstrap::HostBootstrapReady;
+#[cfg(fbcode_build)]
 use crate::host_mesh::HostMesh;
 #[cfg(fbcode_build)]
 use crate::host_mesh::HostMeshShutdownGuard;
@@ -307,10 +309,13 @@ pub async fn host_mesh(n: usize) -> HostMeshShutdownGuard {
         host_addrs.push(ChannelTransport::Unix.any());
     }
 
+    let mut ready = Vec::with_capacity(n);
     for host in host_addrs.iter() {
+        let callback = HostBootstrapReady::new(host.clone()).unwrap();
         let mut cmd = Command::new(program.clone());
         let boot = Bootstrap::Host {
             addr: host.clone(),
+            callback_addr: callback.callback_addr(),
             command: None, // use current binary
             config: None,
             exit_on_shutdown: false,
@@ -324,6 +329,10 @@ pub async fn host_mesh(n: usize) -> HostMeshShutdownGuard {
             cmd.pre_exec(crate::bootstrap::install_pdeathsig_kill);
         }
         cmd.spawn().unwrap();
+        ready.push(callback);
+    }
+    for callback in ready {
+        callback.wait().await.unwrap();
     }
 
     let host_mesh = HostMeshRef::from_hosts(

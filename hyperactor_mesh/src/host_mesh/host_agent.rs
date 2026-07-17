@@ -46,6 +46,7 @@ use hyperactor::actor::ActorStoppingReason;
 use hyperactor::context;
 use hyperactor::gateway::GatewayServeHandle;
 use hyperactor::id::Label;
+use hyperactor::mailbox::MailboxSender as _;
 use hyperactor::value_mesh::ValueOverlay;
 use hyperactor_config::Flattrs;
 use hyperactor_config::attrs::Attrs;
@@ -1406,10 +1407,6 @@ impl Handler<ShutdownHost> for HostAgent {
             self.drain(cx, msg.timeout, msg.max_in_flight).await;
         }
 
-        // Reply this host's rank after children are terminated so the
-        // caller does not tear down the host's networking prematurely.
-        msg.ack.post(cx, rank);
-
         // Drop the host and signal the bootstrap loop to drain the
         // mailbox and exit.
         match std::mem::replace(&mut self.state, HostAgentState::Shutdown) {
@@ -1421,6 +1418,22 @@ impl Handler<ShutdownHost> for HostAgent {
                 mut host,
                 shutdown_tx: Some(tx),
             }) => {
+                // Keep the host's outbound gateway alive until the direct
+                // shutdown acknowledgment has been flushed. The bootstrap
+                // task may stop the frontend as soon as it receives the
+                // handle below.
+                msg.ack.post(cx, rank);
+                let flush_timeout =
+                    hyperactor_config::global::get(hyperactor::config::FORWARDER_FLUSH_TIMEOUT);
+                match tokio::time::timeout(flush_timeout, host.gateway().flush()).await {
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "gateway flush failed during host shutdown");
+                    }
+                    Err(_elapsed) => {
+                        tracing::warn!("gateway flush timed out during host shutdown");
+                    }
+                    Ok(Ok(())) => {}
+                }
                 tracing::info!(
                     proc_id = %cx.self_addr().proc_addr(),
                     actor_id = %cx.self_addr(),
@@ -1432,7 +1445,23 @@ impl Handler<ShutdownHost> for HostAgent {
                     handle.stop("bootstrap shutdown receiver dropped");
                 }
             }
-            _ => {}
+            HostAgentState::Detached(HostAgentMode::Local(mut host))
+            | HostAgentState::Attached(HostAgentMode::Local(mut host)) => {
+                let procs = [host.local_proc().clone(), host.system_proc().clone()];
+                let shutdown_client = Proc::global().client("local_host_shutdown");
+                // Continue outside the system proc so the final ack can be sent
+                // after that proc has stopped.
+                tokio::spawn(async move {
+                    for mut proc in procs {
+                        let _ = proc
+                            .destroy_and_wait(msg.timeout, "local host shutdown")
+                            .await;
+                    }
+                    host.shutdown_servers().await;
+                    msg.ack.post(&shutdown_client, rank);
+                });
+            }
+            _ => msg.ack.post(cx, rank),
         }
 
         Ok(())
@@ -1906,9 +1935,11 @@ mod tests {
 
     use super::*;
     use crate::bootstrap::ProcStatus;
+    use crate::host::LocalProcManager;
     use crate::mesh_id::ResourceId;
     use crate::resource::CreateOrUpdateClient;
     use crate::resource::GetStateClient;
+    use crate::resource::Rank;
     use crate::resource::WaitRankStatusClient;
 
     #[tokio::test]
@@ -1974,6 +2005,58 @@ mod tests {
               && mesh_agent == ActorRef::attest(expected_proc_addr.actor_addr(crate::proc_agent::PROC_AGENT_ACTOR_NAME))
               && bootstrap_command == Some(BootstrapCommand::test())
               && mesh_agent == proc_status_mesh_agent
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_local_host_stops_system_actors_before_ack() {
+        let spawn: ProcManagerSpawnFn =
+            Box::new(|proc| Box::pin(std::future::ready(ProcAgent::boot_v1(proc, None))));
+        let host = Host::new(LocalProcManager::new(spawn), ChannelTransport::Unix.any())
+            .await
+            .unwrap();
+        let system_proc = host.system_proc().clone();
+        let host_agent = system_proc
+            .spawn_with_uid(
+                Uid::singleton(Label::new(HOST_MESH_AGENT_ACTOR_NAME).unwrap()),
+                HostAgent::new_local(host),
+            )
+            .unwrap();
+        HostAgent::wait_initialized(&host_agent).await.unwrap();
+        let cast_actor = system_proc
+            .spawn_with_uid(
+                Uid::singleton(Label::strip(hyperactor_cast::cast_actor::CAST_ACTOR_NAME)),
+                hyperactor_cast::cast_actor::CastActor::default(),
+            )
+            .unwrap();
+
+        let client_proc = Proc::direct(
+            ChannelTransport::Unix.any(),
+            "shutdown_test_client".to_string(),
+        )
+        .unwrap();
+        let client = client_proc.client("shutdown_test");
+        let (ack, mut ack_rx) = client.open_port::<usize>();
+        host_agent
+            .try_post(
+                &client,
+                ShutdownHost {
+                    timeout: Duration::from_secs(5),
+                    max_in_flight: 1,
+                    rank: Rank::new(0),
+                    ack: ack.bind().unsplit(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(ack_rx.recv().await.unwrap(), 0);
+        assert!(
+            host_agent.status().borrow().is_terminal(),
+            "local HostAgent must stop before acknowledging shutdown"
+        );
+        assert!(
+            cast_actor.status().borrow().is_terminal(),
+            "local CastActor must stop before acknowledging shutdown"
         );
     }
 
