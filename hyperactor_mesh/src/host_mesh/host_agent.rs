@@ -1153,11 +1153,9 @@ impl HostAgent {
                 None => Status::Stopped,
             },
             Some(ProcCreationState {
-                created: Err(_), ..
-            }) => {
-                // Already replied with Failed when they were stashed.
-                return;
-            }
+                created: Err(error),
+                ..
+            }) => Status::Failed(error.to_string()),
             None => {
                 // Proc not created yet, nothing to flush.
                 return;
@@ -1973,7 +1971,8 @@ mod tests {
     //   `test_wait_rank_status_stop` (deferred until stop),
     //   `test_wait_rank_status_before_proc_exists` (registered before the proc
     //   exists, then the proc is created at a different rank; the waiter keeps its
-    //   own rank rather than adopting the creation rank).
+    //   own rank rather than adopting the creation rank), and
+    //   `test_rank_status_created_error` (registered before a failed creation).
     // - RSP-4 (absence yields an empty overlay): the unknown-proc GetRankStatus
     //   assertion in `test_wait_rank_status_already_running`.
 
@@ -2306,9 +2305,9 @@ mod tests {
         assert_overlay_at_rank(&overlay, message_rank);
     }
 
-    /// A proc whose creation failed is cached as `created: Err` and reported as a
-    /// `Failed` overlay positioned at the message rank, on both immediate query
-    /// paths — GetRankStatus and (non-deferred) WaitRankStatus.
+    /// A failed creation flushes a waiter registered before the creation attempt,
+    /// and subsequent status queries report the cached failure immediately. Each
+    /// reply is positioned at the rank carried by its request.
     #[tokio::test]
     async fn test_rank_status_created_error() {
         // A local, in-process host whose proc spawn deterministically fails, so
@@ -2335,8 +2334,23 @@ mod tests {
         let client = client_proc.client("client");
 
         let id = ResourceId::instance(Label::new("proc1").unwrap());
+        // Register a waiter before the proc exists. It must be retained through
+        // the failed creation attempt and resolved with the cached failure.
+        let deferred_rank = 8;
+        let (port, mut deferred_rx) = client.open_port::<crate::StatusOverlay>();
+        host_agent
+            .wait_rank_status(
+                &client,
+                id.clone(),
+                resource::Rank::new(deferred_rank),
+                resource::Status::Running,
+                port.bind(),
+            )
+            .await
+            .unwrap();
+
         // Creation is attempted at rank 0; the spawn fails and is cached. The
-        // client call still returns Ok — the handler swallows the spawn error.
+        // client call still returns Ok because status queries carry the failure.
         host_agent
             .create_or_update(
                 &client,
@@ -2346,6 +2360,12 @@ mod tests {
             )
             .await
             .unwrap();
+
+        let overlay = tokio::time::timeout(Duration::from_secs(30), deferred_rx.recv())
+            .await
+            .expect("pre-create waiter was not resolved after creation failed")
+            .expect("reply channel closed");
+        assert_overlay_failed_at_rank(&overlay, deferred_rank);
 
         // WaitRankStatus for a known-but-failed proc replies immediately (no
         // deferral) with a Failed overlay at the message rank.
