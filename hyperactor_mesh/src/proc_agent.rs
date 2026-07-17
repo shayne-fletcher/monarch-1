@@ -166,10 +166,10 @@ struct ActorInstanceState {
     /// operation (spawn, stop, supervision event). Used for last-writer-wins
     /// ordering in the mesh controller.
     generation: u64,
-    /// Pending `WaitRankStatus` callers: each entry is the minimum
-    /// status threshold and the reply port to send once the threshold
-    /// is met.
-    pending_wait_status: Vec<(resource::Status, PortRef<crate::StatusOverlay>)>,
+    /// Pending `WaitRankStatus` callers: each entry is the minimum status
+    /// threshold, the delivered view rank at which to position the reply
+    /// overlay, and the reply port to send once the threshold is met.
+    pending_wait_status: Vec<(resource::Status, usize, PortRef<crate::StatusOverlay>)>,
 }
 
 impl ActorInstanceState {
@@ -234,20 +234,23 @@ impl ActorInstanceState {
             subscriber.post_with_headers(cx, headers, state.clone());
         }
 
-        // One-shot waiters (predicated).
+        // One-shot waiters (predicated). Each retains the reply rank it was
+        // stashed with (RSP-3), positioned in the caller's view (RSP-1).
         let status = self.status();
-        self.pending_wait_status.retain(|(min_status, reply)| {
-            if status >= *min_status {
-                let rank = self.create_rank;
-                let overlay =
-                    crate::StatusOverlay::try_from_runs(vec![(rank..(rank + 1), status.clone())])
-                        .expect("valid single-run overlay");
-                let _ = reply.post(cx, overlay);
-                false
-            } else {
-                true
-            }
-        });
+        self.pending_wait_status
+            .retain(|(min_status, rank, reply)| {
+                if status >= *min_status {
+                    let overlay = crate::StatusOverlay::try_from_runs(vec![(
+                        *rank..(*rank + 1),
+                        status.clone(),
+                    )])
+                    .expect("valid single-run overlay");
+                    let _ = reply.post(cx, overlay);
+                    false
+                } else {
+                    true
+                }
+            });
     }
 }
 
@@ -879,7 +882,9 @@ wirevalue::register_type!(ActorSpec);
 pub struct ActorState {
     /// The actor's ID.
     pub actor_id: ActorAddr,
-    /// The rank of the proc that created the actor. This is before any slicing.
+    /// The actor's dense rank in the view it was first created over. Stable for
+    /// the actor's lifetime and independent of any later view that reuses the
+    /// actor, so it is not the actor's rank in an overlapping or sliced view.
     pub create_rank: usize,
     // TODO status: ActorStatus,
     pub supervision_events: Vec<ActorSupervisionEvent>,
@@ -1023,20 +1028,17 @@ impl Handler<resource::GetRankStatus> for ProcAgent {
         get_rank_status: resource::GetRankStatus,
     ) -> anyhow::Result<()> {
         use crate::StatusOverlay;
-        use crate::resource::Status;
 
-        let (rank, status) = match self.actor_states.get(&get_rank_status.id) {
-            Some(state) => (state.create_rank, state.status()),
-            None => (usize::MAX, Status::NotExist),
-        };
-
-        // Send a sparse overlay update. If rank is unknown, emit an
-        // empty overlay.
-        let overlay = if rank == usize::MAX {
-            StatusOverlay::new()
-        } else {
-            StatusOverlay::try_from_runs(vec![(rank..(rank + 1), status)])
-                .expect("valid single-run overlay")
+        // Position the overlay at the rank the request carries (the recipient's
+        // rank in the caller's view), not the actor's first-creation rank (RSP-1);
+        // an absent actor yields an empty overlay (RSP-4).
+        let overlay = match self.actor_states.get(&get_rank_status.id) {
+            Some(state) => {
+                let rank = get_rank_status.rank.unwrap();
+                StatusOverlay::try_from_runs(vec![(rank..(rank + 1), state.status())])
+                    .expect("valid single-run overlay")
+            }
+            None => StatusOverlay::new(),
         };
         get_rank_status.reply.post(cx, overlay);
         Ok(())
@@ -1051,29 +1053,31 @@ impl Handler<resource::WaitRankStatus> for ProcAgent {
         msg: resource::WaitRankStatus,
     ) -> anyhow::Result<()> {
         use crate::StatusOverlay;
-        use crate::resource::Status;
 
-        let (rank, status) = match self.actor_states.get(&msg.id) {
-            Some(state) => (state.create_rank, state.status()),
-            None => (usize::MAX, Status::NotExist),
+        // The request carries the reply rank (the recipient's rank in the
+        // caller's view) (RSP-1); a deferred waiter retains it, since the cast
+        // context is gone by flush time (RSP-3). An absent actor replies with an
+        // empty overlay (RSP-4).
+        let Some(status) = self.actor_states.get(&msg.id).map(|state| state.status()) else {
+            let _ = msg.reply.post(cx, StatusOverlay::new());
+            return Ok(());
         };
+        let rank = msg.rank.unwrap();
 
         // If already at or past the requested threshold, reply immediately.
-        if status >= msg.min_status || rank == usize::MAX {
-            let overlay = if rank == usize::MAX {
-                StatusOverlay::new()
-            } else {
-                StatusOverlay::try_from_runs(vec![(rank..(rank + 1), status)])
-                    .expect("valid single-run overlay")
-            };
+        if status >= msg.min_status {
+            let overlay = StatusOverlay::try_from_runs(vec![(rank..(rank + 1), status)])
+                .expect("valid single-run overlay");
             let _ = msg.reply.post(cx, overlay);
             return Ok(());
         }
 
-        // Otherwise, stash the waiter. It will be flushed when the
-        // status changes (supervision event or stop).
+        // Otherwise, stash the waiter with its reply rank. It will be flushed
+        // when the status changes (supervision event or stop).
         if let Some(state) = self.actor_states.get_mut(&msg.id) {
-            state.pending_wait_status.push((msg.min_status, msg.reply));
+            state
+                .pending_wait_status
+                .push((msg.min_status, rank, msg.reply));
         }
         Ok(())
     }
