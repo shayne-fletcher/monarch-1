@@ -1837,14 +1837,17 @@ mod tests {
         let program = crate::testresource::get("monarch/hyperactor_mesh/bootstrap");
         let mut host_addrs = vec![];
         let mut children = Vec::new();
+        let mut ready = Vec::new();
         for _ in 0..n {
             host_addrs.push(ChannelTransport::Unix.any());
         }
 
         for host in host_addrs.iter() {
+            let callback = crate::bootstrap::HostBootstrapReady::new(host.clone()).unwrap();
             let mut cmd = Command::new(program.clone());
             let boot = crate::Bootstrap::Host {
                 addr: host.clone(),
+                callback_addr: callback.callback_addr(),
                 command: None,
                 config: Some(hyperactor_config::global::attrs()),
                 exit_on_shutdown: false,
@@ -1857,6 +1860,10 @@ mod tests {
                 cmd.pre_exec(crate::bootstrap::install_pdeathsig_kill);
             }
             children.push(cmd.spawn().unwrap());
+            ready.push(callback);
+        }
+        for callback in ready {
+            callback.wait().await.unwrap();
         }
 
         let host_mesh = crate::HostMeshRef::from_hosts(
