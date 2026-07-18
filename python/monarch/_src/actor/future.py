@@ -7,8 +7,11 @@
 # pyre-strict
 
 import asyncio
+import contextlib
 import logging
 import math
+import os
+import sys
 import warnings
 from typing import (
     Any,
@@ -103,6 +106,86 @@ _ALREADY_TOKIO_MSG = (
     "already converted into a pytokio.Shared object, use 'await' from a "
     "PythonTask coroutine to get the value."
 )
+
+
+# Record-only instrument for the pytokio-removal migration: it records the
+# callsite each time the `_Tokio` state is produced (the sole production site is
+# the tokio branch of `Future.__await__` below), so the migration can prove per
+# callsite that no production path still produces `_Tokio`. Off by default, so it
+# is a no-op with no behavior change; enable in a test with `enable_tokio_oracle()`
+# or process-wide with MONARCH_TOKIO_ORACLE=1 (record) / =raise. Raise mode is
+# opt-in and never on by default.
+class TokioOracleRecord(NamedTuple):
+    module: str
+    filename: str
+    lineno: int
+    function: str
+
+
+_tokio_oracle_mode: str = os.environ.get("MONARCH_TOKIO_ORACLE", "")
+_tokio_oracle_records: list[TokioOracleRecord] = []
+
+
+def enable_tokio_oracle(*, raise_on_produce: bool = False) -> None:
+    global _tokio_oracle_mode
+    _tokio_oracle_mode = "raise" if raise_on_produce else "record"
+
+
+def disable_tokio_oracle() -> None:
+    global _tokio_oracle_mode
+    _tokio_oracle_mode = ""
+
+
+def reset_tokio_oracle() -> None:
+    _tokio_oracle_records.clear()
+
+
+def tokio_oracle_records() -> list[TokioOracleRecord]:
+    return list(_tokio_oracle_records)
+
+
+@contextlib.contextmanager
+def tokio_oracle(
+    *, raise_on_produce: bool = False
+) -> Generator[list[TokioOracleRecord], None, None]:
+    """Scoped `_Tokio`-production oracle for tests: records (or, with
+    `raise_on_produce`, raises on) every `_Tokio` production for the duration
+    and yields the live records list, then restores the prior mode and records.
+    The save/restore keeps a process-wide oracle (e.g. `MONARCH_TOKIO_ORACLE`)
+    intact, and the scope guarantees cleanup so a caller cannot leak enabled
+    state by forgetting to disable it. Prefer this over the bare
+    `enable_tokio_oracle`/`reset_tokio_oracle`/`disable_tokio_oracle` trio.
+    """
+    global _tokio_oracle_mode
+    prev_mode = _tokio_oracle_mode
+    prev_records = _tokio_oracle_records.copy()
+    _tokio_oracle_mode = "raise" if raise_on_produce else "record"
+    _tokio_oracle_records.clear()
+    try:
+        yield _tokio_oracle_records
+    finally:
+        _tokio_oracle_mode = prev_mode
+        _tokio_oracle_records[:] = prev_records
+
+
+def _record_tokio_production() -> None:
+    # The callsite we want is the coroutine that awaited the Future: two frames
+    # up (this fn -> Future.__await__ -> awaiter).
+    if not _tokio_oracle_mode:
+        return
+    f = sys._getframe(2)
+    record = TokioOracleRecord(
+        module=str(f.f_globals.get("__name__", "<unknown>")),
+        filename=f.f_code.co_filename,
+        lineno=f.f_lineno,
+        function=f.f_code.co_name,
+    )
+    _tokio_oracle_records.append(record)
+    if _tokio_oracle_mode == "raise":
+        raise RuntimeError(
+            f"_Tokio produced at {record.filename}:{record.lineno} "
+            f"in {record.module}.{record.function}"
+        )
 
 
 class Future(Generic[R]):
@@ -259,6 +342,7 @@ class Future(Generic[R]):
         elif is_tokio_thread():
             match self._status:
                 case _Unawaited(coro=coro):
+                    _record_tokio_production()
                     shared = coro.spawn()
                     self._status = _Tokio(shared)
                     return shared.__await__()
