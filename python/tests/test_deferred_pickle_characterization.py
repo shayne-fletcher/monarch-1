@@ -7,15 +7,20 @@
 # pyre-unsafe
 
 """
-Characterization oracle for deferred pickling.
+Characterization oracle for pending mesh-reference reserve/fill during
+serialization.
 
 Pins today's observable behavior: a mesh reference that is still *pending*
 (spawned and sent in the same breath, before its background init finishes)
 arrives at the other side as a usable reference, on both send paths: as an
 endpoint argument (request path) and as an endpoint return value (reply path).
-Today this rides the deferred-pickle subsystem (resolve-before-send plus a
-re-pickle); a change to how pending references serialize must preserve these
-outcomes. This is the safety net such a change checks against.
+The live mechanism is pending mesh-reference reserve/fill, NOT a generic
+deferred pickle or re-pickle: ``pickle(..., allow_mesh_references=True)``
+reserves out-of-band ref slots for still-pending meshes, and
+``PicklingState::resolve()`` (``monarch_hyperactor/src/pickle.rs``) awaits those
+handles and fills the slots with the payload bytes unchanged (no re-pickle). A
+change to how pending references serialize must preserve these outcomes. This is
+the safety net such a change checks against.
 
 There is no hook to force the pending path; it relies on the
 spawn-then-immediately-send race, which the synchronous pickle wins in practice
