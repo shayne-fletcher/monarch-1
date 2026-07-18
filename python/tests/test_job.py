@@ -29,6 +29,7 @@ import pytest
 # Import directly from _src since job module isn't properly exposed
 from monarch._src.job.job import (
     BatchJob,
+    exec_command,
     job_load,
     job_loads,
     JobState,
@@ -42,7 +43,7 @@ from monarch._src.job.job_components import JobComponent, JobComponents, MountCo
 from monarch._src.job.mount_config import Mounts
 from monarch._src.job.process import ProcessJob
 from monarch._src.job.process_guard import _Shutdown, _wait_for_socket
-from monarch.actor import HostMesh
+from monarch.actor import Future, HostMesh
 
 
 def _append_line(path: str, line: str) -> None:
@@ -1697,3 +1698,150 @@ def test_mast_job_get_runner_is_lazy():
     source = inspect.getsource(MASTJob._get_runner)
     # The import must be inside the method, not at module level.
     assert "from monarch._src.tools.commands import torchx_runner" in source
+
+
+# ── exec_command tests ─────────────────────────────────────────────────────
+
+
+def _exec_env():
+    """Mock host_mesh -> procs -> bash_actors for driving exec_command.
+
+    procs.stop() returns a real Future whose coroutine flips
+    markers["stop_driven"] only when it is actually awaited/driven, so a test can
+    prove the finally ran to completion rather than merely that stop() was called.
+    Each test configures the endpoint calls (bash_actors.run / run_python).
+    """
+    markers = {"stop_driven": False}
+
+    async def _stop_impl() -> None:
+        markers["stop_driven"] = True
+
+    bash_actors = MagicMock()
+    procs = MagicMock()
+    procs.spawn.return_value = bash_actors
+    procs.stop.return_value = Future(coro=_stop_impl())
+    host_mesh = MagicMock()
+    host_mesh.spawn_procs.return_value = procs
+    return host_mesh, procs, bash_actors, markers
+
+
+def _results_future(pairs):
+    """A real Future resolving to pairs, an iterable of (rank_key, result)."""
+
+    async def _impl():
+        return pairs
+
+    return Future(coro=_impl())
+
+
+def test_exec_command_returns_max_returncode():
+    """exec_command returns the maximum return code across ranks."""
+    host_mesh, _procs, bash_actors, _markers = _exec_env()
+    bash_actors.run.call.return_value = _results_future(
+        [
+            ("rank0", {"returncode": 0, "stdout": "", "stderr": ""}),
+            ("rank1", {"returncode": 7, "stdout": "", "stderr": ""}),
+        ]
+    )
+    assert exec_command(host_mesh, ["echo", "hi"]).get() == 7
+
+
+def test_exec_command_drives_cleanup_on_success():
+    """procs.stop() is driven to completion on the happy path."""
+    host_mesh, procs, bash_actors, markers = _exec_env()
+    bash_actors.run.call.return_value = _results_future(
+        [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+    )
+    exec_command(host_mesh, ["echo", "hi"]).get()
+    assert markers["stop_driven"]
+    procs.stop.assert_called_once()
+
+
+def test_exec_command_drives_cleanup_on_error():
+    """The finally must drive procs.stop() to completion even when the run raises."""
+
+    class _Boom(Exception):
+        pass
+
+    host_mesh, procs, bash_actors, markers = _exec_env()
+    bash_actors.run.call.side_effect = _Boom("run failed")
+    with pytest.raises(_Boom):
+        exec_command(host_mesh, ["echo", "hi"]).get()
+    # Proves the finally did real async work, not merely that stop() was called.
+    assert markers["stop_driven"]
+    procs.stop.assert_called_once()
+
+
+def test_exec_command_dispatches_to_run_python_for_py_scripts():
+    """A .py command routes to run_python.call, not run.call."""
+    host_mesh, _procs, bash_actors, _markers = _exec_env()
+    bash_actors.run_python.call.return_value = _results_future(
+        [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+    )
+    exec_command(host_mesh, ["train.py", "--flag"]).get()
+    bash_actors.run_python.call.assert_called_once()
+    bash_actors.run.call.assert_not_called()
+
+
+def test_exec_command_dispatches_to_run_for_shell_commands():
+    """A non-.py command builds a bash script and routes to run.call."""
+    host_mesh, _procs, bash_actors, _markers = _exec_env()
+    bash_actors.run.call.return_value = _results_future(
+        [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+    )
+    exec_command(host_mesh, ["echo", "hi"]).get()
+    bash_actors.run.call.assert_called_once()
+    bash_actors.run_python.call.assert_not_called()
+    script = bash_actors.run.call.call_args.args[0]
+    assert script.startswith("#!/bin/bash")
+    assert "echo hi" in script
+
+
+def test_exec_command_slices_by_point():
+    """point= selects a sub-mesh via host_mesh.slice(**point)."""
+    host_mesh, procs, bash_actors, _markers = _exec_env()
+    sliced = MagicMock()
+    sliced.spawn_procs.return_value = procs
+    host_mesh.slice.return_value = sliced
+    bash_actors.run.call.return_value = _results_future(
+        [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+    )
+    exec_command(host_mesh, ["echo", "hi"], point={"gpu": 2}).get()
+    host_mesh.slice.assert_called_once_with(gpu=2)
+    sliced.spawn_procs.assert_called_once()
+
+
+def test_exec_command_slices_by_rank():
+    """rank= selects a single rank via flatten('rank').slice(rank=...)."""
+    host_mesh, procs, bash_actors, _markers = _exec_env()
+    flattened = MagicMock()
+    sliced = MagicMock()
+    host_mesh.flatten.return_value = flattened
+    flattened.slice.return_value = sliced
+    sliced.spawn_procs.return_value = procs
+    bash_actors.run.call.return_value = _results_future(
+        [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+    )
+    exec_command(host_mesh, ["echo", "hi"], rank=3).get()
+    host_mesh.flatten.assert_called_once_with("rank")
+    flattened.slice.assert_called_once_with(rank=3)
+
+
+def test_exec_command_prints_output_when_no_output_dir(capsys):
+    """With no output_dir, each rank's stdout is echoed to the caller."""
+    host_mesh, _procs, bash_actors, _markers = _exec_env()
+    bash_actors.run.call.return_value = _results_future(
+        [("rank0", {"returncode": 0, "stdout": "HELLO", "stderr": ""})]
+    )
+    exec_command(host_mesh, ["echo", "hi"]).get()
+    assert "HELLO" in capsys.readouterr().out
+
+
+def test_exec_command_output_dir_suppresses_printing(capsys):
+    """With output_dir set, stdout/stderr are not echoed to the caller."""
+    host_mesh, _procs, bash_actors, _markers = _exec_env()
+    bash_actors.run.call.return_value = _results_future(
+        [("rank0", {"returncode": 0, "stdout": "SHOULD_NOT_PRINT", "stderr": ""})]
+    )
+    exec_command(host_mesh, ["echo", "hi"], output_dir="/tmp/out").get()
+    assert "SHOULD_NOT_PRINT" not in capsys.readouterr().out
