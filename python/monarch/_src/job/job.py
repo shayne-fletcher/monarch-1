@@ -887,7 +887,7 @@ def exec_command(
                     workdir=workdir,
                     client_cwd=client_cwd,
                     output_dir=output_dir,
-                )
+                )._take_inner()
             else:
                 lines: List[str] = ["#!/bin/bash"]
                 if env:
@@ -901,7 +901,9 @@ def exec_command(
                     )
                 lines.append(shlex.join(cmd))
                 script = "\n".join(lines) + "\n"
-                results = await bash_actors.run.call(script, output_dir=output_dir)
+                results = await bash_actors.run.call(
+                    script, output_dir=output_dir
+                )._take_inner()
             max_rc = 0
             for _rank_key, result in results:
                 rc = result.get("returncode", 1)
@@ -916,7 +918,7 @@ def exec_command(
             # pyrefly: ignore [bad-return]
             return max_rc
         finally:
-            await procs.stop()
+            await procs.stop()._take_inner()
 
     return Future(coro=_impl())
 

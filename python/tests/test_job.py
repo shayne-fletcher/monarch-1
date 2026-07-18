@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 import monarch._src.job._job_sidecar_worker as js_worker
 import monarch._src.job.job_sidecar as js
 import pytest
+from monarch._src.actor.future import tokio_oracle
 
 # Import directly from _src since job module isn't properly exposed
 from monarch._src.job.job import (
@@ -1845,3 +1846,30 @@ def test_exec_command_output_dir_suppresses_printing(capsys):
     )
     exec_command(host_mesh, ["echo", "hi"], output_dir="/tmp/out").get()
     assert "SHOULD_NOT_PRINT" not in capsys.readouterr().out
+
+
+def test_exec_command_produces_no_tokio():
+    """Gate A (job cluster): exec_command produces no `_Tokio` state.
+
+    Drives exec_command with the record-only `_Tokio` oracle enabled and asserts
+    job.py produced no `_Tokio` (no `await <Future>` on the tokio thread). Before
+    the `_take_inner()` migration this recorded the three job producers
+    (run_python.call, run.call, procs.stop); after it, zero.
+    """
+    with tokio_oracle() as records:
+        # shell branch: exercises run.call + the procs.stop finally
+        host_mesh, _procs, bash_actors, _markers = _exec_env()
+        bash_actors.run.call.return_value = _results_future(
+            [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+        )
+        exec_command(host_mesh, ["echo", "hi"]).get()
+
+        # python branch: exercises run_python.call + the procs.stop finally
+        host_mesh, _procs, bash_actors, _markers = _exec_env()
+        bash_actors.run_python.call.return_value = _results_future(
+            [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+        )
+        exec_command(host_mesh, ["train.py"]).get()
+
+        job_records = [r for r in records if r.filename.endswith("job.py")]
+        assert job_records == [], f"exec_command still produces _Tokio: {job_records}"
