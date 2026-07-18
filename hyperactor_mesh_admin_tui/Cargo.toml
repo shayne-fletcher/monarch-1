@@ -34,7 +34,7 @@ tokio = { version = "1.52.3", features = ["full", "test-util", "tracing"] }
 urlencoding = "2.1.0"
 
 [dev-dependencies]
-uuid = { version = "1.23.5", features = ["rng-getrandom", "serde", "v4", "v5", "v6", "v7", "v8"] }
+uuid = { version = "1.24.0", features = ["rng-getrandom", "serde", "v4", "v5", "v6", "v7", "v8"] }
 
 [lints]
 workspace = true
