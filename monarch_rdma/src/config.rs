@@ -79,4 +79,15 @@ declare_attrs! {
         Some("rdma_qp_init_timeout".to_string()),
     ))
     pub attr RDMA_QP_INIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// Default ibverbs device target for managers without an explicit target.
+    ///
+    /// Accepted forms are `cpu:<numa>`, `gpu:<ordinal>`, and `nic:<name>`.
+    /// The empty default preserves automatic device selection. Non-empty value
+    /// syntax is validated when the RDMA manager starts.
+    @meta(CONFIG = ConfigAttr::new(
+        Some("MONARCH_RDMA_IBVERBS_TARGET".to_string()),
+        Some("rdma_ibverbs_target".to_string()),
+    ))
+    pub attr RDMA_IBVERBS_TARGET: String = String::new();
 }

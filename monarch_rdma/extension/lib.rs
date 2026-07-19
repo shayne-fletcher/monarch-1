@@ -759,8 +759,9 @@ impl PyRdmaManager {
         let proc_mesh = proc_mesh.downcast::<PyProcMesh>()?.borrow().mesh_ref()?;
         PyPythonTask::new(async move {
             let actor_mesh: ActorMesh<RdmaManagerActor> = proc_mesh
-                // Pass None to use default config - RdmaManagerActor will use default IbverbsConfig
-                // TODO - make IbverbsConfig configurable
+                // Python supplies no per-manager config. `IbvManagerActor::new`
+                // fills an absent `IbvConfig::target` from `RDMA_IBVERBS_TARGET`
+                // (`rdma_ibverbs_target` in Python).
                 .spawn_service(client.deref(), "rdma_manager", &None)
                 .await
                 .map_err(|err| PyException::new_err(err.to_string()))?;

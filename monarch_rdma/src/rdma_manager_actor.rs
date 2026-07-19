@@ -156,6 +156,19 @@ impl RemoteSpawn for RdmaManagerActor {
 #[async_trait]
 impl Actor for RdmaManagerActor {
     async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
+        // An explicit per-manager target takes precedence over
+        // `RDMA_IBVERBS_TARGET`. Otherwise validate the process setting here:
+        // `spawn_available` may ignore an ibverbs initialization failure when
+        // TCP starts, silently turning a malformed pin into TCP fallback.
+        if self
+            .params
+            .as_ref()
+            .and_then(|config| config.target.as_ref())
+            .is_none()
+        {
+            let _ = crate::backend::ibverbs::device_selection::configured_ibverbs_target()?;
+        }
+
         // Spawn every available backend. `spawn_available` bails when none
         // is available (e.g. no NIC and TCP fallback disabled).
         let backends = RdmaBackends::spawn_available(
