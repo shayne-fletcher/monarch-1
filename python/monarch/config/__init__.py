@@ -86,6 +86,7 @@ if TYPE_CHECKING:
             rdma_allow_tcp_fallback: NotRequired[bool]
             rdma_disable_ibverbs: NotRequired[bool]
             rdma_max_chunk_size_mb: NotRequired[int]
+            rdma_ibverbs_target: NotRequired[str]
 
         # pyrefly: ignore [invalid-annotation]
         ConfigureKwargsType = Unpack[ConfigureArgs]
@@ -182,6 +183,11 @@ def configure(**kwargs: "ConfigureKwargsType") -> None:
                 causing all RDMA operations to use the TCP fallback backend.
             rdma_max_chunk_size_mb: Maximum chunk size in megabytes for RDMA
                 transfers.
+            rdma_ibverbs_target: Default ibverbs device target for managers
+                without an explicit target. Accepts ``"cpu:<numa>"``,
+                ``"gpu:<ordinal>"``, or ``"nic:<name>"``. Empty preserves
+                automatic selection. Non-empty value syntax is validated when
+                the RDMA manager starts.
 
         **kwargs: Reserved for future configuration keys exposed by Rust bindings.
     """

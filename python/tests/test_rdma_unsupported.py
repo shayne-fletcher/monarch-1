@@ -6,11 +6,10 @@
 
 # pyre-unsafe
 """
-Tests for RDMA functionality when RDMA is not supported.
+Tests for RDMA manager initialization failures.
 
-This file contains tests that are specifically designed to run on systems
-where RDMA is NOT available. These tests verify error handling and fallback
-behavior when RDMA support is missing.
+These tests cover unsupported hosts and configuration errors that must surface
+before backend fallback.
 """
 
 import sys
@@ -29,6 +28,38 @@ needs_no_rdma = pytest.mark.skipif(
     is_ibverbs_available(),
     reason="RDMA is available, test only runs on systems without RDMA support",
 )
+
+
+async def _rdma_manager_init_fault(**config: object) -> str:
+    import asyncio
+
+    import monarch.actor
+    from monarch._rust_bindings.rdma import _RdmaManager
+    from monarch._src.actor.actor_mesh import context
+    from monarch._src.actor.future import Future
+    from monarch.actor import this_host
+
+    faults = []
+    faulted = asyncio.Event()
+
+    def fault_hook(failure):
+        faults.append(failure)
+        faulted.set()
+
+    monarch.actor.unhandled_fault_hook = fault_hook
+
+    with configured(**config):
+        proc_mesh = this_host().spawn_procs(per_host={"cpus": 1})
+        await Future(
+            coro=_RdmaManager.create_rdma_manager_nonblocking(
+                await Future(coro=proc_mesh._proc_mesh.task()),
+                context().actor_instance,
+            )
+        )
+        await asyncio.wait_for(faulted.wait(), timeout=15.0)
+
+    assert faults, "Expected a supervision fault, got none"
+    return "\n".join(str(failure) for failure in faults)
 
 
 @needs_no_rdma
@@ -50,40 +81,19 @@ async def test_rdma_manager_creation_fails_when_unsupported() -> None:
     chain (Python -> Rust -> C ibverbs library); a Python mock cannot intercept
     the native device probe.
     """
-    import asyncio
-
-    import monarch.actor
-    from monarch._rust_bindings.rdma import _RdmaManager
-    from monarch._src.actor.actor_mesh import context
-    from monarch._src.actor.future import Future
-    from monarch.actor import this_host
-
-    faults = []
-    faulted = asyncio.Event()
-
-    def fault_hook(failure):
-        faults.append(failure)
-        faulted.set()
-
-    monarch.actor.unhandled_fault_hook = fault_hook
-
-    with configured(rdma_allow_tcp_fallback=False):
-        proc_mesh = this_host().spawn_procs(per_host={"cpus": 1})
-
-        # Spawning succeeds; the RdmaManagerActor's init then fails because no
-        # NIC backend is available and TCP fallback is disabled.
-        await Future(
-            coro=_RdmaManager.create_rdma_manager_nonblocking(
-                await Future(coro=proc_mesh._proc_mesh.task()),
-                context().actor_instance,
-            )
-        )
-
-        # The init failure arrives asynchronously as a supervision fault.
-        await asyncio.wait_for(faulted.wait(), timeout=15.0)
-
-    assert len(faults) >= 1, "Expected a supervision fault, got none"
-    failure_message = str(faults[0])
+    failure_message = await _rdma_manager_init_fault(rdma_allow_tcp_fallback=False)
     assert "no RDMA backend available" in failure_message, (
         f"Expected specific failure message not found. Actual fault: {failure_message}"
+    )
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+async def test_malformed_rdma_ibverbs_target_fails_manager_creation() -> None:
+    failure_message = await _rdma_manager_init_fault(
+        rdma_allow_tcp_fallback=True,
+        rdma_ibverbs_target="mlx5_0",  # Missing the required `nic:` target kind.
+    )
+    assert "RDMA_IBVERBS_TARGET" in failure_message, (
+        f"Expected target configuration error not found. Actual fault: {failure_message}"
     )
