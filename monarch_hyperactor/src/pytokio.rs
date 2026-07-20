@@ -753,6 +753,18 @@ pub struct PyShared {
     core: HandleCore,
 }
 
+impl PyShared {
+    /// Await this `Shared`'s result from Rust, yielding the resolved
+    /// `Py<PyAny>` (or the producer's `PyErr`).
+    ///
+    /// Returns the same future the Python `await` path drives, so a Rust
+    /// caller in another crate can resolve a `Shared[T]` inside an `async fn`
+    /// without a pickle round-trip or a blocking `block_on`.
+    pub fn wait_future(&self) -> impl Future<Output = PyResult<Py<PyAny>>> + Send + 'static {
+        self.core.wait_future()
+    }
+}
+
 #[pymethods]
 impl PyShared {
     /// Convert this `Shared` handle into a `PythonTask` that waits
