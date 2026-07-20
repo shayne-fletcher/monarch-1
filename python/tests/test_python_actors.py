@@ -44,7 +44,13 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorAddr
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 from monarch._src.actor.actor_mesh import ActorMesh, Channel, context, Port
-from monarch._src.actor.future import Future
+from monarch._src.actor.future import (
+    disable_tokio_oracle,
+    enable_tokio_oracle,
+    Future,
+    reset_tokio_oracle,
+    tokio_oracle_records,
+)
 from monarch._src.actor.host_mesh import _spawn_admin, HostMesh, this_host, this_proc
 from monarch._src.actor.logging import _pending_flush_tasks
 from monarch._src.actor.proc_mesh import get_or_spawn_controller, HyProcMesh
@@ -2297,3 +2303,26 @@ def test_accumulate_forwards_args_to_stream():
     ep = _stream_endpoint([1])
     Accumulator(ep, 0, operator.add).accumulate("a", k=1).get()
     ep.stream.assert_called_once_with("a", k=1)
+
+
+def test_accumulate_produces_no_tokio():
+    """Gate A (accumulate cluster): accumulate produces no `_Tokio` state.
+
+    Drives accumulate with the record-only `_Tokio` oracle enabled and asserts
+    actor_mesh.py produced no `_Tokio` (no `await <Future>` on the tokio thread).
+    Before the `_take_inner()` migration this recorded the impl producer at 876;
+    after it, zero.
+    """
+    disable_tokio_oracle()
+    reset_tokio_oracle()
+    enable_tokio_oracle()
+    try:
+        acc = Accumulator(_stream_endpoint([1, 2, 3]), 0, operator.add)
+        assert acc.accumulate().get() == 6
+        records = [
+            r for r in tokio_oracle_records() if r.filename.endswith("actor_mesh.py")
+        ]
+        assert records == [], f"accumulate still produces _Tokio: {records}"
+    finally:
+        disable_tokio_oracle()
+        reset_tokio_oracle()
