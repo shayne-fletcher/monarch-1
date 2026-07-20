@@ -873,7 +873,7 @@ class Accumulator(Generic[P, R, A]):
         async def impl() -> A:
             value = self._identity
             for x in gen:
-                value = self._combine(value, await x)
+                value = self._combine(value, await x._take_inner())
             return value
 
         return Future(coro=impl())
