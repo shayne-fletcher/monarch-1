@@ -25,6 +25,7 @@ mod errors;
 pub mod local_memory;
 mod rdma_components;
 mod rdma_manager_actor;
+mod rdma_manager_owner;
 mod rdma_runtime;
 
 pub use backend::ibverbs::primitives::*;
@@ -46,6 +47,7 @@ pub use errors::RdmaInitError;
 pub use rdma_components::RdmaRemoteBuffer;
 pub use rdma_components::*;
 pub use rdma_manager_actor::*;
+pub use rdma_manager_owner::*;
 // Re-export rdmaxcel_sys for extension crate to access types
 pub use rdmaxcel_sys;
 pub use test_utils::is_cuda_available;

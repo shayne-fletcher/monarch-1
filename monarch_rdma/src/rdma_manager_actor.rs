@@ -8,8 +8,8 @@
 
 //! # RDMA Manager Actor
 //!
-//! Per-process actor that owns RDMA buffer registrations and delegates
-//! transport-specific work to a NIC backend and [`TcpManagerActor`].
+//! Per-proc singleton service actor that owns RDMA buffer registrations and
+//! delegates transport-specific work to a NIC backend and [`TcpManagerActor`].
 //!
 //! ## Responsibilities
 //!
@@ -21,6 +21,19 @@
 //!   backend when available, or falls back to the TCP backend
 //!   ([`TcpManagerActor`]).
 //! - Handles remote [`ReleaseBuffer`] requests to clean up registrations.
+//!
+//! ## Service topology and readiness
+//!
+//! `spawn_service("rdma_manager", ...)` creates or reuses one
+//! `RdmaManagerActor` on each target proc and materializes an `ActorMesh` view
+//! over them. Overlapping proc-mesh views reuse the same actor on shared procs;
+//! each view still has its own `ActorMeshController`.
+//!
+//! The owner casts [`RdmaManagerReady`] to every actor in a view. Actor
+//! messages are dispatched only after `init()` succeeds, so the resulting
+//! [`ReadyAck`](crate::ReadyAck) certifies that this proc's manager backends
+//! are initialized. If initialization fails, no acknowledgement is sent and
+//! every controller monitoring that actor reports the failure to the owner.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -50,6 +63,11 @@ use crate::backend::ibverbs::primitives::IbvConfig;
 use crate::backend::tcp::manager_actor::TcpManagerActor;
 use crate::local_memory::KeepaliveLocalMemory;
 use crate::rdma_components::RdmaRemoteBuffer;
+use crate::rdma_manager_owner::EntryId;
+use crate::rdma_manager_owner::RdmaManagerOwnerActor;
+use crate::rdma_manager_owner::RdmaManagerReady;
+use crate::rdma_manager_owner::RdmaManagerReadyHandler;
+use crate::rdma_manager_owner::ReadyAckClient;
 
 /// Helper function to get detailed error messages from RDMAXCEL error codes
 pub fn get_rdmaxcel_error_message(error_code: i32) -> String {
@@ -112,6 +130,7 @@ wirevalue::register_type!(GetTcpActorRef);
     handlers = [
         GetTcpActorRef,
         ReleaseBuffer,
+        RdmaManagerReady,
     ],
 )]
 #[hyperactor::spawnable]
@@ -269,5 +288,21 @@ impl RdmaManagerMessageHandler for RdmaManagerActor {
         _cx: &Context<Self>,
     ) -> Result<Vec<RdmaBackendHandle>, anyhow::Error> {
         Ok(self.backends.get().expect("backends set in init").handles())
+    }
+}
+
+#[async_trait]
+#[hyperactor::handle(RdmaManagerReady)]
+impl RdmaManagerReadyHandler for RdmaManagerActor {
+    async fn rdma_manager_ready(
+        &mut self,
+        cx: &Context<Self>,
+        owner: ActorRef<RdmaManagerOwnerActor>,
+        entry: EntryId,
+    ) -> Result<(), anyhow::Error> {
+        // Runs strictly after `init()` (RMR-1): ack the owner so it can count
+        // this rank toward readiness.
+        owner.ready_ack(cx, entry).await?;
+        Ok(())
     }
 }
