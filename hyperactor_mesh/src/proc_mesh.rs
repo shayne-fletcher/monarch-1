@@ -727,6 +727,57 @@ impl ProcMeshRef {
         self.spawn_with_name(cx, id, params, None, false).await
     }
 
+    /// Spawn a controllerless 'service' actor.
+    ///
+    /// Like [`spawn_service`](Self::spawn_service), this spawns a singleton
+    /// service actor (a reserved name, deduped to one). Unlike `spawn_service`,
+    /// the resulting mesh has **no** `ActorMeshController`: no per-caller
+    /// controller actor is spawned, and the caller `C` is therefore **not**
+    /// required to implement `Handler<MeshFailure>`.
+    ///
+    /// This is for coordinators that own their own supervision — e.g. a
+    /// controllerless singleton that itself spawns controller-ful children —
+    /// where a per-caller controller would be redundant.
+    #[hyperactor::instrument(fields(
+        host_mesh=self.host_mesh_id().map(|id| id.to_string()),
+        proc_mesh=self.id.to_string(),
+        actor_name=name.to_string(),
+    ))]
+    pub async fn spawn_controllerless_service<A: RemoteSpawn, C: context::Actor>(
+        &self,
+        cx: &C,
+        name: &str,
+        params: &A::Params,
+    ) -> crate::Result<ActorMesh<A>>
+    where
+        A::Params: RemoteMessage,
+    {
+        tracing::info!(
+            name = "ProcMeshStatus",
+            status = "ActorMesh::Spawn::Attempt",
+        );
+        tracing::info!(name = "ActorMeshStatus", status = "Spawn::Attempt");
+        let id = ActorMeshId::singleton(Label::strip(name));
+        let result = self
+            .spawn_mesh_inner(cx, id, params, None)
+            .await
+            .map(|(mesh, _statuses)| mesh);
+        match &result {
+            Ok(_) => {
+                tracing::info!(
+                    name = "ProcMeshStatus",
+                    status = "ActorMesh::Spawn::Success",
+                );
+                tracing::info!(name = "ActorMeshStatus", status = "Spawn::Success");
+            }
+            Err(error) => {
+                tracing::error!(name = "ProcMeshStatus", status = "ActorMesh::Spawn::Failed", %error);
+                tracing::error!(name = "ActorMeshStatus", status = "Spawn::Failed", %error);
+            }
+        }
+        result
+    }
+
     /// Spawn an actor on all procs in this mesh under the given
     /// [`ActorMeshId`](crate::mesh_id::ActorMeshId), returning a new `ActorMesh`.
     ///
@@ -796,6 +847,55 @@ impl ProcMeshRef {
     where
         C::A: Handler<MeshFailure>,
     {
+        let (mut mesh, statuses) = self
+            .spawn_mesh_inner(cx, actor_mesh_id, params, supervision_display_name.clone())
+            .await?;
+        // System actors are managed by their owning runtime, not an
+        // ActorMeshController.
+        if !is_system_actor {
+            // Spawn a unique mesh manager for each actor mesh, so the type of the
+            // mesh can be preserved.
+            let controller: ActorMeshController<A> = ActorMeshController::new(
+                ActorMeshControlPlane::new(mesh.deref().clone(), self.clone()),
+                supervision_display_name,
+                Some(cx.instance().port().bind()),
+                statuses,
+            );
+            // hyperactor::proc AI-3: controller name must include mesh
+            // identity for proc-wide ActorAddr uniqueness. A fixed base name alone
+            // collides across parents because pid allocation is
+            // parent-scoped.
+            let controller_name = format!(
+                "{}_{}",
+                crate::mesh_controller::ACTOR_MESH_CONTROLLER_NAME,
+                mesh.id()
+            );
+            let controller = cx.spawn_with_label(&controller_name, controller);
+            // Controller and ActorMesh both depend on references from each other, break
+            // the cycle by setting the controller after the fact.
+            mesh.set_controller(Some(controller.bind()));
+        }
+        Ok(mesh)
+    }
+
+    /// The common spawn path shared by
+    /// [`spawn_with_name_inner`](Self::spawn_with_name_inner) and
+    /// [`spawn_controllerless_service`](Self::spawn_controllerless_service): the
+    /// create/update cast, the accumulator port, the bounded
+    /// `GetRankStatus::wait` with terminal / timeout mapping, mesh
+    /// materialization, and telemetry. It carries **no**
+    /// `C::A: Handler<MeshFailure>` bound — that is required only by the
+    /// controller construction (`cx.instance().port().bind()`), which the
+    /// bounded caller layers on afterward. Returns the mesh together with the
+    /// final `StatusMesh` (moved into the controller for non-system actors;
+    /// discarded otherwise — system actors and the controllerless path).
+    async fn spawn_mesh_inner<A: RemoteSpawn, C: context::Actor>(
+        &self,
+        cx: &C,
+        actor_mesh_id: ActorMeshId,
+        params: &A::Params,
+        supervision_display_name: Option<String>,
+    ) -> crate::Result<(ActorMesh<A>, crate::StatusMesh)> {
         let remote = Remote::collect();
         // `RemoteSpawn` + `register_spawnable!(A)` ensure that `A` has a
         // `SpawnableActor` entry in this registry, so
@@ -911,37 +1011,12 @@ impl ProcMeshRef {
                 .map_err(|error| crate::Error::ConfigurationError(error.into()))?,
         );
 
-        let mut mesh = ActorMesh::new(
+        let mesh = ActorMesh::new(
             self.clone(),
             actor_mesh_id.clone(),
             None,
             actor_mesh_members,
         );
-        // System actors are managed by their owning runtime, not an
-        // ActorMeshController.
-        if !is_system_actor {
-            // Spawn a unique mesh manager for each actor mesh, so the type of the
-            // mesh can be preserved.
-            let controller: ActorMeshController<A> = ActorMeshController::new(
-                ActorMeshControlPlane::new(mesh.deref().clone(), self.clone()),
-                supervision_display_name.clone(),
-                Some(cx.instance().port().bind()),
-                statuses,
-            );
-            // hyperactor::proc AI-3: controller name must include mesh
-            // identity for proc-wide ActorAddr uniqueness. A fixed base name alone
-            // collides across parents because pid allocation is
-            // parent-scoped.
-            let controller_name = format!(
-                "{}_{}",
-                crate::mesh_controller::ACTOR_MESH_CONTROLLER_NAME,
-                mesh.id()
-            );
-            let controller = cx.spawn_with_label(&controller_name, controller);
-            // Controller and ActorMesh both depend on references from each other, break
-            // the cycle by setting the controller after the fact.
-            mesh.set_controller(Some(controller.bind()));
-        }
         // Notify telemetry that an actor mesh was created.
         {
             let id_str = mesh.id().to_string();
@@ -990,7 +1065,7 @@ impl ProcMeshRef {
             }
         }
 
-        Ok(mesh)
+        Ok((mesh, statuses))
     }
 
     /// Send stop actors message to all mesh agents for a specific actor mesh id.
@@ -1676,6 +1751,46 @@ mod tests {
         let _ = hm.shutdown(instance).await;
     }
 
+    #[cfg(fbcode_build)]
+    #[assert_no_process_leak]
+    #[tokio::test]
+    async fn test_failing_spawn_controllerless() {
+        hyperactor_telemetry::initialize_logging(hyperactor_telemetry::DefaultTelemetryClock {});
+
+        let config = hyperactor_config::global::lock();
+        let _guard = config.override_key(PROC_SPAWN_MAX_IDLE, Duration::from_secs(60));
+        let _guard2 = config.override_key(
+            hyperactor::config::HOST_SPAWN_READY_TIMEOUT,
+            Duration::from_secs(60),
+        );
+
+        let instance = testing::instance();
+
+        let mut hm = testing::host_mesh(1).await;
+        let proc_mesh = hm
+            .spawn(&instance, "test", extent!(gpus = 1), None, None)
+            .await
+            .unwrap();
+        // The controllerless path shares spawn_mesh_inner, so it must still run
+        // the bounded spawn wait and surface the same ActorSpawnError shape on a
+        // terminal init failure — identical to spawn/spawn_service.
+        let err = proc_mesh
+            .spawn_controllerless_service::<testactor::FailingCreateTestActor, _>(
+                instance,
+                "testfail_controllerless",
+                &(),
+            )
+            .await
+            .unwrap_err();
+        let statuses = err.into_actor_spawn_error().unwrap();
+        assert_eq!(
+            statuses,
+            RankedValues::from((0..1, Status::Failed("test failure".to_string()))),
+        );
+
+        let _ = hm.shutdown(instance).await;
+    }
+
     #[async_timed_test(timeout_secs = 60)]
     #[cfg(fbcode_build)]
     async fn test_spawn_actor_on_proc_mesh_slice_only_spawns_slice_members() {
@@ -1818,5 +1933,80 @@ mod tests {
             python_class_from_supervision_name("instance0.<NoModule mesh>"),
             None,
         );
+    }
+
+    // Compile-only proof that `spawn_controllerless_service` does NOT require
+    // `C::A: Handler<MeshFailure>` — the whole point of the controllerless
+    // path. This generic wrapper omits that bound and still type-checks; the
+    // identical wrapper over `spawn_service` would fail to compile. (Generic
+    // fn bodies are type-checked at definition, so this holds without ever
+    // being called.)
+    #[allow(dead_code)]
+    async fn _spawn_controllerless_needs_no_mesh_failure_handler<A, C>(
+        pm: &super::ProcMeshRef,
+        cx: &C,
+        name: &str,
+        params: &A::Params,
+    ) -> crate::Result<crate::ActorMesh<A>>
+    where
+        A: hyperactor::RemoteSpawn,
+        A::Params: hyperactor::RemoteMessage,
+        C: hyperactor::context::Actor,
+    {
+        pm.spawn_controllerless_service::<A, C>(cx, name, params)
+            .await
+    }
+
+    #[cfg(fbcode_build)]
+    async fn execute_spawn_controllerless() {
+        hyperactor_telemetry::initialize_logging(hyperactor_telemetry::DefaultTelemetryClock {});
+
+        let instance = testing::instance();
+
+        let mut hm = testing::host_mesh(2).await;
+        let proc_mesh = hm
+            .spawn(&instance, "test", extent!(gpus = 1), None, None)
+            .await
+            .unwrap();
+
+        // A controllerless service mesh has no ActorMeshController...
+        let controllerless = proc_mesh
+            .spawn_controllerless_service::<testactor::TestActor, _>(
+                instance,
+                "svc_controllerless",
+                &(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            controllerless.controller().is_none(),
+            "spawn_controllerless_service must not create a controller",
+        );
+
+        // ...whereas an ordinary service mesh does (contrast).
+        let with_controller = proc_mesh
+            .spawn_service::<testactor::TestActor, _>(instance, "svc_with_controller", &())
+            .await
+            .unwrap();
+        assert!(
+            with_controller.controller().is_some(),
+            "spawn_service must create a controller",
+        );
+
+        let _ = hm.shutdown(instance).await;
+    }
+
+    #[async_timed_test(timeout_secs = 120)]
+    #[cfg(fbcode_build)]
+    async fn test_spawn_controllerless_service() {
+        let config = hyperactor_config::global::lock();
+        let _guard = config.override_key(ENABLE_NATIVE_V1_CASTING, true);
+        let _guard2 = config.override_key(ENABLE_DEST_ACTOR_REORDERING_BUFFER, true);
+        let _guard3 = config.override_key(PROC_SPAWN_MAX_IDLE, Duration::from_secs(120));
+        let _guard4 = config.override_key(
+            hyperactor::config::HOST_SPAWN_READY_TIMEOUT,
+            Duration::from_secs(120),
+        );
+        execute_spawn_controllerless().await;
     }
 }
