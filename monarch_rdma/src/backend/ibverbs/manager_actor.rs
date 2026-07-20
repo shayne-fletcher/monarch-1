@@ -265,6 +265,12 @@ impl<I: IbvDeviceImpl> IbvManagerActor<I> {
                 config
             }
         };
+
+        // Preserve an explicit per-manager target. Otherwise parse the process
+        // default from `RDMA_IBVERBS_TARGET`; empty preserves automatic selection.
+        if config.target.is_none() {
+            config.target = super::device_selection::configured_ibverbs_target()?;
+        }
         tracing::debug!("rdma is enabled, config target: {:?}", config.target);
 
         // check config and hardware support align

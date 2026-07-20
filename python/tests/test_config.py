@@ -25,6 +25,12 @@ class Chunker(Actor):
         return len(chunks)
 
 
+class RdmaTargetProbe(Actor):
+    @endpoint
+    def rdma_ibverbs_target(self) -> str:
+        return get_global_config()["rdma_ibverbs_target"]
+
+
 def test_get_set_transport() -> None:
     for transport in (
         ChannelTransport.Unix,
@@ -87,6 +93,21 @@ def test_get_set_multiple() -> None:
     assert not config["enable_file_capture"]
     assert config["tail_log_lines"] == 0
     assert config["default_transport"] == BindSpec(ChannelTransport.Unix)
+
+
+@isolate_in_subprocess
+def test_rdma_ibverbs_target_round_trip_and_propagation() -> None:
+    assert get_global_config()["rdma_ibverbs_target"] == ""
+
+    target = "nic:mlx5_0"
+    with configured(rdma_ibverbs_target=target) as config:
+        assert config["rdma_ibverbs_target"] == target
+
+        proc = this_host().spawn_procs()
+        probe = proc.spawn("rdma_target_probe", RdmaTargetProbe)
+        assert probe.rdma_ibverbs_target.call_one().get() == target
+
+    assert get_global_config()["rdma_ibverbs_target"] == ""
 
 
 @isolate_in_subprocess

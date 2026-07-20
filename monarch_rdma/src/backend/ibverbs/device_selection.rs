@@ -9,6 +9,7 @@
 //! ibverbs-specific device selection: pairs a [`MemoryLocation`] with the
 //! RDMA NIC(s) that have the best PCIe path to it.
 
+use std::str::FromStr;
 use std::sync::LazyLock;
 
 use anyhow::Context;
@@ -50,6 +51,56 @@ impl IbvDeviceTarget {
     pub fn nic(name: impl Into<String>) -> Self {
         Self::Nic(name.into())
     }
+}
+
+impl FromStr for IbvDeviceTarget {
+    type Err = anyhow::Error;
+
+    fn from_str(spec: &str) -> Result<Self> {
+        let (kind, value) = spec.split_once(':').with_context(|| {
+            format!(
+                "ibverbs target {spec:?} must be `cpu:<numa>`, `gpu:<ordinal>`, or `nic:<name>`"
+            )
+        })?;
+
+        let parse_index = |what: &str| -> Result<u32> {
+            value
+                .parse()
+                .with_context(|| format!("{what} {value:?} must be an integer in 0..={}", u32::MAX))
+        };
+
+        match kind {
+            "cpu" => Ok(Self::cpu(parse_index("cpu target NUMA node")?)),
+            "gpu" => Ok(Self::gpu(parse_index("gpu target ordinal")?)),
+            "nic" => {
+                anyhow::ensure!(
+                    !value.is_empty(),
+                    "nic target must name a device, for example `nic:mlx5_0`"
+                );
+                Ok(Self::nic(value))
+            }
+            other => anyhow::bail!(
+                "unknown ibverbs target kind {other:?}; expected `cpu`, `gpu`, or `nic`"
+            ),
+        }
+    }
+}
+
+/// Return the configured ibverbs target, or `None` when it is unset.
+///
+/// Returns an error when the non-empty value is malformed.
+pub(crate) fn configured_ibverbs_target() -> Result<Option<IbvDeviceTarget>> {
+    let spec = hyperactor_config::global::get_cloned(crate::config::RDMA_IBVERBS_TARGET);
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Ok(None);
+    }
+    let target = spec.parse().map_err(|error| {
+        anyhow::anyhow!(
+            "invalid RDMA_IBVERBS_TARGET (`rdma_ibverbs_target` in Python) value {spec:?}: {error}"
+        )
+    })?;
+    Ok(Some(target))
 }
 
 /// The PCI address of an RDMA NIC, resolved from its sysfs device link
@@ -186,4 +237,74 @@ pub fn get_cuda_device_to_ibv_device<I: IbvDeviceImpl>() -> &'static Vec<Option<
             .collect();
         Box::leak(Box::new(result))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_each_target_kind() {
+        assert_eq!(
+            "cpu:0"
+                .parse::<IbvDeviceTarget>()
+                .expect("cpu target should parse"),
+            IbvDeviceTarget::cpu(0),
+        );
+        assert_eq!(
+            "gpu:1"
+                .parse::<IbvDeviceTarget>()
+                .expect("gpu target should parse"),
+            IbvDeviceTarget::gpu(1),
+        );
+        assert_eq!(
+            "nic:mlx5_0"
+                .parse::<IbvDeviceTarget>()
+                .expect("NIC target should parse"),
+            IbvDeviceTarget::nic("mlx5_0"),
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_targets() {
+        for invalid in ["", "cpu", "cpu:", "cpu:x", "gpu:-1", "nic:", "other:0"] {
+            assert!(
+                invalid.parse::<IbvDeviceTarget>().is_err(),
+                "expected {invalid:?} to be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn empty_configured_target_is_unset() {
+        let lock = hyperactor_config::global::lock();
+        let _guard = lock.override_key(crate::config::RDMA_IBVERBS_TARGET, String::new());
+        assert_eq!(
+            configured_ibverbs_target().expect("empty target should be valid"),
+            None,
+        );
+    }
+
+    #[test]
+    fn parses_configured_target() {
+        let lock = hyperactor_config::global::lock();
+        let _guard = lock.override_key(
+            crate::config::RDMA_IBVERBS_TARGET,
+            "  nic:mlx5_1  ".to_string(),
+        );
+
+        assert_eq!(
+            configured_ibverbs_target().expect("configured target should be valid"),
+            Some(IbvDeviceTarget::nic("mlx5_1")),
+        );
+    }
+
+    #[test]
+    fn malformed_configured_target_names_the_setting() {
+        let lock = hyperactor_config::global::lock();
+        let _guard = lock.override_key(crate::config::RDMA_IBVERBS_TARGET, "mlx5_1".to_string());
+
+        let error = configured_ibverbs_target().expect_err("malformed target should fail");
+        assert!(error.to_string().contains("RDMA_IBVERBS_TARGET"));
+    }
 }
