@@ -6,17 +6,24 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-//! Process-global context, root client actor, and supervision bridge.
+//! Process-global context, root client actor, external-runtime registrations,
+//! and supervision bridge.
 //!
-//! This module provides the Rust equivalent of Python's `context()`,
-//! `this_host()`, and `this_proc()`. A singleton [`Host`] is lazily
-//! created with the [`GlobalClientActor`] on its `local_proc`:
+//! This module has two separate root-context roles:
+//!
+//! - Rust callers use the lazy [`GLOBAL_CONTEXT`] path, exposed through
+//!   [`context()`], [`this_host()`], and [`this_proc()`]. A singleton
+//!   [`Host`] is created with the [`GlobalClientActor`] on its `local_proc`.
+//! - External runtimes such as Python do not use [`GLOBAL_CONTEXT`]. They
+//!   may register their already-bootstrapped client root meshes through
+//!   [`register_client_host`] and [`register_client_proc`]. Registration
+//!   getters are non-bootstrapping and must not initialize [`GLOBAL_CONTEXT`].
 //!
 //! ```rust,ignore
 //! let cx = context().await;
 //! cx.actor_instance    // c.f. Python: context().actor_instance
 //! this_host().await    // c.f. Python: this_host()
-//! this_proc().await    // c.f Python: this_proc()
+//! this_proc().await    // c.f. Python: this_proc()
 //! ```
 //!
 //! ## Undeliverables → supervision
@@ -49,6 +56,17 @@
 //! If no sink has been installed yet (early/late binding),
 //! undeliverables are logged and dropped, preserving forward progress
 //! until a mesh becomes available.
+//!
+//! ## External runtime registration
+//!
+//! **GC-2 (external registration is non-bootstrapping):** External-runtime
+//! registration lookups must never initialize the lazy Rust [`GLOBAL_CONTEXT`].
+//! They read only already-initialized cells via `.get()` (`OnceCell::get` for
+//! `GLOBAL_CONTEXT`, `OnceLock::get` for the registration slots), never a
+//! `get_or_init`. In particular, [`try_registered_client_proc`] returns only
+//! the externally registered proc mesh and deliberately ignores any coexisting
+//! Rust global context; absence is reported as `None`, not filled by
+//! bootstrapping a Rust root.
 
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -560,7 +578,8 @@ static REGISTERED_CLIENT_HOST: std::sync::OnceLock<HostMeshRef> = std::sync::Onc
 
 /// Register the client host mesh from an external runtime (Python).
 /// Called by Python's `bootstrap_host()` so that `try_this_host()`
-/// can discover C for the A/C invariant.
+/// can discover C for the A/C invariant. First registration wins: a later
+/// call is silently ignored (the `OnceLock` is already set).
 pub fn register_client_host(host_mesh: HostMeshRef) {
     let _ = REGISTERED_CLIENT_HOST.set(host_mesh);
 }
@@ -574,6 +593,30 @@ pub fn try_this_host() -> Option<&'static HostMeshRef> {
         .get()
         .map(|state| &state.host_mesh)
         .or_else(|| REGISTERED_CLIENT_HOST.get())
+}
+
+/// Separate storage for the client *proc* mesh registered by non-Rust
+/// runtimes (e.g. Python's `bootstrap_host()`), mirroring
+/// `REGISTERED_CLIENT_HOST`. Read by `try_registered_client_proc()`.
+static REGISTERED_CLIENT_PROC: std::sync::OnceLock<ProcMeshRef> = std::sync::OnceLock::new();
+
+/// Register the client proc mesh from an external runtime (Python).
+/// Mirrors `register_client_host`; called from Python's `bootstrap_host()`
+/// so `try_registered_client_proc` can discover the client proc. First
+/// registration wins: a later call is silently ignored (the `OnceLock` is
+/// already set).
+pub fn register_client_proc(proc_mesh: ProcMeshRef) {
+    let _ = REGISTERED_CLIENT_PROC.set(proc_mesh);
+}
+
+/// Returns the externally-registered client proc mesh, or `None` if none
+/// was registered. Non-bootstrapping: reads only the registration
+/// (`.get()`, never `get_or_init`), so it never spins up `GLOBAL_CONTEXT`.
+/// This getter has a single source of truth: it reads only the external
+/// registration; a coexisting Rust `GLOBAL_CONTEXT` root is ignored, with no
+/// fallback (unlike `try_this_host`, which does consult `GLOBAL_CONTEXT`).
+pub fn try_registered_client_proc() -> Option<&'static ProcMeshRef> {
+    REGISTERED_CLIENT_PROC.get()
 }
 
 #[cfg(test)]
@@ -590,6 +633,21 @@ mod tests {
     use super::*;
     #[cfg(fbcode_build)]
     use crate::testing;
+
+    /// GC-2: the lookup ignores an initialized Rust `GLOBAL_CONTEXT` root and
+    /// returns `None` when there is no external registration.
+    #[tokio::test]
+    async fn test_try_registered_client_proc_ignores_rust_global_context() {
+        let _ = context().await;
+        assert!(
+            GLOBAL_CONTEXT.get().is_some(),
+            "test must initialize the Rust global context",
+        );
+        assert!(
+            try_registered_client_proc().is_none(),
+            "registered-client-proc lookup must not fall back to Rust GLOBAL_CONTEXT",
+        );
+    }
 
     /// Helper: send an `Undeliverable<MessageEnvelope>` to the global
     /// root client's well-known undeliverable port via the runtime's
