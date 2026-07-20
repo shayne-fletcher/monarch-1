@@ -449,6 +449,13 @@ fn bootstrap_host(
         })
         .await;
 
+        // Register the client proc mesh for external-runtime discovery
+        // (`python_client_root`). `bootstrap_client_inner` has just set
+        // `ROOT_CLIENT_INSTANCE_FOR_HOST`, so registering here keeps the pair
+        // complete: the root client instance and the client proc are set
+        // together, before `proc_mesh` is moved into `PyProcMesh` below.
+        hyperactor_mesh::global_context::register_client_proc(proc_mesh.clone());
+
         // Notify telemetry of the bootstrap host mesh, proc mesh, and client actor.
         {
             let now = std::time::SystemTime::now();
@@ -539,6 +546,84 @@ fn bootstrap_host(
             PyInstance::from(instance),
         ))
     })
+}
+
+/// The Python-bootstrapped client root: the root client instance plus the
+/// client proc mesh registered by `bootstrap_host`. Discovered by
+/// [`python_client_root`] for callers that need the stable Python root.
+pub struct PythonClientRoot {
+    cx: &'static Instance<PythonActor>,
+    proc_mesh: ProcMeshRef,
+}
+
+impl PythonClientRoot {
+    /// Spawn a controllerless owner actor on the client root's proc mesh,
+    /// using the root's own stable client instance as the caller context, and
+    /// return its typed [`ActorRef<A>`](hyperactor::ActorRef).
+    ///
+    /// The Python client-root proc mesh is a singleton (one proc), so the
+    /// spawned mesh has exactly one rank. This validates that invariant and
+    /// returns rank 0's actor reference, encoding the single-owner contract in
+    /// the return type and letting callers use the generated `RefClient`
+    /// methods. The intermediate `ActorMesh` is dropped once the ref is
+    /// extracted; its `Drop` is inert, so this does not tear the owner down.
+    ///
+    /// Method-only by design: the owner must be spawned with the long-lived
+    /// root `cx`, never an arbitrary (possibly short-lived) caller context.
+    pub async fn spawn_controllerless_owner<A: hyperactor::RemoteSpawn>(
+        &self,
+        name: &str,
+        params: &A::Params,
+    ) -> hyperactor_mesh::Result<hyperactor::ActorRef<A>>
+    where
+        A::Params: hyperactor::RemoteMessage,
+    {
+        let mesh = self
+            .proc_mesh
+            .spawn_controllerless_service(self.cx, name, params)
+            .await?;
+        // `Ranked` is not imported at module scope: it would make the existing
+        // `.region()` calls in this file ambiguous with `View::region`.
+        let actual = ndslice::view::Ranked::region(&*mesh).num_ranks();
+        if actual != 1 {
+            return Err(hyperactor_mesh::Error::InvalidRankCardinality {
+                expected: 1,
+                actual,
+            });
+        }
+        Ok(ndslice::view::Ranked::get(&*mesh, 0)
+            .expect("singleton owner mesh must contain rank 0")
+            .clone())
+    }
+}
+
+/// Discover the Python-bootstrapped client root, if present.
+///
+/// Python-root discovery only: reads `ROOT_CLIENT_INSTANCE_FOR_HOST` and
+/// [`try_registered_client_proc`](hyperactor_mesh::global_context::try_registered_client_proc)
+/// — never `context()` / `this_proc()` / `try_this_host()`, and it does not
+/// consult the Rust `GLOBAL_CONTEXT`.
+///
+/// Returns `Ok(None)` when neither slot is registered, `Ok(Some(_))` when both
+/// are, and `Err` when exactly one is (partial registration — the pair is set
+/// together by `bootstrap_host`).
+pub fn python_client_root() -> Result<Option<PythonClientRoot>, anyhow::Error> {
+    match (
+        ROOT_CLIENT_INSTANCE_FOR_HOST.get(),
+        hyperactor_mesh::global_context::try_registered_client_proc(),
+    ) {
+        (Some(cx), Some(proc_mesh)) => Ok(Some(PythonClientRoot {
+            cx,
+            proc_mesh: proc_mesh.clone(),
+        })),
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(anyhow::anyhow!(
+            "partial Python client root registration: root client instance is registered but client proc mesh is missing"
+        )),
+        (None, Some(_)) => Err(anyhow::anyhow!(
+            "partial Python client root registration: client proc mesh is registered but root client instance is missing"
+        )),
+    }
 }
 
 #[pyfunction]
