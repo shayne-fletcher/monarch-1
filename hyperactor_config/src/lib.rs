@@ -46,6 +46,7 @@ pub use attrs::SerializableValue;
 #[doc(hidden)]
 pub use bincode;
 pub use flattrs::Flattrs;
+pub use flattrs::FlattrsValidationError;
 // Re-export AttrValue derive macro
 pub use hyperactor_config_macros::AttrValue;
 // Re-export macros needed by declare_attrs!
