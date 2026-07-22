@@ -25,18 +25,22 @@
 //! Assumed of the shared core and producer (not enforced here):
 //! - **HDL-1 (single terminal completion).** The watch value goes `None` ->
 //!   `Some(_)` exactly once and is never reset (`Some` -> `Some`, `Some` ->
-//!   `None`). Relied on by [`HandleCore::wait_future`] (wait loop + `expect`) and
-//!   [`HandleCore::poll`] (re-borrow across the GIL). Held by convention: every
-//!   producer sends once, always `Some(_)`. A send-once sender (a newtype
+//!   `None`). Relied on by [`HandleCore::wait_future`] (wait loop + `expect`),
+//!   [`HandleCore::poll`] (re-borrow across the GIL), and
+//!   [`PyHandle::wait_completion`] (discriminant check then GIL re-borrow). Held
+//!   by convention: every producer sends once, always `Some(_)` (including the
+//!   direct [`PyHandle::spawn`] producer). A send-once sender (a newtype
 //!   consuming the `watch::Sender`) could make it structural, hardening `poll`'s
 //!   re-borrow.
 //! - **HDL-2 (value encoding).** `None` is pending, `Some(Ok(_))` success,
 //!   `Some(Err(_))` a producer error.
 //!
 //! Guaranteed by this module:
-//! - **HDL-3 (non-consuming reads).** Every read clones the value out
-//!   (`clone_ref`) rather than moving it, so any number of observers see the
-//!   same result. Enforced by construction: no read path moves the value.
+//! - **HDL-3 (non-consuming reads).** No read moves the value out: a
+//!   value-extracting read clones it (`clone_ref`), and a discriminant-only read
+//!   (`wait_completion`'s success fast path) borrows just the `Ok`/`Err` tag and
+//!   clones nothing. Either way any number of observers see the same result.
+//!   Enforced by construction: no read path moves the value.
 //! - **HDL-4 (drop does not cancel; drop never panics).** Dropping a `Handle`
 //!   never cancels its producer; a `Handle` observes, it does not own the
 //!   producer's lifecycle. Enforced by construction: a `Handle`'s core has
@@ -63,9 +67,10 @@
 //!   happens to block. A ready value returns after warning; under a
 //!   warnings-as-errors filter the warning escalates to an error.
 //! - **HDL-9 (GIL/watch borrow discipline).** A `watch` borrow is never held
-//!   across a GIL acquisition or an `.await`. `poll` drops its read guard before
-//!   taking the GIL and re-borrows under it (GIL-then-watch order, never the
-//!   inverse against the producer's write-lock `send`); the `wait_ready`/
+//!   across a GIL acquisition or an `.await`. `poll` and `wait_completion`'s error
+//!   path drop their read guard before taking the GIL and re-borrow under it
+//!   (GIL-then-watch order, never the inverse against the producer's write-lock
+//!   `send`); the `wait_ready`/
 //!   `wait_future` loops drop the temporary `Ref` before each `.await`; and their
 //!   returned futures own a cloned receiver (`Send + 'static`, borrowing nothing
 //!   from `&self`), which is what lets `get()` `drop(slf)` + release the GIL
@@ -74,9 +79,9 @@
 //!   partly by construction; exercised by the multi-observer/blocking tests.
 //! - **HDL-10 (dropped producer surfaces, never hangs).** If every producer drops
 //!   its sender without sending, the wait loop's `changed().await?` yields a
-//!   `RecvError` turned into a Python exception (`to_py_error`) on both the sync
-//!   (`get`/`wait_future`) and async (`as_asyncio`) paths, so an observer raises
-//!   rather than hanging forever.
+//!   `RecvError` turned into a Python exception (`to_py_error`) on the sync
+//!   (`get`/`wait_future`) path, the async (`as_asyncio`) path, and
+//!   `wait_completion`, so an observer raises rather than hanging forever.
 //! - **HDL-11 (`Handle` is not constructible from Python).** The pyclass has no
 //!   `#[new]` and the only `from_value` constructor is `#[cfg(test)]`-gated, so a
 //!   live `Handle` always wraps a producer-supplied core (upholding HDL-1/HDL-2);
@@ -88,10 +93,22 @@
 //!   is non-cancelling: it raises `TimeoutError` while leaving the producer and
 //!   every observer untouched, so a later `poll()`/`get()`/`await` still observes
 //!   completion.
+//! - **HDL-13 (direct Rust producer).** A Rust caller can eagerly produce a
+//!   `Handle` from a `Send + 'static` future via [`PyHandle::spawn`], without a
+//!   `PyPythonTask`: it spawns one producer that converts the terminal value to
+//!   `Py<PyAny>` under `monarch_with_gil` and publishes it once through the shared
+//!   `send_result` helper (same one-shot core and unobserved-error policy as
+//!   pytokio's producers, HDL-1/HDL-2), with `abort_on_drop: None` (HDL-4).
+//!   [`PyHandle::wait_completion`] is the matching observer: it projects the
+//!   terminal value to `PyResult<()>`, touching neither the GIL nor the Python
+//!   value on the ready-success fast path (a discriminant-only read, HDL-3) and
+//!   cloning the `PyErr` under the HDL-9 borrow order only on the error path. Both
+//!   are `pub` Rust-only methods outside `#[pymethods]` (HDL-11).
 
 use std::future::Future;
 
 use monarch_types::py_global;
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyStopIteration;
 use pyo3::exceptions::PyTimeoutError;
@@ -105,6 +122,7 @@ use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
 use crate::pytokio::is_tokio_thread;
+use crate::pytokio::send_result;
 use crate::pytokio::to_py_error;
 use crate::runtime::GilSite;
 use crate::runtime::get_tokio_runtime;
@@ -301,6 +319,83 @@ impl PyHandle {
     /// is private to this module.
     pub(crate) fn from_core(core: HandleCore) -> Self {
         Self { core }
+    }
+
+    /// Eagerly drive a Rust future to completion and return an observe-only
+    /// `Handle` over its result (HDL-13).
+    ///
+    /// The producer spawns immediately on the shared Tokio runtime; the returned
+    /// `Handle` observes already-running work rather than starting it lazily on
+    /// first observation. On completion the terminal `PyResult<T>` is converted
+    /// to `Py<PyAny>` under `monarch_with_gil` and published exactly once through
+    /// the shared `send_result` helper (HDL-1/HDL-2). The core carries
+    /// `abort_on_drop: None`, so dropping the `Handle` never cancels the producer
+    /// (HDL-4). Rust-only and outside `#[pymethods]`, so Python still cannot mint
+    /// a core (HDL-11).
+    pub fn spawn<F, T>(fut: F) -> Self
+    where
+        F: Future<Output = PyResult<T>> + Send + 'static,
+        T: for<'py> IntoPyObject<'py> + Send,
+    {
+        let (tx, rx) = watch::channel(None);
+        get_tokio_runtime().spawn(async move {
+            // Convert the terminal value to a Python object under the GIL, the
+            // same shape as `PyPythonTask` producers.
+            let result = async {
+                let value = fut.await?;
+                monarch_with_gil(GilSite::Convert, |py| value.into_py_any(py)).await
+            }
+            .await;
+            // HDL-1/HDL-2/HDL-13: publish exactly once via the shared helper; a
+            // direct Rust producer carries no creation traceback.
+            send_result(tx, result, None);
+        });
+        // HDL-4: a `Handle`'s core never aborts its producer on drop.
+        PyHandle::from_core(HandleCore::new(rx, None, None))
+    }
+
+    /// Observe whether this handle completed successfully, projecting the terminal
+    /// value to `PyResult<()>` (HDL-13).
+    ///
+    /// Returns an owned `Send + 'static` future over a cloned receiver (HDL-9),
+    /// so multiple Rust callers can observe the same terminal state and dropping
+    /// the `Handle` after taking an observer does not abort the producer (HDL-4).
+    /// The ready-success fast path touches neither the GIL nor the Python value
+    /// (a discriminant-only read, HDL-3); only the error path clones the stored
+    /// `PyErr`. This is the readiness surface for callers that need only the
+    /// success/error discriminant, not the value.
+    pub fn wait_completion(&self) -> impl Future<Output = PyResult<()>> + Send + 'static {
+        let ready = self.core.wait_ready();
+        async move {
+            // HDL-10: a dropped producer surfaces as a Python exception here.
+            let rx = ready.await.map_err(to_py_error)?;
+            // Read only the success/error discriminant under a watch borrow that
+            // holds no GIL, then drop it. HDL-1: the value is `Some` and, once
+            // set, never changes.
+            let is_err = rx
+                .borrow()
+                .as_ref()
+                .expect("HDL-1: value is Some after wait_ready")
+                .is_err();
+            if !is_err {
+                return Ok(());
+            }
+            // Error path only. HDL-9: acquire the GIL first, then re-borrow the
+            // watch value (GIL-then-watch order, never the inverse); the
+            // discriminant borrow above is already dropped, so the two are never
+            // held together, and HDL-1 guarantees the same terminal `Err` is still
+            // there to clone.
+            monarch_with_gil(GilSite::Convert, move |py| -> PyResult<()> {
+                Err(rx
+                    .borrow()
+                    .as_ref()
+                    .expect("HDL-1: value is Some after wait_ready")
+                    .as_ref()
+                    .expect_err("HDL-1: error branch, discriminant already checked")
+                    .clone_ref(py))
+            })
+            .await
+        }
     }
 }
 
@@ -1385,6 +1480,119 @@ class MyStop(StopIteration):
                 err.is_instance_of::<pyo3::exceptions::PyTypeError>(py),
                 "constructing Handle() from Python should raise TypeError (no __new__)"
             );
+        });
+    }
+
+    // spawn() eagerly runs its producer -- before any observer exists -- and
+    // resolves the converted value; no PyPythonTask is involved.
+    // Attests HDL-1, HDL-2, HDL-13.
+    #[test]
+    fn rust_spawn_eagerly_resolves_handle() {
+        ensure_python();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = PyHandle::spawn(async move {
+            let _ = started_tx.send(());
+            let _ = release_rx.await;
+            Ok::<i64, PyErr>(42)
+        });
+        // Eager: the producer starts before we create any observer.
+        get_tokio_runtime()
+            .block_on(started_rx)
+            .expect("spawn() must start its producer eagerly, before observation");
+        let _ = release_tx.send(());
+        let out = get_tokio_runtime().block_on(handle.core.wait_future());
+        let got =
+            monarch_with_gil_blocking(GilSite::Test, |py| out.unwrap().extract::<i64>(py).unwrap());
+        assert_eq!(
+            got, 42,
+            "spawn() should resolve the converted producer value"
+        );
+    }
+
+    // Two wait_completion() observers of one handle both see the same terminal
+    // outcome; observation is non-consuming, and success projects to Ok(()).
+    // Attests HDL-3, HDL-13.
+    #[test]
+    fn rust_wait_completion_is_non_consuming() {
+        ensure_python();
+
+        // Success: two observers of one pending handle both resolve to Ok(()).
+        let (tx, handle) = pending_handle();
+        let ok1 = handle.wait_completion();
+        let ok2 = handle.wait_completion();
+        let value = monarch_with_gil_blocking(GilSite::Test, |py| 1i64.into_py_any(py).unwrap());
+        tx.send(Some(Ok(value))).unwrap();
+        let (r1, r2) = get_tokio_runtime().block_on(async move { tokio::join!(ok1, ok2) });
+        assert!(
+            r1.is_ok() && r2.is_ok(),
+            "both completion observers should project success to Ok(())"
+        );
+
+        // Error: two observers of one failed handle both surface the stored error.
+        let (etx, ehandle) = pending_handle();
+        let err1 = ehandle.wait_completion();
+        let err2 = ehandle.wait_completion();
+        etx.send(Some(Err(PyValueError::new_err("boom")))).unwrap();
+        let (e1, e2) = get_tokio_runtime().block_on(async move { tokio::join!(err1, err2) });
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            assert!(
+                e1.unwrap_err().is_instance_of::<PyValueError>(py),
+                "the error projection should clone the stored PyErr"
+            );
+            assert!(e2.unwrap_err().is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    // Dropping the returned Handle before the producer completes does not cancel
+    // it (HDL-4: a spawn()-produced core has abort_on_drop = None).
+    // Attests HDL-4, HDL-13.
+    #[test]
+    fn rust_spawn_survives_handle_drop() {
+        ensure_python();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = PyHandle::spawn(async move {
+            let _ = release_rx.await;
+            let _ = done_tx.send(());
+            Ok::<i64, PyErr>(7)
+        });
+        // Drop the observer before releasing the producer.
+        drop(handle);
+        let _ = release_tx.send(());
+        // The producer still runs to completion despite the dropped Handle.
+        get_tokio_runtime()
+            .block_on(done_rx)
+            .expect("dropping the Handle must not cancel the spawn() producer");
+    }
+
+    // The real spawn() -> wait_completion() pair: a spawn()-produced future that
+    // returns Err surfaces the exact exception (type + message) through
+    // wait_completion, and observing twice sequentially returns the same cached
+    // error -- proving non-consuming error projection over a real producer.
+    // Attests HDL-1, HDL-2, HDL-3, HDL-13.
+    #[test]
+    fn rust_spawn_error_observed_by_wait_completion_twice() {
+        ensure_python();
+        let handle =
+            PyHandle::spawn(async move { Err::<(), PyErr>(PyValueError::new_err("boom")) });
+        // Observe the same terminal error twice, sequentially, over the real
+        // spawn()-produced core.
+        let first = get_tokio_runtime().block_on(handle.wait_completion());
+        let second = get_tokio_runtime().block_on(handle.wait_completion());
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            for (label, res) in [("first", first), ("second", second)] {
+                let err = res.expect_err("wait_completion should surface the producer error");
+                assert!(
+                    err.is_instance_of::<PyValueError>(py),
+                    "{label}: expected PyValueError"
+                );
+                let msg = err.value(py).to_string();
+                assert!(
+                    msg.contains("boom"),
+                    "{label}: cached error message should be preserved, got {msg}"
+                );
+            }
         });
     }
 }

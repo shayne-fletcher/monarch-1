@@ -447,16 +447,17 @@ impl PyPythonTask {
     }
 }
 
-/// Publish a completed task result to the `watch` channel.
+/// Publish a completed background-task result to the `watch` channel.
 ///
-/// If the receiver has already been dropped, `watch::Sender::send`
-/// returns the unsent value as `SendError`. We treat that as "nobody
-/// will ever observe this result".
+/// Shared by `PyPythonTask` spawns and the direct [`PyHandle::spawn`] producer
+/// (HDL-13). If the receiver has already been dropped, `watch::Sender::send`
+/// returns the unsent value as `SendError`. We treat that as "nobody will ever
+/// observe this result".
 ///
-/// In the special case where the unobserved result is an error, we
-/// log it (and include the task creation traceback when available) to
-/// avoid silently losing failures from background tasks.
-fn send_result(
+/// In the special case where the unobserved result is an error, we log it (and
+/// include the creation-site traceback when available) to avoid silently losing
+/// failures from background tasks.
+pub(crate) fn send_result(
     tx: tokio::sync::watch::Sender<Option<PyResult<Py<PyAny>>>>,
     result: PyResult<Py<PyAny>>,
     traceback: Option<Py<PyAny>>,
@@ -467,11 +468,17 @@ fn send_result(
             let tb = if let Some(tb) = traceback {
                 format_traceback(py, &tb).unwrap()
             } else {
-                "None (run with `MONARCH_HYPERACTOR_ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK=1` to see a traceback here)\n".into()
+                // No creation traceback was captured: either a capture-disabled
+                // `PythonTask` (the default when the env var is unset) or the
+                // direct `PyHandle::spawn` producer, which never captures one.
+                "creation traceback unavailable (PythonTask producers can set \
+                 `MONARCH_HYPERACTOR_ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK=1` to capture one)\n"
+                    .into()
             };
             tracing::error!(
-                "PythonTask errored but is not being awaited; this will not crash your program, but indicates that \
-                something went wrong.\n{}\nTraceback where the task was created (most recent call last):\n{}",
+                "a background task errored but is not being awaited; this will not crash your \
+                program, but indicates that something went wrong.\n{}\nTraceback where the task \
+                was created (most recent call last):\n{}",
                 SerializablePyErr::from(py, &pyerr),
                 tb
             );
