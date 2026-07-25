@@ -51,14 +51,43 @@
 //! owner can retain those indefinitely. This is inherited `Handle` observer
 //! behavior, not specific to this binding, and is left unaddressed here rather
 //! than expanding scope to generic observer cancellation.
+//!
+//! `create_rdma_buffer_blocking`, `_RdmaBuffer::drop`, and `_RdmaAction::submit`
+//! accept a readiness `Handle[None]` (`rdma_manager_init`); production Python
+//! supplies the owner-backed Handle for the current `ProcMesh`. The cutover
+//! invariants (`RDC-*`) are:
+//!
+//! - **RDC-1** (single production readiness authority): production Python gates
+//!   every manager-dependent entry point with the terminal result cached by
+//!   `RdmaManagerOwnerActor` for its `ProcMesh`. The native methods treat the
+//!   supplied Handle as a readiness capability; they do not prove its provenance.
+//! - **RDC-2** (exact mesh and cache boundary): the Python explicit helper forwards
+//!   its argument's exact `Shared` and weakly caches by `ProcMesh` identity; the
+//!   no-argument helper supplies the current context's mesh (enforced in `rdma.py`).
+//! - **RDC-3** (ready before effect): each native entry starts its operation only
+//!   after `wait_completion()` resolves `Ok`; a readiness `PyErr` becomes the
+//!   blocking call or returned `Future`'s exception without translation, before
+//!   the buffer request, action lock, submit, or drop.
+//! - **RDC-4** (driver-safe observation): each native entry takes the Handle as a
+//!   `PyRef<PyHandle>`, extracts the owned `Send + 'static` completion future, and
+//!   drops the `PyRef` before `.await`/`signal_safe_block_on`; no Python borrow
+//!   crosses the wait.
+//! - **RDC-5** (public result contract): buffer creation returns the buffer;
+//!   successful submit and drop tasks return Python `None`, including the public
+//!   read and write methods that delegate to submit.
+//! - **RDC-6** (no RDMA `_Tokio` producer): production `rdma.py` has no Tokio-driven
+//!   coroutine that awaits a `Future` (enforced in `rdma.py`).
+//! - **RDC-7** (validate before eager init): local backend, memory, zero-size, and
+//!   submit-timeout checks complete before the cached readiness helper is called
+//!   (enforced in `RDMABuffer.__init__` and `RDMAAction.submit`).
 
 #![allow(unsafe_op_in_unsafe_fn)]
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
 use hyperactor::Endpoint;
-use hyperactor_mesh::ActorMesh;
 use hyperactor_mesh::ProcMeshRef;
 use hyperactor_mesh::client_root::ClientRootRef;
 use hyperactor_mesh::client_root::ClientRootService;
@@ -629,17 +658,46 @@ impl PyRdmaAction {
     /// queue on the inner async mutex and run one at a time, so the
     /// local-range overlap checks performed at `add_*` time remain
     /// meaningful.
-    fn submit(&self, _py: Python<'_>, client: PyInstance, timeout: u64) -> PyResult<PyPythonTask> {
+    fn submit(
+        &self,
+        _py: Python<'_>,
+        client: PyInstance,
+        timeout: u64,
+        rdma_manager_init: PyRef<'_, PyHandle>,
+    ) -> PyResult<PyPythonTask> {
         let inner = self.inner.clone();
-        PyPythonTask::new(async move {
+        // RDC-4: take the owned completion future, then release the PyRef before
+        // the operation is driven on the Tokio worker.
+        let ready = rdma_manager_init.wait_completion();
+        drop(rdma_manager_init);
+        // RDC-3: readiness gates the whole operation; the action lock is taken
+        // inside the closure, only after readiness, so `add_*` is not rejected
+        // earlier than before while initialization is pending.
+        PyPythonTask::new(after_ready(ready, move || async move {
             let mut action = inner.lock().await;
             action
                 .submit(client.deref(), Duration::from_secs(timeout))
                 .await
                 .map_err(|e| PyException::new_err(format!("RdmaAction.submit failed: {}", e)))?;
-            Ok(())
-        })
+            Ok(None::<()>)
+        }))
     }
+}
+
+/// Run `operation` only after `ready` resolves `Ok` (RDC-3).
+///
+/// Generic over the result and error so the short-circuit law is unit-testable
+/// without pyo3; production instantiates `E = PyErr` and this helper never
+/// inspects or remaps it. `operation` is a closure, not an already-started
+/// future, so no effect begins before readiness.
+async fn after_ready<T, E, RF, Op, OF>(ready: RF, operation: Op) -> Result<T, E>
+where
+    RF: Future<Output = Result<(), E>>,
+    Op: FnOnce() -> OF,
+    OF: Future<Output = Result<T, E>>,
+{
+    ready.await?;
+    operation().await
 }
 
 async fn create_rdma_buffer(
@@ -659,94 +717,27 @@ async fn create_rdma_buffer(
 #[pymethods]
 impl PyRdmaBuffer {
     #[classmethod]
-    fn create_rdma_buffer_nonblocking(
-        _cls: &Bound<'_, PyType>,
-        _py: Python<'_>,
-        local: PyLocalMemoryHandle,
-        client: PyInstance,
-    ) -> PyResult<PyPythonTask> {
-        if !rdma_supported() {
-            return Err(PyException::new_err("RDMA is not supported on this system"));
-        }
-        PyPythonTask::new(create_rdma_buffer(local, client))
-    }
-
-    #[classmethod]
     fn create_rdma_buffer_blocking(
         _cls: &Bound<'_, PyType>,
         py: Python<'_>,
         local: PyLocalMemoryHandle,
         client: PyInstance,
+        rdma_manager_init: PyRef<'_, PyHandle>,
     ) -> PyResult<PyRdmaBuffer> {
-        if !rdma_supported() {
-            return Err(PyException::new_err("RDMA is not supported on this system"));
-        }
+        // RDC-4: take the owned completion future, then release the PyRef before
+        // blocking on it.
+        let ready = rdma_manager_init.wait_completion();
+        drop(rdma_manager_init);
+        // Complete the interruptible readiness wait before starting the buffer
+        // request. A signal may detach the observed future, so combining both
+        // steps could allocate a buffer after this call already returned.
+        signal_safe_block_on(py, ready)??;
         signal_safe_block_on(py, create_rdma_buffer(local, client))?
     }
 
     #[pyo3(name = "__repr__")]
     fn repr(&self) -> String {
         format!("<RdmaBuffer'{:?}'>", self.buffer)
-    }
-
-    /// Reads from this remote RDMA buffer into a local memory region.
-    ///
-    /// # Arguments
-    /// * `dst` - Local memory region to read into
-    /// * `client` - The actor performing the read
-    /// * `timeout` - Maximum time in seconds to wait for the operation
-    fn read_into(
-        &self,
-        _py: Python<'_>,
-        dst: PyLocalMemoryHandle,
-        client: PyInstance,
-        timeout: u64,
-    ) -> PyResult<PyPythonTask> {
-        let buffer = self.buffer.clone();
-
-        PyPythonTask::new(async move {
-            buffer
-                .read_into_local(client.deref(), dst.inner, timeout)
-                .await
-                .map_err(|e| {
-                    PyException::new_err(format!(
-                        "failed to read from remote buffer into local buffer: {}",
-                        e
-                    ))
-                })?;
-
-            Ok(())
-        })
-    }
-
-    /// Writes from a local memory region into this remote RDMA buffer.
-    ///
-    /// # Arguments
-    /// * `src` - Local memory region to write from
-    /// * `client` - The actor performing the write
-    /// * `timeout` - Maximum time in seconds to wait for the operation
-    fn write_from(
-        &self,
-        _py: Python<'_>,
-        src: PyLocalMemoryHandle,
-        client: PyInstance,
-        timeout: u64,
-    ) -> PyResult<PyPythonTask> {
-        let buffer = self.buffer.clone();
-
-        PyPythonTask::new(async move {
-            buffer
-                .write_from_local(client.deref(), src.inner, timeout)
-                .await
-                .map_err(|e| {
-                    PyException::new_err(format!(
-                        "failed to write from local buffer into remote buffer: {}",
-                        e
-                    ))
-                })?;
-
-            Ok(())
-        })
     }
 
     fn size(&self) -> usize {
@@ -772,15 +763,24 @@ impl PyRdmaBuffer {
         Ok(PyRdmaBuffer { buffer })
     }
 
-    fn drop(&self, _py: Python<'_>, client: PyInstance) -> PyResult<PyPythonTask> {
+    fn drop(
+        &self,
+        _py: Python<'_>,
+        client: PyInstance,
+        rdma_manager_init: PyRef<'_, PyHandle>,
+    ) -> PyResult<PyPythonTask> {
         let buffer = self.buffer.clone();
-        PyPythonTask::new(async move {
+        // RDC-4: take the owned completion future, then release the PyRef.
+        let ready = rdma_manager_init.wait_completion();
+        drop(rdma_manager_init);
+        // RDC-3: the buffer is dropped only after readiness resolves Ok.
+        PyPythonTask::new(after_ready(ready, move || async move {
             buffer
                 .drop_buffer(client.deref())
                 .await
                 .map_err(|e| PyException::new_err(format!("Failed to drop buffer: {}", e)))?;
-            Ok(())
-        })
+            Ok(None::<()>)
+        }))
     }
 
     fn owner_actor_id(&self) -> String {
@@ -814,51 +814,13 @@ fn map_rdma_init_error(err: RdmaInitWireError) -> PyErr {
     RdmaInitError::new_err(cause)
 }
 
+// `_RdmaManager` is the classmethod namespace for the owner-backed init boundary;
+// it holds no instance state and is never constructed from Python.
 #[pyclass(name = "_RdmaManager", module = "monarch._rust_bindings.rdma")]
-pub struct PyRdmaManager {
-    #[allow(dead_code)] // field never read
-    inner: ActorMesh<RdmaManagerActor>,
-    device: String,
-}
+pub struct PyRdmaManager;
 
 #[pymethods]
 impl PyRdmaManager {
-    #[pyo3(name = "__repr__")]
-    fn repr(&self) -> String {
-        format!("<RdmaManager(device='{}')>", self.device)
-    }
-
-    #[getter]
-    fn device(&self) -> &str {
-        &self.device
-    }
-    /// Creates an RDMA manager actor on the given ProcMesh (async version).
-    /// Returns the actor mesh if RDMA is supported, None otherwise.
-    #[classmethod]
-    fn create_rdma_manager_nonblocking(
-        _cls: &Bound<'_, PyType>,
-        proc_mesh: &Bound<'_, PyAny>,
-        client: PyInstance,
-    ) -> PyResult<PyPythonTask> {
-        tracing::debug!("spawning RDMA manager on target proc_mesh nodes");
-
-        let proc_mesh = proc_mesh.downcast::<PyProcMesh>()?.borrow().mesh_ref()?;
-        PyPythonTask::new(async move {
-            let actor_mesh: ActorMesh<RdmaManagerActor> = proc_mesh
-                // Python supplies no per-manager config. `IbvManagerActor::new`
-                // fills an absent `IbvConfig::target` from `RDMA_IBVERBS_TARGET`
-                // (`rdma_ibverbs_target` in Python).
-                .spawn_service(client.deref(), "rdma_manager", &None)
-                .await
-                .map_err(|err| PyException::new_err(err.to_string()))?;
-
-            Ok(Some(PyRdmaManager {
-                inner: actor_mesh,
-                device: "remote_rdma_device".to_string(),
-            }))
-        })
-    }
-
     /// Ensure a proc mesh's per-proc RDMA managers are initialized through the
     /// Rust owner, returning an observe-only `Handle[None]`.
     ///
@@ -999,4 +961,79 @@ pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
         _get_memoryview_addr_and_size
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::Waker;
+
+    use super::after_ready;
+
+    #[derive(Debug, PartialEq)]
+    struct SentinelErr(&'static str);
+
+    /// RDC-3: after readiness resolves `Ok`, the operation closure runs
+    /// exactly once and its result is returned.
+    #[tokio::test]
+    async fn after_ready_runs_operation_once_on_success() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let out: Result<u8, SentinelErr> =
+            after_ready(async { Ok::<(), SentinelErr>(()) }, move || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Ok(7u8)
+                }
+            })
+            .await;
+        assert_eq!(out, Ok(7));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// RDC-3: a readiness error is returned unchanged and the operation
+    /// closure is never invoked.
+    #[tokio::test]
+    async fn after_ready_short_circuits_on_readiness_error() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let out: Result<u8, SentinelErr> = after_ready(
+            async { Err::<(), SentinelErr>(SentinelErr("boom")) },
+            move || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Ok(7u8)
+                }
+            },
+        )
+        .await;
+        assert_eq!(out, Err(SentinelErr("boom")));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// RDC-3: while readiness is pending the composed future cannot complete
+    /// and the operation closure is never invoked.
+    #[test]
+    fn after_ready_does_not_run_operation_while_pending() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let pending_ready = std::future::pending::<Result<(), SentinelErr>>();
+        let mut fut = Box::pin(after_ready(pending_ready, move || {
+            let c = c.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(7u8)
+            }
+        }));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(fut.as_mut().poll(&mut cx), Poll::Pending);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
 }
