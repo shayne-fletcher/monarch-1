@@ -399,6 +399,99 @@ impl PyHandle {
     }
 }
 
+/// Run `operation` only after `ready` resolves `Ok`, returning the readiness
+/// error unchanged if it does not.
+///
+/// Generic over the result and error so the short-circuit law is unit-testable
+/// without pyo3; the RDMA bindings instantiate `E = PyErr` and this helper never
+/// inspects or remaps it. `operation` is a closure, not an already-started
+/// future, so no effect begins before readiness. The typical `ready` input is
+/// [`PyHandle::wait_completion`].
+pub async fn after_ready<T, E, RF, Op, OF>(ready: RF, operation: Op) -> Result<T, E>
+where
+    RF: Future<Output = Result<(), E>>,
+    Op: FnOnce() -> OF,
+    OF: Future<Output = Result<T, E>>,
+{
+    ready.await?;
+    operation().await
+}
+
+#[cfg(test)]
+mod after_ready_tests {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::Waker;
+
+    use super::after_ready;
+
+    #[derive(Debug, PartialEq)]
+    struct SentinelErr(&'static str);
+
+    /// After readiness resolves `Ok`, the operation closure runs exactly once
+    /// and its result is returned.
+    #[tokio::test]
+    async fn after_ready_runs_operation_once_on_success() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let out: Result<u8, SentinelErr> =
+            after_ready(async { Ok::<(), SentinelErr>(()) }, move || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Ok(7u8)
+                }
+            })
+            .await;
+        assert_eq!(out, Ok(7));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A readiness error is returned unchanged and the operation closure is
+    /// never invoked.
+    #[tokio::test]
+    async fn after_ready_short_circuits_on_readiness_error() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let out: Result<u8, SentinelErr> = after_ready(
+            async { Err::<(), SentinelErr>(SentinelErr("boom")) },
+            move || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Ok(7u8)
+                }
+            },
+        )
+        .await;
+        assert_eq!(out, Err(SentinelErr("boom")));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// While readiness is pending the composed future cannot complete and the
+    /// operation closure is never invoked.
+    #[test]
+    fn after_ready_does_not_run_operation_while_pending() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let pending_ready = std::future::pending::<Result<(), SentinelErr>>();
+        let mut fut = Box::pin(after_ready(pending_ready, move || {
+            let c = c.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(7u8)
+            }
+        }));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(fut.as_mut().poll(&mut cx), Poll::Pending);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}
+
 #[cfg(test)]
 impl PyHandle {
     /// Construct a resolved `Handle` from `value`.
