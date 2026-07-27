@@ -112,6 +112,32 @@ def test_submit_wraps_sbatch_failure(tmp_path, monkeypatch):
             _make_job()._submit_slurm_job(2)
 
 
+def test_account_and_qos_kwargs_emit_sbatch_directives(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with patch(
+        "monarch._src.job.slurm.subprocess.run", side_effect=_fake_sbatch
+    ) as mock:
+        job = _make_job(account="monarch", qos="h100_dev", slurm_args=[])
+        job.apply()
+
+    script = _submitted_script(mock)
+    assert "#SBATCH --account=monarch" in script
+    assert "#SBATCH --qos=h100_dev" in script
+
+
+def test_account_and_qos_omitted_when_unset(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with patch(
+        "monarch._src.job.slurm.subprocess.run", side_effect=_fake_sbatch
+    ) as mock:
+        job = _make_job(slurm_args=[])  # neither kwarg passed
+        job.apply()
+
+    script = _submitted_script(mock)
+    assert "--account" not in script
+    assert "--qos" not in script
+
+
 # ---- $SLURM_JOB_ID fallback + _kill lifecycle --------------------------------
 
 
