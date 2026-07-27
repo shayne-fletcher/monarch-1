@@ -65,6 +65,8 @@ class SlurmJob(JobTrait):
         cpus_per_task: Optional[int] = None,
         mem: Optional[str] = None,
         job_start_timeout: Optional[int] = None,
+        account: Optional[str] = None,
+        qos: Optional[str] = None,
     ) -> None:
         """
         Args:
@@ -83,6 +85,8 @@ class SlurmJob(JobTrait):
             gpus_per_node: Number of GPUs to request per node. If None, no GPU resources are requested.
             job_start_timeout: Maximum time in seconds to wait for the SLURM job to start running.
                       This should account for potential queueing delays. If None (default), waits indefinitely.
+            account: SLURM account to charge the job to (``#SBATCH --account``). If None, uses the cluster default.
+            qos: SLURM quality-of-service to request (``#SBATCH --qos``). If None, uses the cluster default.
         """
         configure(default_transport=ChannelTransport.TcpWithHostname)
         self._meshes = meshes
@@ -99,6 +103,8 @@ class SlurmJob(JobTrait):
         self._cpus_per_task = cpus_per_task
         self._mem = mem
         self._job_start_timeout = job_start_timeout
+        self._account = account
+        self._qos = qos
         # Track the single SLURM job ID and all allocated hostnames
         self._slurm_job_id: Optional[str] = None
         self._all_hostnames: List[str] = []
@@ -181,6 +187,12 @@ class SlurmJob(JobTrait):
 
         if self._partition is not None:
             sbatch_directives.append(f"#SBATCH --partition={self._partition}")
+
+        if self._account is not None:
+            sbatch_directives.append(f"#SBATCH --account={self._account}")
+
+        if self._qos is not None:
+            sbatch_directives.append(f"#SBATCH --qos={self._qos}")
 
         if (
             not self._exclusive
@@ -377,6 +389,8 @@ class SlurmJob(JobTrait):
             and spec._cpus_per_task == self._cpus_per_task
             and spec._mem == self._mem
             and spec._job_start_timeout == self._job_start_timeout
+            and spec._account == self._account
+            and spec._qos == self._qos
             and self._jobs_active()
         )
 
