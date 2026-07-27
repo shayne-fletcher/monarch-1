@@ -159,45 +159,45 @@
         "type": "object"
       },
       "InboundOrdering": {
-        "description": "Mesh-admin presentation of inbound ordering state.\n\nRollups marked `returned_*` are computed over `sessions` only and\nare LOWER BOUNDS when `snapshot_complete == false` (IO-6).\n`known_session_count` is the only rollup that totals returned +\nskipped sessions.",
+        "description": "Mesh-admin presentation of inbound ordering state.\n\nWhen `snapshot_complete == false`, session state was unavailable.\nConsumers must ignore every session-derived field and retry (IO-6).",
         "properties": {
           "enabled": {
             "description": "`true` when reorder buffering is enabled for this sender.",
             "type": "boolean"
           },
           "known_session_count": {
-            "description": "IO-5: `sessions.len() + skipped_session_count`. The only rollup\nthat totals returned + skipped sessions.",
+            "description": "Exact live-session count when complete; ignore when unavailable.",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
           },
           "returned_buffered_message_count": {
-            "description": "IO-6: sum of `buffered_count` OVER RETURNED sessions.\nReorder-buffer scope only (independent of `queue_depth`; see\nIO-3). Lower bound if `!snapshot_complete`.",
+            "description": "Sum of `buffered_count` when complete; ignore when unavailable.\nIndependent of `queue_depth` (IO-3).",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
           },
           "returned_buffered_session_count": {
-            "description": "IO-6: sessions with `buffered_count > 0` AMONG RETURNED\nsessions. Lower bound if `!snapshot_complete`.",
+            "description": "Sessions with `buffered_count > 0` when complete; ignore when\nunavailable.",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
           },
           "returned_max_buffered_count": {
-            "description": "IO-6: max of `buffered_count` OVER RETURNED sessions. Lower\nbound if `!snapshot_complete`.",
+            "description": "Max of `buffered_count` when complete; ignore when unavailable.",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
           },
           "sessions": {
-            "description": "Per-session entries, sorted by `session_id`.",
+            "description": "Complete per-session entries when complete; ignore when unavailable.",
             "items": {
               "$ref": "#/components/schemas/OrderingSessionSnapshot"
             },
             "type": "array"
           },
           "skipped_session_count": {
-            "description": "Sessions held by a concurrent send at snapshot time.",
+            "description": "Aggregate availability marker, not a count of sessions. Zero\nmeans complete; nonzero means unavailable.",
             "format": "uint",
             "minimum": 0,
             "type": "integer"

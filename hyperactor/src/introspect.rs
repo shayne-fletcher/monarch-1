@@ -134,8 +134,8 @@
 //!
 //! ## Inbound ordering exposure invariants (IO-*)
 //!
-//! - **IO-1 (inbound-ordering tri-state semantics):**
-//!   `ActorAttrsView::inbound_ordering` carries three meaningful states
+//! - **IO-1 (inbound-ordering state semantics):**
+//!   `ActorAttrsView::inbound_ordering` carries four meaningful states
 //!   that consumers (DTO, TUI, agents) MUST distinguish:
 //!   * `None` -- no snapshot callback was installed. In current code
 //!     this means structural absence: an `InstanceCellState` not built
@@ -147,16 +147,23 @@
 //!   * `Some({enabled: false, ...})` -- ordered path exists but reorder
 //!     buffering is disabled; `sessions` is empty regardless of traffic.
 //!     Messages bypass receiver-local sequencing.
-//!   * `Some({enabled: true, ...})` -- buffering active; `sessions`
-//!     is meaningful.
+//!   * `Some({enabled: true, skipped_session_count: 1, sessions: []})`
+//!     -- the receiver-local sequencing mutex was busy; session state
+//!     was unavailable at this observation.
+//!   * `Some({enabled: true, skipped_session_count: 0, ...})` -- a
+//!     complete snapshot; `sessions` is meaningful.
 //!
 //!   `None` is NOT equivalent to `Some({enabled: false, ...})`.
-//! - **IO-2 (inbound-ordering reflects publish-time state):** When
-//!   present, the snapshot is computed at `build_actor_attrs`
-//!   invocation time via the sequenced receiver's snapshot handle.
-//!   `last_released_seq` etc. are point-in-time. Sessions held by a
-//!   concurrent receive show up in `skipped_session_count` (never silently omitted);
-//!   `is_complete()` reports the all-clear.
+//! - **IO-2 (inbound-ordering reflects publish-time state):** Snapshot
+//!   atomicity follows lock granularity: one mutex protects the entire
+//!   receiver session map, so acquiring it observes every session and
+//!   failing to acquire it observes none. When present, the snapshot is
+//!   computed at `build_actor_attrs` invocation time via the sequenced
+//!   receiver's snapshot handle. `last_released_seq` etc. are
+//!   point-in-time. A busy mutex yields no session rows and
+//!   `skipped_session_count == 1`; acquiring it yields every session and
+//!   `skipped_session_count == 0`. The count is an aggregate availability
+//!   marker, not a per-session count.
 //! - **IO-3 (queue-depth and inbound-ordering are independent
 //!   diagnostics, no arithmetic contract):**
 //!   * `ACTOR_QUEUE_DEPTH` (per PD-5a/PD-5b in `proc.rs`): accepted
