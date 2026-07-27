@@ -1,6 +1,6 @@
 pyzmq
 requests
-numpy
+numpy>=1.26
 pyre-extensions
 typing-extensions>=4.12
 cloudpickle
