@@ -17,6 +17,7 @@ import tempfile
 import textwrap
 import threading
 import time
+from contextlib import ExitStack
 from typing import Dict, List, Optional, Set
 from unittest.mock import patch
 
@@ -151,6 +152,28 @@ def test_shutdown_host_mesh() -> None:
         am = pm.spawn("actor", RankActor)
         am.get_rank.choose().get()
         hm.shutdown().get()
+        assert hm._inner_host_mesh is None
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+def test_shutdown_immediately_after_proc_spawn_without_actor() -> None:
+    with ExitStack() as cleanup:
+        job = ProcessJob({"hosts": 1})
+        cleanup.callback(job.kill)
+        hm = job.state(cached_path=None).hosts
+        hm.spawn_procs(name="pending_proc")
+
+        shutdown_result = hm.shutdown().get(timeout=10.0)
+        cleanup.pop_all()
+        assert shutdown_result is None
+
+        assert hm._inner_host_mesh is None
+        with pytest.raises(
+            RuntimeError,
+            match="HostMesh has already been shut down",
+        ):
+            hm.spawn_procs()
 
 
 @pytest.mark.timeout(60)
@@ -281,8 +304,16 @@ def test_shutdown_sliced_host_mesh_throws_exception() -> None:
     with scoped_state(ProcessJob({"hosts": 2}), cached_path=None) as state:
         hm = state.hosts
         hm_sliced = hm.slice(hosts=1)
-        with pytest.raises(RuntimeError):
+        sliced_inner = hm_sliced._inner_host_mesh
+        assert sliced_inner is not None
+
+        with pytest.raises(
+            RuntimeError,
+            match="cannot shut down `HostMesh` that is a reference instead of owned",
+        ):
             hm_sliced.shutdown().get()
+
+        assert hm_sliced._inner_host_mesh is sliced_inner
 
 
 @pytest.mark.timeout(60)
