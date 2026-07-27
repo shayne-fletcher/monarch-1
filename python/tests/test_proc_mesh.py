@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from contextlib import ExitStack
 from typing import cast
 from unittest.mock import patch
 
@@ -29,6 +30,7 @@ from monarch._src.actor.actor_mesh import (
     ValueMesh,
 )
 from monarch._src.actor.endpoint import endpoint
+from monarch._src.actor.future import tokio_oracle, TokioOracleRecord
 from monarch._src.actor.host_mesh import this_host, this_proc
 from monarch._src.actor.proc_mesh import (
     get_or_spawn_controller,
@@ -41,6 +43,31 @@ from scoped_state import scoped_state
 
 
 _proc_rank = -1
+_BOOTSTRAP_FAILURE = "stage 3.4 bootstrap failure"
+
+
+def _successful_bootstrap() -> None:
+    return None
+
+
+def _fail_bootstrap() -> None:
+    raise RuntimeError(_BOOTSTRAP_FAILURE)
+
+
+def _tokio_records_for(
+    records: list[TokioOracleRecord],
+    *,
+    module: str,
+    filename: str,
+    function: str | None = None,
+) -> list[TokioOracleRecord]:
+    return [
+        record
+        for record in records
+        if record.module == module
+        and os.path.basename(record.filename) == filename
+        and (function is None or record.function == function)
+    ]
 
 
 class TestActor(Actor):
@@ -90,9 +117,49 @@ class TestActor(Actor):
 async def test_proc_mesh_initialization() -> None:
     with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
         host = state.hosts
-        proc_mesh = host.spawn_procs(name="test_proc")
-        # Test that initialization completes successfully
-        assert await proc_mesh.initialized
+        with tokio_oracle() as records:
+            proc_mesh = host.spawn_procs(
+                name="test_proc",
+                bootstrap=_successful_bootstrap,
+            )
+            assert await proc_mesh.initialized
+
+            setup_records = _tokio_records_for(
+                records,
+                module="monarch._src.actor.proc_mesh",
+                filename="proc_mesh.py",
+                function="task",
+            )
+            assert len(setup_records) == 1
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+async def test_proc_mesh_initialized_fails_when_bootstrap_fails() -> None:
+    with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
+        proc_mesh = state.hosts.spawn_procs(bootstrap=_fail_bootstrap)
+
+        with pytest.raises(monarch.actor.ActorError, match=_BOOTSTRAP_FAILURE):
+            await proc_mesh.initialized
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+async def test_stop_state_tracks_native_stop_result() -> None:
+    with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
+        owner = state.hosts.spawn_procs(per_host={"gpus": 2})
+        await owner.initialized
+        proc_ref = owner.slice(gpus=0)
+
+        with pytest.raises(
+            ValueError,
+            match="ProcMesh is not owned; must be stopped by an owner",
+        ):
+            await proc_ref.stop()
+
+        assert not proc_ref._stopped
+        assert await owner.stop() is None
+        assert owner._stopped
 
 
 @pytest.mark.timeout(60)
@@ -317,11 +384,46 @@ def test_raw_proc_mesh_pickle_blocks_on_proc_mesh_init() -> None:
 @pytest.mark.timeout(60)
 @isolate_in_subprocess
 async def test_actor_spawn_then_immediate_shutdown() -> None:
-    with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
-        proc_mesh = state.hosts.spawn_procs(name="test")
+    with ExitStack() as cleanup:
+        job = ProcessJob({"hosts": 1})
+        cleanup.callback(job.kill)
+        host = job.state(cached_path=None).hosts
+        proc_mesh = host.spawn_procs(name="test")
         await proc_mesh.initialized
+        assert proc_mesh._logging_manager._logging_mesh_client is not None
+
         # spawn actor but do NOT await initialized — immediately shutdown
-        proc_mesh.spawn("test_actor", TestActor, 42)
+        actor_mesh = proc_mesh.spawn("test_actor", TestActor, 42)
+
+        with tokio_oracle() as records:
+            shutdown_result = await host.shutdown()
+            cleanup.pop_all()
+            assert shutdown_result is None
+
+            proc_drain_records = _tokio_records_for(
+                records,
+                module="monarch._src.actor.proc_mesh",
+                filename="proc_mesh.py",
+                function="_flush_pending_actor_spawns",
+            )
+            logging_records = _tokio_records_for(
+                records,
+                module="monarch._src.actor.logging",
+                filename="logging.py",
+                function="flush_async",
+            )
+            host_records = _tokio_records_for(
+                records,
+                module="monarch._src.actor.host_mesh",
+                filename="host_mesh.py",
+            )
+
+            assert len(proc_drain_records) == 1
+            assert len(logging_records) == 1
+            assert host_records == []
+
+        assert await actor_mesh.initialized is None
+        assert proc_mesh._pending_actor_spawns == []
 
 
 @pytest.mark.timeout(60)
