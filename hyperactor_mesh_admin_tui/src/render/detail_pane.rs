@@ -788,16 +788,12 @@ fn render_actor_detail(
 }
 
 /// TUI-IO-1 (ordering-visibility): the inbound-ordering pane is drawn iff
-/// buffering is enabled AND either a session is stalled (`buffered_count > 0`) or
-/// the snapshot is partial. The partial case matters: the sessions we could not
-/// read (mutex held at snapshot time) may be the stalled ones, so the
-/// "(partial: N skipped)" warning must still surface. This is the single source
-/// of truth for `render_inbound_ordering` and `compute_ordering_height` so their
-/// visibility decisions cannot drift. It is a TUI presentation invariant (like
-/// the execution pane's EX-1), distinct from the external `IO-1` whose "not
-/// available" placeholder this stack removed.
+/// buffering is enabled AND either a complete snapshot contains a stalled
+/// session or the snapshot is unavailable. This is the single source of truth
+/// for `render_inbound_ordering` and `compute_ordering_height` so their
+/// visibility decisions cannot drift.
 fn ordering_has_content(io: &InboundOrdering) -> bool {
-    io.enabled && (io.sessions.iter().any(|s| s.buffered_count > 0) || !io.snapshot_complete)
+    io.enabled && (!io.snapshot_complete || io.sessions.iter().any(|s| s.buffered_count > 0))
 }
 
 /// Height of the actor info block. Base = 13: 10 content rows (status, instance,
@@ -872,19 +868,24 @@ pub(crate) fn compute_ordering_height(
     if !ordering_has_content(io) {
         return 0;
     }
-    let stalled = io.sessions.iter().filter(|s| s.buffered_count > 0).count();
-    // border(2) + rollup line 1(1) + rollup line 2(0/1). A partial snapshot with
-    // no returned stalls stops there; otherwise add the table: spacer(1) +
-    // header(1) + rows + more(0/1) + footer spacer(1) + footer(1).
-    let rollup2 = u16::from(io.returned_buffered_message_count > 0);
-    let table = if stalled == 0 {
-        0
+    let want = if !io.snapshot_complete {
+        // border(2) + one unavailable-status line.
+        3
     } else {
-        let rows = stalled.min(TOP_N) as u16;
-        let more_row = u16::from(stalled > TOP_N);
-        1 + 1 + rows + more_row + 1 + 1
+        let stalled = io.sessions.iter().filter(|s| s.buffered_count > 0).count();
+        // border(2) + rollup line 1(1) + rollup line 2(0/1), then the
+        // table: spacer(1) + header(1) + rows + more(0/1) + footer
+        // spacer(1) + footer(1).
+        let rollup2 = u16::from(io.returned_buffered_message_count > 0);
+        let table = if stalled == 0 {
+            0
+        } else {
+            let rows = stalled.min(TOP_N) as u16;
+            let more_row = u16::from(stalled > TOP_N);
+            1 + 1 + rows + more_row + 1 + 1
+        };
+        2 + 1 + rollup2 + table
     };
-    let want = 2 + 1 + rollup2 + table;
     let budget = area_height
         .saturating_sub(info_height)
         .saturating_sub(MIN_FLIGHT_RECORDER_HEIGHT);
@@ -1025,9 +1026,8 @@ fn build_execution_lines<'a>(
 const OWNER_COL_WIDTH: usize = 30;
 const NEED_SEQ_COL_WIDTH: usize = 8;
 
-/// Drawn only when `ordering_has_content` (enabled, and either a stalled session
-/// or a partial snapshot); the caller gives this a zero-height chunk otherwise,
-/// mirroring the execution pane. Hidden states show no placeholder line.
+/// Drawn only when `ordering_has_content`; the caller gives this a zero-height
+/// chunk otherwise, mirroring the execution pane.
 fn render_inbound_ordering(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -1041,9 +1041,9 @@ fn render_inbound_ordering(
     if !ordering_has_content(io) {
         return;
     }
-    // Red border when actionable stalls are present; otherwise
-    // matches the rest of the chrome.
-    let border_style = if io.returned_buffered_session_count > 0 {
+    let border_style = if !io.snapshot_complete {
+        scheme.detail_status_warn
+    } else if io.returned_buffered_session_count > 0 {
         scheme.detail_alert_border
     } else {
         scheme.border
@@ -1064,6 +1064,13 @@ fn build_inbound_ordering_lines<'a>(
     scheme: &ColorScheme,
     l: &'a Labels,
 ) -> Vec<Line<'a>> {
+    if !io.snapshot_complete {
+        return vec![Line::from(Span::styled(
+            l.ordering_snapshot_unavailable,
+            scheme.detail_status_warn,
+        ))];
+    }
+
     let mut lines: Vec<Line> = Vec::new();
 
     // Filter to stalled-only, sort by severity then by oldest gap.
@@ -1083,31 +1090,20 @@ fn build_inbound_ordering_lines<'a>(
         })
     });
 
-    // Rollup line 1: "enabled · 2 of 3 sessions stalled (partial: N skipped)"
-    let partial_suffix = if !io.snapshot_complete {
-        format!(
-            " {}",
-            l.ordering_sessions_partial
-                .replace("{n}", &io.skipped_session_count.to_string())
-        )
-    } else {
-        String::new()
-    };
+    // Rollup line 1: "enabled · 2 of 3 sessions stalled".
     lines.push(Line::from(vec![
         Span::styled(l.ordering_buffering_enabled, scheme.detail_label),
         Span::raw(format!(
-            " · {} {} {} {} {}{}",
+            " · {} {} {} {} {}",
             io.returned_buffered_session_count,
             l.ordering_sessions_known,
             io.known_session_count,
             l.ordering_sessions_label,
             l.ordering_sessions_stalled,
-            partial_suffix,
         )),
     ]));
 
-    // Rollup line 2 only when something is buffered; a partial snapshot with no
-    // returned stalls shows just line 1 ("0 of N stalled (partial: M skipped)").
+    // Rollup line 2 only when something is buffered.
     if io.returned_buffered_message_count > 0 {
         lines.push(Line::from(Span::raw(format!(
             "{} {}, {} {}{}",
@@ -1119,9 +1115,8 @@ fn build_inbound_ordering_lines<'a>(
         ))));
     }
 
-    // Partial snapshot with nothing returned as stalled: the rollup (with its
-    // "(partial: N skipped)" suffix) is why the pane is shown, so stop before the
-    // per-session table.
+    // Keep this defensive even though a complete snapshot without stalls does
+    // not make the pane visible.
     if stalled.is_empty() {
         return lines;
     }
@@ -1776,8 +1771,8 @@ mod tests {
         );
     }
 
-    // TUI-IO-1: enabled, a complete snapshot, and no stalled sessions hides the pane,
-    // mirroring the execution pane. (Contrast the partial-snapshot case below.)
+    // TUI-IO-1: enabled, complete, and no stalled sessions hides the
+    // pane, mirroring the execution pane.
     #[test]
     fn render_actor_detail_inbound_ordering_enabled_no_stalled() {
         let io = InboundOrdering {
@@ -1804,33 +1799,32 @@ mod tests {
         );
     }
 
-    // TUI-IO-1: a partial snapshot with no returned stalls still shows the pane so the
-    // "(partial: N skipped)" warning survives -- the sessions we could not read
-    // may be the stalled ones.
+    // TUI-IO-1: an unavailable snapshot remains visible without
+    // presenting any counts as observed data.
     #[test]
-    fn render_actor_detail_inbound_ordering_partial_no_stalls_shown() {
+    fn render_actor_detail_inbound_ordering_unavailable() {
         let io = InboundOrdering {
             enabled: true,
             snapshot_complete: false,
-            skipped_session_count: 2,
-            known_session_count: 3,
+            skipped_session_count: 1,
+            known_session_count: 1,
             returned_buffered_session_count: 0,
             returned_buffered_message_count: 0,
             returned_max_buffered_count: 0,
-            sessions: vec![session(uuid::Uuid::nil(), None, 0, 5, None, None)],
+            sessions: vec![],
         };
         let text = render_detail_to_string_with_size(&actor_payload(Some(Box::new(io))), 120, 45);
         assert!(
             text.contains("Inbound ordering"),
-            "partial snapshot keeps the pane visible: {text}"
+            "unavailable snapshot keeps the pane visible: {text}"
         );
         assert!(
-            text.contains("(partial: 2 skipped)"),
-            "the skipped-session warning survives: {text}"
+            text.contains("snapshot unavailable; retrying"),
+            "unavailable state is explicit: {text}"
         );
         assert!(
-            !text.contains("Need seq"),
-            "no per-session table when nothing returned is stalled: {text}"
+            !text.contains("sessions stalled") && !text.contains("Need seq"),
+            "unavailable state must not infer session data: {text}"
         );
     }
 
@@ -1877,7 +1871,7 @@ mod tests {
             0
         );
         assert_eq!(compute_ordering_height(45, 13, Some(&mk(true, true, 0))), 0);
-        // Shown -> non-zero: a stalled session, or a partial snapshot.
+        // Shown -> non-zero: a stalled session, or an unavailable snapshot.
         assert!(compute_ordering_height(45, 13, Some(&mk(true, true, 5))) > 0);
         assert!(compute_ordering_height(45, 13, Some(&mk(true, false, 0))) > 0);
     }
@@ -1920,9 +1914,9 @@ mod tests {
         );
     }
 
-    // IO-2: partial snapshot suffix appears.
+    // IO-2: unavailable snapshots ignore any accompanying data.
     #[test]
-    fn render_actor_detail_inbound_ordering_partial_snapshot() {
+    fn render_actor_detail_inbound_ordering_unavailable_ignores_data() {
         let sender = mock_actor_addr("sender_a", "sender_a_proc");
         let io = InboundOrdering {
             enabled: true,
@@ -1943,8 +1937,12 @@ mod tests {
         };
         let text = render_detail_to_string_with_size(&actor_payload(Some(Box::new(io))), 120, 45);
         assert!(
-            text.contains("(partial: 2 skipped)"),
-            "expected partial-snapshot suffix: {text}"
+            text.contains("snapshot unavailable; retrying"),
+            "expected unavailable-snapshot status: {text}"
+        );
+        assert!(
+            !text.contains("sender_a") && !text.contains("Need seq"),
+            "unavailable snapshot data must not be rendered: {text}"
         );
     }
 

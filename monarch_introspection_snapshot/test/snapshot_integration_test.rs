@@ -429,7 +429,7 @@ async fn test_snapshot_sql_queries() -> Result<()> {
 
     // Query E: IO-7 (live actors carry an `actor_inbound_orderings`
     // row), IO-4 (snapshot_complete iff skipped == 0), and IO-5
-    // (known_session_count == returned + skipped). Joins
+    // (complete snapshots have exact session counts). Joins
     // `actor_inbound_orderings` to `ordering_sessions` via the shared
     // `(snapshot_id, node_id)` key and groups to count returned
     // sessions, so we can cross-validate the rollup against the
@@ -468,12 +468,14 @@ async fn test_snapshot_sql_queries() -> Result<()> {
             "IO-4: snapshot_complete must equal (skipped_session_count == 0) for {}",
             col_str(&e, "node_id", row),
         );
-        assert_eq!(
-            known,
-            returned + skipped,
-            "IO-5: known_session_count must equal returned + skipped for {}",
-            col_str(&e, "node_id", row),
-        );
+        if snapshot_complete {
+            assert_eq!(
+                known,
+                returned,
+                "IO-5: complete known_session_count must equal session rows for {}",
+                col_str(&e, "node_id", row),
+            );
+        }
     }
 
     // Query F: every `actor_inbound_orderings` row must FK to a live

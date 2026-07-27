@@ -222,10 +222,8 @@ pub struct OrderingSessionSnapshotDto {
 
 /// Mesh-admin presentation of inbound ordering state.
 ///
-/// Rollups marked `returned_*` are computed over `sessions` only and
-/// are LOWER BOUNDS when `snapshot_complete == false` (IO-6).
-/// `known_session_count` is the only rollup that totals returned +
-/// skipped sessions.
+/// When `snapshot_complete == false`, session state was unavailable.
+/// Consumers must ignore every session-derived field and retry (IO-6).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(rename = "InboundOrdering")]
 pub struct InboundOrderingDto {
@@ -233,22 +231,20 @@ pub struct InboundOrderingDto {
     pub enabled: bool,
     /// IO-4: `true` iff `skipped_session_count == 0`.
     pub snapshot_complete: bool,
-    /// Sessions held by a concurrent send at snapshot time.
+    /// Aggregate availability marker, not a count of sessions. Zero
+    /// means complete; nonzero means unavailable.
     pub skipped_session_count: usize,
-    /// IO-5: `sessions.len() + skipped_session_count`. The only rollup
-    /// that totals returned + skipped sessions.
+    /// Exact live-session count when complete; ignore when unavailable.
     pub known_session_count: usize,
-    /// IO-6: sessions with `buffered_count > 0` AMONG RETURNED
-    /// sessions. Lower bound if `!snapshot_complete`.
+    /// Sessions with `buffered_count > 0` when complete; ignore when
+    /// unavailable.
     pub returned_buffered_session_count: usize,
-    /// IO-6: sum of `buffered_count` OVER RETURNED sessions.
-    /// Reorder-buffer scope only (independent of `queue_depth`; see
-    /// IO-3). Lower bound if `!snapshot_complete`.
+    /// Sum of `buffered_count` when complete; ignore when unavailable.
+    /// Independent of `queue_depth` (IO-3).
     pub returned_buffered_message_count: usize,
-    /// IO-6: max of `buffered_count` OVER RETURNED sessions. Lower
-    /// bound if `!snapshot_complete`.
+    /// Max of `buffered_count` when complete; ignore when unavailable.
     pub returned_max_buffered_count: usize,
-    /// Per-session entries, sorted by `session_id`.
+    /// Complete per-session entries when complete; ignore when unavailable.
     pub sessions: Vec<OrderingSessionSnapshotDto>,
 }
 
@@ -946,7 +942,7 @@ mod tests {
         }
     }
 
-    fn make_actor_payload_inbound_ordering_partial() -> NodePayload {
+    fn make_actor_payload_inbound_ordering_unavailable() -> NodePayload {
         NodePayload {
             identity: NodeRef::Actor(test_actor_id()),
             properties: NodeProperties::Actor {
@@ -963,14 +959,12 @@ mod tests {
                 inbound_ordering: Some(Box::new(InboundOrdering {
                     enabled: true,
                     snapshot_complete: false,
-                    skipped_session_count: 2,
-                    // IO-5: 1 returned + 2 skipped = 3.
-                    known_session_count: 3,
-                    // IO-6: rollups over the one returned session only.
-                    returned_buffered_session_count: 1,
-                    returned_buffered_message_count: 4,
-                    returned_max_buffered_count: 4,
-                    sessions: vec![make_ordering_session(uuid::Uuid::from_u128(7), 0, 4)],
+                    skipped_session_count: 1,
+                    known_session_count: 1,
+                    returned_buffered_session_count: 0,
+                    returned_buffered_message_count: 0,
+                    returned_max_buffered_count: 0,
+                    sessions: vec![],
                 })),
                 failure_info: None,
                 execution: None,
@@ -1056,57 +1050,25 @@ mod tests {
         } = &payload.properties
         {
             assert_eq!(io.snapshot_complete, io.skipped_session_count == 0); // IO-4
-            assert_eq!(
-                io.known_session_count,
-                io.sessions.len() + io.skipped_session_count
-            ); // IO-5
+            assert_eq!(io.known_session_count, io.sessions.len()); // IO-5
         } else {
             panic!("fixture must be Actor with Some(inbound_ordering)");
         }
         assert_round_trip(&payload);
     }
 
-    /// HB-1 + HB-2 + IO-4 + IO-5 + IO-6: Actor with a PARTIAL
-    /// inbound-ordering snapshot round-trips and the rollups reflect
-    /// returned sessions only. `skipped_session_count > 0` forces
-    /// IO-4's `snapshot_complete == false`, IO-5's
-    /// `known_session_count == returned + skipped`, and IO-6's
-    /// returned-only rollups (NOT computed over the skipped sessions
-    /// the snapshot doesn't carry).
+    /// HB-1 + HB-2 + IO-4 + IO-6: Actor with unavailable inbound
+    /// ordering round-trips without interpreting session-derived fields.
     #[test]
-    fn test_round_trip_actor_inbound_ordering_partial() {
-        let payload = make_actor_payload_inbound_ordering_partial();
+    fn test_round_trip_actor_inbound_ordering_unavailable() {
+        let payload = make_actor_payload_inbound_ordering_unavailable();
         if let NodeProperties::Actor {
             inbound_ordering: Some(io),
             ..
         } = &payload.properties
         {
-            // IO-4: false because skipped > 0.
             assert!(!io.snapshot_complete);
             assert_eq!(io.snapshot_complete, io.skipped_session_count == 0);
-            // IO-5: total includes skipped.
-            assert_eq!(
-                io.known_session_count,
-                io.sessions.len() + io.skipped_session_count
-            );
-            // IO-6: rollups over RETURNED sessions only -- NOT over
-            // returned + skipped.
-            assert_eq!(
-                io.returned_buffered_session_count,
-                io.sessions.iter().filter(|s| s.buffered_count > 0).count()
-            );
-            assert_eq!(
-                io.returned_buffered_message_count,
-                io.sessions.iter().map(|s| s.buffered_count).sum::<usize>()
-            );
-            assert_eq!(
-                io.returned_max_buffered_count,
-                io.sessions
-                    .iter()
-                    .map(|s| s.buffered_count)
-                    .max()
-                    .unwrap_or(0)
-            );
         } else {
             panic!("fixture must be Actor with Some(inbound_ordering)");
         }

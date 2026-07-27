@@ -134,29 +134,32 @@ pub(crate) async fn check(s: &DiningScenario) {
         io.skipped_session_count,
     );
 
-    // IO-5: known_session_count totals returned + skipped (equality, not >=).
+    // IO-6: an unavailable observation carries no usable session data.
+    if !io.snapshot_complete {
+        return;
+    }
+
+    // IO-5: complete-snapshot rollups are exact.
     assert_eq!(
         io.known_session_count,
-        io.sessions.len() + io.skipped_session_count,
-        "MIT-77 / IO-5: known_session_count must equal sessions.len() + skipped_session_count; \
-         got known={}, sessions.len()={}, skipped={}",
+        io.sessions.len(),
+        "MIT-77 / IO-5: known_session_count must equal sessions.len() for a complete snapshot; \
+         got known={}, sessions.len()={}",
         io.known_session_count,
         io.sessions.len(),
-        io.skipped_session_count,
     );
 
-    // IO-6: returned_* rollups are computed over RETURNED sessions only.
     assert_eq!(
         io.returned_buffered_session_count,
         io.sessions.iter().filter(|s| s.buffered_count > 0).count(),
         "MIT-77 / IO-6: returned_buffered_session_count must match the count of \
-         returned sessions with buffered_count > 0",
+         sessions with buffered_count > 0 in a complete snapshot",
     );
     assert_eq!(
         io.returned_buffered_message_count,
         io.sessions.iter().map(|s| s.buffered_count).sum::<usize>(),
         "MIT-77 / IO-6: returned_buffered_message_count must equal sum of \
-         buffered_count over returned sessions",
+         buffered_count over a complete snapshot",
     );
     assert_eq!(
         io.returned_max_buffered_count,
@@ -166,7 +169,7 @@ pub(crate) async fn check(s: &DiningScenario) {
             .max()
             .unwrap_or(0),
         "MIT-77 / IO-6: returned_max_buffered_count must equal max of \
-         buffered_count over returned sessions (or 0 when empty)",
+         buffered_count over a complete snapshot (or 0 when empty)",
     );
 
     // Inherited-shape sanity (parent's OrderingSessionSnapshot invariants

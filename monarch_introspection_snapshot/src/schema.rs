@@ -270,10 +270,9 @@ pub struct ActorNodeRow {
 /// flow via `direct_send`); the join to [`OrderingSessionRow`] on
 /// `(snapshot_id, node_id)` will be empty in that case.
 ///
-/// `snapshot_complete == false` indicates IO-2 partial snapshot: rows
-/// in [`OrderingSessionRow`] for this key are a lower bound (skipped
-/// sessions are not enumerated). Use `skipped_session_count` to
-/// detect.
+/// `snapshot_complete == false` means session state was unavailable.
+/// Readers must ignore every session-derived column and joined
+/// [`OrderingSessionRow`], then retry or wait for a later snapshot.
 #[derive(Debug, Clone, PartialEq, RecordBatchRow)]
 pub struct ActorInboundOrderingRow {
     /// PK component. FK → `ActorNode(snapshot_id, node_id)`.
@@ -284,34 +283,27 @@ pub struct ActorInboundOrderingRow {
     pub enabled: bool,
     /// IO-4: `true` iff `skipped_session_count == 0`.
     pub snapshot_complete: bool,
-    /// Sessions held by a concurrent send at snapshot time
-    /// (`OrderedSender::snapshot` uses `try_lock`). Not enumerated in
-    /// [`OrderingSessionRow`].
+    /// Aggregate availability marker, not a count of sessions. Zero
+    /// means complete; nonzero means unavailable.
     pub skipped_session_count: i64,
-    /// IO-5: total live sessions = returned + skipped. The only
-    /// rollup that totals across both.
+    /// Exact live-session count when complete; ignore when unavailable.
     pub known_session_count: i64,
-    /// IO-6: sessions with `buffered_count > 0` AMONG RETURNED
-    /// sessions. Lower bound when `snapshot_complete = false`.
+    /// Sessions with `buffered_count > 0` when complete; ignore when
+    /// unavailable.
     pub returned_buffered_session_count: i64,
-    /// IO-6: sum of `buffered_count` OVER RETURNED sessions. Lower
-    /// bound when `snapshot_complete = false`.
+    /// Sum of `buffered_count` when complete; ignore when unavailable.
     pub returned_buffered_message_count: i64,
-    /// IO-6: max of `buffered_count` OVER RETURNED sessions. Lower
-    /// bound when `snapshot_complete = false`.
+    /// Max of `buffered_count` when complete; ignore when unavailable.
     pub returned_max_buffered_count: i64,
 }
 
-/// Per-returned-session detail of inbound-ordering state. PK:
+/// Per-session detail of inbound-ordering state. PK:
 /// `(snapshot_id, node_id, session_id)`, FK →
 /// `ActorInboundOrdering(snapshot_id, node_id)`.
 ///
-/// One row per RETURNED session at snapshot time. Skipped sessions
-/// (IO-2: held by a concurrent send during snapshotting) are not
-/// enumerated — only counted in
-/// [`ActorInboundOrderingRow::skipped_session_count`]. To detect
-/// "is this a complete view?", join to [`ActorInboundOrderingRow`]
-/// and check `snapshot_complete`.
+/// One row per entry carried by the mesh-admin payload. Join to
+/// [`ActorInboundOrderingRow`] and require `snapshot_complete` before
+/// interpreting these rows.
 ///
 /// `sender` is the session OWNER ActorAddr — the actor whose
 /// `Sequencer` assigned this session's SEQ_INFO. For direct sends and

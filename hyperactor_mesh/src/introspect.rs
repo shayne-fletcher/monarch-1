@@ -180,16 +180,21 @@
 //! - **IO-4 (snapshot_complete derivation):**
 //!   `InboundOrdering.snapshot_complete ==
 //!   (skipped_session_count == 0)`. Mirrors
-//!   `OrderingSnapshot::is_complete()` at the presentation layer.
-//! - **IO-5 (known_session_count totality):**
-//!   `InboundOrdering.known_session_count ==
-//!   sessions.len() + skipped_session_count`. The only rollup
-//!   that is a true total across returned and skipped sessions.
-//! - **IO-6 (returned_* scope):**
-//!   `returned_buffered_session_count`,
-//!   `returned_buffered_message_count`, and
-//!   `returned_max_buffered_count` are computed over `sessions`
-//!   only and are LOWER BOUNDS when `snapshot_complete == false`.
+//!   `OrderingSnapshot::is_complete()` at the presentation layer. By
+//!   IO-2, the aggregate lock makes this an availability check: `true`
+//!   means every session was observed and `false` means none were.
+//! - **IO-5 (complete-snapshot exactness):** When
+//!   `snapshot_complete == true`, `known_session_count ==
+//!   sessions.len()` and every `returned_*` rollup is exact over that
+//!   complete session set.
+//! - **IO-6 (unavailable-snapshot sentinel):** When
+//!   `snapshot_complete == false`, the aggregate sequencing lock was
+//!   busy and no session state was observed. The current producer
+//!   returns `sessions == []`, `skipped_session_count == 1`, and zero
+//!   `returned_*` rollups; the legacy presentation derivation therefore
+//!   sets `known_session_count == 1`. These are fixed unavailability
+//!   sentinel values, not observations of one session with zero stalls.
+//!   Consumers must retry rather than diagnose from them.
 //! - **IO-7 (live-actor exposure):** For any actor built through
 //!   `Instance::new`, `/v1/{actor}` exposes
 //!   `inbound_ordering: Some(...)` -- never `None`. `None`
@@ -1077,12 +1082,9 @@ wirevalue::register_type!(FailureInfo);
 /// are derived at conversion time so consumers don't have to iterate
 /// sessions for the common "is anything stalled?" question.
 ///
-/// Partial-snapshot semantics (IO-2): when `snapshot_complete == false`,
-/// `sessions` excludes any session held by a concurrent send. Rollups
-/// marked "returned" below are computed over `sessions` only and are
-/// LOWER BOUNDS in that case -- agents must refetch before concluding
-/// "no stalls". `known_session_count` is the exception: it counts both
-/// returned and skipped sessions.
+/// When `snapshot_complete == false`, the aggregate sequencing lock was
+/// busy and session state was unavailable. Consumers must ignore every
+/// session-derived field and retry (IO-6).
 //
 // Serialize/Deserialize required by wirevalue::register_type! and
 // ResolveReferenceResponse actor messaging. HTTP serialization uses
@@ -1096,26 +1098,23 @@ pub struct InboundOrdering {
     /// IO-4: `true` iff `skipped_session_count == 0`. Mirrors
     /// `OrderingSnapshot::is_complete()`.
     pub snapshot_complete: bool,
-    /// Sessions whose mutex was held by a concurrent send when we
-    /// tried to snapshot. NOT in `sessions`.
+    /// Aggregate snapshot-availability marker: zero means complete;
+    /// nonzero means unavailable. Not a count of individual sessions.
     pub skipped_session_count: usize,
-    /// IO-5: total live sessions known to `OrderedSender` at snapshot
-    /// time: `sessions.len() + skipped_session_count`. Includes idle /
-    /// drained sessions (state retained for duplicate-detection).
+    /// IO-5: exact live-session count when `snapshot_complete`; ignore
+    /// when unavailable. Includes idle / drained sessions.
     pub known_session_count: usize,
-    /// IO-6: sessions with `buffered_count > 0` AMONG RETURNED
-    /// sessions. Lower bound if `!snapshot_complete`.
+    /// Sessions with `buffered_count > 0` in a complete snapshot.
+    /// Ignore when unavailable (IO-6).
     pub returned_buffered_session_count: usize,
-    /// IO-6: sum of `buffered_count` OVER RETURNED sessions.
-    /// Reorder-buffer scope only (see IO-3 in `hyperactor::introspect`).
-    /// Lower bound if `!snapshot_complete`.
+    /// Sum of `buffered_count` in a complete snapshot. Reorder-buffer
+    /// scope only (see IO-3). Ignore when unavailable (IO-6).
     pub returned_buffered_message_count: usize,
-    /// IO-6: max of `buffered_count` OVER RETURNED sessions. Lower
-    /// bound if `!snapshot_complete`.
+    /// Max of `buffered_count` in a complete snapshot. Ignore when
+    /// unavailable (IO-6).
     pub returned_max_buffered_count: usize,
-    /// Per-session entries, sorted by `session_id` (preserved from
-    /// upstream sort). API returns all returned sessions; TUI may
-    /// truncate.
+    /// Complete per-session entries when `snapshot_complete`, sorted
+    /// by `session_id`. Ignore when unavailable; TUI may truncate.
     pub sessions: Vec<hyperactor::ordering::OrderingSessionSnapshot>,
 }
 wirevalue::register_type!(InboundOrdering);

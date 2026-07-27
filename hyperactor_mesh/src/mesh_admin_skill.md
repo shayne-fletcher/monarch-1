@@ -297,15 +297,15 @@ trace-level debugging is needed. Filter with:
 
 - `inbound_ordering == null` — the actor doesn't go through the ordered work-queue path (IO-1: structural absence; e.g., an instance not built through `Instance::new`).
 - `inbound_ordering.enabled == false` — reorder buffering is off; `sessions` is empty regardless of traffic.
-- `inbound_ordering.snapshot_complete == false` — **partial snapshot**. `sessions` excludes any session that was held by a concurrent send at snapshot time. Every `returned_*` rollup is a **lower bound** over returned sessions only; the skipped sessions may themselves carry buffered messages. **Refetch before concluding "no stalls"** — a `returned_buffered_message_count == 0` reading is only authoritative when `snapshot_complete == true`. Usually a refetch yields a complete view; don't alert on partiality alone.
+- `inbound_ordering.snapshot_complete == false` — the aggregate sequencing lock was busy, so session state is unavailable. Ignore `sessions`, `skipped_session_count`, `known_session_count`, and every `returned_*` rollup, then refetch with bounded backoff. Do not alert on unavailability alone.
 - `inbound_ordering.snapshot_complete == true && inbound_ordering.returned_buffered_message_count == 0` — no stalls.
 - Otherwise: filter `sessions` for `buffered_count > 0`. Each stalled session has:
   - `sender` — a string `ActorAddr` of the **session owner** (the actor whose `Sequencer` assigned the SEQ_INFO for this session). For direct sends and casts, the session owner IS the logical sender.
   - `expected_next_seq` — the seq the next contiguous send must carry to unblock the buffer.
   - `oldest_buffered_seq` / `newest_buffered_seq` — the buffered seq range.
 - Diagnosis template: "`{actor}` is waiting for seq `{expected_next_seq}` from session owner `{sender}`; `{buffered_count}` messages buffered from seq `{oldest_buffered_seq}` to `{newest_buffered_seq}`." The waiting happens at the receiver: the session owner has already done its part (its seqs are in the buffer); the receiver is blocked until the missing seq arrives.
-- `known_session_count` is the only rollup that totals returned and skipped together (`sessions.len() + skipped_session_count`). All other `returned_*` rollups are scoped to returned sessions. `known_session_count` also includes idle / control-plane sessions (e.g., a `client.local` session from a bootstrap call) that have `buffered_count == 0`; those show up in the total but never as stalls. Always filter `sessions` by `buffered_count > 0` before applying the diagnosis template above.
-- `queue_depth` and `inbound_ordering.returned_buffered_message_count` are **independent diagnostics with different scopes** (IO-3). `queue_depth` is accepted handler work; `returned_buffered_message_count` is the reorder-buffer subset over returned sessions. No arithmetic or ordering relationship between the two is part of the API contract; don't derive one from the other.
+- For a complete snapshot, `known_session_count == sessions.len()` and every `returned_*` rollup is exact. `known_session_count` includes idle / control-plane sessions (e.g., a `client.local` session from a bootstrap call) that have `buffered_count == 0`; those show up in the total but never as stalls. Always filter `sessions` by `buffered_count > 0` before applying the diagnosis template above.
+- `queue_depth` and `inbound_ordering.returned_buffered_message_count` are **independent diagnostics with different scopes** (IO-3). `queue_depth` is accepted handler work; `returned_buffered_message_count` is the reorder-buffer total from a complete snapshot. No arithmetic or ordering relationship between the two is part of the API contract; don't derive one from the other.
 
 ## Find any stalled actor in the mesh
 
@@ -323,9 +323,8 @@ opaque-ref parsing beyond percent-encoding for the URL path.
    `properties.Actor.inbound_ordering`.
 5. Flag any actor where `inbound_ordering` is non-null AND
    `snapshot_complete == true` AND
-   `returned_buffered_message_count > 0`. (If `snapshot_complete ==
-   false`, refetch — partial snapshots are lower bounds and not
-   authoritative for "no stalls".)
+   `returned_buffered_message_count > 0`. If `snapshot_complete ==
+   false`, ignore all session-derived fields and refetch.
 6. For each flagged actor, filter `sessions` by `buffered_count > 0`
    and apply the diagnosis template from "Diagnose ordering stalls"
    above to each remaining session.
