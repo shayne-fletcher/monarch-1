@@ -367,7 +367,7 @@ class HostMesh(MeshTrait):
         for pm in self._proc_meshes:
             await pm._flush_pending_actor_spawns()
             try:
-                await pm._logging_manager.flush_async()
+                await pm._logging_manager._flush_from_tokio()
             except Exception:
                 pass
 

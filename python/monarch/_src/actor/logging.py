@@ -14,8 +14,8 @@ from typing import Optional, TextIO, Tuple
 
 from monarch._rust_bindings.monarch_hyperactor.logging import LoggingMeshClient
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._src.actor.actor_mesh import context
-from monarch._src.actor.future import Future
 from monarch._src.actor.ipython_check import is_ipython
 
 IN_IPYTHON: bool = is_ipython()
@@ -84,8 +84,8 @@ class LoggingManager:
 
                     def _post_run_cell_flush(_: object) -> None:
                         # For async cells the loop is still running when the
-                        # callback fires; `flush()` would then call
-                        # `Future.get()` inside that loop, which is an error.
+                        # callback fires; `flush()` would then block that loop
+                        # in `Handle.get(timeout=3)`.
                         # Schedule the async flush on the loop instead.
                         try:
                             loop = asyncio.get_running_loop()
@@ -180,17 +180,16 @@ class LoggingManager:
         self.register_flusher_if_in_ipython()
         self.enable_fd_capture_if_in_ipython()
 
+    def _new_flush_task(self) -> PythonTask[None]:
+        """Return an unscheduled Rust logging-flush future wrapped as a PythonTask."""
+        assert self._logging_mesh_client is not None
+        return self._logging_mesh_client.flush(context().actor_instance._as_rust())
+
     def flush(self) -> None:
         assert self._logging_mesh_client is not None
         try:
-            # blocks for this proc mesh until 3 seconds timeout
-            Future(
-                coro=self._logging_mesh_client.flush(
-                    context().actor_instance._as_rust()
-                )
-                .spawn()
-                .task()
-            ).get(timeout=3)
+            # Schedule the Rust future and wait through a Handle for up to 3 seconds.
+            self._new_flush_task().spawn_handle().get(timeout=3)
         except Exception:
             # TODO: A harmless exception happens to come through due to coroutine
             # accessing shared resources via logging_mesh_client. Flush works fine
@@ -198,21 +197,24 @@ class LoggingManager:
             pass
 
     async def flush_async(self) -> None:
-        """Async version of flush for use in async contexts."""
+        """Flush by awaiting a Handle on the current asyncio event loop."""
         if self._logging_mesh_client is None:
             return
         try:
-            # Drive the flush through Future so it works on an asyncio loop too:
-            # a bare `await` of the PythonTask hits the pytokio gate there and is
-            # swallowed below (a silent no-op). Future.__await__ bridges to an
-            # asyncio.Future on a loop and awaits the spawned Shared on a tokio
-            # thread. Mirrors the sync flush().
-            await Future(
-                coro=self._logging_mesh_client.flush(
-                    context().actor_instance._as_rust()
-                )
-                .spawn()
-                .task()
-            )
+            # Schedule the Rust future and await its Handle on the asyncio loop.
+            await self._new_flush_task().spawn_handle()
+        except Exception:
+            pass
+
+    async def _flush_from_tokio(self) -> None:
+        """Flush while Rust's pytokio driver steps this coroutine on Tokio."""
+        if self._logging_mesh_client is None:
+            return
+        try:
+            # Despite being `async def`, this is not an asyncio task. Rust's
+            # pytokio driver advances it on Tokio. `spawn()` starts the Rust
+            # future, and this `await` yields its `Shared` back to pytokio; the
+            # Rust pytokio driver resumes this coroutine when the flush completes.
+            await self._new_flush_task().spawn()
         except Exception:
             pass

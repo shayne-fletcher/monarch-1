@@ -49,6 +49,7 @@ from monarch._src.actor.future import (
     enable_tokio_oracle,
     Future,
     reset_tokio_oracle,
+    tokio_oracle,
     tokio_oracle_records,
 )
 from monarch._src.actor.host_mesh import _spawn_admin, HostMesh, this_host, this_proc
@@ -1091,7 +1092,16 @@ async def test_flush_async_drives_flush_on_asyncio_loop() -> None:
         await asyncio.sleep(1)
 
         # System under test: flush_async on the test's asyncio loop.
-        await pm._logging_manager.flush_async()
+        with tokio_oracle() as records:
+            await pm._logging_manager.flush_async()
+
+            logging_records = [
+                record
+                for record in records
+                if record.module == "monarch._src.actor.logging"
+                and os.path.basename(record.filename) == "logging.py"
+            ]
+            assert logging_records == []
 
         await asyncio.sleep(1)
         sys.stdout.flush()

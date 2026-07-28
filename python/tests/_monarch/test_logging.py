@@ -14,7 +14,22 @@ from unittest.mock import Mock, patch
 
 import pytest
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 from monarch._src.actor.logging import flush_all_proc_mesh_logs, LoggingManager
+
+
+class _AwaitTracker:
+    def __init__(self, awaitable: Any) -> None:
+        self._awaitable = awaitable
+        self.awaited = False
+        self.get_called = False
+
+    def __await__(self) -> Any:
+        self.awaited = True
+        return self._awaitable.__await__()
+
+    def get(self, *args: object, **kwargs: object) -> None:
+        self.get_called = True
 
 
 class LoggingManagerTest(TestCase):
@@ -125,50 +140,97 @@ class LoggingManagerTest(TestCase):
         # Assert: None is returned
         self.assertIsNone(result)
 
-    @patch("monarch._src.actor.logging.Future")
     @patch("monarch._src.actor.logging.context")
-    def test_flush_calls_mesh_client_flush(
-        self, mock_context: Mock, mock_future: Mock
-    ) -> None:
-        # Setup: mock context, client, and Future
+    def test_flush_calls_mesh_client_flush(self, mock_context: Mock) -> None:
+        # Setup: mock context, client, task, and handle
         mock_instance = Mock()
         mock_context.return_value.actor_instance._as_rust.return_value = mock_instance
         mock_client = Mock()
         mock_task = Mock()
-        mock_client.flush.return_value.spawn.return_value.task.return_value = mock_task
+        mock_handle = Mock()
+        mock_client.flush.return_value = mock_task
+        mock_task.spawn_handle.return_value = mock_handle
         self.logging_manager._logging_mesh_client = mock_client
 
-        mock_future_instance = Mock()
-        mock_future.return_value = mock_future_instance
-
         # Execute: flush logs
-        self.logging_manager.flush()
+        result = self.logging_manager.flush()
 
-        # Assert: mesh client flush was called
+        # Assert: the native task was observed through a Handle with the timeout.
+        self.assertIsNone(result)
         mock_client.flush.assert_called_once_with(mock_instance)
-        # Assert: Future was created and get was called with timeout
-        mock_future.assert_called_once_with(coro=mock_task)
-        mock_future_instance.get.assert_called_once_with(timeout=3)
+        mock_task.spawn_handle.assert_called_once_with()
+        mock_task.spawn.assert_not_called()
+        mock_handle.get.assert_called_once_with(timeout=3)
 
-    @patch("monarch._src.actor.logging.Future")
     @patch("monarch._src.actor.logging.context")
-    def test_flush_handles_exception_gracefully(
-        self, mock_context: Mock, mock_future: Mock
-    ) -> None:
-        # Setup: mock context, client, and Future that raises exception
+    def test_flush_handles_exception_gracefully(self, mock_context: Mock) -> None:
+        # Setup: make Handle observation raise an ordinary exception.
         mock_instance = Mock()
         mock_context.return_value.actor_instance._as_rust.return_value = mock_instance
         mock_client = Mock()
+        mock_task = Mock()
+        mock_handle = Mock()
+        mock_client.flush.return_value = mock_task
+        mock_task.spawn_handle.return_value = mock_handle
+        mock_handle.get.side_effect = Exception("Test exception")
         self.logging_manager._logging_mesh_client = mock_client
 
-        mock_future_instance = Mock()
-        mock_future_instance.get.side_effect = Exception("Test exception")
-        mock_future.return_value = mock_future_instance
-
         # Execute: flush logs (should not raise exception)
-        self.logging_manager.flush()
+        result = self.logging_manager.flush()
 
-        # Assert: no exception is raised and method completes gracefully
+        # Assert: the operation was started and the observer error was suppressed.
+        self.assertIsNone(result)
+        mock_client.flush.assert_called_once_with(mock_instance)
+        mock_task.spawn_handle.assert_called_once_with()
+        mock_handle.get.assert_called_once_with(timeout=3)
+
+    def test_flush_from_tokio_awaits_shared_not_handle(self) -> None:
+        mock_task = Mock()
+        shared = _AwaitTracker(Shared.from_value(None))
+        mock_task.spawn.return_value = shared
+        self.logging_manager._logging_mesh_client = Mock()
+
+        with patch.object(
+            self.logging_manager, "_new_flush_task", return_value=mock_task
+        ) as mock_new_flush_task:
+            result = PythonTask.from_coroutine(
+                self.logging_manager._flush_from_tokio()
+            ).block_on()
+
+        self.assertIsNone(result)
+        mock_new_flush_task.assert_called_once_with()
+        mock_task.spawn.assert_called_once_with()
+        mock_task.spawn_handle.assert_not_called()
+        self.assertTrue(shared.awaited)
+        self.assertFalse(shared.get_called)
+
+    def test_flush_from_tokio_without_client_is_noop(self) -> None:
+        with patch.object(
+            self.logging_manager, "_new_flush_task"
+        ) as mock_new_flush_task:
+            result = PythonTask.from_coroutine(
+                self.logging_manager._flush_from_tokio()
+            ).block_on()
+
+        self.assertIsNone(result)
+        mock_new_flush_task.assert_not_called()
+
+    def test_flush_from_tokio_suppresses_ordinary_error(self) -> None:
+        async def fail() -> None:
+            raise RuntimeError("test error")
+
+        self.logging_manager._logging_mesh_client = Mock()
+        with patch.object(
+            self.logging_manager,
+            "_new_flush_task",
+            return_value=PythonTask.from_coroutine(fail()),
+        ) as mock_new_flush_task:
+            result = PythonTask.from_coroutine(
+                self.logging_manager._flush_from_tokio()
+            ).block_on()
+
+        self.assertIsNone(result)
+        mock_new_flush_task.assert_called_once_with()
 
 
 class FlushAllProcMeshLogsTest(TestCase):
@@ -204,6 +266,26 @@ class FlushAllProcMeshLogsTest(TestCase):
 class LoggingManagerAsyncTest(IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.logging_manager = LoggingManager()
+
+    async def test_flush_async_awaits_handle_not_shared(self) -> None:
+        ready = asyncio.get_running_loop().create_future()
+        ready.set_result(None)
+        handle = _AwaitTracker(ready)
+        mock_task = Mock()
+        mock_task.spawn_handle.return_value = handle
+        self.logging_manager._logging_mesh_client = Mock()
+
+        with patch.object(
+            self.logging_manager, "_new_flush_task", return_value=mock_task
+        ) as mock_new_flush_task:
+            result = await self.logging_manager.flush_async()
+
+        self.assertIsNone(result)
+        mock_new_flush_task.assert_called_once_with()
+        mock_task.spawn_handle.assert_called_once_with()
+        mock_task.spawn.assert_not_called()
+        self.assertTrue(handle.awaited)
+        self.assertFalse(handle.get_called)
 
     @patch("monarch._src.actor.logging.LoggingMeshClient")
     @patch("monarch._src.actor.logging.context")
