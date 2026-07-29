@@ -58,10 +58,9 @@ class _DriverProbe(Actor):
             bare_await_raised = True
 
         # (3) Awaiting a monarch Future here takes the _Handle (asyncio) path,
-        # not _Tokio. Scope the oracle (so a process-wide oracle is left
-        # intact) and count only _Tokio attributed to this probe body, so
-        # unrelated concurrent activity on the loop can't perturb the count.
-        with tokio_oracle() as records:
+        # not _Tokio. Preserve a process-wide raise-mode oracle while this
+        # probe runs.
+        with tokio_oracle(raise_on_produce=True) as records:
             await Future(coro=PythonTask.sleep(0))
             tokio_count = sum(
                 1 for r in records if r.module == __name__ and r.function == "probe"
