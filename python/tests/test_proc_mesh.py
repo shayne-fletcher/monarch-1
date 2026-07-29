@@ -149,6 +149,8 @@ async def test_stop_state_tracks_native_stop_result() -> None:
     with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
         owner = state.hosts.spawn_procs(per_host={"gpus": 2})
         await owner.initialized
+        logging_manager = owner._logging_manager
+        assert logging_manager._logging_mesh_client is not None
         proc_ref = owner.slice(gpus=0)
 
         with pytest.raises(
@@ -158,7 +160,45 @@ async def test_stop_state_tracks_native_stop_result() -> None:
             await proc_ref.stop()
 
         assert not proc_ref._stopped
-        assert await owner.stop() is None
+        flush_started = False
+        proc_flush_called = False
+        new_flush_task = logging_manager._new_flush_task
+        flush_from_tokio = logging_manager._flush_from_tokio
+
+        def record_flush_start() -> PythonTask[None]:
+            flush_task = new_flush_task()
+
+            async def task() -> None:
+                nonlocal flush_started
+                flush_started = True
+                await flush_task
+
+            return PythonTask.from_coroutine(task())
+
+        async def record_flush_from_tokio() -> None:
+            nonlocal proc_flush_called
+            proc_flush_called = True
+            await flush_from_tokio()
+
+        with (
+            patch.object(logging_manager, "_new_flush_task", record_flush_start),
+            patch.object(
+                logging_manager,
+                "_flush_from_tokio",
+                record_flush_from_tokio,
+            ),
+        ):
+            with tokio_oracle() as records:
+                assert await owner.stop() is None
+
+                logging_records = _tokio_records_for(
+                    records,
+                    module="monarch._src.actor.logging",
+                    filename="logging.py",
+                )
+                assert proc_flush_called
+                assert logging_records == []
+        assert flush_started
         assert owner._stopped
 
 
@@ -390,38 +430,68 @@ async def test_actor_spawn_then_immediate_shutdown() -> None:
         host = job.state(cached_path=None).hosts
         proc_mesh = host.spawn_procs(name="test")
         await proc_mesh.initialized
-        assert proc_mesh._logging_manager._logging_mesh_client is not None
+        logging_manager = proc_mesh._logging_manager
+        assert logging_manager._logging_mesh_client is not None
+
+        flush_started = False
+        host_flush_called = False
+        new_flush_task = logging_manager._new_flush_task
+        flush_from_tokio = logging_manager._flush_from_tokio
+
+        def record_flush_start() -> PythonTask[None]:
+            flush_task = new_flush_task()
+
+            async def task() -> None:
+                nonlocal flush_started
+                flush_started = True
+                await flush_task
+
+            return PythonTask.from_coroutine(task())
+
+        async def record_flush_from_tokio() -> None:
+            nonlocal host_flush_called
+            host_flush_called = True
+            await flush_from_tokio()
 
         # spawn actor but do NOT await initialized — immediately shutdown
         actor_mesh = proc_mesh.spawn("test_actor", TestActor, 42)
 
-        with tokio_oracle() as records:
-            shutdown_result = await host.shutdown()
-            cleanup.pop_all()
-            assert shutdown_result is None
+        with (
+            patch.object(logging_manager, "_new_flush_task", record_flush_start),
+            patch.object(
+                logging_manager,
+                "_flush_from_tokio",
+                record_flush_from_tokio,
+            ),
+        ):
+            with tokio_oracle() as records:
+                shutdown_result = await host.shutdown()
+                cleanup.pop_all()
+                assert shutdown_result is None
 
-            proc_drain_records = _tokio_records_for(
-                records,
-                module="monarch._src.actor.proc_mesh",
-                filename="proc_mesh.py",
-                function="_flush_pending_actor_spawns",
-            )
-            logging_records = _tokio_records_for(
-                records,
-                module="monarch._src.actor.logging",
-                filename="logging.py",
-                function="flush_async",
-            )
-            host_records = _tokio_records_for(
-                records,
-                module="monarch._src.actor.host_mesh",
-                filename="host_mesh.py",
-            )
+                proc_drain_records = _tokio_records_for(
+                    records,
+                    module="monarch._src.actor.proc_mesh",
+                    filename="proc_mesh.py",
+                    function="_flush_pending_actor_spawns",
+                )
+                logging_records = _tokio_records_for(
+                    records,
+                    module="monarch._src.actor.logging",
+                    filename="logging.py",
+                )
+                host_records = _tokio_records_for(
+                    records,
+                    module="monarch._src.actor.host_mesh",
+                    filename="host_mesh.py",
+                )
 
-            assert len(proc_drain_records) == 1
-            assert len(logging_records) == 1
-            assert host_records == []
+                assert len(proc_drain_records) == 1
+                assert host_flush_called
+                assert logging_records == []
+                assert host_records == []
 
+        assert flush_started
         assert await actor_mesh.initialized is None
         assert proc_mesh._pending_actor_spawns == []
 
