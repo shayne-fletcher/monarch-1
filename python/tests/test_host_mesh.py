@@ -24,6 +24,7 @@ from unittest.mock import patch
 import cloudpickle
 import pytest
 from isolate_in_subprocess import isolate_in_subprocess
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.shape import Point, Shape, Slice
 from monarch._src.actor.actor_mesh import _client_context, Actor, attach, context
 from monarch._src.actor.bootstrap import attach_to_workers
@@ -63,9 +64,10 @@ def test_multi_host_mesh() -> None:
         assert hy_host.region.slice() == host.region.slice()
 
         # Hosts 5 and 7
-        sliced = host._new_with_shape(
-            Shape(labels=["hosts"], slice=Slice(offset=5, sizes=[2], strides=[2]))
+        slice_shape = Shape(
+            labels=["hosts"], slice=Slice(offset=5, sizes=[2], strides=[2])
         )
+        sliced = host._new_with_shape(slice_shape)
         assert sliced.extent.labels == ["hosts"]
         assert sliced.extent.sizes == [2]
         assert not sliced.stream_logs
@@ -74,6 +76,25 @@ def test_multi_host_mesh() -> None:
         hy_sliced = sliced._hy_host_mesh.block_on()
         assert hy_sliced.region.labels == sliced.region.labels
         assert hy_sliced.region.slice() == sliced.region.slice()
+
+        release_host_mesh = threading.Event()
+
+        async def resolve_host_mesh():
+            await PythonTask.spawn_blocking(release_host_mesh.wait)
+            return hy_host
+
+        # Keep the native mesh unresolved so slicing must take the pending path.
+        host._inner_host_mesh = PythonTask.from_coroutine(resolve_host_mesh()).spawn()
+        try:
+            assert host._hy_host_mesh.poll() is None
+            pending_sliced = host._new_with_shape(slice_shape)
+            assert pending_sliced._hy_host_mesh.poll() is None
+        finally:
+            release_host_mesh.set()
+
+        hy_pending_sliced = pending_sliced._hy_host_mesh.block_on()
+        assert hy_pending_sliced.region.labels == pending_sliced.region.labels
+        assert hy_pending_sliced.region.slice() == pending_sliced.region.slice()
 
 
 @pytest.mark.timeout(120)
