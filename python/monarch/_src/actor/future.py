@@ -206,10 +206,13 @@ class Future(Generic[R]):
         )
 
     def _take_inner(self) -> "PythonTask[R]":
-        """Surrender the underlying ``PythonTask`` to a caller that needs to drive
-        it directly (for example to await the raw Rust future without the GIL).
-        Only valid on a Future that has not yet been awaited or resolved; the
-        Future is spent afterward (a second take, or any get()/await, raises).
+        """Take the underlying one-shot ``PythonTask`` from this Future.
+
+        Awaiting the task drives its Rust future inline as part of the caller.
+        Calling ``spawn()`` and awaiting its ``Shared`` observes a separately
+        running producer that is not aborted when the observer is dropped. Only
+        valid on a Future that has not yet been awaited or resolved; the Future is
+        spent afterward (a second take, or any get()/await, raises).
         """
         match self._status:
             case _Unawaited(coro=coro):

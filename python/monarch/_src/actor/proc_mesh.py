@@ -494,7 +494,7 @@ class ProcMesh(MeshTrait):
             # it here before any of the other python actors are spawned so
             # that the environment variables are set up before cuda init.
             if setup_actor is not None:
-                await setup_actor.setup.call()
+                await setup_actor.setup.call()._take_inner().spawn()
 
             return hy_proc_mesh
 
@@ -659,7 +659,7 @@ class ProcMesh(MeshTrait):
     async def _flush_pending_actor_spawns(self) -> None:
         for mesh in self._pending_actor_spawns:
             try:
-                await mesh.initialized
+                await mesh.initialized._take_inner().spawn()
             except Exception:
                 pass
         self._pending_actor_spawns.clear()
