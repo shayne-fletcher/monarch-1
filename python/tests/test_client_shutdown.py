@@ -40,7 +40,9 @@ def test_client_shutdown() -> None:
     # Now shutdown the client. Delete references to avoid accidental reuse.
     del procs
     del actors
-    shutdown_context().get()
+    assert shutdown_context().get() is None
+    # The already-complete shutdown path remains safe and idempotent.
+    assert shutdown_context().get() is None
     # After this, all the resources created by the client should be released,
     # including this_host and the procs. We check this by seeing if the pids are
     # still alive after a short wait period (procs are cleaned up with an async

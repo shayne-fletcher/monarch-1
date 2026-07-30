@@ -102,7 +102,7 @@ class _RdmaTokioOracleProbe(Actor):
 
     @endpoint
     async def create_buffer(self) -> tuple[RDMABuffer, list[tuple[str, int, str]]]:
-        with tokio_oracle() as records:
+        with tokio_oracle(raise_on_produce=True) as records:
             self.buffer = RDMABuffer(memoryview(self.data))
             sites = _rdma_tokio_sites(records)
         return self.buffer, sites
@@ -112,7 +112,7 @@ class _RdmaTokioOracleProbe(Actor):
         self,
         buffer: RDMABuffer,
     ) -> tuple[bytes, list[tuple[str, int, str]]]:
-        with tokio_oracle() as records:
+        with tokio_oracle(raise_on_produce=True) as records:
             readback = bytearray(len(_ORACLE_INITIAL))
             assert await buffer.read_into(memoryview(readback)) is None
             assert await buffer.write_from(memoryview(_ORACLE_UPDATED)) is None
@@ -122,7 +122,7 @@ class _RdmaTokioOracleProbe(Actor):
     @endpoint
     async def verify_and_drop(self) -> list[tuple[str, int, str]]:
         assert self.buffer is not None
-        with tokio_oracle() as records:
+        with tokio_oracle(raise_on_produce=True) as records:
             assert bytes(self.data) == _ORACLE_UPDATED
             assert await self.buffer.drop() is None
             sites = _rdma_tokio_sites(records)
@@ -143,9 +143,25 @@ def test_tokio_oracle_records_known_tokio_production() -> None:
             for record in records
             if record.module == __name__ and record.function == "produce"
         ]
+        assert records == control_sites
         assert len(control_sites) == 1, (
             f"expected one known _Tokio production, got {control_sites}"
         )
+
+
+def test_tokio_oracle_scoped_record_restores_outer_raise_mode() -> None:
+    from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+    from monarch._src.actor.future import Future
+
+    async def produce() -> None:
+        await Future(coro=PythonTask.sleep(0))
+
+    with tokio_oracle(raise_on_produce=True):
+        with tokio_oracle() as records:
+            PythonTask.from_coroutine(produce()).block_on()
+            assert len(records) == 1
+        with pytest.raises(RuntimeError, match="_Tokio produced"):
+            PythonTask.from_coroutine(produce()).block_on()
 
 
 def test_manager_init_cache_reuses_handle_without_retaining_mesh(monkeypatch) -> None:

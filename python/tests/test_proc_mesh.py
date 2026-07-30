@@ -132,7 +132,7 @@ class TestActor(Actor):
 async def test_proc_mesh_initialization() -> None:
     with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
         host = state.hosts
-        with tokio_oracle() as records:
+        with tokio_oracle(raise_on_produce=True) as records:
             proc_mesh = host.spawn_procs(
                 name="test_proc",
                 bootstrap=_successful_bootstrap,
@@ -145,7 +145,7 @@ async def test_proc_mesh_initialization() -> None:
 @isolate_in_subprocess
 async def test_proc_mesh_initialized_fails_when_bootstrap_fails() -> None:
     with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
-        with tokio_oracle() as records:
+        with tokio_oracle(raise_on_produce=True) as records:
             proc_mesh = state.hosts.spawn_procs(bootstrap=_fail_bootstrap)
             with pytest.raises(monarch.actor.ActorError, match=_BOOTSTRAP_FAILURE):
                 await proc_mesh.initialized
@@ -197,7 +197,7 @@ async def test_stop_state_tracks_native_stop_result() -> None:
                 record_flush_from_tokio,
             ),
         ):
-            with tokio_oracle() as records:
+            with tokio_oracle(raise_on_produce=True) as records:
                 assert await owner.stop() is None
 
                 assert proc_flush_called
@@ -243,13 +243,28 @@ def test_proc_mesh_sliced() -> None:
         # Initialize _proc_rank on each actor process
         actor = proc_mesh.spawn("test_actor", TestActor, 42)
         actor.get_proc_rank.call().get()
+        hy_proc_mesh = proc_mesh._proc_mesh.block_on()
+        release_proc_mesh = threading.Event()
+
+        async def resolve_proc_mesh() -> HyProcMesh:
+            await PythonTask.spawn_blocking(release_proc_mesh.wait)
+            return hy_proc_mesh
+
+        # Keep the native mesh unresolved so slicing must take the pending path.
+        proc_mesh._proc_mesh = PythonTask.from_coroutine(resolve_proc_mesh()).spawn()
+
         # Hosts 0 and 2, gpus 1 and 2
-        sliced = proc_mesh._new_with_shape(
-            Shape(
-                labels=["hosts", "gpus"],
-                slice=Slice(offset=1, sizes=[2, 2], strides=[6, 1]),
-            )
+        slice_shape = Shape(
+            labels=["hosts", "gpus"],
+            slice=Slice(offset=1, sizes=[2, 2], strides=[6, 1]),
         )
+        try:
+            assert proc_mesh._proc_mesh.poll() is None
+            sliced = proc_mesh._new_with_shape(slice_shape)
+            assert sliced._proc_mesh.poll() is None
+        finally:
+            release_proc_mesh.set()
+
         actor = sliced.spawn("test_actor_sliced", TestActor, 42)
         proc_ranks = actor.get_proc_rank.call().get()
         assert proc_ranks.extent.labels == ["hosts", "gpus"]
@@ -485,7 +500,7 @@ async def test_actor_spawn_then_immediate_shutdown() -> None:
                 record_flush_from_tokio,
             ),
         ):
-            with tokio_oracle() as records:
+            with tokio_oracle(raise_on_produce=True) as records:
                 shutdown_result = await host.shutdown()
                 cleanup.pop_all()
                 assert shutdown_result is None

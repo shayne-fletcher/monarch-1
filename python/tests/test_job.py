@@ -1842,12 +1842,12 @@ def test_exec_command_output_dir_suppresses_printing(capsys):
 def test_exec_command_produces_no_tokio():
     """Gate A (job cluster): exec_command produces no `_Tokio` state.
 
-    Drives exec_command with the record-only `_Tokio` oracle enabled and asserts
+    Drives exec_command with the `_Tokio` oracle in raise mode and asserts
     job.py produced no `_Tokio` (no `await <Future>` on the tokio thread). Before
-    the `_take_inner()` migration this recorded the three job producers
+    the `_take_inner()` migration this found the three job producers
     (run_python.call, run.call, procs.stop); after it, zero.
     """
-    with tokio_oracle() as records:
+    with tokio_oracle(raise_on_produce=True) as records:
         # shell branch: exercises run.call + the procs.stop finally
         host_mesh, _procs, bash_actors, _markers = _exec_env()
         bash_actors.run.call.return_value = _results_future(
