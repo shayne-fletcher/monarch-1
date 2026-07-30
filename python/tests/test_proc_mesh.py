@@ -30,7 +30,7 @@ from monarch._src.actor.actor_mesh import (
     ValueMesh,
 )
 from monarch._src.actor.endpoint import endpoint
-from monarch._src.actor.future import tokio_oracle, TokioOracleRecord
+from monarch._src.actor.future import Future, tokio_oracle, TokioOracleRecord
 from monarch._src.actor.host_mesh import this_host, this_proc
 from monarch._src.actor.proc_mesh import (
     get_or_spawn_controller,
@@ -44,6 +44,11 @@ from scoped_state import scoped_state
 
 _proc_rank = -1
 _BOOTSTRAP_FAILURE = "stage 3.4 bootstrap failure"
+_STAGE_3_4_ORACLE_FILES = {
+    "monarch._src.actor.host_mesh": "host_mesh.py",
+    "monarch._src.actor.logging": "logging.py",
+    "monarch._src.actor.proc_mesh": "proc_mesh.py",
+}
 
 
 def _successful_bootstrap() -> None:
@@ -54,20 +59,30 @@ def _fail_bootstrap() -> None:
     raise RuntimeError(_BOOTSTRAP_FAILURE)
 
 
-def _tokio_records_for(
+def _stage_3_4_tokio_records(
     records: list[TokioOracleRecord],
-    *,
-    module: str,
-    filename: str,
-    function: str | None = None,
 ) -> list[TokioOracleRecord]:
     return [
         record
         for record in records
-        if record.module == module
-        and os.path.basename(record.filename) == filename
-        and (function is None or record.function == function)
+        if _STAGE_3_4_ORACLE_FILES.get(record.module)
+        == os.path.basename(record.filename)
     ]
+
+
+class _PendingActorProbe:
+    def __init__(
+        self,
+        name: str,
+        driven: list[str],
+        error: Exception | None = None,
+    ) -> None:
+        async def initialize() -> None:
+            driven.append(name)
+            if error is not None:
+                raise error
+
+        self.initialized = Future(coro=initialize())
 
 
 class TestActor(Actor):
@@ -123,24 +138,18 @@ async def test_proc_mesh_initialization() -> None:
                 bootstrap=_successful_bootstrap,
             )
             assert await proc_mesh.initialized
-
-            setup_records = _tokio_records_for(
-                records,
-                module="monarch._src.actor.proc_mesh",
-                filename="proc_mesh.py",
-                function="task",
-            )
-            assert len(setup_records) == 1
+            assert _stage_3_4_tokio_records(records) == []
 
 
 @pytest.mark.timeout(60)
 @isolate_in_subprocess
 async def test_proc_mesh_initialized_fails_when_bootstrap_fails() -> None:
     with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
-        proc_mesh = state.hosts.spawn_procs(bootstrap=_fail_bootstrap)
-
-        with pytest.raises(monarch.actor.ActorError, match=_BOOTSTRAP_FAILURE):
-            await proc_mesh.initialized
+        with tokio_oracle() as records:
+            proc_mesh = state.hosts.spawn_procs(bootstrap=_fail_bootstrap)
+            with pytest.raises(monarch.actor.ActorError, match=_BOOTSTRAP_FAILURE):
+                await proc_mesh.initialized
+            assert _stage_3_4_tokio_records(records) == []
 
 
 @pytest.mark.timeout(60)
@@ -191,13 +200,8 @@ async def test_stop_state_tracks_native_stop_result() -> None:
             with tokio_oracle() as records:
                 assert await owner.stop() is None
 
-                logging_records = _tokio_records_for(
-                    records,
-                    module="monarch._src.actor.logging",
-                    filename="logging.py",
-                )
                 assert proc_flush_called
-                assert logging_records == []
+                assert _stage_3_4_tokio_records(records) == []
         assert flush_started
         assert owner._stopped
 
@@ -455,6 +459,23 @@ async def test_actor_spawn_then_immediate_shutdown() -> None:
 
         # spawn actor but do NOT await initialized — immediately shutdown
         actor_mesh = proc_mesh.spawn("test_actor", TestActor, 42)
+        drain_order: list[str] = []
+        proc_mesh._pending_actor_spawns.extend(
+            [
+                cast(
+                    ActorMesh,
+                    _PendingActorProbe(
+                        "failed",
+                        drain_order,
+                        RuntimeError("pending actor initialization failed"),
+                    ),
+                ),
+                cast(
+                    ActorMesh,
+                    _PendingActorProbe("succeeded", drain_order),
+                ),
+            ]
+        )
 
         with (
             patch.object(logging_manager, "_new_flush_task", record_flush_start),
@@ -469,29 +490,11 @@ async def test_actor_spawn_then_immediate_shutdown() -> None:
                 cleanup.pop_all()
                 assert shutdown_result is None
 
-                proc_drain_records = _tokio_records_for(
-                    records,
-                    module="monarch._src.actor.proc_mesh",
-                    filename="proc_mesh.py",
-                    function="_flush_pending_actor_spawns",
-                )
-                logging_records = _tokio_records_for(
-                    records,
-                    module="monarch._src.actor.logging",
-                    filename="logging.py",
-                )
-                host_records = _tokio_records_for(
-                    records,
-                    module="monarch._src.actor.host_mesh",
-                    filename="host_mesh.py",
-                )
-
-                assert len(proc_drain_records) == 1
                 assert host_flush_called
-                assert logging_records == []
-                assert host_records == []
+                assert _stage_3_4_tokio_records(records) == []
 
         assert flush_started
+        assert drain_order == ["failed", "succeeded"]
         assert await actor_mesh.initialized is None
         assert proc_mesh._pending_actor_spawns == []
 
