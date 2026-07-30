@@ -90,8 +90,6 @@ pub mod pretty;
 /// examples.
 pub mod token_parser;
 
-/// Shape navigation guided by [`Selection`] expressions.
-
 /// Normalization logic for `Selection`.
 pub mod normal;
 
