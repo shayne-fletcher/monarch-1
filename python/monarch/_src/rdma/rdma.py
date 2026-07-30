@@ -479,7 +479,9 @@ class RDMABuffer:
         # RDC-6: no Tokio-driven coroutine awaits the Handle; the native drop task
         # waits on it and we wrap that task directly (RDC-3).
         ready = _ensure_init_rdma_manager()
-        return Future(coro=self._buffer.drop(client=client, rdma_manager_init=ready))
+        return Future._from_coro(
+            self._buffer.drop(client=client, rdma_manager_init=ready)
+        )
 
     @property
     def owner(self) -> str:
@@ -544,8 +546,10 @@ class RDMAAction:
         # RDC-6: no Tokio-driven coroutine awaits the Handle; the native submit task
         # waits on it before taking the action lock, and we wrap that task directly.
         ready = _ensure_init_rdma_manager()
-        return Future(
-            coro=self._inner.submit(
-                client=client, timeout=timeout, rdma_manager_init=ready
+        return Future._from_coro(
+            self._inner.submit(
+                client=client,
+                timeout=timeout,
+                rdma_manager_init=ready,
             )
         )

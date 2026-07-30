@@ -372,7 +372,7 @@ class ProcMesh(MeshTrait):
             await pm
             return True
 
-        return Future(coro=task())
+        return Future._from_coro(task())
 
     @property
     def host_mesh(self) -> "HostMesh":
@@ -462,7 +462,7 @@ class ProcMesh(MeshTrait):
         This must be called on the asyncio stream.
         """
         assert asyncio.get_running_loop() is not None
-        return await Future(coro=self._proc_mesh.task())
+        return await Future._from_coro(self._proc_mesh.task())
 
     @classmethod
     def from_host_mesh(
@@ -679,7 +679,7 @@ class ProcMesh(MeshTrait):
             await pm.stop_nonblocking(instance, reason)
             self._stopped = True
 
-        return Future(coro=_stop_nonblocking(instance))
+        return Future._from_coro(_stop_nonblocking(instance))
 
     async def __aexit__(
         self, exc_type: object, exc_val: object, exc_tb: object

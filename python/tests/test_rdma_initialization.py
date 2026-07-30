@@ -9,8 +9,8 @@
 Tests for RDMA manager initialization and its failure surfaces.
 
 These tests cover the owner-backed binding from local and remote actors,
-production readiness caching and validation, the RDMA-local `_Tokio` gate,
-and backend configuration errors.
+production readiness caching and validation, public buffer operations, and
+backend configuration errors.
 """
 
 import gc
@@ -26,25 +26,14 @@ if sys.platform != "linux":
     pytest.skip("linux-only", allow_module_level=True)
 
 from isolate_in_subprocess import isolate_in_subprocess
-from monarch._src.actor.future import tokio_oracle, TokioOracleRecord
 from monarch._src.actor.proc_mesh import ProcMesh
 from monarch.actor import Actor, endpoint
 from monarch.config import configured
 from monarch.rdma import RDMABuffer
 
 
-_ORACLE_INITIAL = b"rdma-oracle-a"
-_ORACLE_UPDATED = b"rdma-oracle-b"
-
-
-def _rdma_tokio_sites(
-    records: list[TokioOracleRecord],
-) -> list[tuple[str, int, str]]:
-    return [
-        (record.filename, record.lineno, record.function)
-        for record in records
-        if record.module == RDMABuffer.__module__
-    ]
+_PUBLIC_PATH_INITIAL = b"rdma-public-path-a"
+_PUBLIC_PATH_UPDATED = b"rdma-public-path-b"
 
 
 class _RdmaInitProbe(Actor):
@@ -95,73 +84,31 @@ class _RdmaInitProbe(Actor):
         return buffer_error, submit_error
 
 
-class _RdmaTokioOracleProbe(Actor):
+class _RdmaPublicPathProbe(Actor):
     def __init__(self) -> None:
-        self.data = bytearray(_ORACLE_INITIAL)
+        self.data = bytearray(_PUBLIC_PATH_INITIAL)
         self.buffer: RDMABuffer | None = None
 
     @endpoint
-    async def create_buffer(self) -> tuple[RDMABuffer, list[tuple[str, int, str]]]:
-        with tokio_oracle(raise_on_produce=True) as records:
-            self.buffer = RDMABuffer(memoryview(self.data))
-            sites = _rdma_tokio_sites(records)
-        return self.buffer, sites
+    async def create_buffer(self) -> RDMABuffer:
+        self.buffer = RDMABuffer(memoryview(self.data))
+        return self.buffer
 
     @endpoint
     async def read_and_write(
         self,
         buffer: RDMABuffer,
-    ) -> tuple[bytes, list[tuple[str, int, str]]]:
-        with tokio_oracle(raise_on_produce=True) as records:
-            readback = bytearray(len(_ORACLE_INITIAL))
-            assert await buffer.read_into(memoryview(readback)) is None
-            assert await buffer.write_from(memoryview(_ORACLE_UPDATED)) is None
-            sites = _rdma_tokio_sites(records)
-        return bytes(readback), sites
+    ) -> bytes:
+        readback = bytearray(len(_PUBLIC_PATH_INITIAL))
+        assert await buffer.read_into(memoryview(readback)) is None
+        assert await buffer.write_from(memoryview(_PUBLIC_PATH_UPDATED)) is None
+        return bytes(readback)
 
     @endpoint
-    async def verify_and_drop(self) -> list[tuple[str, int, str]]:
+    async def verify_and_drop(self) -> None:
         assert self.buffer is not None
-        with tokio_oracle(raise_on_produce=True) as records:
-            assert bytes(self.data) == _ORACLE_UPDATED
-            assert await self.buffer.drop() is None
-            sites = _rdma_tokio_sites(records)
-        return sites
-
-
-def test_tokio_oracle_records_known_tokio_production() -> None:
-    from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
-    from monarch._src.actor.future import Future
-
-    async def produce() -> None:
-        await Future(coro=PythonTask.sleep(0))
-
-    with tokio_oracle() as records:
-        PythonTask.from_coroutine(produce()).block_on()
-        control_sites = [
-            record
-            for record in records
-            if record.module == __name__ and record.function == "produce"
-        ]
-        assert records == control_sites
-        assert len(control_sites) == 1, (
-            f"expected one known _Tokio production, got {control_sites}"
-        )
-
-
-def test_tokio_oracle_scoped_record_restores_outer_raise_mode() -> None:
-    from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
-    from monarch._src.actor.future import Future
-
-    async def produce() -> None:
-        await Future(coro=PythonTask.sleep(0))
-
-    with tokio_oracle(raise_on_produce=True):
-        with tokio_oracle() as records:
-            PythonTask.from_coroutine(produce()).block_on()
-            assert len(records) == 1
-        with pytest.raises(RuntimeError, match="_Tokio produced"):
-            PythonTask.from_coroutine(produce()).block_on()
+        assert bytes(self.data) == _PUBLIC_PATH_UPDATED
+        assert await self.buffer.drop() is None
 
 
 def test_manager_init_cache_reuses_handle_without_retaining_mesh(monkeypatch) -> None:
@@ -349,7 +296,7 @@ async def test_public_paths_propagate_readiness_failure() -> None:
 
 @pytest.mark.timeout(90)
 @isolate_in_subprocess
-async def test_public_rdma_paths_produce_no_tokio() -> None:
+async def test_public_rdma_paths() -> None:
     from monarch.actor import this_host
 
     with configured(
@@ -362,26 +309,17 @@ async def test_public_rdma_paths_produce_no_tokio() -> None:
             consumer_proc = this_host().spawn_procs(per_host={"cpus": 1})
             try:
                 producer = producer_proc.spawn(
-                    "rdma_oracle_producer", _RdmaTokioOracleProbe
+                    "rdma_public_path_producer", _RdmaPublicPathProbe
                 )
                 consumer = consumer_proc.spawn(
-                    "rdma_oracle_consumer", _RdmaTokioOracleProbe
+                    "rdma_public_path_consumer", _RdmaPublicPathProbe
                 )
 
-                buffer, create_sites = await producer.create_buffer.call_one()
-                readback, transfer_sites = await consumer.read_and_write.call_one(
-                    buffer
-                )
-                drop_sites = await producer.verify_and_drop.call_one()
+                buffer = await producer.create_buffer.call_one()
+                readback = await consumer.read_and_write.call_one(buffer)
+                assert await producer.verify_and_drop.call_one() is None
 
-                assert readback == _ORACLE_INITIAL
-                assert create_sites == [], (
-                    f"RDMA buffer creation produced _Tokio: {create_sites}"
-                )
-                assert transfer_sites == [], (
-                    f"RDMA read/write produced _Tokio: {transfer_sites}"
-                )
-                assert drop_sites == [], f"RDMA drop produced _Tokio: {drop_sites}"
+                assert readback == _PUBLIC_PATH_INITIAL
             finally:
                 await consumer_proc.stop()
         finally:

@@ -7,11 +7,8 @@
 # pyre-strict
 
 import asyncio
-import contextlib
 import logging
 import math
-import os
-import sys
 import warnings
 from typing import (
     Any,
@@ -28,7 +25,6 @@ from monarch._rust_bindings.monarch_hyperactor.pytokio import (
     Handle,
     is_tokio_thread,
     PythonTask,
-    Shared,
     WouldBlockRuntime,
 )
 from monarch._src.actor.telemetry import log_with_tracing
@@ -42,34 +38,6 @@ async def _aincomplete(impl: Any, self: Any) -> Any:
     except Exception as e:
         self._set_exception(e)
         raise
-
-
-# Future is our generic mechanism for providing both a synchronous and asynchronous API for
-# Monarch Future objects.
-
-# We treat all code as running in one of two contexts: synchronous (asyncio._get_running_loop() is None)
-# or asynchronous.
-
-# Inside of asynchronous code, clients of our API must use `await` to wait for monarch Futures to prevent
-# blocking the surrounding event loop.
-
-# In synchronous code users must call get() because the call is comming from an non-async function so
-# await is not allowed.
-
-# [avoiding async code duplication]
-# Because we allow for two modes, it is tempting as developers of Monarch to start to write two copies of
-# of code for each mode. However, this results in a lot of confusing code duplication.
-# To avoid this, we utilize the fact that synchronous code is allowed to start/complete an asyncio event loop
-# via asyncio.run in order to complete the `get()` operation. So we can just write the async version and use
-# it to implement the synchronoous version.
-
-# However, starting and running an event loop is somewhat expensive. For simple messages, using an event loop
-# is about 4x slower than just directly waiting on the tokio result. To avoid this slow down we perform an
-# optimization. For any case where the `impl` coroutine of a future calls `await` only on PythonFuture
-# (a Tokio future returning a Python value) objects, we pass requires_loop=False to the Future. In this mode,
-# the future will just run the coroutine manually, and the PythonFuture object will recognize it is being awaited
-# without an event loop (search [avoiding code duplication]) and simply do a blocking wait. By avoiding the event
-# loop machinery, this gives it the same throughput as if we ran it synchronously.
 
 
 class _Unawaited(NamedTuple):
@@ -88,122 +56,35 @@ class _Handle(NamedTuple):
     handle: Handle[Any]
 
 
-class _Tokio(NamedTuple):
-    shared: Shared[Any]
-
-
 class _Taken(NamedTuple):
     pass
 
 
-_Status = _Unawaited | _Complete | _Exception | _Handle | _Tokio | _Taken
-
-
-# The `_Tokio` state means the task was bridged to a pytokio `Shared` on a
-# tokio-thread await; `get()` and `as_asyncio()` both refuse it because that
-# value is only awaitable from a PythonTask coroutine.
-_ALREADY_TOKIO_MSG = (
-    "already converted into a pytokio.Shared object, use 'await' from a "
-    "PythonTask coroutine to get the value."
-)
-
-
-# Record-only instrument for the pytokio-removal migration: it records the
-# callsite each time the `_Tokio` state is produced (the sole production site is
-# the tokio branch of `Future.__await__` below), so the migration can prove per
-# callsite that no production path still produces `_Tokio`. Off by default, so it
-# is a no-op with no behavior change; enable in a test with `enable_tokio_oracle()`
-# or process-wide with MONARCH_TOKIO_ORACLE=1 (record) / =raise. Raise mode is
-# opt-in and never on by default.
-class TokioOracleRecord(NamedTuple):
-    module: str
-    filename: str
-    lineno: int
-    function: str
-
-
-_tokio_oracle_mode: str = os.environ.get("MONARCH_TOKIO_ORACLE", "")
-_tokio_oracle_records: list[TokioOracleRecord] = []
-
-
-def enable_tokio_oracle(*, raise_on_produce: bool = False) -> None:
-    global _tokio_oracle_mode
-    _tokio_oracle_mode = "raise" if raise_on_produce else "record"
-
-
-def disable_tokio_oracle() -> None:
-    global _tokio_oracle_mode
-    _tokio_oracle_mode = ""
-
-
-def reset_tokio_oracle() -> None:
-    _tokio_oracle_records.clear()
-
-
-def tokio_oracle_records() -> list[TokioOracleRecord]:
-    return list(_tokio_oracle_records)
-
-
-@contextlib.contextmanager
-def tokio_oracle(
-    *, raise_on_produce: bool = False
-) -> Generator[list[TokioOracleRecord], None, None]:
-    """Scoped `_Tokio`-production oracle for tests: records (or, with
-    `raise_on_produce`, raises on) every `_Tokio` production for the duration
-    and yields the live records list, then restores the prior mode and records.
-    The save/restore keeps a process-wide oracle (e.g. `MONARCH_TOKIO_ORACLE`)
-    intact, and the scope guarantees cleanup so a caller cannot leak enabled
-    state by forgetting to disable it. Prefer this over the bare
-    `enable_tokio_oracle`/`reset_tokio_oracle`/`disable_tokio_oracle` trio.
-    """
-    global _tokio_oracle_mode
-    prev_mode = _tokio_oracle_mode
-    prev_records = _tokio_oracle_records.copy()
-    _tokio_oracle_mode = "raise" if raise_on_produce else "record"
-    _tokio_oracle_records.clear()
-    try:
-        yield _tokio_oracle_records
-    finally:
-        _tokio_oracle_mode = prev_mode
-        _tokio_oracle_records[:] = prev_records
-
-
-def _record_tokio_production() -> None:
-    # The callsite we want is the coroutine that awaited the Future: two frames
-    # up (this fn -> Future.__await__ -> awaiter).
-    if not _tokio_oracle_mode:
-        return
-    f = sys._getframe(2)
-    record = TokioOracleRecord(
-        module=str(f.f_globals.get("__name__", "<unknown>")),
-        filename=f.f_code.co_filename,
-        lineno=f.f_lineno,
-        function=f.f_code.co_name,
-    )
-    _tokio_oracle_records.append(record)
-    if _tokio_oracle_mode == "raise":
-        raise RuntimeError(
-            f"_Tokio produced at {record.filename}:{record.lineno} "
-            f"in {record.module}.{record.function}"
-        )
+_Status = _Unawaited | _Complete | _Exception | _Handle | _Taken
 
 
 class Future(Generic[R]):
-    """
-    The Future class wraps a PythonTask, which is a handle to a asyncio coroutine running on the Tokio event loop.
-    These coroutines do not use asyncio or asyncio.Future; instead, they are executed directly on the Tokio runtime.
-    The Future class provides both synchronous (.get()) and asynchronous APIs (await) for interacting with these tasks.
+    """A result returned by Monarch asynchronous operations.
 
-    Args:
-        coro (Coroutine[Any, Any, R] | PythonTask[R]): The coroutine or PythonTask representing
-            the asynchronous computation.
-
+    Use ``get()`` from synchronous code. On an asyncio loop, use ``await`` or
+    ``as_asyncio()``. Future objects cannot be constructed directly.
     """
 
-    def __init__(self, *, coro: "Coroutine[Any, Any, R] | PythonTask[R]") -> None:
-        self._status: _Status = _Unawaited(
+    _status: _Status
+
+    def __init__(self) -> None:
+        raise TypeError(
+            "Future objects are returned by Monarch operations and cannot be "
+            "constructed directly."
+        )
+
+    @classmethod
+    def _from_coro(cls, coro: "Coroutine[Any, Any, R] | PythonTask[R]") -> "Future[R]":
+        future = cast("Future[R]", object.__new__(cls))
+        future._status = _Unawaited(
             coro if isinstance(coro, PythonTask) else PythonTask.from_coroutine(coro)
         )
+        return future
 
     def _take_inner(self) -> "PythonTask[R]":
         """Take the underlying one-shot ``PythonTask`` from this Future.
@@ -286,7 +167,7 @@ class Future(Generic[R]):
                     # the timeout path spawns a Handle then raises -- both mutate.)
                     raise WouldBlockRuntime(
                         "Future.get() cannot block from within a Tokio runtime; "
-                        "await the Future inside a PythonTask coroutine instead."
+                        "observe the Future from a synchronous or asyncio context."
                     )
                 if timeout is not None:
                     # Validate the timeout BEFORE spawning: an invalid value must
@@ -330,8 +211,6 @@ class Future(Generic[R]):
                 return cast("R", value)
             case _Exception(exe=exe):
                 raise exe
-            case _Tokio(_):
-                raise ValueError(_ALREADY_TOKIO_MSG)
             case _Taken():
                 raise ValueError("Future was consumed.")
             case _:
@@ -344,13 +223,11 @@ class Future(Generic[R]):
             return self.as_asyncio().__await__()
         elif is_tokio_thread():
             match self._status:
-                case _Unawaited(coro=coro):
-                    _record_tokio_production()
-                    shared = coro.spawn()
-                    self._status = _Tokio(shared)
-                    return shared.__await__()
-                case _Tokio(shared=shared):
-                    return shared.__await__()
+                case _Unawaited():
+                    raise RuntimeError(
+                        "Future cannot be awaited on a Tokio thread; observe it "
+                        "from an asyncio loop or synchronous context."
+                    )
                 case _Handle(_):
                     raise ValueError(
                         "Future is backed by a Handle and is not awaitable on a tokio thread; "
@@ -404,8 +281,6 @@ class Future(Generic[R]):
                     else exe
                 )
                 return cast("asyncio.Future[R]", failed)
-            case _Tokio(_):
-                raise ValueError(_ALREADY_TOKIO_MSG)
             case _Taken():
                 raise ValueError("Future was consumed.")
             case _:

@@ -395,7 +395,7 @@ class HostMesh(MeshTrait):
             # Remove the inner host mesh to clean up associated memory.
             self._inner_host_mesh = None
 
-        return Future(coro=task())
+        return Future._from_coro(task())
 
     def stop(self) -> Future[None]:
         """
@@ -415,7 +415,7 @@ class HostMesh(MeshTrait):
             hy_mesh = await self._hy_host_mesh
             await hy_mesh.stop(context().actor_instance._as_rust())
 
-        return Future(coro=task())
+        return Future._from_coro(task())
 
     async def __aenter__(self) -> "HostMesh":
         if self._inner_host_mesh is None:
@@ -466,7 +466,7 @@ class HostMesh(MeshTrait):
             await hm
             return True
 
-        return Future(coro=task())
+        return Future._from_coro(task())
 
     @property
     def _hy_host_mesh(self) -> Shared[HyHostMesh]:
@@ -510,7 +510,7 @@ def _spawn_admin(
         os.environ["MONARCH_ADMIN_URL"] = admin_url
         return admin_url, admin_ref
 
-    return Future(coro=task())
+    return Future._from_coro(task())
 
 
 def hosts_from_config(name: str) -> HostMesh:

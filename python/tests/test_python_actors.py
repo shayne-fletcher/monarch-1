@@ -44,7 +44,7 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorAddr
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 from monarch._src.actor.actor_mesh import ActorMesh, Channel, context, Port
-from monarch._src.actor.future import Future, tokio_oracle
+from monarch._src.actor.future import Future
 from monarch._src.actor.host_mesh import _spawn_admin, HostMesh, this_host, this_proc
 from monarch._src.actor.logging import _pending_flush_tasks
 from monarch._src.actor.proc_mesh import get_or_spawn_controller, HyProcMesh
@@ -1085,16 +1085,7 @@ async def test_flush_async_drives_flush_on_asyncio_loop() -> None:
         await asyncio.sleep(1)
 
         # System under test: flush_async on the test's asyncio loop.
-        with tokio_oracle(raise_on_produce=True) as records:
-            await pm._logging_manager.flush_async()
-
-            logging_records = [
-                record
-                for record in records
-                if record.module == "monarch._src.actor.logging"
-                and os.path.basename(record.filename) == "logging.py"
-            ]
-            assert logging_records == []
+        await pm._logging_manager.flush_async()
 
         await asyncio.sleep(1)
         sys.stdout.flush()
@@ -1135,10 +1126,8 @@ async def test_multiple_ongoing_flushes_no_deadlock() -> None:
             # FIXME: the order of futures doesn't necessarily mean the order of flushes due to the async nature.
             await asyncio.sleep(0.1)
             futures.append(
-                Future(
-                    coro=log_mesh.flush(context().actor_instance._as_rust())
-                    .spawn()
-                    .task()
+                Future._from_coro(
+                    log_mesh.flush(context().actor_instance._as_rust()).spawn().task()
                 )
             )
 
@@ -2273,7 +2262,7 @@ def _future_of(value):
     async def _v():
         return value
 
-    return Future(coro=_v())
+    return Future._from_coro(_v())
 
 
 def _stream_endpoint(values):
@@ -2306,18 +2295,3 @@ def test_accumulate_forwards_args_to_stream():
     ep = _stream_endpoint([1])
     Accumulator(ep, 0, operator.add).accumulate("a", k=1).get()
     ep.stream.assert_called_once_with("a", k=1)
-
-
-def test_accumulate_produces_no_tokio():
-    """Gate A (accumulate cluster): accumulate produces no `_Tokio` state.
-
-    Drives accumulate with the `_Tokio` oracle in raise mode and asserts
-    actor_mesh.py produced no `_Tokio` (no `await <Future>` on the tokio thread).
-    Before the `_take_inner()` migration this recorded the impl producer at 876;
-    after it, zero.
-    """
-    with tokio_oracle(raise_on_produce=True) as oracle_records:
-        acc = Accumulator(_stream_endpoint([1, 2, 3]), 0, operator.add)
-        assert acc.accumulate().get() == 6
-        records = [r for r in oracle_records if r.filename.endswith("actor_mesh.py")]
-        assert records == [], f"accumulate still produces _Tokio: {records}"

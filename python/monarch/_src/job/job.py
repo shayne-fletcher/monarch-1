@@ -925,7 +925,7 @@ def exec_command(
         finally:
             await procs.stop()._take_inner()
 
-    return Future(coro=_impl())
+    return Future._from_coro(_impl())
 
 
 class LocalJob(JobTrait):

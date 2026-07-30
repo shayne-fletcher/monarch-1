@@ -75,8 +75,8 @@
 //! - **RDC-5** (public result contract): buffer creation returns the buffer;
 //!   successful submit and drop tasks return Python `None`, including the public
 //!   read and write methods that delegate to submit.
-//! - **RDC-6** (no RDMA `_Tokio` producer): production `rdma.py` has no Tokio-driven
-//!   coroutine that awaits a `Future` (enforced in `rdma.py`).
+//! - **RDC-6** (no Tokio-driven `Future` await): production `rdma.py` has no
+//!   Tokio-driven coroutine that awaits a `Future` (enforced in `rdma.py`).
 //! - **RDC-7** (validate before eager init): local backend, memory, zero-size, and
 //!   submit-timeout checks complete before the cached readiness helper is called
 //!   (enforced in `RDMABuffer.__init__` and `RDMAAction.submit`).
