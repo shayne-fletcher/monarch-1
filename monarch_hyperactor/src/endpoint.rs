@@ -596,17 +596,13 @@ impl PyValueStream {
         })?
         .into();
 
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("coro", task)?;
-        let future = self.future_class.call(py, (), Some(&kwargs))?;
+        let future = self.future_class.call_method1(py, "_from_coro", (task,))?;
         Ok(Some(future))
     }
 }
 
 fn wrap_in_future(py: Python<'_>, task: PyPythonTask) -> PyResult<Py<PyAny>> {
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("coro", task)?;
-    let future = make_future(py).call((), Some(&kwargs))?;
+    let future = make_future(py).call_method1("_from_coro", (task,))?;
     Ok(future.unbind())
 }
 

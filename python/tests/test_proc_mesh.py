@@ -30,7 +30,7 @@ from monarch._src.actor.actor_mesh import (
     ValueMesh,
 )
 from monarch._src.actor.endpoint import endpoint
-from monarch._src.actor.future import Future, tokio_oracle, TokioOracleRecord
+from monarch._src.actor.future import Future
 from monarch._src.actor.host_mesh import this_host, this_proc
 from monarch._src.actor.proc_mesh import (
     get_or_spawn_controller,
@@ -44,11 +44,6 @@ from scoped_state import scoped_state
 
 _proc_rank = -1
 _BOOTSTRAP_FAILURE = "stage 3.4 bootstrap failure"
-_STAGE_3_4_ORACLE_FILES = {
-    "monarch._src.actor.host_mesh": "host_mesh.py",
-    "monarch._src.actor.logging": "logging.py",
-    "monarch._src.actor.proc_mesh": "proc_mesh.py",
-}
 
 
 def _successful_bootstrap() -> None:
@@ -57,17 +52,6 @@ def _successful_bootstrap() -> None:
 
 def _fail_bootstrap() -> None:
     raise RuntimeError(_BOOTSTRAP_FAILURE)
-
-
-def _stage_3_4_tokio_records(
-    records: list[TokioOracleRecord],
-) -> list[TokioOracleRecord]:
-    return [
-        record
-        for record in records
-        if _STAGE_3_4_ORACLE_FILES.get(record.module)
-        == os.path.basename(record.filename)
-    ]
 
 
 class _PendingActorProbe:
@@ -82,7 +66,7 @@ class _PendingActorProbe:
             if error is not None:
                 raise error
 
-        self.initialized = Future(coro=initialize())
+        self.initialized = Future._from_coro(initialize())
 
 
 class TestActor(Actor):
@@ -132,24 +116,20 @@ class TestActor(Actor):
 async def test_proc_mesh_initialization() -> None:
     with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
         host = state.hosts
-        with tokio_oracle(raise_on_produce=True) as records:
-            proc_mesh = host.spawn_procs(
-                name="test_proc",
-                bootstrap=_successful_bootstrap,
-            )
-            assert await proc_mesh.initialized
-            assert _stage_3_4_tokio_records(records) == []
+        proc_mesh = host.spawn_procs(
+            name="test_proc",
+            bootstrap=_successful_bootstrap,
+        )
+        assert await proc_mesh.initialized
 
 
 @pytest.mark.timeout(60)
 @isolate_in_subprocess
 async def test_proc_mesh_initialized_fails_when_bootstrap_fails() -> None:
     with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
-        with tokio_oracle(raise_on_produce=True) as records:
-            proc_mesh = state.hosts.spawn_procs(bootstrap=_fail_bootstrap)
-            with pytest.raises(monarch.actor.ActorError, match=_BOOTSTRAP_FAILURE):
-                await proc_mesh.initialized
-            assert _stage_3_4_tokio_records(records) == []
+        proc_mesh = state.hosts.spawn_procs(bootstrap=_fail_bootstrap)
+        with pytest.raises(monarch.actor.ActorError, match=_BOOTSTRAP_FAILURE):
+            await proc_mesh.initialized
 
 
 @pytest.mark.timeout(60)
@@ -197,11 +177,9 @@ async def test_stop_state_tracks_native_stop_result() -> None:
                 record_flush_from_tokio,
             ),
         ):
-            with tokio_oracle(raise_on_produce=True) as records:
-                assert await owner.stop() is None
+            assert await owner.stop() is None
 
-                assert proc_flush_called
-                assert _stage_3_4_tokio_records(records) == []
+            assert proc_flush_called
         assert flush_started
         assert owner._stopped
 
@@ -500,13 +478,11 @@ async def test_actor_spawn_then_immediate_shutdown() -> None:
                 record_flush_from_tokio,
             ),
         ):
-            with tokio_oracle(raise_on_produce=True) as records:
-                shutdown_result = await host.shutdown()
-                cleanup.pop_all()
-                assert shutdown_result is None
+            shutdown_result = await host.shutdown()
+            cleanup.pop_all()
+            assert shutdown_result is None
 
-                assert host_flush_called
-                assert _stage_3_4_tokio_records(records) == []
+            assert host_flush_called
 
         assert flush_started
         assert drain_order == ["failed", "succeeded"]

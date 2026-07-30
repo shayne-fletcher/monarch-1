@@ -287,7 +287,7 @@ def test_attach_to_workers_accepts_future_addresses() -> None:
         )
         procs.append(proc)
         # Wrap the address in a Future[str] so attach goes through _take_inner.
-        fut: Future[str] = Future(coro=_resolve(addr))
+        fut: Future[str] = Future._from_coro(_resolve(addr))
         workers.append(fut)
 
     try:

@@ -555,7 +555,7 @@ def shutdown_context() -> "Future[None]":
         async def _noop() -> None:
             pass
 
-        return Future(coro=_noop())
+        return Future._from_coro(_noop())
 
     c: Context | None = _context.get()
 
@@ -585,7 +585,7 @@ def shutdown_context() -> "Future[None]":
             await instance.stop_and_wait("shutdown")
             _context.set(None)
 
-    return Future(coro=_shutdown_sequence())
+    return Future._from_coro(_shutdown_sequence())
 
 
 def context() -> Context:
@@ -876,7 +876,7 @@ class Accumulator(Generic[P, R, A]):
                 value = self._combine(value, await x._take_inner())
             return value
 
-        return Future(coro=impl())
+        return Future._from_coro(impl())
 
 
 @rust_struct("monarch_hyperactor::value_mesh::ValueMesh")
@@ -1091,7 +1091,7 @@ class Port(Generic[R]):
         message = PendingMessage(kind, state)
         resolved = message.try_resolve_now()
         if resolved is None:
-            resolved = await Future(coro=cast(Any, message).resolve())
+            resolved = await Future._from_coro(cast(Any, message).resolve())
         self.send_message(resolved)
 
     def exception(self, obj: Exception) -> None: ...
@@ -1203,7 +1203,7 @@ class PortReceiver(Generic[R]):
                 raise ValueError(f"Unexpected message kind: {msg.kind}")
 
     def recv(self) -> "Future[R]":
-        return Future(coro=self._recv())
+        return Future._from_coro(self._recv())
 
     def ranked(self) -> "RankedPortReceiver[R]":
         return RankedPortReceiver[R](self._mailbox, self._receiver)
@@ -1456,7 +1456,7 @@ class _Actor:
 
             response = response_port.resolve_and_send(result)
             if isinstance(response, PythonTask):
-                await Future(coro=response)
+                await Future._from_coro(response)
             else:
                 await response
         except Exception as e:
@@ -1873,17 +1873,17 @@ class ActorMesh(MeshTrait, Generic[T]):
 
     def stop(self, reason: str = "stopped by client") -> "Future[None]":
         instance = context().actor_instance._as_rust()
-        return Future(coro=self._inner.stop(instance, reason))
+        return Future._from_coro(self._inner.stop(instance, reason))
 
     @property
     def initialized(self) -> Future[None]:
-        return Future(coro=self._inner.initialized())
+        return Future._from_coro(self._inner.initialized())
 
     @property
     def _name(self) -> Future[str]:
         """Retrieves the name stored in the ActorMesh internally."""
         # Not called "name" to avoid clashing with a common endpoint name.
-        return Future(coro=self._inner.name())
+        return Future._from_coro(self._inner.name())
 
 
 class ActorError(Exception):
