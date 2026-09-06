@@ -1555,6 +1555,28 @@ def test_attach_fails_closed_on_unreachable_host():
             )
 
 
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+def test_attach_failure_replays_to_fresh_readiness_observers() -> None:
+    with configured(mesh_attach_config_timeout="500ms"):
+        with TemporaryDirectory() as directory:
+            unreachable = f"ipc://{directory}/never_bound"
+            hosts = attach_to_workers(ca="trust_all_connections", workers=[unreachable])
+
+            errors = []
+            for _ in range(2):
+                with pytest.raises(RuntimeError) as excinfo:
+                    hosts.initialized.get(timeout=10)
+                errors.append(excinfo.value)
+
+            assert type(errors[0]) is RuntimeError
+            assert type(errors[1]) is RuntimeError
+            assert str(errors[0]) == str(errors[1])
+            message = str(errors[0])
+            assert "attach failed: config push failed during attach" in message
+            assert f"{directory}/never_bound" in message
+
+
 @isolate_in_subprocess
 def test_config_propagates_to_host_agent():
     """Verify that configure() overrides reach host agent OS processes

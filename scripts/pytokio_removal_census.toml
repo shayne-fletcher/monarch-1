@@ -1122,16 +1122,20 @@ public_operation = "HostMesh.initialized"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
 consumer = "user code and internal readiness gates"
-driver = "awaited or blocked on by the caller"
-start_point = "the storage Shared is already being driven; the coroutine only awaits it"
-abandonment = "possible; initialization continues on the storage Shared"
-eager_effect = "observes already-running work"
-drop_behavior = "abandons this observer only"
+driver = "the caller drives only the per-access observer coroutine; HostMesh._hy_host_mesh retains a non-aborting Shared source that is already running or already resolved"
+start_point = "property access synchronously snapshots _hy_host_mesh, or raises if the mesh was shut down; the retained Shared source was created earlier, and this observer coroutine starts only when driven"
+abandonment = "before drive, dropping the Future starts no observer but can emit Python's ordinary never-awaited-coroutine warning. Source-grounded after a timed get starts the non-aborting observer: dropping the Future discards its receiver but does not stop that observer or HostMesh's retained Shared source"
+eager_effect = "would begin observing the retained running or resolved Shared during property access rather than when the caller drives the Future"
+drop_behavior = "does not affect host initialization; a fresh initialized Future can observe the same True result or the same retained failure"
 first_side_effect = "none; the property access only raises if the mesh is already shut down"
-unobserved_error = "silently dropped"
+unobserved_error = "a pre-drive drop never observes the Shared's terminal error and can emit Python's ordinary never-awaited-coroutine warning. Source-grounded: if a started observer later sees failure after its receiver is dropped, send_result logs the receiverless background error. The retained Shared independently stores the exact failure, and fresh initialized Futures replay its type and message"
 disposition = "preserve timing"
 semantic_class = "already_started_lazy_observer"
-oracle = "host mesh readiness coverage"
+oracle = [
+  "fbcode//monarch/python/tests:test_host_mesh::test_attach_starts_before_readiness_observation_and_survives_a_dropped_observer",
+  "fbcode//monarch/python/tests:test_python_actors::test_attach_fails_closed_on_unreachable_host",
+  "fbcode//monarch/python/tests:test_python_actors::test_attach_failure_replays_to_fresh_readiness_observers",
+]
 
 [[site]]
 id = "fc.host_mesh.HostMesh.shutdown[Future._from_corotask]"
@@ -1233,16 +1237,19 @@ public_operation = "ProcMesh.initialized"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
 consumer = "user code and internal readiness gates"
-driver = "awaited or blocked on by the caller"
-start_point = "the storage Shared is already being driven; the coroutine only awaits it"
-abandonment = "possible; initialization continues on the storage Shared"
-eager_effect = "observes already-running work"
-drop_behavior = "abandons this observer only"
+driver = "the caller drives only the per-access observer coroutine; ProcMesh._proc_mesh retains a Shared source that is already running through native spawn, logging initialization, and setup, or is already resolved"
+start_point = "the ProcMesh retained its running or resolved Shared source before property access; this property's observer coroutine begins only when its per-access Future is driven"
+abandonment = "before drive, dropping the Future starts no observer but can emit Python's ordinary never-awaited-coroutine warning. Source-grounded after a timed get starts the non-aborting observer: dropping the Future discards its receiver but does not stop that observer or the retained ProcMesh Shared source"
+eager_effect = "would begin observing the retained running or resolved Shared during property access rather than when the caller drives the Future"
+drop_behavior = "does not affect proc initialization; a fresh initialized Future can observe the same True result or replay the same retained failure"
 first_side_effect = "none"
-unobserved_error = "silently dropped"
+unobserved_error = "a pre-drive drop never observes the Shared's terminal error and can emit Python's ordinary never-awaited-coroutine warning. Source-grounded: if a started observer later sees failure after its receiver is dropped, send_result logs the receiverless background error. The retained Shared independently stores the exact failure, and fresh initialized Futures replay its type and message"
 disposition = "preserve timing"
 semantic_class = "already_started_lazy_observer"
-oracle = "proc mesh readiness coverage"
+oracle = [
+  "fbcode//monarch/python/tests:test_proc_mesh::test_proc_mesh_readiness_replays_success_after_discarded_observer",
+  "fbcode//monarch/python/tests:test_proc_mesh::test_proc_mesh_readiness_replays_failure_after_discarded_observer",
+]
 
 [[site]]
 id = "fc.proc_mesh.ProcMesh.stop[Future._from_coro_stop_nonblockinginstance]"
@@ -2336,16 +2343,20 @@ state = "legacy"
 transition = "6.3c"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from attach_to_workers"
-consumer = "HostMesh construction, through the bootstrap _as_python_task adapter"
-driver = "awaited inside the host mesh setup coroutine"
-start_point = "lazy; the boxed future is not polled until the returned task is driven"
-abandonment = "possible; the adapter's task may be dropped before it is driven"
-eager_effect = "starts a side effect"
-drop_behavior = "no worker attach is performed"
-unobserved_error = "surfaced on observation"
+consumer = "bootstrap.attach_to_workers normally calls spawn() on the returned task and stores the resulting Shared as HostMesh._inner_host_mesh after constructing the HostMesh extent"
+driver = "PythonTask.spawn drives it on the shared Tokio runtime; HostMesh retains the Shared, while HostMesh.initialized creates only per-access observers"
+start_point = "source-grounded: the binding synchronously takes every input worker PythonTask before constructing its own lazy task. With the ordinary list input covered here, the public wrapper constructs the extent and then spawns that task before returning HostMesh"
+abandonment = "source-grounded: direct private-binding callers can drop the raw task. The public wrapper can also drop it if an accepted custom Sequence iterates successfully but raises when len(workers) constructs the extent; the ordinary-list path tested here spawns it immediately, and dropping HostMesh.initialized abandons only that observer"
+eager_effect = "would begin polling worker-address tasks and attaching during the binding call. That changes direct raw-task abandonment and the source-grounded public exceptional path where extent construction fails before spawn; on the tested ordinary-list path, spawn follows extent construction"
+drop_behavior = "source-grounded: dropping an undriven raw binding task, including during exceptional public extent construction, performs no attach. On the tested ordinary-list path, dropping a readiness observer does not cancel attach because HostMesh retains the non-aborting Shared"
+unobserved_error = "the retained Shared stores an attach failure and later HostMesh.initialized observers replay its original type and message. Source-grounded: if every Shared receiver disappears before completion, send_result logs the error"
 disposition = "intentionally become eager"
 semantic_class = "deferred_side_effect"
-oracle = "bootstrap attach-to-workers coverage"
+oracle = [
+  "fbcode//monarch/python/tests:test_host_mesh::test_attach_starts_before_readiness_observation_and_survives_a_dropped_observer",
+  "fbcode//monarch/python/tests:test_python_actors::test_attach_fails_closed_on_unreachable_host",
+  "fbcode//monarch/python/tests:test_python_actors::test_attach_failure_replays_to_fresh_readiness_observers",
+]
 
 [[site]]
 id = "np.bootstrap.run_worker_loop_forever"
@@ -2434,16 +2445,19 @@ state = "legacy"
 transition = "6.3c"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from PyHostMesh::spawn_nonblocking"
-consumer = "HostMesh._spawn_nonblocking"
-driver = "driven by PythonTask.from_coroutine(task()).spawn() on the Python side"
-start_point = "lazy; the boxed future is not polled until the returned task is driven"
-abandonment = "possible; the storage Shared may be built and never observed"
-eager_effect = "starts a side effect"
-drop_behavior = "no proc mesh is spawned"
-unobserved_error = "send_result logs an unobserved error once spawned"
+consumer = "HostMesh._spawn_nonblocking's already-started outer coroutine constructs and immediately awaits the returned task after the host mesh is ready; HostMesh retains the outer spawn Shared in _pending_spawns"
+driver = "PythonTask.from_coroutine(task()).spawn() drives the retained outer coroutine, which drives this native task inline; HostMesh also retains the resulting ProcMesh"
+start_point = "source-grounded for the direct binding: the raw native task is lazy in isolation. On the tested public path, spawn_procs starts and retains the outer coroutine before returning ProcMesh, and that coroutine constructs and awaits this task after host readiness"
+abandonment = "source-grounded for the direct private binding: its raw task can be dropped undriven. On the tested public route, dropping the returned ProcMesh or an initialized Future does not cancel spawn because HostMesh retains both the spawn Shared and ProcMesh"
+eager_effect = "source-grounded: an eager binding would begin native proc spawning during task construction instead of at the outer coroutine's immediately following await; the public route has no independent drop point between them"
+drop_behavior = "source-grounded for the direct binding: dropping an undriven raw task performs no native spawn. Tested on the public route: dropping the ProcMesh or readiness observer does not prevent spawn, and HostMesh drains its retained spawn before shutdown"
+unobserved_error = "source-grounded: a native-spawn failure remains in the retained Shared and propagates through ProcMesh initialization; HostMesh stop or shutdown catches and suppresses that pending-spawn failure while draining"
 disposition = "intentionally become eager"
 semantic_class = "deferred_side_effect"
-oracle = "proc mesh setup coverage"
+oracle = [
+  "fbcode//monarch/python/tests:test_host_mesh::test_shutdown_waits_for_a_pending_proc_spawn_after_caller_drops_mesh",
+  "fbcode//monarch/python/tests:test_proc_mesh::test_proc_mesh_readiness_replays_success_after_discarded_observer",
+]
 
 [[site]]
 id = "np.host_mesh.PyHostMesh.stop"
