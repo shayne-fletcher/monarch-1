@@ -356,7 +356,7 @@ shared_reconstruction = 2
 reserve_binding = 1
 py_mesh_reserve = 2
 py_is_tokio_thread = 3
-pytokio_import = 29
+pytokio_import = 30
 pytokio_module_ref = 17
 helper_symbol = 26
 helper_definition = 6
@@ -773,6 +773,7 @@ owns = [
   "im.rdma.module",
   "im.supervision.module",
   "im.test_actor_driver_characterization.module",
+  "im.test_admin_spawn_characterization.module",
   "im.test_actor_mesh.module",
   "im.test_client_context_guard.module",
   "im.test_future_characterization.module",
@@ -1200,17 +1201,19 @@ transition = "6.3c"
 public_operation = "host mesh admin spawn"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
-consumer = "internal admin plumbing"
-driver = "awaited or blocked on by the caller"
-start_point = "lazy; nothing runs until the Future is observed"
-abandonment = "possible; dropping leaves MONARCH_ADMIN_URL unset"
-eager_effect = "starts a side effect"
-drop_behavior = "no admin mesh is spawned"
-first_side_effect = "the native admin spawn, which then sets MONARCH_ADMIN_URL"
-unobserved_error = "silently dropped"
+consumer = "MeshAdminComponent.state in production, which calls get() under fake_sync_state, plus direct internal test callers that await or get the Future"
+driver = "the first asyncio observation or timed get spawns a non-aborting Handle producer; a synchronous get without a timeout drives the coroutine inline. The producer resolves the host meshes, constructs and awaits the raw native task, then publishes MONARCH_ADMIN_URL"
+start_point = "for an unchanged nonempty host list, the call checks that the list is nonempty and constructs the Future. Source inspection shows that construction captures the current Monarch context and can bootstrap a missing client; the oracle starts with an initialized client and proves that no native admin call occurs before observation. Observation first resolves the host Shared values and invokes the native binding"
+abandonment = "source shows that dropping the unobserved Future prevents the native binding call, admin spawn, and environment update. The oracle proves that cancelling one asyncio observer after the retained producer constructs the raw native task does not abort that producer: a fresh observer receives the result after the gate opens"
+eager_effect = "an eager replacement for the outer Future would resolve the hosts and begin the native operation during the call, allowing the admin actor and MONARCH_ADMIN_URL to appear even when the caller discards the return value; the inherited disposition does not decide that behavior change"
+drop_behavior = "source shows that dropping before observation constructs no raw _hy_spawn_admin task and produces no admin or environment value. The oracle proves that after Handle-backed observation starts, cancelling one observer does not stop the retained producer, which completes once and publishes MONARCH_ADMIN_URL"
+first_side_effect = "source inspection shows that construction-time context capture can bootstrap a missing client. In the initialized-client path exercised by the oracle, the first admin-domain effect is spawning the local admin actor when the raw task is driven; after its address is available, the outer producer publishes MONARCH_ADMIN_URL"
+unobserved_error = "an empty list raises exact ValueError during the public call. For the unchanged initialized-host shape in the oracle, an invalid admin_addr is not parsed until observation reaches the raw binding; it then raises exact built-in Exception and does not publish the environment variable. The oracle proves successful-result replay after observer cancellation; error replay is source-grounded in the same Handle state machine"
 disposition = "intentionally become eager"
 semantic_class = "deferred_side_effect"
-oracle = "admin spawn coverage"
+oracle = [
+  "fbcode//monarch/python/tests:test_admin_spawn_characterization::test_spawn_admin_is_lazy_and_survives_cancelled_observer",
+]
 
 [[site]]
 id = "fc.proc_mesh.ProcMesh._proc_mesh_for_asyncio_fixme[Future._from_coroself._proc_mesh.task]"
@@ -2494,16 +2497,18 @@ state = "legacy"
 transition = "6.3c"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from _spawn_admin"
-consumer = "the Python _spawn_admin coroutine, which then sets MONARCH_ADMIN_URL"
-driver = "awaited inside the Python _spawn_admin coroutine"
-start_point = "lazy; the boxed future is not polled until the returned task is driven"
-abandonment = "possible; the admin coroutine may be abandoned"
-eager_effect = "starts a side effect"
-drop_behavior = "no admin mesh is spawned and the environment variable is not set"
-unobserved_error = "surfaced on observation"
+consumer = "the Python _spawn_admin coroutine, which immediately awaits the returned raw task and publishes MONARCH_ADMIN_URL only after success"
+driver = "driven inline by the already-running Python _spawn_admin producer; the public cancellation oracle does not introduce an independent raw-task observer"
+start_point = "the raw binding synchronously rejects an empty native mesh list, parses admin_addr, extracts the HostMeshRef values, and constructs the PyPythonTask. Spawning the local admin actor and querying its address are deferred until that task is driven"
+abandonment = "a direct private caller can drop the raw task before driving it, in which case no admin is spawned. On the tested public route, the outer producer retains and immediately awaits the raw task once constructed, so cancelling its asyncio observer does not abandon the native operation"
+eager_effect = "an eager replacement would spawn the local admin during the raw binding call. The public outer Future would still have to be observed before it invokes that binding; the inherited disposition does not decide either boundary"
+drop_behavior = "source shows that dropping a directly obtained raw task before drive prevents the admin spawn. The public oracle instead proves that cancelling an outer observer after raw task construction leaves the retained producer able to drive it once and publish MONARCH_ADMIN_URL"
+unobserved_error = "the native empty-list and invalid-admin-address checks raise built-in Exception before returning a task; the oracle exercises invalid admin_addr through the public deferred call. Spawn and address-query errors occur only when the returned task is driven and are also mapped to built-in Exception"
 disposition = "intentionally become eager"
 semantic_class = "deferred_side_effect"
-oracle = "admin spawn coverage"
+oracle = [
+  "fbcode//monarch/python/tests:test_admin_spawn_characterization::test_spawn_admin_is_lazy_and_survives_cancelled_observer",
+]
 
 [[site]]
 id = "np.host_mesh.bootstrap_host"
@@ -3016,6 +3021,18 @@ scope = "test"
 state = "legacy"
 transition = "6.8"
 members = ["PythonTask"]
+
+[[site]]
+id = "im.test_admin_spawn_characterization.module"
+category = "module_import"
+language = "python"
+path = "fbcode/monarch/python/tests/test_admin_spawn_characterization.py"
+symbol = "<module>"
+operation = "pytokio_import"
+scope = "test"
+state = "legacy"
+transition = "6.8"
+members = ["Handle", "PythonTask"]
 
 [[site]]
 id = "im.test_client_context_guard.module"
