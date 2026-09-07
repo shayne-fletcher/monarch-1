@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import pathlib
 import tempfile
@@ -22,6 +23,7 @@ import cloudpickle
 import monarch.actor
 import pytest
 from isolate_in_subprocess import isolate_in_subprocess
+from monarch._rust_bindings.monarch_hyperactor.context import Instance as HyInstance
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
@@ -81,6 +83,43 @@ def _wait_for_marker(path: pathlib.Path) -> None:
         if time.monotonic() >= deadline:
             raise AssertionError(f"timed out waiting for marker {path}")
         time.sleep(0.01)
+
+
+async def _wait_for_event(event: threading.Event, message: str) -> None:
+    reached = await asyncio.wait_for(
+        asyncio.to_thread(event.wait, 30),
+        timeout=35,
+    )
+    assert reached, message
+
+
+class _ProcStopCallThrough:
+    """Gate a real native stop task without replacing its behavior."""
+
+    def __init__(self, inner: HyProcMesh, release: threading.Event) -> None:
+        self._inner = inner
+        self._release = release
+        self.entered = threading.Event()
+        self.calls = 0
+
+    def stop_nonblocking(
+        self,
+        instance: HyInstance,
+        reason: str,
+    ) -> PythonTask[None]:
+        native_task = self._inner.stop_nonblocking(instance, reason)
+        self.calls += 1
+        self.entered.set()
+
+        async def gated() -> None:
+            released = await PythonTask.spawn_blocking(
+                lambda: self._release.wait(timeout=30)
+            )
+            if not released:
+                raise TimeoutError("proc stop release was not published")
+            await native_task
+
+        return PythonTask.from_coroutine(gated())
 
 
 class _PendingActorProbe:
@@ -234,19 +273,95 @@ def test_proc_mesh_readiness_replays_failure_after_discarded_observer() -> None:
 
 @pytest.mark.timeout(60)
 @isolate_in_subprocess
+async def test_proc_stop_is_lazy_and_survives_cancelled_observer() -> None:
+    job = ProcessJob({"hosts": 1})
+    release = threading.Event()
+    stop_future: Future[None] | None = None
+    try:
+        host = job.state(cached_path=None).hosts
+        owner = host.spawn_procs(per_host={"gpus": 1})
+        await asyncio.wait_for(owner.initialized, timeout=30)
+        inner = owner._proc_mesh.poll()
+        assert inner is not None
+
+        discarded = owner.stop()
+        del discarded
+        assert not owner._stopped
+        actor = owner.spawn("after_discarded_stop", TestActor, 41)
+        assert await asyncio.wait_for(actor.get_value.choose(), 30) == 41
+
+        call_through = _ProcStopCallThrough(inner, release)
+        owner._proc_mesh = Shared.from_value(cast(HyProcMesh, call_through))
+        stop_future = owner.stop()
+        assert not owner._stopped
+        assert call_through.calls == 0
+
+        observer = stop_future.as_asyncio()
+        await _wait_for_event(
+            call_through.entered,
+            "proc stop did not reach the native binding",
+        )
+        assert not owner._stopped
+        assert call_through.calls == 1
+
+        assert observer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await observer
+
+        release.set()
+        assert (
+            await asyncio.wait_for(
+                asyncio.to_thread(stop_future.get, 30),
+                timeout=35,
+            )
+            is None
+        )
+        assert await asyncio.wait_for(stop_future, timeout=30) is None
+        assert owner._stopped
+
+        assert await asyncio.wait_for(owner.stop(), timeout=30) is None
+        assert call_through.calls == 2
+        # The two calls prove that both requests reached the binding. Source
+        # inspection, not this seam, shows that only the first took the
+        # SharedCell and reached the domain ProcMesh::stop operation. It also
+        # shows that an overlapping second stop can set _stopped True even if
+        # the first domain stop later fails; this test does not create overlap.
+    finally:
+        release.set()
+        try:
+            if stop_future is not None:
+                try:
+                    await asyncio.wait_for(stop_future, timeout=30)
+                except (Exception, asyncio.CancelledError):
+                    pass
+        finally:
+            job.kill()
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
 async def test_stop_state_tracks_native_stop_result() -> None:
     with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
         owner = state.hosts.spawn_procs(per_host={"gpus": 2})
-        await owner.initialized
+        assert await asyncio.wait_for(owner.initialized, timeout=30) is True
         logging_manager = owner._logging_manager
         assert logging_manager._logging_mesh_client is not None
         proc_ref = owner.slice(gpus=0)
+        raw_ref = proc_ref._proc_mesh.poll()
+        assert raw_ref is not None
+        instance = context().actor_instance._as_rust()
 
-        with pytest.raises(
-            ValueError,
-            match="ProcMesh is not owned; must be stopped by an owner",
-        ):
-            await proc_ref.stop()
+        with pytest.raises(ValueError) as raw_stop_error:
+            raw_ref.stop_nonblocking(instance, "test reference rejection")
+        assert type(raw_stop_error.value) is ValueError
+        assert str(raw_stop_error.value) == (
+            "ProcMesh is not owned; must be stopped by an owner"
+        )
+
+        with pytest.raises(ValueError) as public_stop_error:
+            await asyncio.wait_for(proc_ref.stop(), timeout=30)
+        assert type(public_stop_error.value) is ValueError
+        assert str(public_stop_error.value) == str(raw_stop_error.value)
 
         assert not proc_ref._stopped
         flush_started = False
@@ -277,7 +392,7 @@ async def test_stop_state_tracks_native_stop_result() -> None:
                 record_flush_from_tokio,
             ),
         ):
-            assert await owner.stop() is None
+            assert await asyncio.wait_for(owner.stop(), timeout=30) is None
 
             assert proc_flush_called
         assert flush_started
