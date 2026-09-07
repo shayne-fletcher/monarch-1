@@ -17,6 +17,7 @@ import tempfile
 import textwrap
 import threading
 import time
+import weakref
 from contextlib import ExitStack
 from typing import Dict, List, Optional, Set
 from unittest.mock import patch
@@ -24,15 +25,22 @@ from unittest.mock import patch
 import cloudpickle
 import pytest
 from isolate_in_subprocess import isolate_in_subprocess
+from monarch._rust_bindings.monarch_hyperactor.host_mesh import BootstrapCommand
 from monarch._rust_bindings.monarch_hyperactor.proc import ProcId, Uid
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.shape import Point, Shape, Slice
 from monarch._src.actor.actor_mesh import _client_context, Actor, attach, context
 from monarch._src.actor.bootstrap import attach_to_workers
 from monarch._src.actor.endpoint import endpoint
-from monarch._src.actor.host_mesh import HostMesh, this_host, this_proc
+from monarch._src.actor.future import Future
+from monarch._src.actor.host_mesh import (
+    default_bootstrap_cmd,
+    HostMesh,
+    this_host,
+    this_proc,
+)
 from monarch._src.actor.pickle import flatten, unflatten
-from monarch._src.actor.proc_mesh import get_or_spawn_controller
+from monarch._src.actor.proc_mesh import _get_bootstrap_args, get_or_spawn_controller
 from monarch._src.job.job import ProcessState
 from monarch._src.job.process import ProcessJob
 from monarch._src.job.service_identity import new_service_proc_id, service_proc_addr
@@ -166,6 +174,63 @@ def is_process_running(pid: int) -> bool:
         return False
 
 
+def _wait_for_marker(path: pathlib.Path) -> None:
+    # Stress runs start several isolated ProcessJobs at once, so reaching the
+    # bootstrap wrapper can take longer than a focused run.
+    deadline = time.monotonic() + 30
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for marker {path}")
+        time.sleep(0.01)
+
+
+def _gated_bootstrap_command(
+    directory: pathlib.Path,
+) -> tuple[BootstrapCommand, pathlib.Path, pathlib.Path]:
+    entered = directory / "bootstrap-entered"
+    release = directory / "bootstrap-release"
+    wrapper = directory / "gated-bootstrap.py"
+    wrapper.write_text(
+        textwrap.dedent(
+            """\
+            import os
+            import pathlib
+            import sys
+            import time
+
+            entered, release, program, arg0, *args = sys.argv[1:]
+            pathlib.Path(entered).touch()
+            deadline = time.monotonic() + 30
+            while not pathlib.Path(release).exists():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("bootstrap release marker was not published")
+                time.sleep(0.01)
+            os.execvpe(program, [arg0, *args], os.environ)
+            """
+        )
+    )
+
+    base = default_bootstrap_cmd()
+    # BootstrapCommand's Rust binding exposes every field, but its stub declares
+    # only env. Read the argv from the helper used by default_bootstrap_cmd so
+    # this fixture follows the real default without widening the production stub.
+    original_program, original_args, _ = _get_bootstrap_args()
+    command = BootstrapCommand(
+        sys.executable,
+        None,
+        [
+            str(wrapper),
+            str(entered),
+            str(release),
+            original_program,
+            original_program,
+            *(original_args or []),
+        ],
+        dict(base.env),
+    )
+    return command, entered, release
+
+
 @pytest.mark.timeout(60)
 @isolate_in_subprocess
 def test_shutdown_host_mesh() -> None:
@@ -197,6 +262,122 @@ def test_shutdown_immediately_after_proc_spawn_without_actor() -> None:
             match="HostMesh has already been shut down",
         ):
             hm.spawn_procs()
+
+
+@pytest.mark.timeout(90)
+@isolate_in_subprocess
+def test_shutdown_waits_for_a_pending_proc_spawn_after_caller_drops_mesh() -> None:
+    with tempfile.TemporaryDirectory(prefix="monarch_spawn_gate_") as directory:
+        command, entered, release = _gated_bootstrap_command(pathlib.Path(directory))
+        with ExitStack() as cleanup:
+            job = ProcessJob({"hosts": 1})
+            cleanup.callback(job.kill)
+            cleanup.callback(release.touch)
+            hm = job.state(cached_path=None).hosts
+            proc_mesh = hm.spawn_procs(
+                name="pending_proc",
+                bootstrap_command=command,
+            )
+            # HostMesh retains the raw native spawn in _pending_spawns and the
+            # ProcMesh retains a second Shared that performs logging and setup.
+            # Keep witnesses for both before discarding the caller's ProcMesh.
+            spawn = hm._pending_spawns[-1]
+            proc_initialization = proc_mesh._proc_mesh
+            retained_proc_mesh = weakref.ref(proc_mesh)
+            del proc_mesh
+            assert retained_proc_mesh() is hm._proc_meshes[-1]
+            _wait_for_marker(entered)
+
+            flush_entered = threading.Event()
+            flush_exited = threading.Event()
+            release_shutdown = threading.Event()
+            cleanup.callback(release_shutdown.set)
+            flush_pending_spawns = hm._flush_pending_spawns
+
+            async def record_flush_entry() -> None:
+                flush_entered.set()
+                await flush_pending_spawns()
+                flush_exited.set()
+                released = await PythonTask.spawn_blocking(
+                    lambda: release_shutdown.wait(timeout=30)
+                )
+                if not released:
+                    raise TimeoutError("native shutdown release was not published")
+
+            with patch.object(hm, "_flush_pending_spawns", record_flush_entry):
+                shutdown = hm.shutdown()
+                shutdown_results: list[None] = []
+                shutdown_errors: list[Exception] = []
+                shutdown_done = threading.Event()
+
+                def drive_shutdown() -> None:
+                    try:
+                        shutdown_results.append(shutdown.get(timeout=45))
+                    except Exception as error:
+                        shutdown_errors.append(error)
+                    finally:
+                        shutdown_done.set()
+
+                shutdown_thread = threading.Thread(
+                    target=drive_shutdown,
+                    daemon=True,
+                    name="drive-host-mesh-shutdown",
+                )
+                shutdown_thread.start()
+                try:
+                    # Start shutdown on another thread so entry into the flush,
+                    # rather than thread scheduling, is the synchronization
+                    # point for proving that the pending spawn blocks it.
+                    assert flush_entered.wait(timeout=10)
+                    assert spawn.poll() is None
+                    assert proc_initialization.poll() is None
+                    assert not flush_exited.is_set()
+                    assert not shutdown_done.is_set()
+
+                    release.touch()
+                    completion_deadline = time.monotonic() + 30
+                    while spawn.poll() is None:
+                        if time.monotonic() >= completion_deadline:
+                            raise AssertionError(
+                                "proc spawn did not complete after bootstrap release"
+                            )
+                        time.sleep(0.01)
+                    assert flush_exited.wait(
+                        timeout=max(0.0, completion_deadline - time.monotonic())
+                    )
+                    proc_initialization_value = proc_initialization.poll()
+                    while proc_initialization_value is None:
+                        if time.monotonic() >= completion_deadline:
+                            raise AssertionError(
+                                "proc initialization did not complete after bootstrap release"
+                            )
+                        time.sleep(0.01)
+                        proc_initialization_value = proc_initialization.poll()
+                    release_shutdown.set()
+                    assert shutdown_done.wait(timeout=15)
+                finally:
+                    release.touch()
+                    release_shutdown.set()
+                    try:
+                        if shutdown_thread.is_alive():
+                            job.kill()
+                    finally:
+                        shutdown_thread.join(timeout=10)
+
+                assert not shutdown_thread.is_alive()
+                assert flush_exited.is_set()
+                assert shutdown_errors == []
+                assert shutdown_results == [None]
+
+            assert spawn.poll() is not None
+            assert proc_initialization_value is not None
+            assert hm._pending_spawns == []
+            assert hm._inner_host_mesh is None
+            with pytest.raises(
+                RuntimeError,
+                match="HostMesh has already been shut down",
+            ):
+                hm.spawn_procs()
 
 
 @pytest.mark.timeout(60)
@@ -303,6 +484,52 @@ def test_attach_to_workers_accepts_future_addresses() -> None:
         for proc in procs:
             proc.kill()
             proc.wait()
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+def test_attach_starts_before_readiness_observation_and_survives_a_dropped_observer() -> (
+    None
+):
+    address_started = threading.Event()
+    release_address = threading.Event()
+
+    async def resolve_address() -> str:
+        address_started.set()
+        released = await PythonTask.spawn_blocking(
+            lambda: release_address.wait(timeout=30)
+        )
+        if not released:
+            raise TimeoutError("worker address release was not published")
+        return addr
+
+    with ExitStack() as cleanup:
+        job = ProcessJob({"hosts": 1})
+        job.apply()
+        cleanup.callback(job.kill)
+        cleanup.callback(release_address.set)
+        addr = job._host_to_pid["hosts_0"].channel
+        address: Future[str] = Future._from_coro(resolve_address())
+
+        hosts = attach_to_workers(
+            ca="trust_all_connections",
+            workers=[address],
+        )
+
+        with pytest.raises(ValueError) as consumed:
+            address.get()
+        assert str(consumed.value) == "Future was consumed."
+        assert address_started.wait(timeout=10)
+
+        discarded = hosts.initialized
+        with pytest.raises(TimeoutError):
+            discarded.get(timeout=0.25)
+        del discarded
+        release_address.set()
+
+        assert hosts.initialized.get(timeout=30) is True
+        assert hosts.initialized.get(timeout=30) is True
+        assert hosts.shutdown().get(timeout=30) is None
 
 
 @pytest.mark.timeout(60)
