@@ -1152,16 +1152,20 @@ public_operation = "HostMesh.shutdown()"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
 consumer = "user code and context-manager exit"
-driver = "awaited or blocked on by the caller"
-start_point = "lazy; nothing runs until the Future is observed"
-abandonment = "possible; dropping leaves the mesh running and _inner_host_mesh set"
-eager_effect = "starts a side effect"
-drop_behavior = "shutdown never runs"
+driver = "the first observation drives a retained Handle producer; synchronous get without a timeout may instead drive inline"
+start_point = "the call synchronously wraps the coroutine and captures context, but pending-spawn drain and shutdown do not begin until the Future is observed"
+abandonment = "dropping an unobserved Future leaves the mesh usable and _inner_host_mesh set; after asyncio observation starts, cancelling that observer does not abort the retained shutdown producer"
+eager_effect = "an eager replacement would begin draining and shutting down during the call even if the returned Future were discarded"
+drop_behavior = "before observation shutdown never runs; after observation the retained producer completes despite observer cancellation"
 first_side_effect = "flushing pending spawns"
-unobserved_error = "silently dropped"
+unobserved_error = "an unobserved Future reports nothing; after observation, the successful result remains available to another observer. Source-grounded: Python pending-spawn and logging-flush failures are silently suppressed, while native drain and acknowledgement failures warn and return success. Tested consumed states differ: a second preconstructed shutdown drains and then raises before another native call, while shutdown after stop reports success and clears the Python field although the workers remain live"
 disposition = "require a binding-specific design"
 semantic_class = "deferred_side_effect"
-oracle = "immediate-shutdown coverage"
+oracle = [
+  "fbcode//monarch/python/tests:test_host_mesh::test_preconstructed_shutdowns_drain_after_observer_cancellation",
+  "fbcode//monarch/python/tests:test_host_mesh::test_shutdown_host_mesh",
+  "fbcode//monarch/python/tests:test_host_mesh::test_stop_and_reconnect",
+]
 
 [[site]]
 id = "fc.host_mesh.HostMesh.stop[Future._from_corotask]"
@@ -1178,15 +1182,18 @@ caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
 consumer = "user code"
 driver = "awaited or blocked on by the caller"
-start_point = "lazy; nothing runs until the Future is observed"
-abandonment = "possible; dropping leaves the mesh running"
-eager_effect = "starts a side effect"
-drop_behavior = "stop never runs"
+start_point = "the call synchronously wraps the coroutine and captures context, but pending-spawn drain and stop do not begin until the Future is observed"
+abandonment = "dropping an unobserved Future leaves the mesh usable and does not stop its processes"
+eager_effect = "an eager replacement would begin draining and stopping during the call even if the returned Future were discarded"
+drop_behavior = "stop never runs before observation"
 first_side_effect = "flushing pending spawns"
-unobserved_error = "silently dropped"
+unobserved_error = "an unobserved Future reports nothing. Source-grounded: Python pending-spawn and logging-flush failures are silently suppressed, while native drain failures warn and return success. A repeated stop drains and reaches the binding again, then returns None; source inspection shows the empty cell prevents a second domain stop and lets an overlapping second stop return while the first domain stop is still running"
 disposition = "intentionally become eager"
 semantic_class = "deferred_side_effect"
-oracle = "stop idempotence coverage"
+oracle = [
+  "fbcode//monarch/python/tests:test_host_mesh::test_shutdown_host_mesh",
+  "fbcode//monarch/python/tests:test_host_mesh::test_stop_and_reconnect",
+]
 
 [[site]]
 id = "fc.host_mesh._spawn_admin[Future._from_corotask]"
@@ -1268,16 +1275,19 @@ public_operation = "ProcMesh.stop()"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
 consumer = "user code and context-manager exit"
-driver = "awaited or blocked on by the caller"
-start_point = "lazy; nothing runs until the Future is observed"
-abandonment = "possible; dropping leaves _stopped False and logs unflushed"
-eager_effect = "starts a side effect"
-drop_behavior = "stop never runs"
+driver = "the first observation drives a retained Handle producer; synchronous get without a timeout may instead drive inline"
+start_point = "the call synchronously captures the current Rust instance and wraps the coroutine; actor drain, logging flush, and native stop begin only when the Future is observed"
+abandonment = "dropping an unobserved Future leaves the proc mesh usable and _stopped False; after asyncio observation starts, cancelling that observer does not abort the retained stop producer"
+eager_effect = "an eager replacement would begin draining actors, flushing logs, and stopping processes during the call even if the returned Future were discarded"
+drop_behavior = "before observation stop never runs; after observation the retained producer completes despite observer cancellation"
 first_side_effect = "flushing pending actor spawns"
-unobserved_error = "silently dropped"
+unobserved_error = "an unobserved Future reports nothing; after observation, the successful result remains available to another observer. Source-grounded: pending-actor and logging-flush failures are silently suppressed. A repeated stop reaches the binding and returns None; source inspection shows the empty cell prevents a second domain stop before the public wrapper sets _stopped True, so an overlapping second stop can mark the mesh stopped even if the first domain stop later fails"
 disposition = "intentionally become eager"
 semantic_class = "deferred_side_effect"
-oracle = "proc mesh stop idempotence coverage"
+oracle = [
+  "fbcode//monarch/python/tests:test_proc_mesh::test_proc_stop_is_lazy_and_survives_cancelled_observer",
+  "fbcode//monarch/python/tests:test_proc_mesh::test_stop_state_tracks_native_stop_result",
+]
 
 [[site]]
 id = "fc.job.exec_command[Future._from_coro_impl]"
@@ -2427,14 +2437,18 @@ constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from PyHostMesh::shutdown"
 consumer = "HostMesh.shutdown, after flushing pending spawns"
 driver = "awaited inside the HostMesh.shutdown coroutine"
-start_point = "lazy; the boxed future is not polled until the returned task is driven"
-abandonment = "possible; reachable only when the shutdown coroutine is abandoned"
-eager_effect = "starts a side effect"
-drop_behavior = "the host mesh is never shut down"
-unobserved_error = "surfaced on observation"
+start_point = "the Owned call constructs a lazy task; driving it takes a nonempty SharedCell before awaiting domain shutdown, while an empty cell returns success without domain shutdown and a Ref raises RuntimeError before task construction"
+abandonment = "source-grounded for a direct private caller: dropping the raw task before drive leaves the SharedCell intact; on the tested public route the outer coroutine immediately awaits it"
+eager_effect = "an eager replacement would take the SharedCell and start domain shutdown during the binding call"
+drop_behavior = "source-grounded for the direct binding: an undriven raw task performs no shutdown; the public wrapper's own unobserved Future never calls this binding"
+unobserved_error = "a Ref raises synchronously with its exact managed-only message. Source-grounded: a first Owned shutdown warns and returns success on native drain or acknowledgement failure; an empty-cell repeat logs and returns success without domain shutdown. The empty-cell outcome is a current defect to revisit when repeated teardown is corrected, not a target invariant"
 disposition = "require a binding-specific design"
 semantic_class = "deferred_side_effect"
-oracle = "immediate-shutdown and drain coverage"
+oracle = [
+  "fbcode//monarch/python/tests:test_host_mesh::test_preconstructed_shutdowns_drain_after_observer_cancellation",
+  "fbcode//monarch/python/tests:test_host_mesh::test_shutdown_sliced_host_mesh_throws_exception",
+  "fbcode//monarch/python/tests:test_host_mesh::test_stop_and_reconnect",
+]
 
 [[site]]
 id = "np.host_mesh.PyHostMesh.spawn_nonblocking"
@@ -2476,14 +2490,17 @@ constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from PyHostMesh::stop"
 consumer = "HostMesh.stop, after flushing pending spawns"
 driver = "awaited inside the HostMesh.stop coroutine"
-start_point = "lazy; the boxed future is not polled until the returned task is driven"
-abandonment = "possible; reachable only when the stop coroutine is abandoned"
-eager_effect = "starts a side effect"
-drop_behavior = "the host mesh is never stopped"
-unobserved_error = "surfaced on observation"
+start_point = "the Owned call constructs a lazy task; driving it takes a nonempty SharedCell before awaiting domain stop, while an empty cell returns success without domain stop and a Ref raises RuntimeError before task construction"
+abandonment = "source-grounded for a direct private caller: dropping the raw task before drive leaves the SharedCell intact; on the tested public route the outer coroutine immediately awaits it"
+eager_effect = "an eager replacement would take the SharedCell and start domain stop during the binding call"
+drop_behavior = "source-grounded for the direct binding: an undriven raw task performs no stop; the public wrapper's own unobserved Future never calls this binding"
+unobserved_error = "a Ref raises synchronously with its exact managed-only message. Source-grounded: a first Owned stop warns and returns success on native drain failure; an empty-cell repeat logs and returns success without domain stop. The empty-cell outcome is a current defect to revisit when repeated teardown is corrected, not a target invariant"
 disposition = "intentionally become eager"
 semantic_class = "deferred_side_effect"
-oracle = "stop idempotence coverage"
+oracle = [
+  "fbcode//monarch/python/tests:test_host_mesh::test_shutdown_sliced_host_mesh_throws_exception",
+  "fbcode//monarch/python/tests:test_host_mesh::test_stop_and_reconnect",
+]
 
 [[site]]
 id = "np.host_mesh._spawn_admin"
@@ -2669,14 +2686,17 @@ constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from PyProcMesh::stop_nonblocking"
 consumer = "ProcMesh.stop, after flushing pending actor spawns and logs"
 driver = "awaited inside the _stop_nonblocking coroutine"
-start_point = "lazy; the boxed future is not polled until the returned task is driven"
-abandonment = "possible; reachable only when the stop coroutine is abandoned"
-eager_effect = "starts a side effect"
-drop_behavior = "the proc mesh is never stopped and _stopped stays False"
-unobserved_error = "surfaced on observation"
+start_point = "the call takes the GIL and rejects a Ref synchronously; for Owned it constructs a lazy task that takes a nonempty SharedCell only when driven, while an empty cell returns success without domain stop"
+abandonment = "source-grounded for a direct private caller: dropping the raw task before drive leaves the SharedCell intact; on the tested public route the outer producer immediately awaits it once reached"
+eager_effect = "an eager replacement would take the SharedCell and start domain stop during the binding call"
+drop_behavior = "source-grounded for the direct binding: an undriven raw task performs no stop; dropping the public outer Future before observation prevents this binding from being called"
+unobserved_error = "a Ref raises PyValueError synchronously with its exact owned-only message. Source-grounded: a first Owned stop failure is reported as PyValueError when the task is observed; an empty-cell repeat logs and returns success without domain stop"
 disposition = "intentionally become eager"
 semantic_class = "deferred_side_effect"
-oracle = "proc mesh stop idempotence coverage"
+oracle = [
+  "fbcode//monarch/python/tests:test_proc_mesh::test_proc_stop_is_lazy_and_survives_cancelled_observer",
+  "fbcode//monarch/python/tests:test_proc_mesh::test_stop_state_tracks_native_stop_result",
+]
 
 [[site]]
 id = "np.lib.PyRdmaAction.submit"
@@ -3068,7 +3088,7 @@ operation = "pytokio_import"
 scope = "test"
 state = "legacy"
 transition = "6.8"
-members = ["PythonTask"]
+members = ["PythonTask", "Shared"]
 
 [[site]]
 id = "im.test_proc_launcher_probe.module"

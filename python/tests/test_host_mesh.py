@@ -6,6 +6,7 @@
 
 # pyre-unsafe
 
+import asyncio
 import os
 import pathlib
 import shutil
@@ -19,15 +20,19 @@ import threading
 import time
 import weakref
 from contextlib import ExitStack
-from typing import Dict, List, Optional, Set
+from typing import Any, cast, Dict, Generator, List, Optional, Set
 from unittest.mock import patch
 
 import cloudpickle
 import pytest
 from isolate_in_subprocess import isolate_in_subprocess
-from monarch._rust_bindings.monarch_hyperactor.host_mesh import BootstrapCommand
+from monarch._rust_bindings.monarch_hyperactor.context import Instance as HyInstance
+from monarch._rust_bindings.monarch_hyperactor.host_mesh import (
+    BootstrapCommand,
+    HostMesh as HyHostMesh,
+)
 from monarch._rust_bindings.monarch_hyperactor.proc import ProcId, Uid
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 from monarch._rust_bindings.monarch_hyperactor.shape import Point, Shape, Slice
 from monarch._src.actor.actor_mesh import _client_context, Actor, attach, context
 from monarch._src.actor.bootstrap import attach_to_workers
@@ -184,6 +189,106 @@ def _wait_for_marker(path: pathlib.Path) -> None:
         time.sleep(0.01)
 
 
+async def _wait_for_event(event: threading.Event, message: str) -> None:
+    reached = await asyncio.wait_for(
+        asyncio.to_thread(event.wait, 30),
+        timeout=35,
+    )
+    assert reached, message
+
+
+class _AwaitRecord:
+    """Record when a synthetic pending spawn is actually awaited."""
+
+    def __init__(self, record: list[str], value: str) -> None:
+        self._record = record
+        self._value = value
+
+    def __await__(self) -> Generator[Any, None, None]:
+        async def record() -> None:
+            self._record.append(self._value)
+
+        return record().__await__()
+
+
+class _PendingActorRecord:
+    """Expose an initializer that records when the real actor queue drives it."""
+
+    def __init__(self, record: list[str]) -> None:
+        self._record = record
+
+    @property
+    def initialized(self) -> Future[bool]:
+        async def record() -> bool:
+            self._record.append("pending_actor")
+            return True
+
+        return Future._from_coro(record())
+
+
+class _HostTeardownCallThrough:
+    """Observe binding calls while forwarding every call to the real mesh.
+
+    The wrapper can count entry into ``PyHostMesh.stop`` and ``shutdown``. It
+    cannot see which ``SharedCell::take`` branch Rust takes, so tests must not
+    use it to claim that an inner domain operation ran.
+    """
+
+    def __init__(
+        self,
+        inner: HyHostMesh,
+        record: list[str] | None = None,
+        release: threading.Event | None = None,
+    ) -> None:
+        self._inner = inner
+        self._record = record
+        self._release = release
+        self.entered = threading.Event()
+        self.calls: list[str] = []
+
+    def _wrap(self, operation: str, task: PythonTask[None]) -> PythonTask[None]:
+        self.calls.append(operation)
+        if self._record is not None:
+            self._record.append(f"native_{operation}")
+        self.entered.set()
+        release = self._release
+        if release is None:
+            return task
+        release_event = cast(threading.Event, release)
+
+        async def gated() -> None:
+            released = await PythonTask.spawn_blocking(
+                lambda: release_event.wait(timeout=30)
+            )
+            if not released:
+                raise TimeoutError("host teardown release was not published")
+            await task
+
+        return PythonTask.from_coroutine(gated())
+
+    def shutdown(self, instance: HyInstance) -> PythonTask[None]:
+        return self._wrap("shutdown", self._inner.shutdown(instance))
+
+    def stop(self, instance: HyInstance) -> PythonTask[None]:
+        return self._wrap("stop", self._inner.stop(instance))
+
+
+def _install_host_teardown_call_through(
+    host: HostMesh,
+    record: list[str] | None = None,
+    release: threading.Event | None = None,
+    inner: HyHostMesh | None = None,
+) -> _HostTeardownCallThrough:
+    if inner is None:
+        inner = host._hy_host_mesh.block_on()
+    call_through = _HostTeardownCallThrough(inner, record, release)
+    # HostMesh reads this value through the Shared interface. The test wrapper
+    # preserves that interface and forwards every teardown call to the exact
+    # native object it replaced.
+    host._inner_host_mesh = Shared.from_value(cast(HyHostMesh, call_through))
+    return call_through
+
+
 def _gated_bootstrap_command(
     directory: pathlib.Path,
 ) -> tuple[BootstrapCommand, pathlib.Path, pathlib.Path]:
@@ -231,15 +336,111 @@ def _gated_bootstrap_command(
     return command, entered, release
 
 
+@pytest.mark.timeout(120)
+@isolate_in_subprocess
+async def test_preconstructed_shutdowns_drain_after_observer_cancellation() -> None:
+    job = ProcessJob({"hosts": 1})
+    release = threading.Event()
+    first_shutdown: Future[None] | None = None
+    try:
+        host = job.state(cached_path=None).hosts
+        proc_mesh = host.spawn_procs(name="drain_order")
+        await asyncio.wait_for(proc_mesh.initialized, timeout=30)
+        inner = host._hy_host_mesh.poll()
+        assert inner is not None
+
+        order: list[str] = []
+        # These synthetic completions sit in the real pending-proc and
+        # pending-actor queues. They prove traversal and ordering through those
+        # queues, not the lifecycle of real proc or actor spawns.
+        host._pending_spawns = [cast(Any, _AwaitRecord(order, "pending_proc"))]
+        proc_mesh._pending_actor_spawns = [cast(Any, _PendingActorRecord(order))]
+        flush_logging = proc_mesh._logging_manager._flush_from_tokio
+
+        async def record_logging_flush() -> None:
+            await flush_logging()
+            order.append("logging_flush")
+
+        call_through = _install_host_teardown_call_through(
+            host,
+            order,
+            release,
+            inner,
+        )
+        first_shutdown = host.shutdown()
+        second_shutdown = host.shutdown()
+        assert order == []
+        assert call_through.calls == []
+
+        with patch.object(
+            proc_mesh._logging_manager,
+            "_flush_from_tokio",
+            record_logging_flush,
+        ):
+            observer = first_shutdown.as_asyncio()
+            await _wait_for_event(
+                call_through.entered,
+                "host shutdown did not reach the native binding",
+            )
+            assert order == [
+                "pending_proc",
+                "pending_actor",
+                "logging_flush",
+                "native_shutdown",
+            ]
+            assert call_through.calls == ["shutdown"]
+
+            assert observer.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await observer
+
+            release.set()
+            assert (
+                await asyncio.wait_for(
+                    asyncio.to_thread(first_shutdown.get, 30),
+                    timeout=35,
+                )
+                is None
+            )
+            assert await asyncio.wait_for(first_shutdown, timeout=30) is None
+            assert host._inner_host_mesh is None
+
+            with pytest.raises(RuntimeError) as second_error:
+                await asyncio.wait_for(second_shutdown, timeout=30)
+            assert type(second_error.value) is RuntimeError
+            assert str(second_error.value) == "HostMesh has already been shut down"
+            assert order == [
+                "pending_proc",
+                "pending_actor",
+                "logging_flush",
+                "native_shutdown",
+                "logging_flush",
+            ]
+            assert call_through.calls == ["shutdown"]
+    finally:
+        release.set()
+        try:
+            if first_shutdown is not None:
+                try:
+                    await asyncio.wait_for(first_shutdown, timeout=30)
+                except (Exception, asyncio.CancelledError):
+                    pass
+        finally:
+            job.kill()
+
+
 @pytest.mark.timeout(60)
 @isolate_in_subprocess
 def test_shutdown_host_mesh() -> None:
     with scoped_state(ProcessJob({"hosts": 2}), cached_path=None) as state:
         hm = state.hosts
+        discarded_stop = hm.stop()
+        discarded_shutdown = hm.shutdown()
+        del discarded_stop, discarded_shutdown
         pm = hm.spawn_procs(per_host={"gpus": 2})
         am = pm.spawn("actor", RankActor)
-        am.get_rank.choose().get()
-        hm.shutdown().get()
+        am.get_rank.choose().get(timeout=30)
+        assert hm.shutdown().get(timeout=30) is None
         assert hm._inner_host_mesh is None
 
 
@@ -553,15 +754,32 @@ async def test_host_mesh_context_manager() -> None:
 def test_shutdown_sliced_host_mesh_throws_exception() -> None:
     with scoped_state(ProcessJob({"hosts": 2}), cached_path=None) as state:
         hm = state.hosts
+        assert hm.initialized.get(timeout=30) is True
         hm_sliced = hm.slice(hosts=1)
         sliced_inner = hm_sliced._inner_host_mesh
         assert sliced_inner is not None
+        reference = sliced_inner.poll()
+        assert reference is not None
+        instance = context().actor_instance._as_rust()
 
-        with pytest.raises(
-            RuntimeError,
-            match="cannot shut down `HostMesh` that is a reference instead of owned",
-        ):
-            hm_sliced.shutdown().get()
+        with pytest.raises(RuntimeError) as raw_shutdown_error:
+            reference.shutdown(instance)
+        assert type(raw_shutdown_error.value) is RuntimeError
+        assert str(raw_shutdown_error.value) == (
+            "cannot shut down `HostMesh` that is a reference instead of owned"
+        )
+
+        with pytest.raises(RuntimeError) as raw_stop_error:
+            reference.stop(instance)
+        assert type(raw_stop_error.value) is RuntimeError
+        assert str(raw_stop_error.value) == (
+            "cannot stop `HostMesh` that is a reference instead of owned"
+        )
+
+        with pytest.raises(RuntimeError) as public_shutdown_error:
+            hm_sliced.shutdown().get(timeout=30)
+        assert type(public_shutdown_error.value) is RuntimeError
+        assert str(public_shutdown_error.value) == str(raw_shutdown_error.value)
 
         assert hm_sliced._inner_host_mesh is sliced_inner
 
@@ -584,34 +802,78 @@ def test_stop_and_reconnect() -> None:
     # waiting for undeliverable-message errors to surface.
     with configured(message_delivery_timeout="5s"):
         job = ProcessJob({"hosts": 2})
+        try:
+            # First connection: spawn actors, verify they work.
+            with scoped_state(job, cached_path=None) as state:
+                hm = state.hosts
+                pm = hm.spawn_procs(per_host={"gpus": 1})
+                am = pm.spawn("actor", RankActor)
+                pids = am.get_pid.call().get(timeout=30)
+                assert len(pids) == 2
+                pids = [pid for _, pid in pids.items()]
 
-        # First connection: spawn actors, verify they work.
-        with scoped_state(job, cached_path=None) as state:
-            hm = state.hosts
-            pm = hm.spawn_procs(per_host={"gpus": 1})
-            am = pm.spawn("actor", RankActor)
-            pids = am.get_pid.call().get()
-            assert len(pids) == 2
-            pids = [pid for _, pid in pids.items()]
+                order: list[str] = []
+                call_through = _install_host_teardown_call_through(hm, order)
+                flush_pending_spawns = hm._flush_pending_spawns
 
-            # Stop: terminate user procs but keep workers alive.
-            hm.stop().get()
-            # Ensure that the procs are actually dead.
-            assert all(not is_process_running(pid) for pid in pids)
+                async def record_drain() -> None:
+                    order.append("drain")
+                    await flush_pending_spawns()
 
-            # Sleep past the message delivery timeout to ensure that no errors
-            # surface from undeliverable messages to dead procs/actors.
-            time.sleep(7)
+                with patch.object(hm, "_flush_pending_spawns", record_drain):
+                    # Stop terminates user procs but leaves workers available.
+                    assert hm.stop().get(timeout=30) is None
+                    assert order == ["drain", "native_stop"]
+                    assert call_through.calls == ["stop"]
+                    assert all(not is_process_running(pid) for pid in pids)
 
-            # Second connection: reconnect to the same workers via state().
-            hm2 = job.state(cached_path=None).hosts
-            pm2 = hm2.spawn_procs(per_host={"gpus": 1})
-            am2 = pm2.spawn("actor", RankActor)
-            ranks2 = am2.get_rank.call().get()
-            assert len(ranks2) == 2
+                    # Sleep past the message delivery timeout to ensure that no
+                    # errors surface from undeliverable messages to dead
+                    # procs/actors.
+                    time.sleep(7)
 
-            # Shutdown: fully tear down and exit workers.
-            hm2.shutdown().get()
+                    # Reconnect after stop and use an actor before exercising
+                    # any repeated-teardown behavior. This remains the ordinary
+                    # stop-and-reconnect regression witness.
+                    hm2 = job.state(cached_path=None).hosts
+                    pm2 = hm2.spawn_procs(per_host={"gpus": 1})
+                    am2 = pm2.spawn("actor", RankActor)
+                    ranks2 = list(am2.get_rank.call().get(timeout=30).items())
+                    assert len(ranks2) == 2
+
+                    # The second stop and following shutdown both report
+                    # success after the first stop consumed the native cell.
+                    assert hm.stop().get(timeout=30) is None
+                    assert hm.shutdown().get(timeout=30) is None
+                    assert hm._inner_host_mesh is None
+
+                    assert order == [
+                        "drain",
+                        "native_stop",
+                        "drain",
+                        "native_stop",
+                        "drain",
+                        "native_shutdown",
+                    ]
+                    assert call_through.calls == ["stop", "stop", "shutdown"]
+                    # The call count proves that both stop requests reached the
+                    # binding. Source inspection, not this seam, shows that only
+                    # the first took the cell and ran the domain stop operation.
+                    # It also shows that an overlapping second stop can return
+                    # success while the first domain stop is still running;
+                    # this sequential test does not exercise that overlap.
+
+                    # This second call characterizes current empty-cell false
+                    # success: the reported shutdown left the same workers and
+                    # actor live. Revise this assertion when repeated teardown
+                    # is corrected; the first call above remains the independent
+                    # reconnect-after-stop regression.
+                    assert list(am2.get_rank.call().get(timeout=30).items()) == ranks2
+
+                # Shutdown: fully tear down and exit workers.
+                hm2.shutdown().get(timeout=30)
+        finally:
+            job.kill()
 
 
 @pytest.mark.timeout(120)
