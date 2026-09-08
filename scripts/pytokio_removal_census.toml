@@ -356,7 +356,7 @@ shared_reconstruction = 2
 reserve_binding = 1
 py_mesh_reserve = 2
 py_is_tokio_thread = 3
-pytokio_import = 30
+pytokio_import = 31
 pytokio_module_ref = 17
 helper_symbol = 26
 helper_definition = 6
@@ -779,6 +779,7 @@ owns = [
   "im.test_future_characterization.module",
   "im.test_host_mesh.module",
   "im.test_hyperactor.module",
+  "im.test_logging_initialization_characterization.module",
   "im.test_logging.module",
   "im.test_mailbox.module",
   "im.test_proc_mesh.module",
@@ -2597,16 +2598,33 @@ state = "legacy"
 transition = "6.3b"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from LoggingMeshClient::flush"
-consumer = "ProcMesh.stop and the logging manager's tokio flush"
-driver = "awaited during teardown"
-start_point = "lazy; the boxed future is not polled until the returned task is driven"
-abandonment = "possible; teardown may abandon it"
-eager_effect = "starts a side effect"
-drop_behavior = "the flush never runs and buffered logs are lost"
-unobserved_error = "currently suppressed rather than reported"
+consumer = "LoggingManager._new_flush_task, reached by flush, flush_async and _flush_from_tokio"
+driver = "flush drives a Handle synchronously; flush_async is an asyncio-driven coroutine awaiting a Handle; _flush_from_tokio is advanced by the pytokio driver on Tokio and awaits a Shared. Adapter-level coverage proves that two manager calls request and drive distinct tasks; their mapping to distinct native operations is source-composed from _new_flush_task calling LoggingMeshClient.flush each time"
+start_point = "the binding call captures the client actor and optional forwarder mesh but leaves the task lazy. Once spawn or spawn_handle starts it, a no-forwarder task returns immediately; a forwarding task posts StartSyncFlush and runs the distributed barrier"
+abandonment = "two tested states. Before start, dropping a raw task performs no flush: against a completed baseline probe v, the next completed probe returns v + 1, which is only that probe's own increment. After start, the synthetic flush_async Handle test proves that cancelling its asyncio observer does not abort the controlled producer. Source-grounded composition: native spawn_handle and the Tokio spawn path both use non-abortable spawn_core(false), so their producers likewise continue after observer cancellation"
+eager_effect = "an eager conversion would begin the sync-flush barrier during the binding call; today the effect begins only at spawn or spawn_handle"
+drop_behavior = "dropping an undriven raw task is inert. The synthetic flush_async cancellation test cancels the only observer, releases the producer, and proves completion through an independent bounded event. Source-grounded: real native flush producers use the same non-abortable Handle and Shared scheduling policy"
+unobserved_error = "ordinary Exception is suppressed by all three logging-manager adapters. A sentinel BaseException escapes all three with its exact type and message. Cancelling the synthetic flush_async observer raises asyncio.CancelledError while its controlled producer continues; continuation of a real native flush and the Tokio spawn path is source-grounded through their shared non-abortable spawn_core(false) policy"
 disposition = "preserve timing"
 semantic_class = "deferred_side_effect"
-oracle = "logging flush ordering coverage"
+oracle = [
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::logging::tests::discarded_flush_task_does_not_advance_sync_flush_version",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::logging::tests::flush_behaviors",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerTest::test_flush_handles_exception_gracefully",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerTest::test_flush_propagates_base_exception",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerTest::test_flush_from_tokio_awaits_shared_not_handle",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerTest::test_flush_from_tokio_suppresses_ordinary_error",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_awaits_handle_not_shared",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_suppresses_ordinary_error",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_propagates_base_exception",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_from_tokio_propagates_base_exception",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_cancellation_leaves_producer_reapable",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_two_manager_flushes_create_two_operations",
+  "fbcode//monarch/python/tests:test_logging_initialization_characterization::test_flush_pending_spawns_does_not_await_logging_init",
+  "fbcode//monarch/python/tests:test_host_mesh::test_preconstructed_shutdowns_drain_after_observer_cancellation",
+  "fbcode//monarch/python/tests:test_python_actors::test_flush_async_drives_flush_on_asyncio_loop",
+  "fbcode//monarch/python/tests:test_python_actors::test_multiple_ongoing_flushes_no_deadlock",
+]
 
 [[site]]
 id = "np.logging.LoggingMeshClient.spawn"
@@ -2620,16 +2638,21 @@ state = "legacy"
 transition = "6.3b"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from LoggingMeshClient::spawn"
-consumer = "proc mesh logging initialization"
-driver = "awaited during proc mesh setup"
-start_point = "lazy; the boxed future is not polled until the returned task is driven"
-abandonment = "possible; this is the known fast-bootstrap gap"
-eager_effect = "starts a side effect"
-drop_behavior = "the logging client is never created and early logs are lost"
-unobserved_error = "currently suppressed rather than reported"
+consumer = "LoggingManager.init, the sole in-tree caller, awaits the returned task directly"
+driver = "awaited inside ProcMesh.from_host_mesh's task, a PythonTask.from_coroutine producer spawned and advanced by the pytokio driver on Tokio"
+start_point = "proc-mesh validation happens during the binding call; a valid call only captures its inputs and builds a lazy task. The local LogClientActor and remote logging meshes begin spawning when that task is driven"
+abandonment = "a direct binding caller can drop the raw task before drive, which creates no LogClientActor; the production LoggingManager.init path awaits it immediately"
+eager_effect = "an eager conversion would begin spawning the local log client and remote logging actors during the binding call; today construction performs no domain work"
+drop_behavior = "dropping an undriven raw task is inert, and a fresh task can still create exactly one local LogClientActor"
+unobserved_error = "source-grounded: LoggingManager.init does not catch a spawn failure; _proc_mesh retains it and a later observer receives it unchanged. If nobody observes _proc_mesh, _flush_pending_spawns does not await it, so host drain does not itself report the failure"
 disposition = "preserve timing"
 semantic_class = "deferred_side_effect"
-oracle = "logging initialization and suppression coverage"
+oracle = [
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::logging::tests::discarded_spawn_task_creates_no_log_client_actor",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::logging::tests::spawn_respects_forwarding_flag",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_init_with_hyprocmesh_creates_logging_mesh_client",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_init_returns_early_if_already_initialized",
+]
 
 [[site]]
 id = "np.pickle.PendingMessage.py_resolve"
@@ -3101,6 +3124,18 @@ scope = "test"
 state = "legacy"
 transition = "6.8"
 members = ["PythonTask", "Shared"]
+
+[[site]]
+id = "im.test_logging_initialization_characterization.module"
+category = "module_import"
+language = "python"
+path = "fbcode/monarch/python/tests/test_logging_initialization_characterization.py"
+symbol = "<module>"
+operation = "pytokio_import"
+scope = "test"
+state = "legacy"
+transition = "6.8"
+members = ["PythonTask"]
 
 [[site]]
 id = "im.test_proc_launcher_probe.module"
