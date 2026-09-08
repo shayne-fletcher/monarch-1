@@ -8,8 +8,12 @@
 
 import os
 import time
+from typing import Any, Callable
+from unittest.mock import patch
 
 import pytest
+from monarch._rust_bindings.monarch_hyperactor import host_mesh as host_mesh_binding
+from monarch._src.actor import actor_mesh as actor_mesh_module
 from monarch.actor import Actor, endpoint, shutdown_context, this_host
 
 
@@ -29,24 +33,71 @@ def pid_exists(pid: int) -> bool:
         return True
 
 
+class _ShutdownCallThrough:
+    """Record shutdown state and forward to the real native binding."""
+
+    def __init__(self, real_shutdown: Callable[[], Any]) -> None:
+        self._real_shutdown = real_shutdown
+        self.calls = 0
+        self.shutdown_done_at_call: list[bool] = []
+
+    def __call__(self) -> Any:
+        self.shutdown_done_at_call.append(actor_mesh_module._shutdown_done)
+        self.calls += 1
+        return self._real_shutdown()
+
+
 # This test has to be in its own file so it does not share any process state
 # with other tests. The client cannot be restarted after it has been shutdown.
-@pytest.mark.timeout(30)
+@pytest.mark.timeout(240)
 def test_client_shutdown() -> None:
     procs = this_host().spawn_procs(per_host={"gpus": 2})
     actors = procs.spawn("simple", Simple)
-    pids = actors.get_pid.call().get()
-    pids = [p for _, p in pids]
-    # Now shutdown the client. Delete references to avoid accidental reuse.
-    del procs
-    del actors
-    assert shutdown_context().get() is None
-    # The already-complete shutdown path remains safe and idempotent.
-    assert shutdown_context().get() is None
+    pid_items = list(actors.get_pid.call().get(timeout=30).items())
+    pids = [pid for _, pid in pid_items]
+
+    call_through = _ShutdownCallThrough(host_mesh_binding.shutdown_local_host_mesh)
+    with patch.object(
+        host_mesh_binding,
+        "shutdown_local_host_mesh",
+        call_through,
+    ):
+        discarded = shutdown_context()
+        del discarded
+        assert list(actors.get_pid.call().get(timeout=30).items()) == pid_items
+        assert call_through.calls == 0
+        assert call_through.shutdown_done_at_call == []
+
+        # Both Futures capture the shutdown-sequence branch now. Driving the
+        # first sets _shutdown_done; observing the second then proves that an
+        # already-constructed sequence takes its own early return.
+        first_shutdown = shutdown_context()
+        second_shutdown = shutdown_context()
+        assert first_shutdown.get(timeout=60) is None
+        assert call_through.calls == 1
+        assert call_through.shutdown_done_at_call == [True]
+
+        # This Future captured the shutdown-sequence branch before the first
+        # one ran, but observes _shutdown_done after the first one completes.
+        assert second_shutdown.get(timeout=30) is None
+        assert call_through.calls == 1
+        assert call_through.shutdown_done_at_call == [True]
+
+        # The client cannot be restarted after this one full shutdown: five
+        # Rust registrations are OnceLock, and _client_context keeps the
+        # stopped Context. Never reset _shutdown_done to rehearse it.
+        del procs
+        del actors
+
+        # This Future is constructed after _shutdown_done became true, so it
+        # takes the separate _noop branch and never calls the native binding.
+        assert shutdown_context().get(timeout=30) is None
+        assert call_through.calls == 1
+        assert call_through.shutdown_done_at_call == [True]
+
     # After this, all the resources created by the client should be released,
-    # including this_host and the procs. We check this by seeing if the pids are
-    # still alive after a short wait period (procs are cleaned up with an async
-    # message).
+    # including this_host and the procs. This observes worker-process exit after
+    # explicit shutdown; it does not exercise client-process exit or atexit.
     still_alive = []
     for _ in range(4):
         time.sleep(5)
