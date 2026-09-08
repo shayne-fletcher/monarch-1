@@ -8,9 +8,10 @@
 
 import asyncio
 import logging
+import threading
 from typing import Any, Callable
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import Mock, patch
+from unittest.mock import call, Mock, patch
 
 import pytest
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
@@ -30,6 +31,32 @@ class _AwaitTracker:
 
     def get(self, *args: object, **kwargs: object) -> None:
         self.get_called = True
+
+
+class _FlushBaseException(BaseException):
+    pass
+
+
+_FLUSH_BASE_EXCEPTION_MESSAGE = "test flush base exception"
+
+
+def _failing_python_task(error: BaseException) -> PythonTask[None]:
+    async def fail() -> None:
+        raise error
+
+    return PythonTask.from_coroutine(fail())
+
+
+class _RecordingTask:
+    """Expose the real Handle returned when a synthetic task is started."""
+
+    def __init__(self, task: PythonTask[None]) -> None:
+        self._task = task
+        self.handle: Any | None = None
+
+    def spawn_handle(self) -> Any:
+        self.handle = self._task.spawn_handle()
+        return self.handle
 
 
 class LoggingManagerTest(TestCase):
@@ -184,6 +211,28 @@ class LoggingManagerTest(TestCase):
         mock_task.spawn_handle.assert_called_once_with()
         mock_handle.get.assert_called_once_with(timeout=3)
 
+    def test_flush_propagates_base_exception(self) -> None:
+        with patch.object(self.logging_manager, "_new_flush_task") as no_client_task:
+            with self.assertRaises(AssertionError) as no_client_error:
+                self.logging_manager.flush()
+        self.assertIs(type(no_client_error.exception), AssertionError)
+        no_client_task.assert_not_called()
+
+        self.logging_manager._logging_mesh_client = Mock()
+        with patch.object(
+            self.logging_manager,
+            "_new_flush_task",
+            return_value=_failing_python_task(
+                _FlushBaseException(_FLUSH_BASE_EXCEPTION_MESSAGE)
+            ),
+        ) as mock_new_flush_task:
+            with self.assertRaises(_FlushBaseException) as raised:
+                self.logging_manager.flush()
+
+        self.assertIs(type(raised.exception), _FlushBaseException)
+        self.assertEqual(str(raised.exception), _FLUSH_BASE_EXCEPTION_MESSAGE)
+        mock_new_flush_task.assert_called_once_with()
+
     def test_flush_from_tokio_awaits_shared_not_handle(self) -> None:
         mock_task = Mock()
         shared = _AwaitTracker(Shared.from_value(None))
@@ -286,6 +335,175 @@ class LoggingManagerAsyncTest(IsolatedAsyncioTestCase):
         mock_task.spawn.assert_not_called()
         self.assertTrue(handle.awaited)
         self.assertFalse(handle.get_called)
+
+    async def test_flush_async_suppresses_ordinary_error(self) -> None:
+        entered: list[str] = []
+
+        async def fail() -> None:
+            entered.append("ordinary error")
+            raise RuntimeError("test flush error")
+
+        self.logging_manager._logging_mesh_client = Mock()
+        with patch.object(
+            self.logging_manager,
+            "_new_flush_task",
+            return_value=PythonTask.from_coroutine(fail()),
+        ) as mock_new_flush_task:
+            result = await asyncio.wait_for(
+                self.logging_manager.flush_async(), timeout=10
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(entered, ["ordinary error"])
+        mock_new_flush_task.assert_called_once_with()
+
+    async def test_flush_async_propagates_base_exception(self) -> None:
+        with patch.object(self.logging_manager, "_new_flush_task") as no_client_task:
+            result = await asyncio.wait_for(
+                self.logging_manager.flush_async(), timeout=10
+            )
+        self.assertIsNone(result)
+        no_client_task.assert_not_called()
+
+        self.logging_manager._logging_mesh_client = Mock()
+        with patch.object(
+            self.logging_manager,
+            "_new_flush_task",
+            return_value=_failing_python_task(
+                _FlushBaseException(_FLUSH_BASE_EXCEPTION_MESSAGE)
+            ),
+        ) as mock_new_flush_task:
+            with self.assertRaises(_FlushBaseException) as raised:
+                await asyncio.wait_for(self.logging_manager.flush_async(), timeout=10)
+
+        self.assertIs(type(raised.exception), _FlushBaseException)
+        self.assertEqual(str(raised.exception), _FLUSH_BASE_EXCEPTION_MESSAGE)
+        mock_new_flush_task.assert_called_once_with()
+
+    async def test_flush_from_tokio_propagates_base_exception(self) -> None:
+        with patch.object(self.logging_manager, "_new_flush_task") as no_client_task:
+            no_client = PythonTask.from_coroutine(
+                self.logging_manager._flush_from_tokio()
+            )
+            result = await asyncio.wait_for(
+                asyncio.to_thread(no_client.block_on), timeout=10
+            )
+        self.assertIsNone(result)
+        no_client_task.assert_not_called()
+
+        self.logging_manager._logging_mesh_client = Mock()
+        with patch.object(
+            self.logging_manager,
+            "_new_flush_task",
+            return_value=_failing_python_task(
+                _FlushBaseException(_FLUSH_BASE_EXCEPTION_MESSAGE)
+            ),
+        ) as mock_new_flush_task:
+            adapter = PythonTask.from_coroutine(
+                self.logging_manager._flush_from_tokio()
+            )
+            with self.assertRaises(_FlushBaseException) as raised:
+                await asyncio.wait_for(asyncio.to_thread(adapter.block_on), timeout=10)
+
+        self.assertIs(type(raised.exception), _FlushBaseException)
+        self.assertEqual(str(raised.exception), _FLUSH_BASE_EXCEPTION_MESSAGE)
+        mock_new_flush_task.assert_called_once_with()
+
+    async def test_flush_async_cancellation_leaves_producer_reapable(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        completed = threading.Event()
+
+        async def gated_flush() -> None:
+            entered.set()
+            released = await PythonTask.spawn_blocking(lambda: release.wait(timeout=10))
+            if not released:
+                raise TimeoutError("flush release was not published")
+            completed.set()
+
+        # Adapter-level seam: this is a controlled PythonTask, not a native
+        # LoggingMeshClient flush. The production method uses the same
+        # non-abortable Handle observation path. Keep no second Handle here:
+        # cancelling flush_async must drop its only observer before release.
+        controlled = PythonTask.from_coroutine(gated_flush())
+        observer: asyncio.Task[None] | None = None
+        completed_after_cancel = False
+        self.logging_manager._logging_mesh_client = Mock()
+        try:
+            with patch.object(
+                self.logging_manager,
+                "_new_flush_task",
+                return_value=controlled,
+            ):
+                observer = asyncio.create_task(self.logging_manager.flush_async())
+                reached = await asyncio.wait_for(
+                    asyncio.to_thread(entered.wait, 10), timeout=10
+                )
+                self.assertTrue(reached, "the controlled flush did not start")
+
+                self.assertTrue(observer.cancel())
+                with self.assertRaises(asyncio.CancelledError):
+                    await observer
+        finally:
+            release.set()
+            try:
+                completed_after_cancel = await asyncio.wait_for(
+                    asyncio.to_thread(completed.wait, 5), timeout=10
+                )
+            finally:
+                if observer is not None:
+                    if not observer.done():
+                        observer.cancel()
+                    try:
+                        await observer
+                    except asyncio.CancelledError:
+                        pass
+
+        self.assertTrue(
+            completed_after_cancel,
+            "cancelling the observer must not cancel the started producer",
+        )
+
+    async def test_two_manager_flushes_create_two_operations(self) -> None:
+        entries = [0, 0]
+
+        # Adapter-level seam: the native client supplies distinct synthetic
+        # producers, while the real manager helper must request, start, and
+        # observe each one independently. This does not claim to exercise two
+        # native sync-flush barriers; those effects are covered natively.
+        def controlled_task(index: int) -> _RecordingTask:
+            async def enter() -> None:
+                entries[index] += 1
+
+            return _RecordingTask(PythonTask.from_coroutine(enter()))
+
+        first = controlled_task(0)
+        second = controlled_task(1)
+        mock_client = Mock()
+        mock_client.flush.side_effect = [first, second]
+        mock_instance = Mock()
+        self.logging_manager._logging_mesh_client = mock_client
+        with patch("monarch._src.actor.logging.context") as mock_context:
+            mock_context.return_value.actor_instance._as_rust.return_value = (
+                mock_instance
+            )
+            first_result = await asyncio.wait_for(
+                self.logging_manager.flush_async(), timeout=10
+            )
+            second_result = await asyncio.wait_for(
+                self.logging_manager.flush_async(), timeout=10
+            )
+
+        self.assertIsNone(first_result)
+        self.assertIsNone(second_result)
+        self.assertEqual(entries, [1, 1])
+        self.assertIsNotNone(first.handle)
+        self.assertIsNotNone(second.handle)
+        self.assertIsNot(first.handle, second.handle)
+        self.assertEqual(
+            mock_client.flush.call_args_list,
+            [call(mock_instance), call(mock_instance)],
+        )
 
     @patch("monarch._src.actor.logging.LoggingMeshClient")
     @patch("monarch._src.actor.logging.context")
