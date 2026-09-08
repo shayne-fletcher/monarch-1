@@ -9,9 +9,12 @@
 from __future__ import annotations
 
 import os
+import pathlib
+import tempfile
 import threading
 import time
 from contextlib import ExitStack
+from functools import partial
 from typing import cast
 from unittest.mock import patch
 
@@ -52,6 +55,32 @@ def _successful_bootstrap() -> None:
 
 def _fail_bootstrap() -> None:
     raise RuntimeError(_BOOTSTRAP_FAILURE)
+
+
+def _gated_bootstrap(
+    entered_path: str,
+    release_path: str,
+    failure: str | None,
+) -> None:
+    pathlib.Path(entered_path).touch()
+    release = pathlib.Path(release_path)
+    deadline = time.monotonic() + 30
+    while not release.exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("proc bootstrap release was not published")
+        time.sleep(0.01)
+    if failure is not None:
+        raise RuntimeError(failure)
+
+
+def _wait_for_marker(path: pathlib.Path) -> None:
+    # The full target launches many isolated ProcessJobs concurrently, so
+    # reaching the remote setup callback can take longer than a focused run.
+    deadline = time.monotonic() + 30
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for marker {path}")
+        time.sleep(0.01)
 
 
 class _PendingActorProbe:
@@ -130,6 +159,77 @@ async def test_proc_mesh_initialized_fails_when_bootstrap_fails() -> None:
         proc_mesh = state.hosts.spawn_procs(bootstrap=_fail_bootstrap)
         with pytest.raises(monarch.actor.ActorError, match=_BOOTSTRAP_FAILURE):
             await proc_mesh.initialized
+
+
+@pytest.mark.timeout(90)
+@isolate_in_subprocess
+def test_proc_mesh_readiness_replays_success_after_discarded_observer() -> None:
+    with tempfile.TemporaryDirectory(prefix="monarch_proc_ready_") as directory:
+        entered = pathlib.Path(directory) / "entered"
+        release = pathlib.Path(directory) / "release"
+        with ExitStack() as cleanup:
+            state = cleanup.enter_context(
+                scoped_state(ProcessJob({"hosts": 1}), cached_path=None)
+            )
+            cleanup.callback(release.touch)
+            proc_mesh = state.hosts.spawn_procs(
+                name="test_proc",
+                bootstrap=partial(
+                    _gated_bootstrap,
+                    str(entered),
+                    str(release),
+                    None,
+                ),
+            )
+            _wait_for_marker(entered)
+
+            discarded = proc_mesh.initialized
+            with pytest.raises(TimeoutError):
+                discarded.get(timeout=0.25)
+            del discarded
+            release.touch()
+
+            assert proc_mesh.initialized.get(timeout=30) is True
+            assert proc_mesh.initialized.get(timeout=30) is True
+
+
+@pytest.mark.timeout(90)
+@isolate_in_subprocess
+def test_proc_mesh_readiness_replays_failure_after_discarded_observer() -> None:
+    with tempfile.TemporaryDirectory(prefix="monarch_proc_ready_") as directory:
+        entered = pathlib.Path(directory) / "entered"
+        release = pathlib.Path(directory) / "release"
+        with ExitStack() as cleanup:
+            state = cleanup.enter_context(
+                scoped_state(ProcessJob({"hosts": 1}), cached_path=None)
+            )
+            cleanup.callback(release.touch)
+            proc_mesh = state.hosts.spawn_procs(
+                bootstrap=partial(
+                    _gated_bootstrap,
+                    str(entered),
+                    str(release),
+                    _BOOTSTRAP_FAILURE,
+                )
+            )
+            _wait_for_marker(entered)
+
+            discarded = proc_mesh.initialized
+            with pytest.raises(TimeoutError):
+                discarded.get(timeout=0.25)
+            del discarded
+            release.touch()
+
+            errors = []
+            for _ in range(2):
+                with pytest.raises(monarch.actor.ActorError) as excinfo:
+                    proc_mesh.initialized.get(timeout=30)
+                errors.append(excinfo.value)
+
+            assert type(errors[0]) is monarch.actor.ActorError
+            assert type(errors[1]) is monarch.actor.ActorError
+            assert str(errors[0]) == str(errors[1])
+            assert _BOOTSTRAP_FAILURE in str(errors[0])
 
 
 @pytest.mark.timeout(60)
