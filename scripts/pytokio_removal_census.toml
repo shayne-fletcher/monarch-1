@@ -1074,15 +1074,17 @@ caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
 consumer = "user code, usually at process exit"
 driver = "awaited or blocked on by the caller"
-start_point = "the wrapped coroutine is an empty no-op; there is nothing to start"
-abandonment = "possible and harmless; shutdown already completed"
-eager_effect = "only wraps a completed no-op"
-drop_behavior = "no effect; _shutdown_done is already True"
-first_side_effect = "none"
+start_point = "source-grounded branch selection: a call while _shutdown_done is True builds the _noop Future. The test constructs this Future after the first shutdown and verifies that it returns None without another native binding call, but that result is indistinguishable from the preconstructed shutdown sequence's early return. The call synchronously asks Future._from_coro to capture context(); source-grounded, context capture can bootstrap a fresh caller, while the tested post-shutdown caller reuses its cached context"
+abandonment = "possible and harmless to teardown; dropping skips the no-op body after construction-time context capture"
+eager_effect = "only completes the no-op body during the call; shutdown already completed"
+drop_behavior = "no teardown effect; _shutdown_done is already True"
+first_side_effect = "none after construction-time context capture"
 unobserved_error = "none"
 disposition = "replace with a direct value"
 semantic_class = "ready_no_op_wrapper"
-oracle = "lifecycle edge behavior (6.0c item 7)"
+oracle = [
+  "fbcode//monarch/python/tests:test_client_shutdown::test_client_shutdown",
+]
 
 [[site]]
 id = "fc.actor_mesh.shutdown_context[Future._from_coro_shutdown_sequence]"
@@ -1099,15 +1101,17 @@ caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
 consumer = "user code, usually at process exit"
 driver = "awaited or blocked on by the caller"
-start_point = "lazy; no shutdown work runs until the Future is observed"
-abandonment = "possible; dropping leaves _shutdown_done False and shutdown unperformed"
-eager_effect = "starts a side effect"
-drop_behavior = "shutdown never runs"
+start_point = "source-grounded branch selection: a call while _shutdown_done is False builds the shutdown-sequence Future; the test constructs both sequence Futures before driving the first. When the first is driven, the call-through directly records _shutdown_done as True before invoking local-host teardown. The preconstructed second later returns None without another native binding call, but that result is indistinguishable from _noop. The call synchronously asks Future._from_coro to capture context(); source-grounded, context capture can bootstrap a fresh caller"
+abandonment = "tested after client initialization: dropping an unobserved Future leaves _shutdown_done False, the workers usable, and shutdown unperformed"
+eager_effect = "would set _shutdown_done and begin shutdown during the call even if the returned value were discarded"
+drop_behavior = "after construction-time context capture, no shutdown body runs and the live workers remain usable"
 first_side_effect = "setting _shutdown_done = True"
-unobserved_error = "silently dropped"
+unobserved_error = "an unobserved Future reports nothing because its body never runs. Source-grounded: once driven, RuntimeError from local-host shutdown selects the no-host stop_and_wait fallback; other errors surface only to an observer"
 disposition = "require a binding-specific design"
 semantic_class = "deferred_side_effect"
-oracle = "lifecycle edge behavior (6.0c item 7)"
+oracle = [
+  "fbcode//monarch/python/tests:test_client_shutdown::test_client_shutdown",
+]
 
 [[site]]
 id = "fc.host_mesh.HostMesh.initialized[Future._from_corotask]"
@@ -2412,16 +2416,18 @@ state = "legacy"
 transition = "6.3b"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from PyInstance::stop_and_wait"
-consumer = "shutdown_context's no-host fallback"
-driver = "awaited inside _shutdown_sequence"
-start_point = "lazy; the boxed future is not polled until the returned task is driven"
-abandonment = "possible; reachable only when the shutdown coroutine itself is abandoned"
-eager_effect = "starts a side effect"
-drop_behavior = "the root client instance is never stopped"
-unobserved_error = "surfaced on observation"
+consumer = "shutdown_context's no-host fallback; the Rust characterization calls the binding directly"
+driver = "awaited inside _shutdown_sequence on the fallback path; the Rust characterization takes and awaits the raw task under a timeout"
+start_point = "the call clones the instance and reason and constructs the PyPythonTask; actor stop, terminal-status wait, and proc flush begin only when the returned task is driven"
+abandonment = "possible through the direct binding and tested on an isolated instance; the production fallback awaits the task immediately once reached"
+eager_effect = "would signal the actor during the binding call instead of waiting for the returned task to be driven"
+drop_behavior = "dropping the raw task undriven sends no stop signal"
+unobserved_error = "PyPythonTask construction can fail synchronously. After construction, source shows that stop and flush failures are warned and suppressed, the status result is discarded, and a successful stop can wait without a deadline for terminal status; the controlled success and repeated-call paths resolve to PyO3's empty-tuple conversion of Rust unit"
 disposition = "intentionally become eager"
 semantic_class = "deferred_side_effect"
-oracle = "lifecycle edge behavior (6.0c item 7)"
+oracle = [
+  "fbcode//monarch/monarch_hyperactor:test_monarch_hyperactor::client_root::py_instance_stop_and_wait_is_lazy_and_repeatable",
+]
 
 [[site]]
 id = "np.host_mesh.PyHostMesh.shutdown"
@@ -2539,16 +2545,18 @@ state = "legacy"
 transition = "6.3c"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from bootstrap_host"
-consumer = "host mesh construction"
-driver = "awaited inside the host mesh setup coroutine"
-start_point = "lazy; the boxed future is not polled until the returned task is driven"
-abandonment = "possible; the setup coroutine may be abandoned"
-eager_effect = "starts a side effect"
-drop_behavior = "no host is bootstrapped"
-unobserved_error = "surfaced on observation"
+consumer = "_init_client_context immediately calls block_on; a direct binding caller can retain or discard the raw task"
+driver = "_init_client_context immediately consumes it with PyPythonTask.block_on; the Rust integration test exercises that same block_on path after discarding the first raw task"
+start_point = "bootstrap-command conversion and via-address parsing happen during the call; host creation and global registration begin only when the returned task is driven"
+abandonment = "tested through the direct binding: dropping a valid raw task leaves the observable client-root and host-agent registrations absent. Production normally block_on drives immediately; source-grounded, a Python main-thread signal can return from block_on while the spawned bootstrap task continues detached"
+eager_effect = "would begin host creation and permanent global registration during the binding call"
+drop_behavior = "dropping a valid raw task undriven performs no observable bootstrap, and a later fresh task can perform the one allowed bootstrap"
+unobserved_error = "an invalid via raises exact PyValueError before a task exists; bootstrap failures after construction surface when driven. Source-grounded, the main-thread signal branch can report an error while already-started bootstrap continues"
 disposition = "intentionally become eager"
 semantic_class = "deferred_side_effect"
-oracle = "host mesh setup coverage"
+oracle = [
+  "fbcode//monarch/monarch_hyperactor:test_monarch_hyperactor::client_root::python_bootstrap_seeds_client_root_on_local_proc_agent",
+]
 
 [[site]]
 id = "np.host_mesh.shutdown_local_host_mesh"
@@ -2562,16 +2570,20 @@ state = "legacy"
 transition = "6.3b"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from shutdown_local_host_mesh"
-consumer = "_shutdown_sequence, as the local-host path"
-driver = "awaited inside _shutdown_sequence"
-start_point = "lazy; the boxed future is not polled until the returned task is driven"
-abandonment = "possible; reachable only when the shutdown coroutine is abandoned"
-eager_effect = "starts a side effect"
-drop_behavior = "the local host mesh is never shut down and logs are not flushed"
-unobserved_error = "surfaced on observation"
+consumer = "_shutdown_sequence immediately awaits it on the local-host path; direct binding callers can retain or discard the raw task"
+driver = "awaited inside _shutdown_sequence; the Rust integration test takes and awaits a fresh raw task under a timeout"
+start_point = "the call rejects a missing host agent synchronously; with a host it clones the agent and constructs a lazy task. Driving the task posts ShutdownHost, then takes the optional one-shot HostShutdownHandle"
+abandonment = "tested through both boundaries: after dropping a direct raw task, the same HostAgent accepts and launches a deliberately failing probe process and the root service remains usable; dropping an unobserved outer shutdown_context Future never calls the binding. Source-grounded: the current PyPythonTask constructor stores rather than spawns the future"
+eager_effect = "would post ShutdownHost and take the one-shot shutdown handle during the binding call"
+drop_behavior = "dropping a raw task undriven performs no host shutdown before the same-HostAgent process-creation probe and leaves the root service usable"
+unobserved_error = "a missing host raises exact PyRuntimeError before a task exists. A first driven raw task resolves to PyO3's empty-tuple conversion of Rust unit after the full shutdown, while shutdown_context resolves to None; source-grounded, later raw calls post again but cannot retake the shutdown handle and repeat only root stop/flush. Lower-level coverage proves root flush precedes transport join; binding composition is source-grounded"
 disposition = "require a binding-specific design"
 semantic_class = "deferred_side_effect"
-oracle = "global shutdown sequence coverage"
+oracle = [
+  "fbcode//monarch/monarch_hyperactor:test_monarch_hyperactor::client_root::python_bootstrap_seeds_client_root_on_local_proc_agent",
+  "fbcode//monarch/python/tests:test_client_shutdown::test_client_shutdown",
+  "fbcode//monarch/hyperactor_mesh:hyperactor_mesh-unittest::bootstrap::tests::test_host_shutdown_flushes_before_joining_frontend",
+]
 
 [[site]]
 id = "np.logging.LoggingMeshClient.flush"
