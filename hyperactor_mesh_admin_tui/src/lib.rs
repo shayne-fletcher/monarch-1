@@ -23,7 +23,9 @@
 //!
 //! 1. **TUI-1 (join-semilattice):** All fetch results merge via
 //!    `FetchState::join`, guaranteeing commutativity, associativity,
-//!    and idempotence under retries and reordering.
+//!    and idempotence under retries and reordering. `Stamp` compares
+//!    allocator sequence before wall-clock time, so cloned foreground
+//!    and background allocators agree on result precedence.
 //! 2. **TUI-2 (cursor-bounds):** Selection is managed by `Cursor`, which
 //!    enforces the invariant `pos < len` (or `pos == 0` when empty).
 //! 3. **TUI-3 (tree-recursion):** The mesh topology is stored
@@ -43,6 +45,9 @@
 //!   remains displayable; errors always retry. A completed detail
 //!   request accepted for the current selection joins at the current
 //!   generation, including when it spans a topology refresh.
+//!   `refresh_gen` advances only when a current, successful topology
+//!   snapshot is applied; discarded and failed snapshots leave it
+//!   unchanged.
 //! - **TUI-7 (synthetic-root):** The root node is synthetic and
 //!   always expanded; only its children are rendered at depth 0.
 //! - **TUI-8 (cycle-safety):** Tree building rejects only true
@@ -53,13 +58,15 @@
 //!   abstractions, not bespoke recursion.
 //! - **TUI-11 (selection-semantics):** Cursor restoration prefers
 //!   `(reference, depth)` to disambiguate; falls back to
-//!   reference-only if depth changes.
+//!   reference-only if depth changes. Background snapshot application
+//!   preserves the selection live at application time, not the one
+//!   present when its walk started.
 //! - **TUI-12 (serial-topology-fetches):** Topology cache fetches
 //!   (via `fetch_with_join` / `build_tree_node`) are serial within
-//!   a refresh cycle; join semantics handle retries and reordering.
-//!   Detail and overlay fetches are concurrent via `tokio::spawn`;
-//!   detail results rejoin the topology cache on the event loop,
-//!   while overlay results do not participate in that cache.
+//!   a refresh cycle, while one background refresh may overlap detail
+//!   and overlay work. Join semantics handle retries and reordering.
+//!   Detail and refresh results rejoin the topology cache on the event
+//!   loop; overlay results do not participate in that cache.
 //! - **TUI-13 (stopped-detection):** `is_stopped_node` matches
 //!   `Actor` variants whose `actor_status` starts with `"stopped:"`
 //!   or `"failed:"`. All other variants return false.
@@ -108,9 +115,9 @@
 //!   still requests quit. Rendering gives the help overlay precedence
 //!   over `app.overlay` and node detail, and help never mutates the
 //!   topology or detail cache.
-//! - **TUI-23 (nonblocking-detail):** The input/render loop never
-//!   awaits node-detail network I/O. Selection schedules background
-//!   work and returns immediately.
+//! - **TUI-23 (nonblocking-network-work):** The input/render loop never
+//!   awaits node-detail or topology-refresh network I/O. Selection and
+//!   refresh requests schedule background work and return immediately.
 //! - **TUI-24 (latest-selection-wins):** Only a detail result whose
 //!   reference and request token still match the current selection
 //!   may update the visible pane. A topology refresh preserves an
@@ -119,6 +126,16 @@
 //! - **TUI-25 (stale-while-revalidate):** Any present detail payload
 //!   is displayed immediately and never regresses to loading while
 //!   its reference is revalidated.
+//! - **TUI-26 (snapshot-input-currency):** A topology snapshot is
+//!   installed only while the filter flags and expansion state it was
+//!   built from remain current. Superseded snapshots are cancelled or
+//!   discarded without advancing `refresh_gen`, and one replacement is
+//!   remembered.
+//! - **TUI-27 (refresh-lifecycle):** `App` owns at most one refresh
+//!   task and cancels it when superseded or dropped. Every terminal
+//!   outcome releases the single-flight slot; only a successful,
+//!   input-current snapshot may replace the tree or advance
+//!   `refresh_gen`.
 //!
 //! Py-spy overlay invariants:
 //!
@@ -368,7 +385,7 @@ pub async fn run(config: TuiConfig) -> io::Result<()> {
     spinner.enable_steady_tick(Duration::from_millis(80));
 
     let splash_start = tokio::time::Instant::now();
-    app.refresh().await;
+    app.load_initial_topology().await;
     let elapsed = splash_start.elapsed();
     let min_splash = Duration::from_secs(2);
     if elapsed < min_splash {

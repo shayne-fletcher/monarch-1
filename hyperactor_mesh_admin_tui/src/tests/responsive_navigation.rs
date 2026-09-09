@@ -489,6 +489,13 @@ async fn wait_for_detail_request_to_finish(app: &App) {
     panic!("detail request should finish after its held response is released");
 }
 
+async fn run_refresh(app: &mut App) {
+    app.request_refresh();
+    let completion = app.receive_pending_refresh_for_test().await;
+    app.apply_refresh_completion(completion);
+    app.start_pending_refresh_if_allowed();
+}
+
 #[tokio::test]
 async fn refresh_does_not_cancel_pending_detail_fetch() {
     let TestTopology {
@@ -505,7 +512,7 @@ async fn refresh_does_not_cancel_pending_detail_fetch() {
     let token = app.current_detail_token();
 
     for _ in 0..3 {
-        app.refresh().await;
+        run_refresh(&mut app).await;
         assert_eq!(app.pending_detail_reference(), Some(&target_actor));
         assert_eq!(app.current_detail_token(), token);
     }
@@ -552,7 +559,7 @@ async fn refresh_preserves_completed_detail_result() {
     server.release(&target_actor);
     wait_for_detail_request_to_finish(&app).await;
 
-    app.refresh().await;
+    run_refresh(&mut app).await;
 
     assert_eq!(app.pending_detail_reference(), Some(&target_actor));
     assert_eq!(app.current_detail_token(), token);
@@ -585,7 +592,7 @@ async fn refresh_supersedes_redundant_detail_request() {
     server.release(&target_proc);
     wait_for_detail_request_to_finish(&app).await;
 
-    app.refresh().await;
+    run_refresh(&mut app).await;
 
     assert!(app.pending_detail_reference().is_none());
     assert_ne!(app.current_detail_token(), token);
@@ -767,4 +774,395 @@ fn detail_pane_renders_loading_state() {
         .collect::<String>();
 
     assert!(text.contains("Loading…"));
+}
+
+#[tokio::test]
+async fn refresh_does_not_block_navigation() {
+    let TestTopology {
+        tree, responses, ..
+    } = large_topology();
+    let mut server = HeldAdminServer::spawn(responses, [NodeRef::Root]).await;
+    let mut app = app_with_tree(server.base_url.clone(), tree, std::time::Duration::ZERO);
+    let initial_generation = app.refresh_gen;
+
+    app.request_refresh();
+
+    server.wait_for_request(&NodeRef::Root).await;
+    let result = app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.apply_key_result(result).await;
+
+    assert_eq!(app.cursor.pos(), 1, "Down should move immediately");
+    assert!(app.refresh_is_in_flight());
+    assert_eq!(app.refresh_gen, initial_generation);
+    let selected = app
+        .selected_reference()
+        .expect("the moved cursor should select a row")
+        .clone();
+
+    server.release(&NodeRef::Root);
+    let completion = app.receive_pending_refresh_for_test().await;
+    app.apply_refresh_completion(completion);
+
+    assert_eq!(app.selected_reference(), Some(&selected));
+}
+
+#[tokio::test]
+async fn refresh_keeps_previous_tree_visible() {
+    let TestTopology {
+        tree,
+        mut responses,
+        ..
+    } = large_topology();
+    let retained_host = host("host-0");
+    responses.insert(
+        NodeRef::Root.to_string(),
+        NodePayloadDto::from(NodePayload {
+            identity: NodeRef::Root,
+            properties: NodeProperties::Root {
+                num_hosts: 1,
+                started_at: SystemTime::UNIX_EPOCH,
+                started_by: "responsive-navigation-test".to_string(),
+                system_children: Vec::new(),
+            },
+            children: vec![retained_host],
+            parent: None,
+            as_of: SystemTime::UNIX_EPOCH,
+        }),
+    );
+    let mut server = HeldAdminServer::spawn(responses, [NodeRef::Root]).await;
+    let mut app = app_with_tree(server.base_url.clone(), tree, std::time::Duration::ZERO);
+    let previous_rows = app.visible_rows().len();
+
+    app.request_refresh();
+    server.wait_for_request(&NodeRef::Root).await;
+
+    assert_eq!(app.visible_rows().len(), previous_rows);
+
+    server.release(&NodeRef::Root);
+    let completion = app.receive_pending_refresh_for_test().await;
+    app.apply_refresh_completion(completion);
+
+    assert!(app.visible_rows().len() < previous_rows);
+}
+
+#[tokio::test]
+async fn refresh_ticks_are_coalesced_while_one_is_in_flight() {
+    let TestTopology {
+        tree, responses, ..
+    } = large_topology();
+    let mut server = HeldAdminServer::spawn(responses, [NodeRef::Root]).await;
+    let mut app = app_with_tree(server.base_url.clone(), tree, std::time::Duration::ZERO);
+
+    app.request_refresh();
+    server.wait_for_request(&NodeRef::Root).await;
+    for _ in 0..5 {
+        app.request_refresh();
+    }
+
+    assert!(app.refresh_is_in_flight());
+    assert!(app.refresh_is_pending());
+
+    server.release(&NodeRef::Root);
+    let first = app.receive_pending_refresh_for_test().await;
+    app.apply_refresh_completion(first);
+    app.start_pending_refresh_if_allowed();
+    server.wait_for_request(&NodeRef::Root).await;
+
+    let second = app.receive_pending_refresh_for_test().await;
+    app.apply_refresh_completion(second);
+    app.start_pending_refresh_if_allowed();
+
+    assert_eq!(server.request_count(&NodeRef::Root), 2);
+    assert!(!app.refresh_is_in_flight());
+    assert!(!app.refresh_is_pending());
+}
+
+#[tokio::test]
+async fn completed_refresh_preserves_selection_by_reference() {
+    let TestTopology {
+        tree, responses, ..
+    } = large_topology();
+    let mut server = HeldAdminServer::spawn(responses, [NodeRef::Root]).await;
+    let mut app = app_with_tree(server.base_url.clone(), tree, std::time::Duration::ZERO);
+
+    app.request_refresh();
+    server.wait_for_request(&NodeRef::Root).await;
+    for _ in 0..7 {
+        let result = app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.apply_key_result(result).await;
+    }
+    let selected = app
+        .selected_reference()
+        .expect("navigation should leave a selected row")
+        .clone();
+
+    server.release(&NodeRef::Root);
+    let completion = app.receive_pending_refresh_for_test().await;
+    app.apply_refresh_completion(completion);
+
+    assert_eq!(app.selected_reference(), Some(&selected));
+}
+
+#[tokio::test]
+async fn refresh_completion_is_deferred_across_foreground_overlay() {
+    let TestTopology {
+        tree, responses, ..
+    } = large_topology();
+    let server = HeldAdminServer::spawn(responses, []).await;
+    let mut app = app_with_tree(server.base_url.clone(), tree, std::time::Duration::ZERO);
+    let generation = app.refresh_gen;
+
+    app.request_refresh();
+    let completion = app.receive_pending_refresh_for_test().await;
+    app.set_job(ActiveJob::Diagnostics {
+        results: Vec::new(),
+        running: true,
+        rx: None,
+        completed_at: None,
+    });
+    app.apply_refresh_completion(completion);
+
+    assert_eq!(app.refresh_gen, generation);
+    assert!(app.refresh_is_pending());
+    assert!(!app.refresh_is_in_flight());
+
+    app.dismiss_job();
+    app.start_pending_refresh_if_allowed();
+    assert!(app.refresh_is_in_flight());
+    let completion = app.receive_pending_refresh_for_test().await;
+    app.apply_refresh_completion(completion);
+    assert_eq!(app.refresh_gen, generation + 1);
+}
+
+#[tokio::test]
+async fn startup_schedules_detail_for_initial_selection() {
+    let TestTopology {
+        tree, responses, ..
+    } = large_topology();
+    let selected = flatten_tree(&tree)[0].node.reference.clone();
+    let mut server = HeldAdminServer::spawn(responses, [selected.clone()]).await;
+    let mut app = app_with_tree(server.base_url.clone(), tree, std::time::Duration::ZERO);
+
+    app.seed_initial_detail();
+
+    server.wait_for_request(&selected).await;
+    assert_eq!(app.pending_detail_reference(), Some(&selected));
+    server.release(&selected);
+}
+
+#[tokio::test]
+async fn background_refresh_does_not_mark_visible_rows_stale() {
+    let TestTopology {
+        tree,
+        responses,
+        target_actor,
+        ..
+    } = large_topology();
+    let mut server = HeldAdminServer::spawn(responses, [NodeRef::Root]).await;
+    let mut app = app_with_tree(server.base_url.clone(), tree, std::time::Duration::ZERO);
+    select_reference(&mut app, &target_actor);
+    app.fetch_cache.insert(
+        target_actor.clone(),
+        FetchState::Ready {
+            stamp: app.stamps.next(),
+            generation: app.refresh_gen,
+            value: detail_payload(target_actor.clone()),
+        },
+    );
+
+    app.request_refresh();
+    server.wait_for_request(&NodeRef::Root).await;
+    app.schedule_selected_detail();
+
+    assert!(app.pending_detail_reference().is_none());
+    assert_eq!(server.request_count(&target_actor), 0);
+    assert!(matches!(
+        app.detail,
+        DetailState::Ready {
+            freshness: DetailFreshness::Fresh,
+            ..
+        }
+    ));
+    server.release(&NodeRef::Root);
+}
+
+#[tokio::test]
+async fn discarded_snapshot_does_not_advance_generation() {
+    let TestTopology {
+        tree, responses, ..
+    } = large_topology();
+    let server = HeldAdminServer::spawn(responses, []).await;
+    let mut app = app_with_tree(server.base_url.clone(), tree, std::time::Duration::ZERO);
+    let generation = app.refresh_gen;
+
+    app.request_refresh();
+    let completion = app.receive_pending_refresh_for_test().await;
+    app.set_job(ActiveJob::Diagnostics {
+        results: Vec::new(),
+        running: true,
+        rx: None,
+        completed_at: None,
+    });
+    app.apply_refresh_completion(completion);
+
+    assert_eq!(app.refresh_gen, generation);
+}
+
+#[tokio::test]
+async fn filter_change_supersedes_in_flight_refresh() {
+    let TestTopology {
+        tree, responses, ..
+    } = large_topology();
+    let mut server = HeldAdminServer::spawn(responses, [NodeRef::Root]).await;
+    let mut app = app_with_tree(server.base_url.clone(), tree, std::time::Duration::ZERO);
+
+    app.request_refresh();
+    server.wait_for_request(&NodeRef::Root).await;
+    let first_revision = app
+        .current_refresh_view_revision()
+        .expect("the first refresh should record its view revision");
+
+    let result = app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+    app.apply_key_result(result).await;
+    server.wait_for_request(&NodeRef::Root).await;
+
+    assert!(app.show_system);
+    assert!(
+        app.current_refresh_view_revision()
+            .is_some_and(|revision| revision > first_revision)
+    );
+    assert_eq!(app.refresh_gen, 0);
+    assert_eq!(server.request_count(&NodeRef::Root), 2);
+
+    server.release(&NodeRef::Root);
+    let completion = app.receive_pending_refresh_for_test().await;
+    app.apply_refresh_completion(completion);
+}
+
+#[tokio::test]
+async fn collapse_supersedes_in_flight_refresh() {
+    let TestTopology {
+        tree, responses, ..
+    } = large_topology();
+    let mut server = HeldAdminServer::spawn(responses, [NodeRef::Root]).await;
+    let mut app = app_with_tree(server.base_url.clone(), tree, std::time::Duration::ZERO);
+    assert!(
+        app.tree()
+            .and_then(|root| root.children.first())
+            .is_some_and(|host| host.expanded)
+    );
+
+    app.request_refresh();
+    server.wait_for_request(&NodeRef::Root).await;
+    let result = app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+    app.apply_key_result(result).await;
+    server.wait_for_request(&NodeRef::Root).await;
+
+    assert!(
+        app.tree()
+            .and_then(|root| root.children.first())
+            .is_some_and(|host| !host.expanded)
+    );
+
+    server.release(&NodeRef::Root);
+    let completion = app.receive_pending_refresh_for_test().await;
+    app.apply_refresh_completion(completion);
+
+    assert!(
+        app.tree()
+            .and_then(|root| root.children.first())
+            .is_some_and(|host| !host.expanded)
+    );
+}
+
+#[tokio::test]
+async fn stale_refresh_completion_does_not_cancel_current_refresh() {
+    let TestTopology {
+        tree, responses, ..
+    } = large_topology();
+    let server = HeldAdminServer::spawn(responses, []).await;
+    let mut app = app_with_tree(server.base_url.clone(), tree, std::time::Duration::ZERO);
+
+    app.request_refresh();
+    let stale_revision = app
+        .current_refresh_view_revision()
+        .expect("the first refresh should record its view revision");
+    let stale_completion = app.receive_pending_refresh_for_test().await;
+
+    let result = app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+    app.apply_key_result(result).await;
+    app.start_pending_refresh_if_allowed();
+    assert!(
+        app.current_refresh_view_revision()
+            .is_some_and(|revision| revision > stale_revision)
+    );
+
+    app.apply_refresh_completion(stale_completion);
+
+    assert!(app.refresh_is_in_flight());
+}
+
+#[tokio::test]
+async fn failed_refresh_preserves_last_good_tree_and_allows_retry() {
+    let TestTopology {
+        tree, responses, ..
+    } = large_topology();
+    let server = HeldAdminServer::spawn(responses, []).await;
+    let mut app = app_with_tree(
+        "::invalid-url::".to_string(),
+        tree,
+        std::time::Duration::ZERO,
+    );
+    let expected_references: Vec<_> = app
+        .visible_rows()
+        .as_slice()
+        .iter()
+        .map(|row| row.node.reference.clone())
+        .collect();
+    let generation = app.refresh_gen;
+
+    run_refresh(&mut app).await;
+
+    assert_eq!(app.refresh_gen, generation);
+    assert_eq!(
+        app.visible_rows()
+            .as_slice()
+            .iter()
+            .map(|row| row.node.reference.clone())
+            .collect::<Vec<_>>(),
+        expected_references
+    );
+    assert!(!app.refresh_is_in_flight());
+
+    app.base_url = server.base_url.clone();
+    run_refresh(&mut app).await;
+    assert_eq!(app.refresh_gen, generation + 1);
+
+    let generation = app.refresh_gen;
+    app.install_panicking_refresh_for_test();
+    let completion = app.receive_pending_refresh_for_test().await;
+    app.apply_refresh_completion(completion);
+    assert_eq!(app.refresh_gen, generation);
+    assert!(!app.refresh_is_in_flight());
+
+    run_refresh(&mut app).await;
+    assert_eq!(app.refresh_gen, generation + 1);
+}
+
+#[tokio::test]
+async fn in_flight_refresh_is_cancelled_when_owner_is_dropped() {
+    let mut app = app_with_tree(
+        "http://127.0.0.1:1".to_string(),
+        large_topology().tree,
+        std::time::Duration::ZERO,
+    );
+    let (dropped, cancelled) = tokio::sync::oneshot::channel();
+    app.install_pending_refresh_for_test(dropped);
+
+    drop(app);
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), cancelled)
+        .await
+        .expect("refresh cancellation should be bounded")
+        .expect("refresh task should report that its future was dropped");
 }
