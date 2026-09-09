@@ -3671,6 +3671,7 @@ name = "hyperactor_mesh_admin_tui_lib"
 version = "0.0.0"
 dependencies = [
  "algebra",
+ "axum",
  "chrono",
  "clap",
  "crossterm",

@@ -29,6 +29,8 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 
 use crate::App;
+use crate::DetailFreshness;
+use crate::DetailState;
 use crate::Theme;
 use crate::diagnostics::DiagNodeRole;
 use crate::diagnostics::DiagOutcome;
@@ -50,14 +52,11 @@ use crate::theme::Labels;
 ///
 /// Precedence: the help glossary (`app.show_help`, TUI-22) takes priority,
 /// then the active `app.overlay` (py-spy / config / diagnostics), then node
-/// detail. For node detail, if a `NodePayload` for the current selection is
-/// available in `app.detail`, dispatches to `render_node_detail` to show a
-/// type-specific view (root/host/proc/actor); otherwise shows either the
-/// last fetch error (`app.detail_error`) or a neutral "select a node"
-/// placeholder message.
+/// detail. Ready detail remains visible while it is revalidated; cold loads
+/// and failures render explicit status messages.
 pub(crate) fn render_detail_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     if app.show_help {
-        render_help_overlay(frame, area, app.detail.as_ref(), &app.theme.scheme);
+        render_help_overlay(frame, area, app.detail.payload(), &app.theme.scheme);
         return;
     }
     if let Some(overlay) = &app.overlay {
@@ -65,27 +64,67 @@ pub(crate) fn render_detail_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app
         return;
     }
     match &app.detail {
-        Some(payload) => {
-            render_node_detail(frame, area, payload, &app.theme.scheme, &app.theme.labels)
-        }
-        None => {
-            let msg = app
-                .detail_error
-                .as_deref()
-                .unwrap_or("Select a node to view details");
-            let msg_style = if app.detail_error.is_some() {
-                app.theme.scheme.error
-            } else {
-                app.theme.scheme.info
+        DetailState::Ready {
+            payload, freshness, ..
+        } => {
+            let status = match freshness {
+                DetailFreshness::Fresh => None,
+                DetailFreshness::Revalidating => Some(("Refreshing…", app.theme.scheme.info)),
+                DetailFreshness::Stale { message } => {
+                    Some((message.as_str(), app.theme.scheme.error))
+                }
             };
-            let block = Block::default()
-                .title(app.theme.labels.pane_details)
-                .borders(Borders::ALL)
-                .border_style(app.theme.scheme.border);
-            let p = Paragraph::new(Span::styled(msg, msg_style)).block(block);
-            frame.render_widget(p, area);
+            let (detail_area, status_area) = if status.is_some() && area.height > 1 {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(1), Constraint::Length(1)])
+                    .split(area);
+                (chunks[0], Some(chunks[1]))
+            } else {
+                (area, None)
+            };
+            render_node_detail(
+                frame,
+                detail_area,
+                payload,
+                &app.theme.scheme,
+                &app.theme.labels,
+            );
+            if let (Some((message, style)), Some(status_area)) = (status, status_area) {
+                frame.render_widget(Paragraph::new(Span::styled(message, style)), status_area);
+            }
+        }
+        DetailState::Empty => {
+            render_detail_message(
+                frame,
+                area,
+                "Select a node to view details",
+                app.theme.scheme.info,
+                app,
+            );
+        }
+        DetailState::Loading => {
+            render_detail_message(frame, area, "Loading…", app.theme.scheme.info, app);
+        }
+        DetailState::Failed { message, .. } => {
+            render_detail_message(frame, area, message, app.theme.scheme.error, app);
         }
     }
+}
+
+fn render_detail_message(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    message: &str,
+    style: Style,
+    app: &App,
+) {
+    let block = Block::default()
+        .title(app.theme.labels.pane_details)
+        .borders(Borders::ALL)
+        .border_style(app.theme.scheme.border);
+    let paragraph = Paragraph::new(Span::styled(message, style)).block(block);
+    frame.render_widget(paragraph, area);
 }
 
 /// A single field-help entry: a field name, its one-line meaning, and an
@@ -833,7 +872,7 @@ pub(crate) fn detail_content_clipped(app: &App, detail_height: u16) -> bool {
     if app.show_help || app.overlay.is_some() {
         return false;
     }
-    let Some(payload) = app.detail.as_ref() else {
+    let Some(payload) = app.detail.payload() else {
         return false;
     };
     let NodeProperties::Actor {
@@ -845,8 +884,19 @@ pub(crate) fn detail_content_clipped(app: &App, detail_height: u16) -> bool {
     else {
         return false;
     };
+    let status_height = if matches!(
+        &app.detail,
+        DetailState::Ready {
+            freshness: DetailFreshness::Revalidating | DetailFreshness::Stale { .. },
+            ..
+        }
+    ) {
+        1
+    } else {
+        0
+    };
     actor_detail_clipped(
-        detail_height,
+        detail_height.saturating_sub(status_height),
         inbound_ordering.as_deref(),
         execution.as_deref(),
         failure_info.as_ref(),

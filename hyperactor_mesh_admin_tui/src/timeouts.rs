@@ -32,6 +32,8 @@
 //!   is suspended while any foreground job exists (both in-flight
 //!   and completed overlays). Refresh resumes only when the overlay
 //!   is dismissed.
+//! - **TP-11:** Detail-fetch debounce is owned by
+//!   `TuiTimeoutPolicy`, separately from request timeout budgets.
 
 use std::time::Duration;
 
@@ -87,6 +89,8 @@ pub(crate) struct TuiTimeoutPolicy {
     /// probes: below this is `Pass`, at or above this is `Slow`.
     /// This is not a timeout budget and does not cancel the probe.
     pub diagnostics_probe_slow: Duration,
+    /// Delay before fetching detail for a newly selected row.
+    pub detail_debounce: Duration,
     // Private fields; accessed via typed accessors.
     interactive_fetch: Duration,
     config_dump: Duration,
@@ -111,6 +115,7 @@ impl TuiTimeoutPolicy {
         Self {
             refresh_interval: Duration::from_millis(config.refresh_ms),
             diagnostics_probe_slow: Duration::from_millis(500),
+            detail_debounce: Duration::from_millis(100),
             interactive_fetch: Duration::from_secs(5),
             config_dump: Duration::from_secs(8),
             pyspy_dump: hyperactor_config::global::get(
@@ -281,6 +286,13 @@ mod tests {
     fn refresh_interval_default_cadence() {
         let policy = TuiTimeoutPolicy::from_config(&default_config());
         assert_eq!(policy.refresh_interval, Duration::from_secs(2));
+    }
+
+    // TP-11: detail debounce is explicit and independent of request budgets.
+    #[test]
+    fn detail_debounce_default() {
+        let policy = TuiTimeoutPolicy::from_config(&default_config());
+        assert_eq!(policy.detail_debounce, Duration::from_millis(100));
     }
 
     // TP-10: RefreshPolicy semilattice laws. Intentionally minimal

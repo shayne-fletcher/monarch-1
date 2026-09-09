@@ -334,6 +334,42 @@ impl<'a> VisibleRows<'a> {
     }
 }
 
+/// Status attached to a detail payload that remains visible.
+#[derive(Debug, Clone)]
+pub(crate) enum DetailFreshness {
+    /// The payload is current for this refresh generation.
+    Fresh,
+    /// A newer payload is being requested in the background.
+    Revalidating,
+    /// Revalidation failed, so the last usable payload remains visible.
+    Stale { message: String },
+}
+
+/// Complete state of the right-hand node-detail pane.
+#[derive(Debug, Clone)]
+pub(crate) enum DetailState {
+    /// No node is selected.
+    Empty,
+    /// The selected node has no cached payload and is being fetched.
+    Loading,
+    /// A payload is available for the selected node.
+    Ready {
+        payload: Box<NodePayload>,
+        freshness: DetailFreshness,
+    },
+    /// The selected node has no usable payload and its fetch failed.
+    Failed { message: String },
+}
+
+impl DetailState {
+    pub(crate) fn payload(&self) -> Option<&NodePayload> {
+        match self {
+            Self::Ready { payload, .. } => Some(payload.as_ref()),
+            Self::Empty | Self::Loading | Self::Failed { .. } => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::SystemTime;

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
 
+use algebra::JoinSemilattice;
 use crossterm::event::Event;
 use crossterm::event::EventStream;
 use crossterm::event::KeyCode;
@@ -24,15 +25,20 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 use crate::ActiveJob;
 use crate::ActiveJobEvent;
 use crate::ColorScheme;
 use crate::Cursor;
+use crate::DetailFreshness;
+use crate::DetailState;
 use crate::FetchState;
 use crate::KeyResult;
 use crate::LangName;
 use crate::NodeType;
+use crate::Stamp;
+use crate::StampAllocator;
 use crate::Theme;
 use crate::ThemeName;
 use crate::TreeNode;
@@ -44,6 +50,7 @@ use crate::collect_failed_refs;
 use crate::collect_refs;
 use crate::derive_label;
 use crate::diagnostics::run_diagnostics;
+use crate::fetch_node_state_raw;
 use crate::fetch_with_join;
 use crate::find_at_depth_from_root_mut;
 use crate::flatten_tree;
@@ -57,6 +64,25 @@ use crate::sorted_children;
 use crate::timeouts::TuiTimeoutPolicy;
 
 // Application state
+
+struct DetailRequest {
+    reference: NodeRef,
+    token: u64,
+    stamp: Stamp,
+    task: JoinHandle<FetchState<NodePayload>>,
+}
+
+impl Drop for DetailRequest {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+pub(crate) struct DetailFetchResult {
+    pub(crate) reference: NodeRef,
+    pub(crate) token: u64,
+    pub(crate) state: FetchState<NodePayload>,
+}
 
 /// Runtime state for the admin TUI.
 ///
@@ -88,12 +114,12 @@ pub(crate) struct App {
     /// Height of the topology tree viewport in rows (updated during
     /// rendering).
     pub(crate) tree_viewport_height: usize,
-    /// Detail payload for the selected node (usually served from
-    /// `node_cache`).
-    pub(crate) detail: Option<NodePayload>,
-    /// Error string for the detail pane when fetching/parsing the
-    /// selected node fails.
-    pub(crate) detail_error: Option<String>,
+    /// Complete state of the selected node's detail pane.
+    pub(crate) detail: DetailState,
+    /// Background fetch for the current detail selection, if any.
+    detail_request: Option<DetailRequest>,
+    /// Latest selection token; only a matching result may update the pane.
+    detail_token: u64,
 
     /// Human-readable refresh interval (e.g. "1s", "5s").
     pub(crate) refresh_interval_label: String,
@@ -113,8 +139,8 @@ pub(crate) struct App {
     pub(crate) fetch_cache: HashMap<NodeRef, FetchState<NodePayload>>,
     /// Current refresh generation for cache invalidation.
     pub(crate) refresh_gen: u64,
-    /// Monotonic sequence counter for timestamp ordering.
-    pub(crate) seq_counter: u64,
+    /// Shared allocator for foreground and background fetch stamps.
+    pub(crate) stamps: StampAllocator,
 
     /// Visual presentation (colors + labels).
     pub(crate) theme: Theme,
@@ -159,15 +185,16 @@ impl App {
             cursor: Cursor::new(0),
             tree_scroll_offset: 0,
             tree_viewport_height: 20, // Default, updated during rendering
-            detail: None,
-            detail_error: None,
+            detail: DetailState::Empty,
+            detail_request: None,
+            detail_token: 0,
             refresh_interval_label: String::new(),
             error: None,
             show_system: false,
             show_stopped: false,
             fetch_cache: HashMap::new(),
             refresh_gen: 0,
-            seq_counter: 0,
+            stamps: StampAllocator::default(),
             theme: Theme::new(theme_name, lang_name),
             theme_name,
             lang_name,
@@ -226,7 +253,7 @@ impl App {
             reference,
             &mut self.fetch_cache,
             self.refresh_gen,
-            &mut self.seq_counter,
+            &self.stamps,
             force,
             self.policy
                 .request_timeout(crate::timeouts::RequestOp::InteractiveFetch),
@@ -332,7 +359,7 @@ impl App {
                 &expanded_keys,
                 &failed_keys,
                 self.refresh_gen,
-                &mut self.seq_counter,
+                &self.stamps,
                 self.policy
                     .request_timeout(crate::timeouts::RequestOp::InteractiveFetch),
             )
@@ -397,8 +424,7 @@ impl App {
             self.cursor.update_len(rows.len());
         }
 
-        // Update detail from cache for current selection.
-        self.update_selected_detail().await;
+        self.schedule_selected_detail();
     }
 
     /// Lazily expand a single node by fetching its children.
@@ -559,32 +585,200 @@ impl App {
         false
     }
 
-    /// Update the right-hand detail pane for the currently selected
-    /// row.
-    ///
-    /// Looks up the selected node's reference and populates
-    /// `self.detail` from `fetch_cache` when available; otherwise
-    /// fetches the payload from the admin API and caches it. On fetch
-    /// failure, clears `detail` and records a human-readable error in
-    /// `detail_error` so the UI can display it.
-    pub(crate) async fn update_selected_detail(&mut self) {
-        self.detail = None;
-        self.detail_error = None;
+    /// Display cached detail immediately and schedule any required fetch.
+    pub(crate) fn schedule_selected_detail(&mut self) {
+        let Some(reference) = self.selected_reference().cloned() else {
+            self.detail_request = None;
+            self.detail_token = self.stamps.next().seq;
+            self.detail = DetailState::Empty;
+            return;
+        };
 
-        // Get reference first (releases tree borrow).
-        let reference = self.selected_reference().cloned();
-
-        if let Some(node_ref) = reference {
-            let state = self.fetch_node_state(&node_ref, false).await;
-            match state {
-                FetchState::Ready { value, .. } => {
-                    self.detail = Some(value);
-                }
-                FetchState::Error { msg, .. } => {
-                    self.detail_error = Some(format!("Fetch failed: {}", msg));
-                }
-                FetchState::Unknown => {}
+        match self.fetch_cache.get(&reference) {
+            Some(FetchState::Ready {
+                generation, value, ..
+            }) if *generation >= self.refresh_gen => {
+                self.detail_request = None;
+                self.detail_token = self.stamps.next().seq;
+                self.detail = DetailState::Ready {
+                    payload: Box::new(value.clone()),
+                    freshness: DetailFreshness::Fresh,
+                };
+                return;
             }
+            Some(FetchState::Ready { value, .. }) => {
+                self.detail = DetailState::Ready {
+                    payload: Box::new(value.clone()),
+                    freshness: DetailFreshness::Revalidating,
+                };
+            }
+            Some(FetchState::Unknown | FetchState::Error { .. }) | None => {
+                self.detail = DetailState::Loading;
+            }
+        }
+
+        if self
+            .detail_request
+            .as_ref()
+            .is_some_and(|request| request.reference == reference)
+        {
+            return;
+        }
+
+        self.detail_request = None;
+        let stamp = self.stamps.next();
+        let token = stamp.seq;
+        self.detail_token = token;
+        let client = self.client.clone();
+        let base_url = self.base_url.clone();
+        let request_reference = reference.clone();
+        let generation = self.refresh_gen;
+        let debounce = self.policy.detail_debounce;
+        let timeout = self
+            .policy
+            .request_timeout(crate::timeouts::RequestOp::InteractiveFetch);
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(debounce).await;
+            fetch_node_state_raw(
+                &client,
+                &base_url,
+                &request_reference,
+                generation,
+                stamp,
+                timeout,
+            )
+            .await
+        });
+        self.detail_request = Some(DetailRequest {
+            reference,
+            token,
+            stamp,
+            task,
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_detail_reference(&self) -> Option<&NodeRef> {
+        self.detail_request
+            .as_ref()
+            .map(|request| &request.reference)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_detail_token(&self) -> u64 {
+        self.detail_token
+    }
+
+    #[cfg(test)]
+    pub(crate) fn detail_request_is_finished(&self) -> Option<bool> {
+        self.detail_request
+            .as_ref()
+            .map(|request| request.task.is_finished())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn receive_pending_detail_for_test(&mut self) -> DetailFetchResult {
+        recv_detail_request(&mut self.detail_request).await
+    }
+
+    /// Merge a completed detail fetch and update the pane only if it still
+    /// belongs to the current selection.
+    pub(crate) fn apply_detail_result(&mut self, result: DetailFetchResult) {
+        let is_current_request = self.detail_request.as_ref().is_some_and(|request| {
+            request.token == result.token && request.reference == result.reference
+        });
+        if is_current_request {
+            self.detail_request = None;
+        }
+
+        let selected = self.selected_reference().cloned();
+        let may_update_pane = self.detail_token == result.token
+            && selected
+                .as_ref()
+                .is_some_and(|reference| reference == &result.reference);
+
+        match result.state {
+            FetchState::Ready {
+                stamp,
+                generation,
+                value,
+            } => {
+                let ready = FetchState::Ready {
+                    stamp,
+                    generation: if is_current_request && may_update_pane {
+                        self.refresh_gen
+                    } else {
+                        generation
+                    },
+                    value,
+                };
+                let joined = self
+                    .fetch_cache
+                    .entry(result.reference.clone())
+                    .and_modify(|state| *state = state.join(&ready))
+                    .or_insert(ready)
+                    .clone();
+                if may_update_pane {
+                    match joined {
+                        FetchState::Ready { value, .. } => {
+                            self.detail = DetailState::Ready {
+                                payload: Box::new(value),
+                                freshness: DetailFreshness::Fresh,
+                            };
+                        }
+                        FetchState::Error { msg, .. } => {
+                            self.detail = DetailState::Failed {
+                                message: format!("Fetch failed: {msg}"),
+                            };
+                        }
+                        FetchState::Unknown => {}
+                    }
+                }
+            }
+            FetchState::Error { stamp, msg } => {
+                let cached_ready = self.fetch_cache.get(&result.reference).and_then(|state| {
+                    if let FetchState::Ready {
+                        stamp: cached_stamp,
+                        value,
+                        ..
+                    } = state
+                    {
+                        Some((*cached_stamp, value.clone()))
+                    } else {
+                        None
+                    }
+                });
+                if let Some((cached_stamp, payload)) = cached_ready {
+                    if may_update_pane {
+                        let freshness = if cached_stamp > stamp {
+                            DetailFreshness::Fresh
+                        } else {
+                            DetailFreshness::Stale {
+                                message: format!("Refresh failed: {msg}"),
+                            }
+                        };
+                        self.detail = DetailState::Ready {
+                            payload: Box::new(payload),
+                            freshness,
+                        };
+                    }
+                } else {
+                    let error = FetchState::Error {
+                        stamp,
+                        msg: msg.clone(),
+                    };
+                    self.fetch_cache
+                        .entry(result.reference.clone())
+                        .and_modify(|state| *state = state.join(&error))
+                        .or_insert(error);
+                    if may_update_pane {
+                        self.detail = DetailState::Failed {
+                            message: format!("Fetch failed: {msg}"),
+                        };
+                    }
+                }
+            }
+            FetchState::Unknown => {}
         }
     }
 
@@ -998,6 +1192,43 @@ impl App {
         }
     }
 
+    /// Apply work requested by one keyboard event.
+    pub(crate) async fn apply_key_result(&mut self, result: KeyResult) {
+        match result {
+            KeyResult::DetailChanged => {
+                self.schedule_selected_detail();
+            }
+            KeyResult::NeedsRefresh => {
+                self.refresh().await;
+            }
+            KeyResult::ExpandNode(reference, depth) => {
+                if self.expand_node(&reference, depth).await {
+                    let rows = self.visible_rows();
+                    self.cursor.update_len(rows.len());
+                    self.cursor.move_down();
+                    self.ensure_cursor_visible();
+                }
+                self.schedule_selected_detail();
+            }
+            KeyResult::RunDiagnostics => {
+                let rx = run_diagnostics(self.client.clone(), self.base_url.clone(), &self.policy);
+                self.set_job(ActiveJob::Diagnostics {
+                    results: Vec::new(),
+                    running: true,
+                    rx: Some(rx),
+                    completed_at: None,
+                });
+            }
+            KeyResult::RunPySpy(proc_id) => {
+                self.start_pyspy(proc_id);
+            }
+            KeyResult::RunConfig(proc_id) => {
+                self.start_config(proc_id);
+            }
+            KeyResult::None => {}
+        }
+    }
+
     /// Dispatch variant-specific rerun keys when an overlay is active.
     pub(crate) fn overlay_rerun_key(&self, key: KeyEvent) -> KeyResult {
         match &self.active_job {
@@ -1352,6 +1583,28 @@ async fn recv_active_job(job: &mut Option<ActiveJob>) -> ActiveJobEvent {
     }
 }
 
+/// Await the selected node's current background detail request.
+async fn recv_detail_request(request: &mut Option<DetailRequest>) -> DetailFetchResult {
+    let Some(request) = request else {
+        return std::future::pending().await;
+    };
+    let reference = request.reference.clone();
+    let token = request.token;
+    let stamp = request.stamp;
+    let state = match (&mut request.task).await {
+        Ok(state) => state,
+        Err(error) => FetchState::Error {
+            stamp,
+            msg: format!("detail task failed: {error}"),
+        },
+    };
+    DetailFetchResult {
+        reference,
+        token,
+        state,
+    }
+}
+
 /// TP-10: derive refresh policy from active job state.
 ///
 /// Suspend refresh while any foreground job is active — both
@@ -1403,7 +1656,6 @@ pub(crate) async fn run_app(
                 // policy is Baseline. When the in-flight operation
                 // completes, refresh resumes on the next scheduled
                 // tick, not immediately.
-                use algebra::JoinSemilattice;
                 use crate::timeouts::RefreshPolicy;
                 let effective = RefreshPolicy::Baseline
                     .join(&refresh_policy_for_job(&app.active_job));
@@ -1414,46 +1666,8 @@ pub(crate) async fn run_app(
             maybe_event = events.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) => {
-                        match app.on_key(key) {
-                            KeyResult::DetailChanged => {
-                                app.update_selected_detail().await;
-                            }
-                            KeyResult::NeedsRefresh => {
-                                app.refresh().await;
-                            }
-                            KeyResult::ExpandNode(reference, depth) => {
-                                if app.expand_node(&reference, depth).await {
-                                    // Update cursor length to reflect new children
-                                    let rows = app.visible_rows();
-                                    app.cursor.update_len(rows.len());
-                                    // Move cursor to first child after expanding
-                                    app.cursor.move_down();
-                                    app.ensure_cursor_visible();
-                                }
-                                app.update_selected_detail().await;
-                            }
-                            KeyResult::RunDiagnostics => {
-                                let rx = run_diagnostics(
-                                    app.client.clone(),
-                                    app.base_url.clone(),
-                                    &app.policy,
-                                );
-                                // PY-5: set_job drops any prior PySpy variant.
-                                app.set_job(ActiveJob::Diagnostics {
-                                    results: Vec::new(),
-                                    running: true,
-                                    rx: Some(rx),
-                                    completed_at: None,
-                                });
-                            }
-                            KeyResult::RunPySpy(proc_id) => {
-                                app.start_pyspy(proc_id);
-                            }
-                            KeyResult::RunConfig(proc_id) => {
-                                app.start_config(proc_id);
-                            }
-                            KeyResult::None => {}
-                        }
+                        let result = app.on_key(key);
+                        app.apply_key_result(result).await;
                     }
                     Some(Ok(Event::Resize(_, _))) => {}
                     _ => {}
@@ -1464,6 +1678,9 @@ pub(crate) async fn run_app(
                     job.on_event(job_event);
                 }
                 app.rebuild_overlay();
+            }
+            detail_result = recv_detail_request(&mut app.detail_request) => {
+                app.apply_detail_result(detail_result);
             }
         }
 

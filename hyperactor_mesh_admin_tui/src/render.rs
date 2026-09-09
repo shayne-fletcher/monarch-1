@@ -11,7 +11,6 @@
 // - base_url
 // - cursor
 // - detail
-// - detail_error
 // - error
 // - lang_name
 // - refresh_interval_label
