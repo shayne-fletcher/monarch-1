@@ -6,6 +6,7 @@
 
 # pyre-unsafe
 
+import asyncio
 import contextlib
 import os
 import pickle
@@ -26,6 +27,7 @@ import monarch._src.job._job_sidecar_worker as js_worker
 import monarch._src.job.job_sidecar as js
 import pytest
 from monarch._rust_bindings.monarch_hyperactor.proc import ProcId, Uid
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 
 # Import directly from _src since job module isn't properly exposed
 from monarch._src.job.job import (
@@ -1930,3 +1932,324 @@ def test_exec_command_output_dir_suppresses_printing(capsys):
     )
     exec_command(host_mesh, ["echo", "hi"], output_dir="/tmp/out").get()
     assert "SHOULD_NOT_PRINT" not in capsys.readouterr().out
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_spawns_no_procs_before_observation():
+    """Discarding an unobserved command does not enter its deferred body."""
+    host_mesh, procs, bash_actors, markers = _exec_env()
+    selected = MagicMock()
+    selected.spawn_procs.return_value = procs
+    host_mesh.slice.return_value = selected
+    bash_actors.run.call.return_value = _results_future(
+        [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+    )
+
+    discarded = exec_command(host_mesh, ["echo", "hi"], point={"gpu": 2})
+    del discarded
+
+    host_mesh.slice.assert_not_called()
+    host_mesh.spawn_procs.assert_not_called()
+    selected.spawn_procs.assert_not_called()
+    procs.spawn.assert_not_called()
+    bash_actors.run.call.assert_not_called()
+    procs.stop.assert_not_called()
+    assert not markers["stop_driven"]
+
+    assert exec_command(host_mesh, ["echo", "hi"], point={"gpu": 2}).get() == 0
+    host_mesh.slice.assert_called_once_with(gpu=2)
+    host_mesh.spawn_procs.assert_not_called()
+    selected.spawn_procs.assert_called_once_with(per_host=None)
+    procs.spawn.assert_called_once()
+    bash_actors.run.call.assert_called_once()
+    procs.stop.assert_called_once()
+    assert markers["stop_driven"]
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_repeated_get_spawns_and_cleans_up_once():
+    """Repeated blocking observation replays one command result."""
+    host_mesh, procs, bash_actors, markers = _exec_env()
+    bash_actors.run.call.return_value = _results_future(
+        [("rank0", {"returncode": 4, "stdout": "", "stderr": ""})]
+    )
+
+    result = exec_command(host_mesh, ["exit", "4"])
+    assert result.get() == 4
+    assert result.get() == 4
+
+    host_mesh.spawn_procs.assert_called_once_with(per_host=None)
+    bash_actors.run.call.assert_called_once()
+    procs.stop.assert_called_once()
+    assert markers["stop_driven"]
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_reobserved_asyncio_shares_one_run():
+    """Repeated asyncio observation shares the running command producer."""
+    gate = {"entries": 0, "released": False, "completed": False}
+
+    async def gated_results():
+        gate["entries"] += 1
+        while not gate["released"]:
+            await PythonTask.sleep(0.005)
+        gate["completed"] = True
+        return [("rank0", {"returncode": 5, "stdout": "", "stderr": ""})]
+
+    host_mesh, procs, bash_actors, markers = _exec_env()
+    bash_actors.run.call.return_value = Future._from_coro(gated_results())
+    result = exec_command(host_mesh, ["exit", "5"])
+
+    async def observe_twice():
+        first = result.as_asyncio()
+        second = result.as_asyncio()
+
+        async def wait_for_entry():
+            while gate["entries"] == 0:
+                await asyncio.sleep(0.005)
+
+        await asyncio.wait_for(wait_for_entry(), timeout=2)
+        assert not first.done()
+        assert not second.done()
+        gate["released"] = True
+        return await asyncio.wait_for(asyncio.gather(first, second), timeout=2)
+
+    try:
+        observed = asyncio.run(observe_twice())
+    finally:
+        original_error = sys.exc_info()[1]
+        gate["released"] = True
+        try:
+            drained = result.get(timeout=2)
+        except BaseException as cleanup_error:
+            if original_error is None:
+                raise
+            original_error.add_note(f"cleanup also failed: {cleanup_error!r}")
+
+    assert observed == [5, 5]
+    assert drained == 5
+    assert gate == {"entries": 1, "released": True, "completed": True}
+    host_mesh.spawn_procs.assert_called_once_with(per_host=None)
+    bash_actors.run.call.assert_called_once()
+    procs.stop.assert_called_once()
+    assert markers["stop_driven"]
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_dispatches_to_run_python_for_dash_m():
+    """A -m command routes to run_python.call, not run.call."""
+    host_mesh, _procs, bash_actors, _markers = _exec_env()
+    bash_actors.run_python.call.return_value = _results_future(
+        [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+    )
+
+    exec_command(host_mesh, ["-m", "pkg.mod"]).get()
+
+    bash_actors.run_python.call.assert_called_once()
+    bash_actors.run.call.assert_not_called()
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_forwards_env_workdir_per_host_and_output_dir(capsys):
+    """exec_command forwards process and Python-command configuration."""
+    host_mesh, _procs, bash_actors, _markers = _exec_env()
+    bash_actors.run_python.call.return_value = _results_future(
+        [
+            (
+                "rank0",
+                {
+                    "returncode": 0,
+                    "stdout": "REDIRECTED_STDOUT",
+                    "stderr": "REDIRECTED_STDERR",
+                },
+            )
+        ]
+    )
+    env = {"MODE": "test"}
+    per_host = {"gpu": 2}
+
+    assert (
+        exec_command(
+            host_mesh,
+            ["-m", "pkg.mod"],
+            env=env,
+            workdir="/work",
+            output_dir="/logs",
+            per_host=per_host,
+        ).get()
+        == 0
+    )
+
+    host_mesh.spawn_procs.assert_called_once_with(per_host=per_host)
+    bash_actors.run_python.call.assert_called_once_with(
+        ["-m", "pkg.mod"],
+        env=env,
+        workdir="/work",
+        client_cwd=os.getcwd(),
+        output_dir="/logs",
+    )
+    captured = capsys.readouterr()
+    captured_output = captured.out + captured.err
+    assert "REDIRECTED_STDOUT" not in captured_output
+    assert "REDIRECTED_STDERR" not in captured_output
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_drives_cleanup_on_base_exception():
+    """A BaseException raised while awaiting the command still drives cleanup."""
+
+    class _CommandAbort(BaseException):
+        pass
+
+    async def fail_command():
+        raise _CommandAbort("command aborted")
+
+    host_mesh, procs, bash_actors, markers = _exec_env()
+    bash_actors.run.call.return_value = Future._from_coro(fail_command())
+
+    with pytest.raises(_CommandAbort) as raised:
+        exec_command(host_mesh, ["echo", "hi"]).get()
+
+    assert type(raised.value) is _CommandAbort
+    assert str(raised.value) == "command aborted"
+    procs.stop.assert_called_once()
+    assert markers["stop_driven"]
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_cleanup_failure_supersedes_command_failure():
+    """An awaited cleanup failure surfaces with the command failure as context."""
+
+    class _CommandError(Exception):
+        pass
+
+    class _CleanupError(Exception):
+        pass
+
+    command_error = _CommandError("command failed")
+    cleanup_error = _CleanupError("cleanup failed")
+    cleanup_calls = 0
+
+    async def fail_command():
+        raise command_error
+
+    async def fail_cleanup():
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        raise cleanup_error
+
+    bash_actors = MagicMock()
+    procs = MagicMock()
+    procs.spawn.return_value = bash_actors
+    host_mesh = MagicMock()
+    host_mesh.spawn_procs.return_value = procs
+    bash_actors.run.call.return_value = Future._from_coro(fail_command())
+    procs.stop.return_value = Future._from_coro(fail_cleanup())
+    result = exec_command(host_mesh, ["echo", "hi"])
+
+    for _ in range(2):
+        with pytest.raises(_CleanupError) as raised:
+            result.get()
+        assert raised.value is cleanup_error
+        assert raised.value.__context__ is command_error
+
+    procs.stop.assert_called_once()
+    assert cleanup_calls == 1
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_observer_cancellation_still_cleans_up():
+    """Cancelling one observer does not abort a command that already started."""
+    state = {
+        "command_entries": 0,
+        "command_released": False,
+        "command_completions": 0,
+        "cleanup_entries": 0,
+        "cleanup_released": False,
+        "cleanup_completions": 0,
+    }
+
+    async def gated_command():
+        state["command_entries"] += 1
+        while not state["command_released"]:
+            await PythonTask.sleep(0.005)
+        state["command_completions"] += 1
+        return [("rank0", {"returncode": 6, "stdout": "", "stderr": ""})]
+
+    async def gated_cleanup():
+        state["cleanup_entries"] += 1
+        while not state["cleanup_released"]:
+            await PythonTask.sleep(0.005)
+        state["cleanup_completions"] += 1
+
+    bash_actors = MagicMock()
+    procs = MagicMock()
+    procs.spawn.return_value = bash_actors
+    procs.stop.return_value = Future._from_coro(gated_cleanup())
+    host_mesh = MagicMock()
+    host_mesh.spawn_procs.return_value = procs
+    bash_actors.run.call.return_value = Future._from_coro(gated_command())
+    result = exec_command(host_mesh, ["exit", "6"])
+
+    async def cancel_after_start():
+        # Observation starts the outer producer; without this first step the
+        # command cannot reach the gate and the entry wait would deadlock.
+        observer = result.as_asyncio()
+
+        async def wait_for_command_entry():
+            while state["command_entries"] == 0:
+                await asyncio.sleep(0.005)
+
+        await asyncio.wait_for(wait_for_command_entry(), timeout=2)
+        assert state["command_entries"] == 1
+        assert state["command_completions"] == 0
+        assert observer.cancel()
+        assert observer.cancelled()
+        state["command_released"] = True
+
+        retained_observer = result.as_asyncio()
+
+        async def wait_for_cleanup_entry():
+            while state["cleanup_entries"] == 0:
+                await asyncio.sleep(0.005)
+
+        await asyncio.wait_for(wait_for_cleanup_entry(), timeout=2)
+        assert state["command_completions"] == 1
+        assert state["cleanup_entries"] == 1
+        assert state["cleanup_completions"] == 0
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                asyncio.shield(retained_observer),
+                timeout=0.05,
+            )
+        assert not retained_observer.done()
+        assert state["cleanup_completions"] == 0
+        state["cleanup_released"] = True
+        return await asyncio.wait_for(retained_observer, timeout=2)
+
+    try:
+        observed = asyncio.run(cancel_after_start())
+    finally:
+        original_error = sys.exc_info()[1]
+        state["command_released"] = True
+        state["cleanup_released"] = True
+        try:
+            drained = result.get(timeout=2)
+        except BaseException as cleanup_error:
+            if original_error is None:
+                raise
+            original_error.add_note(f"cleanup also failed: {cleanup_error!r}")
+
+    assert observed == 6
+    assert drained == 6
+    assert state == {
+        "command_entries": 1,
+        "command_released": True,
+        "command_completions": 1,
+        "cleanup_entries": 1,
+        "cleanup_released": True,
+        "cleanup_completions": 1,
+    }
+    host_mesh.spawn_procs.assert_called_once_with(per_host=None)
+    bash_actors.run.call.assert_called_once()
+    procs.stop.assert_called_once()
