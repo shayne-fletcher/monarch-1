@@ -334,13 +334,14 @@ def oracle_reference_problem(reference: object) -> str | None:
     return None
 
 
-def oracle_problem(value: object) -> str | None:
+def oracle_problem(value: object, *, allow_legacy: bool) -> str | None:
     """Why a present ``oracle`` value is unusable, or ``None``.
 
-    Two accepted shapes while rows are being converted: the canonical list of
-    references, and a legacy prose label. Any bare string that starts with the
-    Buck prefix is rejected rather than read as prose -- valid or malformed --
-    because it is a half-finished conversion wearing the old shape.
+    Active rows require a canonical list of references. Historical tombstones
+    may retain a legacy prose label because the code and its live test no
+    longer exist. Any bare string that starts with the Buck prefix is rejected
+    rather than read as prose -- valid or malformed -- because it is a
+    half-finished conversion wearing the old shape.
     """
     if isinstance(value, str):
         if not value.strip():
@@ -355,12 +356,19 @@ def oracle_problem(value: object) -> str | None:
                 f"oracle is a bare reference string{syntax}; canonical "
                 "references go in a list, as oracle = [...]"
             )
-        return None
-    if not isinstance(value, list):
+        if allow_legacy:
+            return None
         return (
-            f"oracle is {type(value).__name__}; expected a list of references "
-            "or a legacy label"
+            "oracle is a legacy prose label; active rows require a canonical "
+            "list of test references"
         )
+    if not isinstance(value, list):
+        expected = (
+            "a list of references or a legacy label"
+            if allow_legacy
+            else "a list of references"
+        )
+        return f"oracle is {type(value).__name__}; expected {expected}"
     if not value:
         return "oracle is an empty list; give at least one reference"
     seen: set[str] = set()
@@ -376,9 +384,8 @@ def oracle_problem(value: object) -> str | None:
             # is a botched reference rather than prose, so it falls through to
             # the reference diagnostic, which can name the actual defect.
             return (
-                f"oracle[{position}] {reference!r} is not a reference; a legacy "
-                "prose label stays a bare string, and list entries must be "
-                "canonical references"
+                f"oracle[{position}] {reference!r} is not a reference; "
+                "list entries must be canonical references"
             )
         problem = oracle_reference_problem(reference)
         if problem is not None:
@@ -1242,14 +1249,16 @@ def validate_rows(rows: list[dict], schema: dict, config: dict) -> list[str]:
         if row["category"] not in BEHAVIOR_KINDS:
             continue
         if "oracle" in row:
-            # Shape first, for this field only. While rows are being converted
-            # `oracle` accepts two representations, so a present value can be
-            # structurally wrong rather than merely absent, and the truthiness
-            # gate below would misreport it as missing. The other required
-            # fields are single free-form values with nothing to check, so this
-            # is a local exception and not the start of a field-validation
-            # framework.
-            problem = oracle_problem(row["oracle"])
+            # Shape first, for this field only. Active rows require canonical
+            # references, while historical tombstones may keep a prose label,
+            # so a present value can be structurally wrong rather than merely
+            # absent and the truthiness gate below would misreport it as
+            # missing. The other required fields are single free-form values
+            # with nothing to check, so this is a local exception and not the
+            # start of a field-validation framework.
+            problem = oracle_problem(
+                row["oracle"], allow_legacy=row["state"] in TOMBSTONES
+            )
             if problem is not None:
                 errors.append(f"{row['id']}: {problem}")
                 continue

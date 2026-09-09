@@ -743,3 +743,91 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     hyperactor_mod.add_class::<PythonUndeliverableMessageEnvelope>()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use hyperactor::Proc;
+    use pyo3::PyTypeInfo;
+
+    use super::*;
+
+    fn test_message(rank: usize) -> PythonMessage {
+        PythonMessage {
+            kind: PythonMessageKind::Result { rank: Some(rank) },
+            ..Default::default()
+        }
+    }
+
+    // `recv_task()` takes the native once receiver before it constructs the
+    // returned task. Dropping that task cannot put the receiver back.
+    #[test]
+    fn once_recv_task_consumes_receiver_at_construction() {
+        pyo3::Python::initialize();
+        let proc = Proc::isolated();
+        let client = proc.client("once_recv_task_consumes_receiver_at_construction");
+        let (handle, receiver) = client.open_once_port::<PythonMessage>();
+        handle
+            .try_post(&client, test_message(13))
+            .expect("the message should be queued before recv_task is called");
+        let mut receiver = PythonOncePortReceiver {
+            inner: Arc::new(std::sync::Mutex::new(Some(receiver))),
+        };
+
+        let first = receiver
+            .recv_task()
+            .expect("the first recv_task call should construct a task");
+        drop(first);
+
+        let error = match receiver.recv_task() {
+            Ok(_) => panic!("the second recv_task call should fail"),
+            Err(error) => error,
+        };
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            assert!(error.get_type(py).is(PyValueError::type_object(py)));
+            assert_eq!(error.value(py).to_string(), "OncePort is already used");
+        });
+    }
+
+    // A regular receiver is only cloned at construction. Even with a message
+    // already pending, dropping one task leaves it for the next driven task.
+    #[tokio::test]
+    async fn port_recv_task_claims_only_when_driven() {
+        pyo3::Python::initialize();
+        let proc = Proc::isolated();
+        let client = proc.client("port_recv_task_claims_only_when_driven");
+        let (handle, receiver) = client.open_port::<PythonMessage>();
+        let expected = test_message(17);
+        handle
+            .try_post(&client, expected.clone())
+            .expect("the message should be queued before either task exists");
+        let mut receiver = PythonPortReceiver {
+            inner: Arc::new(tokio::sync::Mutex::new(receiver)),
+        };
+
+        let first = receiver
+            .recv_task()
+            .expect("the first recv_task call should construct a task");
+        let mut second = receiver
+            .recv_task()
+            .expect("the second recv_task call should also construct a task");
+        drop(first);
+
+        let received = tokio::time::timeout(
+            Duration::from_secs(30),
+            second
+                .take_task()
+                .expect("the second receive task should be unconsumed"),
+        )
+        .await
+        .expect("timed out driving the second receive task")
+        .expect("the second receive task should succeed");
+        let received = monarch_with_gil_blocking(GilSite::Test, |py| {
+            received
+                .extract::<PythonMessage>(py)
+                .expect("recv_task should return the posted PythonMessage")
+        });
+        assert_eq!(received, expected);
+    }
+}

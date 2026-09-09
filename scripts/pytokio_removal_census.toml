@@ -182,15 +182,11 @@
 #                       ::pickle::tests::resolve_fills_slots_in_order"
 #                      "fbcode//monarch/python/tests:test_job::TestJob::test_exec_command"
 #
-#                    A legacy label stays a *bare string*. Prose inside the list
-#                    is rejected: the list is the canonical form and every entry
-#                    in it must be a reference.
-#
-#                    A prose label on an *active* row is transitional: those
-#                    rows are being converted to exact references and the label
-#                    will be replaced. A historical tombstone may keep its prose
-#                    label permanently, because the path it described is gone
-#                    and there is no live test left to name.
+#                    Active behavior rows require a non-empty list of canonical
+#                    references. Prose inside that list is rejected: every entry
+#                    must be a reference. Only a historical tombstone may keep a
+#                    bare prose label, because the path it described is gone and
+#                    there is no live test left to name.
 #
 #                    A bare string starting with "fbcode//" is rejected whether
 #                    or not it parses, because that is a half-finished
@@ -1055,15 +1051,19 @@ caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
 consumer = "user code"
 driver = "awaited or blocked on by the caller"
-start_point = "lazy; the native recv_task binding is not called until the coroutine is driven"
-abandonment = "possible; discarding claims nothing because the binding was never called"
-eager_effect = "claims a receive"
-drop_behavior = "no message is consumed"
-first_side_effect = "the native recv_task call"
-unobserved_error = "silently dropped"
+start_point = "Future._from_coro synchronously captures the Monarch context and may bootstrap or fail before returning; the coroutine body and native recv_task call begin only when the Future is driven"
+abandonment = "after successful construction, dropping an unobserved Future cannot undo context capture but calls neither native receiver and claims no message"
+eager_effect = "an eager replacement would enter _recv and call the native recv_task binding during recv(); current construction only captures context"
+drop_behavior = "no message is consumed; a later regular or once receive gets the pending message"
+first_side_effect = "source-grounded: construction-time context capture and possible client bootstrap; tested: recv_task is the first receive effect and waits for observation"
+unobserved_error = "a synchronous context or task-construction failure raises before any Future exists; a never-driven Future enters no receive and produces no receive or decode error; driven errors surface to the observer"
 disposition = "require a binding-specific design"
 semantic_class = "deferred_receive_claim"
-oracle = "mailbox ownership (6.0c item 2)"
+oracle = [
+  "fbcode//monarch/python/tests:test_receive_ownership_characterization::test_recv_futures_observed_in_reverse_receive_in_observation_order",
+  "fbcode//monarch/python/tests:test_receive_ownership_characterization::test_discarded_regular_recv_claims_nothing",
+  "fbcode//monarch/python/tests:test_receive_ownership_characterization::test_discarded_once_recv_at_public_boundary_claims_nothing",
+]
 
 [[site]]
 id = "fc.actor_mesh._Actor.handle[Future._from_cororesponse]"
@@ -3493,14 +3493,17 @@ constructor = "raw PythonTask"
 return_surface = "raw PythonTask returned from PyValueStream::__next__"
 consumer = "the per-element Future yielded by ValueStream iteration"
 driver = "awaited by the caller, one element at a time"
-start_point = "lazy; the raw task is not polled at construction, and the receiver claim begins only when it is driven"
-abandonment = "possible; a yielded element Future may be discarded"
-eager_effect = "claims a receive"
-drop_behavior = "the reply is left for the next observer"
-unobserved_error = "surfaced on observation"
+start_point = "remaining is decremented synchronously before the fallible task and Future construction; the shared receiver is not locked and no receive begins until the returned observer is driven"
+abandonment = "possible after successful construction; discarding the yielded observer claims no reply, but its iteration slot is already consumed"
+eager_effect = "an eager replacement would begin receiving for the already-reserved slot during __next__; current construction only decrements remaining"
+drop_behavior = "the reply stays in the shared queue for the next observer, but the discarded observer burns a slot; a later reply can therefore remain queued after the stream reports exhaustion"
+unobserved_error = "task or Future construction can fail after remaining is decremented, leaving no observer while the slot stays burned; after successful construction, receive, decode and supervision errors surface only when driven"
 disposition = "require a binding-specific design"
-semantic_class = "deferred_receive_claim"
-oracle = "ValueStream reverse observation (6.0c item 2)"
+semantic_class = "sync_partial_effect_lazy_tail"
+oracle = [
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::endpoint::tests::value_stream_observers_receive_in_observation_order",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::endpoint::tests::dropped_value_stream_observer_leaves_reply_but_burns_slot_stranding_tail",
+]
 
 [[site]]
 id = "np.endpoint.call"
@@ -3513,17 +3516,19 @@ scope = "production"
 state = "legacy"
 transition = "6.5a"
 constructor = "raw PythonTask"
-return_surface = "raw PythonTask returned from call"
-consumer = "the public Future built by make_future for call"
-driver = "awaited by the caller through Future.get or as_asyncio"
-start_point = "the cast already happened; only ValueMesh accumulation is deferred"
-abandonment = "possible; a caller may drop the returned Future"
-eager_effect = "observes already-running work"
-drop_behavior = "accumulation is abandoned"
-unobserved_error = "surfaced on observation"
+return_surface = "public Future wrapping the raw PythonTask created by call"
+consumer = "production wraps the raw task with monarch._src.actor.future.Future._from_coro; that wrapper is source-grounded at endpoint.rs:615-618, while the oracle substitutes a test-only identity adapter so it can retain the exact response port"
+driver = "production callers drive the public wrapper through Future.get or as_asyncio; the oracle drives the raw task directly and proves submission, task construction, response collection and response-port lifetime, not the real Future wrapper"
+start_point = "the response port is opened and send_message_with_headers returns before observer construction; actual cast completion is mesh-dependent, and only ValueMesh collection waits for the observer"
+abandonment = "possible after successful construction; dropping the public Future closes the sole response receiver while the submitted operation continues"
+eager_effect = "an eager replacement would begin ValueMesh collection during call; it would not newly submit the operation"
+drop_behavior = "the response port closes and later replies are undeliverable, while the operation submitted before observer construction is not cancelled"
+unobserved_error = "PythonTask::new or Future wrapping can fail after submission and close the response port with no observer; after successful construction, collection, decode and supervision failures surface only when driven"
 disposition = "preserve timing"
 semantic_class = "already_started_lazy_observer"
-oracle = "collect_valuemesh refs and lazy-decode coverage"
+oracle = [
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::endpoint::tests::call_submits_cast_before_observer_and_drop_closes_response_port",
+]
 
 [[site]]
 id = "np.endpoint.value_collector"
@@ -3536,17 +3541,19 @@ scope = "production"
 state = "legacy"
 transition = "6.5a"
 constructor = "raw PythonTask"
-return_surface = "raw PythonTask returned from value_collector"
+return_surface = "raw PythonTask immediately wrapped by call_one or choose"
 consumer = "the public Future built by make_future for call_one and choose"
 driver = "awaited by the caller through Future.get or as_asyncio"
-start_point = "the request was already cast; only reply collection is deferred"
-abandonment = "possible; a caller may drop the returned Future"
-eager_effect = "observes already-running work"
-drop_behavior = "collection is abandoned and the reply is discarded"
-unobserved_error = "surfaced on observation"
+start_point = "the caller has already submitted the request; value_collector moves the sole response receiver into a task, while receive and conversion wait for the public observer"
+abandonment = "possible after successful construction; dropping the public Future drops the task and its sole response receiver"
+eager_effect = "an eager replacement would begin reply collection immediately; it would not resubmit the request"
+drop_behavior = "the response receiver closes, any queued reply is discarded, and later posts are undeliverable"
+unobserved_error = "PythonTask::new can fail after taking ownership of the receiver, closing it with no task; after successful construction, receive, conversion and supervision failures surface only when driven"
 disposition = "preserve timing"
 semantic_class = "already_started_lazy_observer"
-oracle = "endpoint reply coverage"
+oracle = [
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::endpoint::tests::value_collector_drop_discards_its_reply",
+]
 
 [[site]]
 id = "np.mailbox.PythonOncePortReceiver.recv_task"
@@ -3564,12 +3571,14 @@ consumer = "PortReceiver._recv for a once port"
 driver = "awaited by the PortReceiver.recv coroutine"
 start_point = "the once receiver is taken synchronously at construction; only the await is deferred"
 abandonment = "possible, and the receiver is already consumed"
-eager_effect = "claims a receive at construction"
+eager_effect = "an eager replacement would begin awaiting the receiver during recv_task; current construction only takes ownership"
 drop_behavior = "the reply is lost; the receiver cannot be reused"
-unobserved_error = "surfaced on observation"
+unobserved_error = "PythonTask::new can fail after the synchronous take, leaving the receiver consumed with no task; after successful construction, receive and conversion failures occur only when driven and surface to the observer"
 disposition = "require a binding-specific design"
 semantic_class = "sync_partial_effect_lazy_tail"
-oracle = "mailbox ownership, once receiver (6.0c item 2)"
+oracle = [
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::mailbox::tests::once_recv_task_consumes_receiver_at_construction",
+]
 
 [[site]]
 id = "np.mailbox.PythonPortReceiver.recv_task"
@@ -3587,12 +3596,14 @@ consumer = "PortReceiver._recv, which decodes the message"
 driver = "awaited by the PortReceiver.recv coroutine"
 start_point = "lazy; the receiver Arc is cloned but the lock and recv happen only when driven"
 abandonment = "possible; discarding the task claims nothing"
-eager_effect = "claims a receive"
+eager_effect = "an eager replacement would lock the receiver and begin recv during recv_task; current construction only clones the Arc"
 drop_behavior = "no message is consumed; the next observer gets it"
-unobserved_error = "surfaced on observation"
+unobserved_error = "PythonTask::new can fail after cloning the Arc, but dropping that clone leaves the receiver reusable; after successful construction, receive and conversion failures occur only when driven and surface to the observer"
 disposition = "require a binding-specific design"
 semantic_class = "deferred_receive_claim"
-oracle = "mailbox ownership, regular receiver (6.0c item 2)"
+oracle = [
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::mailbox::tests::port_recv_task_claims_only_when_driven",
+]
 
 [[site]]
 id = "ms.pickle.reserve_mesh_reference"
