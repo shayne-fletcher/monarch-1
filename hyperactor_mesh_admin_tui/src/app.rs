@@ -613,17 +613,14 @@ impl App {
     /// current cursor position.
     ///
     /// - Proc selected → proc's own reference.
-    /// - Actor selected → owning proc from `detail.parent`.
+    /// - Actor selected → owning proc from visible-tree ancestry.
     /// - Root/Host selected → `None` (PY-4).
     pub(crate) fn pyspy_proc_ref(&self) -> Option<hyperactor::ProcAddr> {
         let rows = self.visible_rows();
         let row = rows.get(&self.cursor)?;
         match (&row.node.node_type, &row.node.reference) {
             (NodeType::Proc, NodeRef::Proc(proc_id)) => Some(proc_id.clone()),
-            (NodeType::Actor, _) => self.detail.as_ref().and_then(|p| match &p.parent {
-                Some(NodeRef::Proc(proc_id)) => Some(proc_id.clone()),
-                _ => None,
-            }),
+            (NodeType::Actor, _) => row.owning_proc.cloned(),
             _ => None,
         }
     }

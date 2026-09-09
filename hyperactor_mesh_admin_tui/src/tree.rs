@@ -39,15 +39,32 @@ pub(crate) fn flatten_tree(root: &TreeNode) -> Vec<FlatRow<'_>> {
 /// Includes current node and recursively includes children only if
 /// current node is expanded.
 pub(crate) fn flatten_visible<'a>(node: &'a TreeNode, depth: usize) -> Vec<FlatRow<'a>> {
-    fold_tree_with_depth(node, depth, &|n, d, child_results| {
-        let mut rows = vec![FlatRow { node: n, depth: d }];
-        if n.expanded {
-            for child_rows in child_results {
-                rows.extend(child_rows);
+    fold_tree_with_depth(
+        node,
+        depth,
+        &|n, d, child_results: Vec<Vec<FlatRow<'a>>>| {
+            let owning_proc = match &n.reference {
+                NodeRef::Proc(proc_id) => Some(proc_id),
+                _ => None,
+            };
+            let mut rows = vec![FlatRow {
+                node: n,
+                depth: d,
+                owning_proc,
+            }];
+            if n.expanded {
+                for child_rows in child_results {
+                    rows.extend(child_rows.into_iter().map(|mut row| {
+                        if row.owning_proc.is_none() {
+                            row.owning_proc = owning_proc;
+                        }
+                        row
+                    }));
+                }
             }
-        }
-        rows
-    })
+            rows
+        },
+    )
 }
 
 /// Generic tree fold - unified traversal abstraction.
@@ -577,13 +594,20 @@ mod tests {
             ],
         };
         let rows = flatten_tree(&tree);
+        let expected_proc = match proc_ref("proc1") {
+            NodeRef::Proc(proc_id) => proc_id,
+            _ => unreachable!("proc_ref constructs a proc reference"),
+        };
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].node.reference, proc_ref("proc1"));
         assert_eq!(rows[0].depth, 0);
+        assert_eq!(rows[0].owning_proc, Some(&expected_proc));
         assert_eq!(rows[1].node.reference, actor("actor1"));
         assert_eq!(rows[1].depth, 1);
+        assert_eq!(rows[1].owning_proc, Some(&expected_proc));
         assert_eq!(rows[2].node.reference, actor("actor1"));
         assert_eq!(rows[2].depth, 0);
+        assert_eq!(rows[2].owning_proc, None);
     }
 
     #[test]

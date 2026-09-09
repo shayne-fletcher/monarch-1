@@ -119,7 +119,8 @@
 //!   arrival.
 //! - **PY-4 (selection-totality):** `p` is a no-op on Root/Host;
 //!   targets the proc ref directly on Proc; targets the owning proc
-//!   via `detail.parent` on Actor.
+//!   from visible-tree ancestry on Actor, independently of detail
+//!   loading.
 //! - **PY-5 (overlay-isolation):** Diagnostics and py-spy overlays
 //!   must not write into each other's display surface. Enforced by
 //!   `set_job`: `RunDiagnostics` calls `set_job` with the
@@ -148,8 +149,8 @@
 //!   arrival.
 //! - **CFG-4 (selection-totality):** `C` targets the proc ref directly
 //!   on Proc (worker or service); targets the owning proc via
-//!   `detail.parent` on Actor; no-op on Root/Host. Backend routes to
-//!   ProcAgent or HostAgent per proc type (same as PY-4).
+//!   visible-tree ancestry on Actor; no-op on Root/Host. Backend
+//!   routes to ProcAgent or HostAgent per proc type (same as PY-4).
 //! - **CFG-5 (overlay-isolation):** Config, Diagnostics, and PySpy
 //!   overlays must not write into each other's display surface.
 //!   Enforced by `set_job`: each variant drops any prior receiver;
