@@ -35,10 +35,14 @@
 //!
 //! - **TUI-4 (failed-always-visible):** Failed nodes are always
 //!   visible regardless of the `show_stopped` toggle.
-//! - **TUI-5 (single-fetch-path):** All cache writes go through
-//!   `fetch_with_join` (no direct inserts).
+//! - **TUI-5 (single-cache-owner):** Fetch work returns stamped
+//!   results; `App` owns the cache and merges every completed write
+//!   through `FetchState::join`.
 //! - **TUI-6 (refresh-staleness):** `FetchState::Ready` with
-//!   `generation < refresh_gen` is refetched; errors always retry.
+//!   `generation < refresh_gen` is revalidated while its payload
+//!   remains displayable; errors always retry. A completed detail
+//!   request accepted for the current selection joins at the current
+//!   generation, including when it spans a topology refresh.
 //! - **TUI-7 (synthetic-root):** The root node is synthetic and
 //!   always expanded; only its children are rendered at depth 0.
 //! - **TUI-8 (cycle-safety):** Tree building rejects only true
@@ -53,8 +57,9 @@
 //! - **TUI-12 (serial-topology-fetches):** Topology cache fetches
 //!   (via `fetch_with_join` / `build_tree_node`) are serial within
 //!   a refresh cycle; join semantics handle retries and reordering.
-//!   Overlay fetches (py-spy, config, diagnostics) are concurrent
-//!   via `tokio::spawn` and do not participate in the topology cache.
+//!   Detail and overlay fetches are concurrent via `tokio::spawn`;
+//!   detail results rejoin the topology cache on the event loop,
+//!   while overlay results do not participate in that cache.
 //! - **TUI-13 (stopped-detection):** `is_stopped_node` matches
 //!   `Actor` variants whose `actor_status` starts with `"stopped:"`
 //!   or `"failed:"`. All other variants return false.
@@ -103,6 +108,17 @@
 //!   still requests quit. Rendering gives the help overlay precedence
 //!   over `app.overlay` and node detail, and help never mutates the
 //!   topology or detail cache.
+//! - **TUI-23 (nonblocking-detail):** The input/render loop never
+//!   awaits node-detail network I/O. Selection schedules background
+//!   work and returns immediately.
+//! - **TUI-24 (latest-selection-wins):** Only a detail result whose
+//!   reference and request token still match the current selection
+//!   may update the visible pane. A topology refresh preserves an
+//!   active request for the same selected reference unless its cache
+//!   result has already superseded that request.
+//! - **TUI-25 (stale-while-revalidate):** Any present detail payload
+//!   is displayed immediately and never regresses to loading while
+//!   its reference is revalidated.
 //!
 //! Py-spy overlay invariants:
 //!

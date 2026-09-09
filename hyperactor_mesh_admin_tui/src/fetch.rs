@@ -10,6 +10,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use algebra::JoinSemilattice;
 use hyperactor_mesh::introspect::NodePayload;
@@ -36,6 +39,30 @@ pub(crate) struct Stamp {
     /// Monotonic tie-breaker for identical timestamps in this
     /// process.
     pub(crate) seq: u64,
+}
+
+/// Clone-shared allocator for fetch ordering stamps.
+///
+/// Clones share the same sequence so foreground and background fetches
+/// that receive the same wall-clock timestamp still have distinct ordering
+/// keys.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StampAllocator {
+    next_seq: Arc<AtomicU64>,
+}
+
+impl StampAllocator {
+    pub(crate) fn next(&self) -> Stamp {
+        let seq = self
+            .next_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let ts_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+        Stamp { ts_micros, seq }
+    }
 }
 
 /// Cached result of fetching a node, with ordering metadata.
@@ -107,6 +134,31 @@ impl<T: Clone> JoinSemilattice for FetchState<T> {
     }
 }
 
+/// Fetch one node and package the outcome with an already allocated stamp.
+pub(crate) async fn fetch_node_state_raw(
+    client: &reqwest::Client,
+    base_url: &str,
+    reference: &NodeRef,
+    generation: u64,
+    stamp: Stamp,
+    timeout: std::time::Duration,
+) -> FetchState<NodePayload> {
+    let fetch_result =
+        tokio::time::timeout(timeout, fetch_node_raw(client, base_url, reference)).await;
+    match fetch_result {
+        Err(_) => FetchState::Error {
+            stamp,
+            msg: format!("request timed out after {}s", timeout.as_secs()),
+        },
+        Ok(Ok(payload)) => FetchState::Ready {
+            stamp,
+            generation,
+            value: payload,
+        },
+        Ok(Err(msg)) => FetchState::Error { stamp, msg },
+    }
+}
+
 /// Unified fetch+join path for all cache writes.
 ///
 /// Checks cache first, only fetches if needed (not present, stale, or
@@ -120,7 +172,7 @@ pub(crate) async fn fetch_with_join(
     reference: &NodeRef,
     cache: &mut HashMap<NodeRef, FetchState<NodePayload>>,
     refresh_gen: u64,
-    seq_counter: &mut u64,
+    stamps: &StampAllocator,
     force: bool,
     timeout: std::time::Duration,
 ) -> FetchState<NodePayload> {
@@ -137,33 +189,17 @@ pub(crate) async fn fetch_with_join(
     };
 
     if should_fetch {
-        // Generate stamp.
-        *seq_counter += 1;
-        let ts_micros = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros() as u64;
-        let stamp = Stamp {
-            ts_micros,
-            seq: *seq_counter,
-        };
-
         // TP-9: timeout covers the full fetch lifecycle at the
         // operation boundary.
-        let fetch_result =
-            tokio::time::timeout(timeout, fetch_node_raw(client, base_url, reference)).await;
-        let new_state = match fetch_result {
-            Err(_) => FetchState::Error {
-                stamp,
-                msg: format!("request timed out after {}s", timeout.as_secs()),
-            },
-            Ok(Ok(payload)) => FetchState::Ready {
-                stamp,
-                generation: refresh_gen,
-                value: payload,
-            },
-            Ok(Err(e)) => FetchState::Error { stamp, msg: e },
-        };
+        let new_state = fetch_node_state_raw(
+            client,
+            base_url,
+            reference,
+            refresh_gen,
+            stamps.next(),
+            timeout,
+        )
+        .await;
 
         // Join into cache.
         cache
@@ -241,7 +277,7 @@ pub(crate) fn build_tree_node<'a>(
     expanded_keys: &'a HashSet<(NodeRef, usize)>,
     failed_keys: &'a HashSet<(NodeRef, usize)>,
     refresh_gen: u64,
-    seq_counter: &'a mut u64,
+    stamps: &'a StampAllocator,
     timeout: std::time::Duration,
 ) -> Pin<Box<dyn Future<Output = Option<TreeNode>> + Send + 'a>> {
     Box::pin(async move {
@@ -264,7 +300,7 @@ pub(crate) fn build_tree_node<'a>(
             reference,
             cache,
             refresh_gen,
-            seq_counter,
+            stamps,
             false,
             timeout,
         )
@@ -377,7 +413,7 @@ pub(crate) fn build_tree_node<'a>(
                             expanded_keys,
                             failed_keys,
                             refresh_gen,
-                            seq_counter,
+                            stamps,
                             timeout,
                         )
                         .await
@@ -451,7 +487,7 @@ pub(crate) fn build_tree_node<'a>(
                         expanded_keys,
                         failed_keys,
                         refresh_gen,
-                        seq_counter,
+                        stamps,
                         timeout,
                     )
                     .await

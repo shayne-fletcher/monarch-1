@@ -23,6 +23,8 @@ use crate::diagnostics::DiagPhase;
 use crate::diagnostics::DiagResult;
 use crate::timeouts::TuiTimeoutPolicy;
 
+mod responsive_navigation;
+
 /// Test-only convenience policy with current production defaults.
 /// Not a `Default` impl — forces production code through `from_config`.
 fn test_policy() -> TuiTimeoutPolicy {
@@ -2743,32 +2745,35 @@ fn detail_content_clipped_guards() {
     use crate::render::detail_pane::detail_content_clipped;
 
     let mut app = make_app_with_cursor(vec![actor_node("a")], 0);
-    app.detail = Some(NodePayload {
-        identity: actor("a"),
-        properties: NodeProperties::Actor {
-            actor_status: "running".into(),
-            actor_type: "TestActor".into(),
-            instance_id: String::new(),
-            messages_processed: 0,
-            created_at: Some(SystemTime::UNIX_EPOCH),
-            last_message_handler: None,
-            total_processing_time_us: 0,
-            queue_depth: 0,
-            flight_recorder: None,
-            is_system: false,
-            inbound_ordering: None,
-            failure_info: None,
-            execution: Some(Box::new(Execution {
-                active_count: 2,
-                active_handlers: vec![],
-                complete: true,
-                truncated: false,
-            })),
-        },
-        children: vec![],
-        parent: Some(proc_ref("worker")),
-        as_of: SystemTime::now(),
-    });
+    app.detail = DetailState::Ready {
+        payload: Box::new(NodePayload {
+            identity: actor("a"),
+            properties: NodeProperties::Actor {
+                actor_status: "running".into(),
+                actor_type: "TestActor".into(),
+                instance_id: String::new(),
+                messages_processed: 0,
+                created_at: Some(SystemTime::UNIX_EPOCH),
+                last_message_handler: None,
+                total_processing_time_us: 0,
+                queue_depth: 0,
+                flight_recorder: None,
+                is_system: false,
+                inbound_ordering: None,
+                failure_info: None,
+                execution: Some(Box::new(Execution {
+                    active_count: 2,
+                    active_handlers: vec![],
+                    complete: true,
+                    truncated: false,
+                })),
+            },
+            children: vec![],
+            parent: Some(proc_ref("worker")),
+            as_of: SystemTime::now(),
+        }),
+        freshness: DetailFreshness::Fresh,
+    };
     // Live execution starved to zero height -> alert; roomy -> no alert.
     assert!(detail_content_clipped(&app, 18));
     assert!(!detail_content_clipped(&app, 45));
@@ -2794,21 +2799,24 @@ fn detail_content_clipped_guards() {
 
     // Non-actor selection -> no alert.
     let mut host_app = make_app_with_cursor(vec![], 0);
-    host_app.detail = Some(NodePayload {
-        identity: host("h"),
-        properties: NodeProperties::Host {
-            addr: "10.0.0.1:8080".into(),
-            num_procs: 1,
-            system_children: vec![],
-            memory: hyperactor_mesh::introspect::ProcessMemoryStats {
-                process_rss_bytes: None,
-                process_vm_size_bytes: None,
+    host_app.detail = DetailState::Ready {
+        payload: Box::new(NodePayload {
+            identity: host("h"),
+            properties: NodeProperties::Host {
+                addr: "10.0.0.1:8080".into(),
+                num_procs: 1,
+                system_children: vec![],
+                memory: hyperactor_mesh::introspect::ProcessMemoryStats {
+                    process_rss_bytes: None,
+                    process_vm_size_bytes: None,
+                },
             },
-        },
-        children: vec![],
-        parent: Some(NodeRef::Root),
-        as_of: SystemTime::now(),
-    });
+            children: vec![],
+            parent: Some(NodeRef::Root),
+            as_of: SystemTime::now(),
+        }),
+        freshness: DetailFreshness::Fresh,
+    };
     assert!(!detail_content_clipped(&host_app, 18));
 }
 
