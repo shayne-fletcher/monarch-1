@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
+use std::time::Duration;
 
 use algebra::JoinSemilattice;
 use crossterm::event::Event;
@@ -72,6 +73,142 @@ struct DetailRequest {
     task: JoinHandle<FetchState<NodePayload>>,
 }
 
+struct RefreshBuild {
+    client: reqwest::Client,
+    base_url: String,
+    cache: HashMap<NodeRef, FetchState<NodePayload>>,
+    show_system: bool,
+    show_stopped: bool,
+    expanded_keys: HashSet<(NodeRef, usize)>,
+    failed_keys: HashSet<(NodeRef, usize)>,
+    generation: u64,
+    stamps: StampAllocator,
+    timeout: Duration,
+}
+
+struct RefreshSnapshot {
+    tree: TreeNode,
+    cache: HashMap<NodeRef, FetchState<NodePayload>>,
+    generation: u64,
+    error: Option<String>,
+}
+
+enum RefreshBuildResult {
+    Ready(Box<RefreshSnapshot>),
+    Failed { message: Option<String> },
+}
+
+struct RefreshRequest {
+    view_revision: u64,
+    task: JoinHandle<RefreshBuildResult>,
+}
+
+impl Drop for RefreshRequest {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+pub(crate) struct RefreshCompletion {
+    view_revision: u64,
+    result: RefreshBuildResult,
+}
+
+#[cfg(test)]
+struct RefreshDropSignal(Option<oneshot::Sender<()>>);
+
+#[cfg(test)]
+impl Drop for RefreshDropSignal {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+impl RefreshBuild {
+    async fn run(mut self) -> RefreshBuildResult {
+        let root_ref = NodeRef::Root;
+        let root_state = fetch_with_join(
+            &self.client,
+            &self.base_url,
+            &root_ref,
+            &mut self.cache,
+            self.generation,
+            &self.stamps,
+            true,
+            self.timeout,
+        )
+        .await;
+        let root_payload = match root_state {
+            FetchState::Ready { value, .. } => value,
+            FetchState::Error { msg, .. } => {
+                return RefreshBuildResult::Failed {
+                    message: Some(format!("Failed to connect: {msg}")),
+                };
+            }
+            FetchState::Unknown => return RefreshBuildResult::Failed { message: None },
+        };
+
+        let mut path = vec![NodeRef::Root];
+        let mut root_children = Vec::new();
+        let mut child_errors = Vec::new();
+        for child_ref in sorted_children(&root_payload) {
+            if let Some(child_node) = build_tree_node(
+                &self.client,
+                &self.base_url,
+                self.show_system,
+                self.show_stopped,
+                &mut self.cache,
+                &mut path,
+                &child_ref,
+                0,
+                &self.expanded_keys,
+                &self.failed_keys,
+                self.generation,
+                &self.stamps,
+                self.timeout,
+            )
+            .await
+            {
+                root_children.push(child_node);
+            } else if let Some(FetchState::Error { msg, .. }) = self.cache.get(&child_ref) {
+                child_errors.push(format!("{child_ref}: {msg}"));
+            }
+        }
+
+        let error = if root_children.is_empty() && !child_errors.is_empty() {
+            Some(format!(
+                "All host fetches failed: {}",
+                child_errors
+                    .first()
+                    .expect("non-empty child errors should have a first entry")
+            ))
+        } else {
+            None
+        };
+        let tree = TreeNode {
+            reference: NodeRef::Root,
+            label: "Root".to_string(),
+            node_type: NodeType::Root,
+            expanded: true,
+            fetched: true,
+            has_children: !root_children.is_empty(),
+            stopped: false,
+            failed: false,
+            is_system: false,
+            children: root_children,
+        };
+
+        RefreshBuildResult::Ready(Box::new(RefreshSnapshot {
+            tree,
+            cache: self.cache,
+            generation: self.generation,
+            error,
+        }))
+    }
+}
+
 impl Drop for DetailRequest {
     fn drop(&mut self) {
         self.task.abort();
@@ -120,6 +257,12 @@ pub(crate) struct App {
     detail_request: Option<DetailRequest>,
     /// Latest selection token; only a matching result may update the pane.
     detail_token: u64,
+    /// The one background topology refresh currently owned by this app.
+    refresh_request: Option<RefreshRequest>,
+    /// Whether one refresh should start when policy and the single-flight slot allow it.
+    refresh_pending: bool,
+    /// Monotonic revision of filter and expansion inputs used to build the tree.
+    view_revision: u64,
 
     /// Human-readable refresh interval (e.g. "1s", "5s").
     pub(crate) refresh_interval_label: String,
@@ -188,6 +331,9 @@ impl App {
             detail: DetailState::Empty,
             detail_request: None,
             detail_token: 0,
+            refresh_request: None,
+            refresh_pending: false,
+            view_revision: 0,
             refresh_interval_label: String::new(),
             error: None,
             show_system: false,
@@ -298,18 +444,7 @@ impl App {
         rows.get(&self.cursor).map(|row| &row.node.reference)
     }
 
-    /// Refresh the in-memory topology model by re-walking the
-    /// reference graph from `"root"`.
-    ///
-    /// Preserves expansion state (and tries to preserve the current
-    /// selection) across rebuilds, updates the node cache, and then
-    /// refreshes the detail pane for the currently selected row.
-    pub(crate) async fn refresh(&mut self) {
-        self.error = None;
-        self.refresh_gen += 1;
-
-        // Save expanded and failed state before rebuilding.
-        // Track (reference, depth) pairs to handle dual appearances correctly.
+    fn refresh_build(&self) -> RefreshBuild {
         let mut expanded_keys = HashSet::new();
         let mut failed_keys = HashSet::new();
         if let Some(root) = self.tree() {
@@ -319,79 +454,80 @@ impl App {
             }
         }
 
-        // Save current selection's reference and depth.
-        let rows = self.visible_rows();
-        let prev_selection = rows
+        RefreshBuild {
+            client: self.client.clone(),
+            base_url: self.base_url.clone(),
+            cache: self.fetch_cache.clone(),
+            show_system: self.show_system,
+            show_stopped: self.show_stopped,
+            expanded_keys,
+            failed_keys,
+            generation: self.refresh_gen.wrapping_add(1),
+            stamps: self.stamps.clone(),
+            timeout: self
+                .policy
+                .request_timeout(crate::timeouts::RequestOp::InteractiveFetch),
+        }
+    }
+
+    /// Load the first complete topology before entering the terminal event loop.
+    pub(crate) async fn load_initial_topology(&mut self) {
+        self.error = None;
+        match self.refresh_build().run().await {
+            RefreshBuildResult::Ready(snapshot) => self.apply_refresh_snapshot(*snapshot),
+            RefreshBuildResult::Failed { message } => self.error = message,
+        }
+    }
+
+    /// Remember one refresh request and start it when policy permits.
+    pub(crate) fn request_refresh(&mut self) {
+        self.refresh_pending = true;
+        self.start_pending_refresh_if_allowed();
+    }
+
+    pub(crate) fn start_pending_refresh_if_allowed(&mut self) {
+        if self.should_quit
+            || !self.refresh_pending
+            || self.refresh_request.is_some()
+            || !refresh_policy_for_job(&self.active_job).permits_refresh()
+        {
+            return;
+        }
+
+        self.refresh_pending = false;
+        self.error = None;
+        let view_revision = self.view_revision;
+        let task = tokio::spawn(self.refresh_build().run());
+        self.refresh_request = Some(RefreshRequest {
+            view_revision,
+            task,
+        });
+    }
+
+    fn note_view_inputs_changed(&mut self) {
+        self.view_revision = self.view_revision.wrapping_add(1);
+        if self.refresh_request.take().is_some() {
+            self.refresh_pending = true;
+        }
+    }
+
+    fn apply_refresh_snapshot(&mut self, snapshot: RefreshSnapshot) {
+        let current_selection = self
+            .visible_rows()
             .get(&self.cursor)
             .map(|row| (row.node.reference.clone(), row.depth));
 
-        // Fetch root using centralized fetch with force=true.
-        let root_ref = NodeRef::Root;
-        let root_state = self.fetch_node_state(&root_ref, true).await;
-        let root_payload = match root_state {
-            FetchState::Ready { value, .. } => value,
-            FetchState::Error { msg, .. } => {
-                self.error = Some(format!("Failed to connect: {}", msg));
-                return;
-            }
-            FetchState::Unknown => return,
-        };
-
-        // Path for cycle detection: tracks current path from root to
-        // Node being built. Start with root in the path.
-        let mut path = vec![NodeRef::Root];
-
-        // Build tree recursively from root's children.
-        let mut root_children = Vec::new();
-        let sorted = sorted_children(&root_payload);
-
-        let mut child_errors = Vec::new();
-        for child_ref in &sorted {
-            if let Some(child_node) = build_tree_node(
-                &self.client,
-                &self.base_url,
-                self.show_system,
-                self.show_stopped,
-                &mut self.fetch_cache,
-                &mut path,
-                child_ref,
-                0,
-                &expanded_keys,
-                &failed_keys,
-                self.refresh_gen,
-                &self.stamps,
-                self.policy
-                    .request_timeout(crate::timeouts::RequestOp::InteractiveFetch),
-            )
-            .await
-            {
-                root_children.push(child_node);
-            } else if let Some(FetchState::Error { msg, .. }) = self.fetch_cache.get(child_ref) {
-                child_errors.push(format!("{}: {}", child_ref, msg));
-            }
-        }
-        if root_children.is_empty() && !child_errors.is_empty() {
-            self.error = Some(format!(
-                "All host fetches failed: {}",
-                child_errors.first().unwrap()
-            ));
+        for (reference, state) in snapshot.cache {
+            self.fetch_cache
+                .entry(reference)
+                .and_modify(|current| *current = current.join(&state))
+                .or_insert(state);
         }
 
-        // Create synthetic root node.
-        self.set_tree(Some(TreeNode {
-            reference: NodeRef::Root,
-            label: "Root".to_string(),
-            node_type: NodeType::Root,
-            expanded: true,
-            fetched: true,
-            has_children: !root_children.is_empty(),
-            stopped: false,
-            failed: false,
-            is_system: false,
-            children: root_children,
-        }));
+        self.refresh_gen = snapshot.generation;
+        self.error = snapshot.error;
+        self.set_tree(Some(snapshot.tree));
 
-        // Prune stale cache entries (collect owned refs to avoid borrow issues).
         let live_refs: HashSet<NodeRef> = if let Some(root) = self.tree() {
             let mut refs = HashSet::new();
             collect_refs(root, &mut refs);
@@ -399,32 +535,97 @@ impl App {
         } else {
             HashSet::new()
         };
-        self.fetch_cache
-            .retain(|k, _| matches!(k, NodeRef::Root) || live_refs.contains(k));
+        self.fetch_cache.retain(|reference, _| {
+            matches!(reference, NodeRef::Root) || live_refs.contains(reference)
+        });
 
-        // Restore selection position.
-        let rows = self.visible_rows();
-        if let Some((prev_ref, prev_depth)) = prev_selection {
-            // Try to match both reference and depth first.
-            let depth_match = rows
-                .as_slice()
-                .iter()
-                .position(|row| row.node.reference == prev_ref && row.depth == prev_depth);
-            // Fall back to matching just reference.
-            let any_match = rows
-                .as_slice()
-                .iter()
-                .position(|row| row.node.reference == prev_ref);
+        let (row_count, restored_position) = {
+            let rows = self.visible_rows();
+            let restored_position = current_selection.and_then(|(reference, depth)| {
+                let depth_match = rows
+                    .as_slice()
+                    .iter()
+                    .position(|row| row.node.reference == reference && row.depth == depth);
+                let any_match = rows
+                    .as_slice()
+                    .iter()
+                    .position(|row| row.node.reference == reference);
+                depth_match.or(any_match)
+            });
+            (rows.len(), restored_position)
+        };
+        self.cursor.update_len(row_count);
+        if let Some(position) = restored_position {
+            self.cursor.set_pos(position);
+        }
+    }
 
-            self.cursor.update_len(rows.len());
-            if let Some(pos) = depth_match.or(any_match) {
-                self.cursor.set_pos(pos);
-            }
-        } else {
-            self.cursor.update_len(rows.len());
+    pub(crate) fn apply_refresh_completion(&mut self, completion: RefreshCompletion) {
+        let is_current_request = self
+            .refresh_request
+            .as_ref()
+            .is_some_and(|request| request.view_revision == completion.view_revision);
+        if !is_current_request {
+            return;
+        }
+        self.refresh_request = None;
+
+        if !refresh_policy_for_job(&self.active_job).permits_refresh()
+            || completion.view_revision != self.view_revision
+        {
+            self.refresh_pending = true;
+            return;
         }
 
-        self.schedule_selected_detail();
+        match completion.result {
+            RefreshBuildResult::Ready(snapshot) => {
+                self.apply_refresh_snapshot(*snapshot);
+                self.schedule_selected_detail();
+            }
+            RefreshBuildResult::Failed { message } => self.error = message,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn refresh_is_in_flight(&self) -> bool {
+        self.refresh_request.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn refresh_is_pending(&self) -> bool {
+        self.refresh_pending
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_refresh_view_revision(&self) -> Option<u64> {
+        self.refresh_request
+            .as_ref()
+            .map(|request| request.view_revision)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn receive_pending_refresh_for_test(&mut self) -> RefreshCompletion {
+        recv_refresh_request(&mut self.refresh_request).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_panicking_refresh_for_test(&mut self) {
+        self.refresh_request = Some(RefreshRequest {
+            view_revision: self.view_revision,
+            task: tokio::spawn(async { panic!("injected refresh panic") }),
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_pending_refresh_for_test(&mut self, dropped: oneshot::Sender<()>) {
+        let signal = RefreshDropSignal(Some(dropped));
+        self.refresh_request = Some(RefreshRequest {
+            view_revision: self.view_revision,
+            task: tokio::spawn(async move {
+                let _signal = signal;
+                std::future::pending::<RefreshBuildResult>().await
+            }),
+        });
     }
 
     /// Lazily expand a single node by fetching its children.
@@ -655,6 +856,10 @@ impl App {
             stamp,
             task,
         });
+    }
+
+    pub(crate) fn seed_initial_detail(&mut self) {
+        self.schedule_selected_detail();
     }
 
     #[cfg(test)]
@@ -1098,6 +1303,7 @@ impl App {
                             node.expanded = false;
                             let rows = self.visible_rows();
                             self.cursor.update_len(rows.len());
+                            self.note_view_inputs_changed();
                             return KeyResult::DetailChanged;
                         }
                     } else {
@@ -1116,16 +1322,19 @@ impl App {
                 });
                 let rows = self.visible_rows();
                 self.cursor.update_len(rows.len());
+                self.note_view_inputs_changed();
                 KeyResult::DetailChanged
             }
             KeyCode::Char('s') => {
                 // Toggle system proc visibility
                 self.show_system = !self.show_system;
+                self.note_view_inputs_changed();
                 KeyResult::NeedsRefresh
             }
             KeyCode::Char('h') => {
                 // Toggle stopped actor visibility (failed always visible)
                 self.show_stopped = !self.show_stopped;
+                self.note_view_inputs_changed();
                 KeyResult::NeedsRefresh
             }
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1199,7 +1408,7 @@ impl App {
                 self.schedule_selected_detail();
             }
             KeyResult::NeedsRefresh => {
-                self.refresh().await;
+                self.request_refresh();
             }
             KeyResult::ExpandNode(reference, depth) => {
                 if self.expand_node(&reference, depth).await {
@@ -1207,6 +1416,7 @@ impl App {
                     self.cursor.update_len(rows.len());
                     self.cursor.move_down();
                     self.ensure_cursor_visible();
+                    self.note_view_inputs_changed();
                 }
                 self.schedule_selected_detail();
             }
@@ -1227,6 +1437,7 @@ impl App {
             }
             KeyResult::None => {}
         }
+        self.start_pending_refresh_if_allowed();
     }
 
     /// Dispatch variant-specific rerun keys when an overlay is active.
@@ -1605,6 +1816,24 @@ async fn recv_detail_request(request: &mut Option<DetailRequest>) -> DetailFetch
     }
 }
 
+/// Await the one background topology refresh currently owned by the app.
+async fn recv_refresh_request(request: &mut Option<RefreshRequest>) -> RefreshCompletion {
+    let Some(request) = request else {
+        return std::future::pending().await;
+    };
+    let view_revision = request.view_revision;
+    let result = match (&mut request.task).await {
+        Ok(result) => result,
+        Err(error) => RefreshBuildResult::Failed {
+            message: Some(format!("Refresh task failed: {error}")),
+        },
+    };
+    RefreshCompletion {
+        view_revision,
+        result,
+    }
+}
+
 /// TP-10: derive refresh policy from active job state.
 ///
 /// Suspend refresh while any foreground job is active — both
@@ -1631,12 +1860,14 @@ pub(crate) async fn run_app(
 ) -> io::Result<()> {
     let refresh_ms = app.policy.refresh_interval.as_millis() as u64;
     let mut refresh_interval = tokio::time::interval(app.policy.refresh_interval);
+    refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     app.refresh_interval_label = if refresh_ms >= 1000 && refresh_ms.is_multiple_of(1000) {
         format!("{}s", refresh_ms / 1000)
     } else {
         format!("{}ms", refresh_ms)
     };
     let mut events = EventStream::new();
+    app.seed_initial_detail();
 
     loop {
         // Update viewport height before rendering. The body area is
@@ -1648,20 +1879,7 @@ pub(crate) async fn run_app(
 
         tokio::select! {
             _ = refresh_interval.tick() => {
-                // Phase 3a: the effective refresh policy is the
-                // join of all refresh-pressure sources. Currently
-                // there is one source (foreground job state); later
-                // sources extend by more joins, not by rewriting
-                // the branch. Refresh runs only when effective
-                // policy is Baseline. When the in-flight operation
-                // completes, refresh resumes on the next scheduled
-                // tick, not immediately.
-                use crate::timeouts::RefreshPolicy;
-                let effective = RefreshPolicy::Baseline
-                    .join(&refresh_policy_for_job(&app.active_job));
-                if effective == RefreshPolicy::Baseline {
-                    app.refresh().await;
-                }
+                app.request_refresh();
             }
             maybe_event = events.next() => {
                 match maybe_event {
@@ -1682,7 +1900,12 @@ pub(crate) async fn run_app(
             detail_result = recv_detail_request(&mut app.detail_request) => {
                 app.apply_detail_result(detail_result);
             }
+            refresh_result = recv_refresh_request(&mut app.refresh_request) => {
+                app.apply_refresh_completion(refresh_result);
+            }
         }
+
+        app.start_pending_refresh_if_allowed();
 
         if app.should_quit {
             break;

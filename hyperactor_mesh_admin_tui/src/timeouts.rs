@@ -30,8 +30,9 @@
 //!   job state. `RefreshPolicy` implements `JoinSemilattice` so
 //!   multiple sources can be combined when added. Background refresh
 //!   is suspended while any foreground job exists (both in-flight
-//!   and completed overlays). Refresh resumes only when the overlay
-//!   is dismissed.
+//!   and completed overlays). A refresh completing under suspension is
+//!   discarded, one replacement is remembered, and refresh resumes
+//!   only when the overlay is dismissed.
 //! - **TP-11:** Detail-fetch debounce is owned by
 //!   `TuiTimeoutPolicy`, separately from request timeout budgets.
 
@@ -167,6 +168,19 @@ pub(crate) enum RefreshPolicy {
     Baseline,
     /// Do not schedule background refresh.
     Suspend,
+}
+
+impl RefreshPolicy {
+    /// Whether this fully joined policy permits a background refresh.
+    ///
+    /// Keep this match exhaustive so adding a policy variant requires an
+    /// explicit scheduling decision.
+    pub(crate) fn permits_refresh(self) -> bool {
+        match self {
+            Self::Baseline => true,
+            Self::Suspend => false,
+        }
+    }
 }
 
 impl algebra::JoinSemilattice for RefreshPolicy {
@@ -331,5 +345,11 @@ mod tests {
             RefreshPolicy::Suspend.join(&RefreshPolicy::Suspend),
             RefreshPolicy::Suspend,
         );
+    }
+
+    #[test]
+    fn refresh_policy_permission_is_explicit() {
+        assert!(RefreshPolicy::Baseline.permits_refresh());
+        assert!(!RefreshPolicy::Suspend.permits_refresh());
     }
 }

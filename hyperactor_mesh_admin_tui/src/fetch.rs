@@ -30,15 +30,15 @@ use crate::model::TreeNode;
 
 /// Monotonic ordering key for fetch results.
 ///
-/// `ts_micros` comes from wall-clock time and `seq`
-/// breaks ties to ensure a total order within this process.
+/// `seq` defines allocation order within this process. `ts_micros`
+/// records when the allocation occurred and breaks equal-sequence
+/// ties in constructed values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Stamp {
+    /// Monotonic ordering key shared by allocator clones.
+    pub(crate) seq: u64,
     /// Wall-clock timestamp in microseconds since UNIX epoch.
     pub(crate) ts_micros: u64,
-    /// Monotonic tie-breaker for identical timestamps in this
-    /// process.
-    pub(crate) seq: u64,
 }
 
 /// Clone-shared allocator for fetch ordering stamps.
@@ -61,7 +61,7 @@ impl StampAllocator {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_micros() as u64;
-        Stamp { ts_micros, seq }
+        Stamp { seq, ts_micros }
     }
 }
 
@@ -612,31 +612,42 @@ mod tests {
     }
 
     #[test]
-    fn stamp_orders_by_timestamp_first() {
-        let earlier = Stamp {
-            ts_micros: 1000,
-            seq: 2,
-        };
-        let later = Stamp {
-            ts_micros: 2000,
-            seq: 1,
-        };
-        assert!(earlier < later);
-        assert!(later > earlier);
-    }
-
-    #[test]
-    fn stamp_orders_by_seq_when_timestamp_equal() {
+    fn stamp_orders_by_sequence_first() {
         let first = Stamp {
-            ts_micros: 1000,
             seq: 1,
+            ts_micros: 2000,
         };
         let second = Stamp {
-            ts_micros: 1000,
             seq: 2,
+            ts_micros: 1000,
         };
         assert!(first < second);
         assert!(second > first);
+    }
+
+    #[test]
+    fn stamp_uses_timestamp_when_sequence_is_equal() {
+        let first = Stamp {
+            seq: 1,
+            ts_micros: 1000,
+        };
+        let second = Stamp {
+            seq: 1,
+            ts_micros: 2000,
+        };
+        assert!(first < second);
+        assert!(second > first);
+    }
+
+    #[test]
+    fn allocator_clones_share_sequence_order() {
+        let allocator = StampAllocator::default();
+        let clone = allocator.clone();
+
+        let first = allocator.next();
+        let second = clone.next();
+
+        assert!(first < second);
     }
 
     #[test]
@@ -841,20 +852,20 @@ mod tests {
     }
 
     #[test]
-    fn join_uses_seq_for_tie_break() {
+    fn join_prefers_later_sequence() {
         let payload = mock_payload(mock_actor_ref("test"));
         let first = FetchState::Ready {
             stamp: Stamp {
-                ts_micros: 1000,
                 seq: 1,
+                ts_micros: 2000,
             },
             generation: 1,
             value: payload.clone(),
         };
         let second = FetchState::Ready {
             stamp: Stamp {
-                ts_micros: 1000,
                 seq: 2,
+                ts_micros: 1000,
             },
             generation: 1,
             value: payload.clone(),
