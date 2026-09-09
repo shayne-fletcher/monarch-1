@@ -356,7 +356,7 @@ shared_reconstruction = 2
 reserve_binding = 1
 py_mesh_reserve = 2
 py_is_tokio_thread = 3
-pytokio_import = 32
+pytokio_import = 33
 pytokio_module_ref = 17
 helper_symbol = 26
 helper_definition = 6
@@ -779,6 +779,7 @@ owns = [
   "im.test_client_context_guard.module",
   "im.test_future_characterization.module",
   "im.test_host_mesh.module",
+  "im.test_job.module",
   "im.test_hyperactor.module",
   "im.test_logging_initialization_characterization.module",
   "im.test_logging.module",
@@ -1323,16 +1324,34 @@ public_operation = "job.exec_command(...)"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
 consumer = "user code"
-driver = "awaited or blocked on by the caller"
-start_point = "lazy; no proc is spawned until the Future is observed"
-abandonment = "possible; dropping prevents the spawn and therefore the finally-block cleanup"
-eager_effect = "starts a side effect"
-drop_behavior = "nothing runs, and no cleanup is owed"
-first_side_effect = "the proc spawn"
-unobserved_error = "silently dropped"
+driver = "Future refusal and warning checks run before work starts; a first no-timeout get() drives inline, while a successful first await/as_asyncio observation or a first get() with a valid timeout starts a non-aborting Handle producer that continues independently; result() and exception() delegate to get()"
+start_point = "Tested: mesh selection, spawn_procs, the BashActor spawn, and command dispatch wait for observation. Source-grounded: Future._from_coro calls PythonTask.from_coroutine during construction, synchronously capturing the Monarch context and potentially bootstrapping a fresh client before returning the Future"
+abandonment = "Never observed: _impl never runs, no proc spawns, and no cleanup is owed, but dropping cannot undo the construction-time context capture. After asyncio observation starts the producer, cancelling that observer does not abort it; the command completes and the finally block drives procs.stop()"
+eager_effect = "an eager Handle would make _impl eligible to run independently before observation; it would not guarantee that mesh selection, proc spawn, BashActor spawn, and command dispatch all execute synchronously inside exec_command()"
+drop_behavior = "Before observation, dropping the Future leaves _impl unrun and no cleanup owed after the already-completed context capture. After Handle-backed observation starts, dropping or cancelling that observer does not abort the producer or its cleanup. Mesh selection and spawn_procs are outside the try, so cleanup is owed only after spawn_procs returns procs. Once reached, the command and cleanup Futures are spent one-shot by ot.job.exec_command._impl[bash_actors.run.callscript, output_dir=output_dir._take_inner], ot.job.exec_command._impl[bash_actors.run_python.callcmd, env=env, workdir=workdir, client_cwd=client_cwd, output_dir=output_dir._take_inner], and ot.job.exec_command._impl[procs.stop._take_inner]"
+first_side_effect = "source-grounded: synchronous construction-time context capture is the first effect; tested: proc spawn is the first worker-visible effect and waits for observation"
+unobserved_error = "A synchronous construction or context failure raises before any Future exists. A never-driven _impl produces no error. Tested: an ordinary cleanup Exception that supersedes an awaited command Exception is replayed on a second observation with procs.stop() still called once. Source-grounded: after Handle-backed start, cancelling one asyncio observer does not abort an ordinary failure; another observer of the live outer Future can still receive it, while the cancelled observer receives nothing. A get-first BaseException is not cached: cleanup runs, but the consumed task leaves the outer Future poisoned for a second observation, as pinned by fbcode//monarch/python/tests:test_future_characterization::test_fm_terminal_baseexception_current_poisons_the_future"
 disposition = "require a binding-specific design"
 semantic_class = "deferred_side_effect"
-oracle = "job.exec_command operation-root behavior (6.0c item 6)"
+oracle = [
+  "fbcode//monarch/python/tests:test_job::test_exec_command_returns_max_returncode",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_drives_cleanup_on_success",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_drives_cleanup_on_error",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_dispatches_to_run_python_for_py_scripts",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_dispatches_to_run_for_shell_commands",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_slices_by_point",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_slices_by_rank",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_prints_output_when_no_output_dir",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_output_dir_suppresses_printing",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_spawns_no_procs_before_observation",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_repeated_get_spawns_and_cleans_up_once",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_reobserved_asyncio_shares_one_run",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_dispatches_to_run_python_for_dash_m",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_forwards_env_workdir_per_host_and_output_dir",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_drives_cleanup_on_base_exception",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_cleanup_failure_supersedes_command_failure",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_observer_cancellation_still_cleans_up",
+]
 
 [[site]]
 id = "fc.rdma.RDMAAction.submit[Future._from_coroself._inner.submitclient=client, timeout=timeout, rdma_manager_init=ready]"
@@ -3151,6 +3170,18 @@ scope = "test"
 state = "legacy"
 transition = "6.8"
 members = ["PythonTask", "Shared"]
+
+[[site]]
+id = "im.test_job.module"
+category = "module_import"
+language = "python"
+path = "fbcode/monarch/python/tests/test_job.py"
+symbol = "<module>"
+operation = "pytokio_import"
+scope = "test"
+state = "legacy"
+transition = "6.8"
+members = ["PythonTask"]
 
 [[site]]
 id = "im.test_logging_initialization_characterization.module"
