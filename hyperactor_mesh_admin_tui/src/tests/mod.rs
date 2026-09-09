@@ -53,8 +53,11 @@ fn host(name: &str) -> NodeRef {
 }
 
 fn proc_ref(name: &str) -> NodeRef {
-    let proc_id = hyperactor_mesh::mesh_id::ResourceId::proc_addr_from_name(test_addr(), name);
-    NodeRef::Proc(proc_id)
+    NodeRef::Proc(proc_addr(name))
+}
+
+fn proc_addr(name: &str) -> hyperactor::ProcAddr {
+    hyperactor_mesh::mesh_id::ResourceId::proc_addr_from_name(test_addr(), name)
 }
 
 fn actor(name: &str) -> NodeRef {
@@ -1541,6 +1544,14 @@ fn actor_node(reference: &str) -> TreeNode {
     }
 }
 
+fn expanded_proc_with_actor(proc_name: &str, actor_name: &str) -> TreeNode {
+    let mut proc = proc_node(proc_name);
+    proc.expanded = true;
+    proc.has_children = true;
+    proc.children.push(actor_node(actor_name));
+    proc
+}
+
 // PY-4: Proc selected → own reference returned.
 #[test]
 fn pyspy_proc_ref_proc_node() {
@@ -1548,32 +1559,11 @@ fn pyspy_proc_ref_proc_node() {
     assert!(app.pyspy_proc_ref().is_some());
 }
 
-// PY-4: Actor selected with detail.parent → owning proc returned.
+// PY-4: Actor selected → owning proc comes from visible-tree ancestry.
 #[test]
-fn pyspy_proc_ref_actor_node_with_parent() {
-    let mut app = make_app_with_cursor(vec![actor_node("actor1")], 0);
-    app.detail = Some(NodePayload {
-        identity: actor("actor1"),
-        properties: NodeProperties::Actor {
-            actor_status: "running".into(),
-            actor_type: "TestActor".into(),
-            instance_id: String::new(),
-            messages_processed: 0,
-            created_at: Some(SystemTime::UNIX_EPOCH),
-            last_message_handler: None,
-            total_processing_time_us: 0,
-            queue_depth: 0,
-            flight_recorder: None,
-            is_system: false,
-            inbound_ordering: None,
-            failure_info: None,
-            execution: None,
-        },
-        children: vec![],
-        parent: Some(proc_ref("worker")),
-        as_of: SystemTime::now(),
-    });
-    assert!(app.pyspy_proc_ref().is_some());
+fn pyspy_proc_ref_actor_uses_visible_proc_ancestor() {
+    let app = make_app_with_cursor(vec![expanded_proc_with_actor("worker", "actor1")], 1);
+    assert_eq!(app.pyspy_proc_ref(), Some(proc_addr("worker")));
 }
 
 // PY-4: Root node selected → None.
@@ -1618,11 +1608,22 @@ fn pyspy_proc_ref_host_node() {
     assert_eq!(app.pyspy_proc_ref(), None);
 }
 
-// PY-4: Actor selected with detail=None → None (no panic).
+// PY-4: Actor without a proc ancestor → None (no panic).
 #[test]
-fn pyspy_proc_ref_actor_no_detail() {
+fn pyspy_proc_ref_actor_without_proc_ancestor() {
     let app = make_app_with_cursor(vec![actor_node("actor1")], 0);
     assert_eq!(app.pyspy_proc_ref(), None);
+}
+
+// PY-4: `p` on an actor does not depend on the detail payload.
+#[test]
+fn on_key_pyspy_on_actor_without_detail() {
+    let mut app = make_app_with_cursor(vec![expanded_proc_with_actor("worker", "actor1")], 1);
+    let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+    match app.on_key(key) {
+        KeyResult::RunPySpy(actual) => assert_eq!(actual, proc_addr("worker")),
+        other => panic!("p on an actor should target its owning proc, got: {other:?}"),
+    }
 }
 
 // PY-5: parse_error_envelope renders ApiErrorEnvelope body so py-spy
@@ -2431,6 +2432,17 @@ fn on_key_config_on_proc() {
         matches!(result, KeyResult::RunConfig(_)),
         "C on Proc should dispatch RunConfig, got: {result:?}"
     );
+}
+
+// CFG-4: `C` on an actor does not depend on the detail payload.
+#[test]
+fn on_key_config_on_actor_without_detail() {
+    let mut app = make_app_with_cursor(vec![expanded_proc_with_actor("worker", "actor1")], 1);
+    let key = KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT);
+    match app.on_key(key) {
+        KeyResult::RunConfig(actual) => assert_eq!(actual, proc_addr("worker")),
+        other => panic!("C on an actor should target its owning proc, got: {other:?}"),
+    }
 }
 
 // CFG-4: 'C' on a Root node is a no-op.

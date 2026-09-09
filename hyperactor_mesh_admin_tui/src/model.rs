@@ -6,6 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use hyperactor::ProcAddr;
 use hyperactor_mesh::introspect::NodePayload;
 use hyperactor_mesh::introspect::NodeProperties;
 use hyperactor_mesh::introspect::NodeRef;
@@ -288,6 +289,8 @@ pub(crate) struct FlatRow<'a> {
     pub(crate) node: &'a TreeNode,
     /// Visual indentation level for this row.
     pub(crate) depth: usize,
+    /// Owning process for a proc or actor occurrence in this tree.
+    pub(crate) owning_proc: Option<&'a ProcAddr>,
 }
 
 /// Wrapper for flattened visible rows with cursor helpers.
