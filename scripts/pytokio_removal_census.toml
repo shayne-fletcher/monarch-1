@@ -356,7 +356,7 @@ shared_reconstruction = 2
 reserve_binding = 1
 py_mesh_reserve = 2
 py_is_tokio_thread = 3
-pytokio_import = 31
+pytokio_import = 32
 pytokio_module_ref = 17
 helper_symbol = 26
 helper_definition = 6
@@ -775,6 +775,7 @@ owns = [
   "im.test_actor_driver_characterization.module",
   "im.test_admin_spawn_characterization.module",
   "im.test_actor_mesh.module",
+  "im.test_accumulator_characterization.module",
   "im.test_client_context_guard.module",
   "im.test_future_characterization.module",
   "im.test_host_mesh.module",
@@ -969,16 +970,30 @@ public_operation = "Accumulator.accumulate(...)"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
 consumer = "user code"
-driver = "awaited or blocked on by the caller"
-start_point = "the endpoint stream is dispatched when accumulate() is called; combine runs only on observation"
-abandonment = "possible; the stream was already dispatched, so dropping abandons its replies"
-eager_effect = "observes already-running work"
-drop_behavior = "the combine never runs and the dispatched replies are never collected"
-first_side_effect = "endpoint stream dispatch at call time"
-unobserved_error = "silently dropped"
+driver = "after the shared Future refusal and warning checks, a first no-timeout get() drives the fold inline; a successful first await/as_asyncio() observation or first get() with a valid timeout starts a non-aborting Handle producer that continues independently; result() and exception() delegate to get()"
+start_point = "accumulate() calls endpoint.stream() before constructing the returned Future, but iteration, _take_inner(), and combine begin only when that Future is driven. Source-grounded for ActorEndpoint: stream() opens the response port and submits the cast path before returning PyValueStream; AsyncActorMesh queues resolve-and-cast for later, while a bare PythonActorMeshImpl resolves and casts synchronously"
+abandonment = "dropping a never-observed Future abandons the fold before iteration, _take_inner(), or combine, after endpoint.stream() has already run. After asyncio observation starts the non-aborting Handle producer, cancelling that observer does not stop the fold and a later observer receives the shared result"
+eager_effect = "would start the fold when the replacement Handle is created, allowing iterator advancement, streamed-result waits, and combine to begin before any caller observation; today accumulate() stops after endpoint.stream() returns, whether its mesh queued the cast or completed it synchronously"
+drop_behavior = "before observation, dropping the Future does not advance the iterator or run combine; after asyncio observation starts, observer cancellation does not stop the fold. Every streamed Future already reached by the fold is spent by _take_inner()"
+first_side_effect = "calls endpoint.stream() during accumulate(); ActorEndpoint opens a response port and submits the mesh-dependent cast path before returning"
+unobserved_error = "source-grounded: synchronous endpoint.stream() construction or submission errors raise directly from accumulate(), while remote execution and replies may proceed after the call. A never-driven fold cannot materialize or observe a streamed-result error and never invokes combine. Once driven, an ordinary Exception from either a streamed Future or combine short-circuits and later observers receive the same type and message; the get-first BaseException poisoning case is characterized separately by fbcode//monarch/python/tests:test_future_characterization::test_fm_terminal_baseexception_current_poisons_the_future"
 disposition = "require a binding-specific design"
 semantic_class = "already_started_lazy_observer"
-oracle = "Accumulator exact-once and error behavior (6.0c item 5)"
+oracle = [
+  "fbcode//monarch/python/tests:test_accumulator_characterization::test_accumulate_folds_with_combine",
+  "fbcode//monarch/python/tests:test_accumulator_characterization::test_accumulate_empty_stream_returns_identity",
+  "fbcode//monarch/python/tests:test_accumulator_characterization::test_accumulate_folds_left_to_right",
+  "fbcode//monarch/python/tests:test_accumulator_characterization::test_accumulate_invokes_stream_before_any_observation",
+  "fbcode//monarch/python/tests:test_accumulator_characterization::test_accumulate_short_circuits_and_propagates_combine_error",
+  "fbcode//monarch/python/tests:test_accumulator_characterization::test_accumulate_short_circuits_and_propagates_stream_error",
+  "fbcode//monarch/python/tests:test_accumulator_characterization::test_accumulate_get_then_await_does_not_rerun_combine",
+  "fbcode//monarch/python/tests:test_accumulator_characterization::test_accumulate_await_then_get_does_not_rerun_combine",
+  "fbcode//monarch/python/tests:test_accumulator_characterization::test_accumulate_replays_combine_error_get_then_await",
+  "fbcode//monarch/python/tests:test_accumulator_characterization::test_accumulate_replays_combine_error_await_then_get",
+  "fbcode//monarch/python/tests:test_accumulator_characterization::test_accumulate_post_start_abandonment_completes_fold_once",
+  "fbcode//monarch/python/tests:test_accumulator_characterization::test_accumulate_empty_stream_makes_no_combine_call",
+  "fbcode//monarch/python/tests:test_python_actors::test_accumulate_get_works_inside_sync_endpoint",
+]
 
 [[site]]
 id = "fc.actor_mesh.ActorMesh._name[Future._from_coroself._inner.name]"
@@ -3016,6 +3031,18 @@ scope = "production"
 state = "legacy"
 transition = "6.2"
 members = ["Handle"]
+
+[[site]]
+id = "im.test_accumulator_characterization.module"
+category = "module_import"
+language = "python"
+path = "fbcode/monarch/python/tests/test_accumulator_characterization.py"
+symbol = "<module>"
+operation = "pytokio_import"
+scope = "test"
+state = "legacy"
+transition = "6.8"
+members = ["PythonTask"]
 
 [[site]]
 id = "im.test_actor_mesh.module"
