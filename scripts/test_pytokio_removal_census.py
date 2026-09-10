@@ -1348,11 +1348,14 @@ class CensusCheckerTest(unittest.TestCase):
         ]
         self.assertEqual(self.fixture.check(manifest), [])
 
-    def test_oracle_legacy_label_accepted_on_active_row(self) -> None:
-        """Prose is still accepted while rows are being converted."""
+    def test_oracle_legacy_label_rejected_on_active_row(self) -> None:
+        """Every live behavior row must identify its canonical test."""
         manifest = self.fixture.manifest()
         self._behavior_row(manifest)["oracle"] = "endpoint reply coverage"
-        self.assertEqual(self.fixture.check(manifest), [])
+        self.assert_reports(
+            self.fixture.check(manifest),
+            "legacy prose label; active rows require a canonical list",
+        )
 
     def test_oracle_legacy_label_accepted_on_tombstone(self) -> None:
         """A deleted path has no live test to name, so its label stays."""
@@ -1451,7 +1454,7 @@ class CensusCheckerTest(unittest.TestCase):
         manifest = self.fixture.manifest()
         self._behavior_row(manifest)["oracle"] = ["endpoint reply coverage"]
         self.assert_reports(
-            self.fixture.check(manifest), "a legacy prose label stays a bare string"
+            self.fixture.check(manifest), "list entries must be canonical references"
         )
 
         manifest = self.fixture.manifest()
@@ -1472,15 +1475,6 @@ class CensusCheckerTest(unittest.TestCase):
                 manifest = self.fixture.manifest()
                 self._behavior_row(manifest)["oracle"] = blank
                 self.assert_reports(self.fixture.check(manifest), "oracle is empty")
-
-    def test_oracle_ordinary_prose_label_still_passes(self) -> None:
-        """The contrast case: prose that does not reach for the canonical form
-        is untouched by the prefix rule."""
-        for label in ("endpoint reply coverage", "lifecycle edge behavior"):
-            with self.subTest(label=label):
-                manifest = self.fixture.manifest()
-                self._behavior_row(manifest)["oracle"] = label
-                self.assertEqual(self.fixture.check(manifest), [])
 
     def test_oracle_empty_list_reports_shape_not_missing_field(self) -> None:
         """The empty list is present but unusable; the truthiness gate would

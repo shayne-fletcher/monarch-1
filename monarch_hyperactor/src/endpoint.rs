@@ -1629,9 +1629,21 @@ impl Accumulator for PythonResponseMessageAccumulator {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
     use hyperactor::ActorAddr;
+    use hyperactor::OncePortRef;
+    use hyperactor::Proc;
+    use hyperactor::mailbox::MessageEnvelope;
+    use hyperactor::mailbox::PortSender as _;
+    use hyperactor::mailbox::Undeliverable;
     use hyperactor::mailbox::headers::OPERATION_ADVERB;
     use hyperactor::mailbox::headers::OPERATION_ENDPOINT;
+    use pyo3::PyTypeInfo;
+    use pyo3::exceptions::PyValueError;
 
     use super::*;
 
@@ -1729,5 +1741,397 @@ mod tests {
             Some("call_one"),
             "OPERATION_ADVERB should still be stamped",
         );
+    }
+
+    const WAIT: Duration = Duration::from_secs(30);
+
+    fn test_instance(name: &str) -> Instance<PythonActor> {
+        Proc::isolated()
+            .actor_instance::<PythonActor>(name)
+            .expect("the test actor instance should be created")
+            .instance
+    }
+
+    fn result_message(rank: Option<usize>) -> PythonMessage {
+        PythonMessage {
+            kind: PythonMessageKind::Result { rank },
+            ..Default::default()
+        }
+    }
+
+    fn unexpected_message(name: &str) -> (PythonMessage, String) {
+        let kind = PythonMessageKind::CallMethod {
+            name: MethodSpecifier::ReturnsResponse {
+                name: name.to_string(),
+            },
+            response_port: None,
+            correlation_id: None,
+        };
+        let error = format!("unexpected message kind {kind:?}");
+        (
+            PythonMessage {
+                kind,
+                ..Default::default()
+            },
+            error,
+        )
+    }
+
+    fn test_span(instance: &Instance<PythonActor>, adverb: EndpointAdverb) -> SpanGuard {
+        SpanGuard::actor_endpoint(
+            adverb.as_str(),
+            instance.self_addr(),
+            "ownership_test_mesh",
+            "ownership_test",
+            0,
+        )
+    }
+
+    #[pyclass]
+    struct IdentityFuture;
+
+    #[pymethods]
+    impl IdentityFuture {
+        #[staticmethod]
+        fn _from_coro(task: Py<PyPythonTask>) -> Py<PyPythonTask> {
+            task
+        }
+    }
+
+    // `Endpoint::call` always resolves `Future._from_coro` through its Python
+    // module. The Rust unit-test target does not package that module, so expose
+    // only the identity wrapper needed to exercise the real `call` method.
+    fn install_future_test_module(py: Python<'_>) -> PyResult<()> {
+        let modules = py
+            .import("sys")?
+            .getattr("modules")?
+            .cast_into::<PyDict>()
+            .map_err(PyErr::from)?;
+        let mut path = String::new();
+        let mut parent: Option<Bound<'_, PyModule>> = None;
+        for part in "monarch._src.actor.future".split('.') {
+            if !path.is_empty() {
+                path.push('.');
+            }
+            path.push_str(part);
+            let module = match modules.get_item(&path)? {
+                Some(module) => module.cast_into::<PyModule>().map_err(PyErr::from)?,
+                None => {
+                    let module = PyModule::new(py, &path)?;
+                    modules.set_item(&path, &module)?;
+                    module
+                }
+            };
+            if let Some(parent) = &parent
+                && parent.getattr(part).is_err()
+            {
+                parent.setattr(part, &module)?;
+            }
+            parent = Some(module);
+        }
+        let module = parent.expect("the dotted module path is not empty");
+        if module.getattr("Future").is_err() {
+            module.setattr("Future", py.get_type::<IdentityFuture>())?;
+        }
+        Ok(())
+    }
+
+    async fn drive_task(task: Py<PyPythonTask>) -> PyResult<Py<PyAny>> {
+        let task = monarch_with_gil_blocking(GilSite::Test, |py| task.borrow_mut(py).take_task())
+            .expect("the task should be unconsumed");
+        tokio::time::timeout(WAIT, task)
+            .await
+            .expect("timed out driving the task")
+    }
+
+    fn assert_message_error(error: PyErr, expected: &str) {
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            assert!(error.get_type(py).is(PyValueError::type_object(py)));
+            assert_eq!(error.value(py).to_string(), expected);
+        });
+    }
+
+    async fn assert_task_message_error(task: Py<PyPythonTask>, expected: &str) {
+        let error = match drive_task(task).await {
+            Ok(_) => panic!("the unexpected message kind should be rejected"),
+            Err(error) => error,
+        };
+        assert_message_error(error, expected);
+    }
+
+    fn value_stream(
+        instance: &Instance<PythonActor>,
+        receiver: PortReceiver<PythonMessage>,
+        remaining: usize,
+    ) -> PyValueStream {
+        let future_class = monarch_with_gil_blocking(GilSite::Test, |py| {
+            py.get_type::<IdentityFuture>().into_any().unbind()
+        });
+        PyValueStream {
+            receiver: Arc::new(tokio::sync::Mutex::new(receiver)),
+            supervision_monitor: None,
+            instance: instance.clone_for_py(),
+            remaining: AtomicUsize::new(remaining),
+            attrs: Arc::new(EndpointAttrs::new("ownership_test", None)),
+            qualified_endpoint_name: None,
+            start: tokio::time::Instant::now(),
+            future_class,
+        }
+    }
+
+    fn next_task(stream: &PyValueStream) -> Option<Py<PyPythonTask>> {
+        monarch_with_gil_blocking(GilSite::Test, |py| -> PyResult<Option<Py<PyPythonTask>>> {
+            stream
+                .__next__(py)?
+                .map(|task| task.extract(py).map_err(Into::<PyErr>::into))
+                .transpose()
+        })
+        .expect("ValueStream.__next__ should construct its task")
+    }
+
+    #[tokio::test]
+    async fn value_collector_drop_discards_its_reply() {
+        pyo3::Python::initialize();
+        let instance = test_instance("value_collector_drop_discards_its_reply");
+        let (handle, receiver) = instance.mailbox_for_py().open_port::<PythonMessage>();
+        handle
+            .try_post(&instance, result_message(None))
+            .expect("the positive-control reply should be queued");
+
+        let task = value_collector(
+            receiver,
+            Arc::new(EndpointAttrs::new("ownership_test", None)),
+            None,
+            instance.clone_for_py(),
+            None,
+            EndpointAdverb::Choose,
+            test_span(&instance, EndpointAdverb::Choose),
+        )
+        .expect("value_collector should return a task");
+        drop(task);
+
+        assert!(
+            handle.try_post(&instance, result_message(None)).is_err(),
+            "dropping the task should close its sole response receiver"
+        );
+    }
+
+    #[tokio::test]
+    async fn value_stream_observers_receive_in_observation_order() {
+        pyo3::Python::initialize();
+        let instance = test_instance("value_stream_observers_receive_in_observation_order");
+        let (handle, receiver) = instance.mailbox_for_py().open_port::<PythonMessage>();
+        let (first_reply, first_error) = unexpected_message("first reply");
+        let (second_reply, second_error) = unexpected_message("second reply");
+        handle
+            .try_post(&instance, first_reply)
+            .expect("the first reply should be queued");
+        handle
+            .try_post(&instance, second_reply)
+            .expect("the second reply should be queued");
+        let stream = value_stream(&instance, receiver, 2);
+
+        let first = next_task(&stream).expect("the first slot should yield a task");
+        let second = next_task(&stream).expect("the second slot should yield a task");
+
+        assert_task_message_error(second, &first_error).await;
+        assert_task_message_error(first, &second_error).await;
+        assert!(
+            next_task(&stream).is_none(),
+            "the two constructed observers should exhaust the stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_value_stream_observer_leaves_reply_but_burns_slot_stranding_tail() {
+        pyo3::Python::initialize();
+        let instance = test_instance("dropped_value_stream_observer_leaves_reply_but_burns_slot");
+        let (handle, receiver) = instance.mailbox_for_py().open_port::<PythonMessage>();
+        let (first_reply, first_error) = unexpected_message("first reply");
+        let (second_reply, _) = unexpected_message("second reply");
+        let second_kind = second_reply.kind.clone();
+        handle
+            .try_post(&instance, first_reply)
+            .expect("the first reply should be queued");
+        handle
+            .try_post(&instance, second_reply)
+            .expect("the second reply should be queued");
+        let stream = value_stream(&instance, receiver, 2);
+
+        let discarded = next_task(&stream).expect("the first slot should yield a task");
+        monarch_with_gil_blocking(GilSite::Test, |_py| drop(discarded));
+
+        let retained = next_task(&stream).expect("the second slot should yield a task");
+        assert_task_message_error(retained, &first_error).await;
+        assert!(
+            next_task(&stream).is_none(),
+            "discarding an observer should still consume its iteration slot"
+        );
+
+        let stranded = stream
+            .receiver
+            .lock()
+            .await
+            .try_recv()
+            .expect("the shared receiver should remain usable")
+            .expect("the final reply should remain queued but unreachable by iteration");
+        assert_eq!(stranded.kind, second_kind);
+    }
+
+    struct RecordingCallEndpoint {
+        instance: Instance<PythonActor>,
+        attrs: Arc<EndpointAttrs>,
+        submissions: AtomicUsize,
+        response_ports: Mutex<Vec<OncePortRef<PythonMessage>>>,
+    }
+
+    impl RecordingCallEndpoint {
+        fn new(instance: Instance<PythonActor>) -> Self {
+            Self {
+                instance,
+                attrs: Arc::new(EndpointAttrs::new("ownership_test", None)),
+                submissions: AtomicUsize::new(0),
+                response_ports: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn take_response_port(&self) -> OncePortRef<PythonMessage> {
+            self.response_ports
+                .lock()
+                .expect("the response-port recorder should not be poisoned")
+                .pop()
+                .expect("call should have supplied a response port")
+        }
+    }
+
+    impl Endpoint for RecordingCallEndpoint {
+        fn get_extent(&self, _py: Python<'_>) -> PyResult<Extent> {
+            Ok(Extent::unity())
+        }
+
+        fn get_method_name(&self) -> &str {
+            "ownership_test"
+        }
+
+        fn metric_attrs(&self) -> &Arc<EndpointAttrs> {
+            &self.attrs
+        }
+
+        fn send_message<'py>(
+            &self,
+            _py: Python<'py>,
+            _args: &Bound<'py, PyTuple>,
+            _kwargs: Option<&Bound<'py, PyDict>>,
+            port_ref: Option<EitherPortRef>,
+            _selection: AllOrChoose,
+            _instance: &Instance<PythonActor>,
+            _correlation_id: Option<u64>,
+        ) -> PyResult<()> {
+            let Some(EitherPortRef::Once(PythonOncePortRef { inner: Some(port) })) = port_ref
+            else {
+                panic!("call should submit one reducible response port");
+            };
+            self.response_ports
+                .lock()
+                .expect("the response-port recorder should not be poisoned")
+                .push(port);
+            self.submissions.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn get_supervision_monitor(&self) -> Option<Arc<dyn Supervisable>> {
+            None
+        }
+
+        fn get_qualified_name(&self) -> Option<String> {
+            Some("ownership_test.call()".to_string())
+        }
+
+        fn enter_endpoint_span(
+            &self,
+            adverb: EndpointAdverb,
+            actor_id: &ActorAddr,
+            correlation_id: u64,
+        ) -> SpanGuard {
+            SpanGuard::actor_endpoint(
+                adverb.as_str(),
+                actor_id,
+                "ownership_test_mesh",
+                "ownership_test",
+                correlation_id,
+            )
+        }
+
+        fn get_current_instance(&self, _py: Python<'_>) -> PyResult<Instance<PythonActor>> {
+            Ok(self.instance.clone_for_py())
+        }
+    }
+
+    fn call_observer(endpoint: &RecordingCallEndpoint) -> Py<PyPythonTask> {
+        monarch_with_gil_blocking(GilSite::Test, |py| -> PyResult<Py<PyPythonTask>> {
+            install_future_test_module(py)?;
+            endpoint
+                .call(py, &PyTuple::empty(py), None)?
+                .extract(py)
+                .map_err(Into::<PyErr>::into)
+        })
+        .expect("call should return an observer")
+    }
+
+    #[tokio::test]
+    async fn call_submits_cast_before_observer_and_drop_closes_response_port() {
+        pyo3::Python::initialize();
+        let instance = test_instance("call_submits_cast_before_observer_and_drop_closes_port");
+        let endpoint = RecordingCallEndpoint::new(instance.clone_for_py());
+
+        let retained = call_observer(&endpoint);
+        assert_eq!(
+            endpoint.submissions.load(Ordering::SeqCst),
+            1,
+            "submission should happen before the observer is driven"
+        );
+        let retained_port = endpoint.take_response_port();
+        let (return_handle, _return_receiver) = instance
+            .mailbox_for_py()
+            .open_port::<Undeliverable<MessageEnvelope>>();
+        instance
+            .mailbox_for_py()
+            .serialize_and_send_once(retained_port, result_message(Some(0)), return_handle)
+            .expect("the retained observer's response should serialize");
+        let collected = drive_task(retained)
+            .await
+            .expect("the retained observer should collect its response");
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            collected
+                .extract::<Py<PyValueMesh>>(py)
+                .expect("the retained observer should collect its response");
+        });
+
+        let discarded = call_observer(&endpoint);
+        assert_eq!(
+            endpoint.submissions.load(Ordering::SeqCst),
+            2,
+            "the second operation should also be submitted before observation"
+        );
+        let dropped_port = endpoint.take_response_port();
+        let dropped_destination = dropped_port.port_addr().clone();
+        monarch_with_gil_blocking(GilSite::Test, |_py| drop(discarded));
+
+        let (return_handle, mut return_receiver) = instance
+            .mailbox_for_py()
+            .open_port::<Undeliverable<MessageEnvelope>>();
+        instance
+            .mailbox_for_py()
+            .serialize_and_send_once(dropped_port, result_message(Some(0)), return_handle)
+            .expect("the post should serialize before delivery is rejected");
+        let undeliverable = tokio::time::timeout(WAIT, return_receiver.recv())
+            .await
+            .expect("timed out waiting for the dropped port's delivery failure")
+            .expect("the return port should receive the delivery failure");
+        let Undeliverable::Returned(envelope) = undeliverable else {
+            panic!("the failed response should retain its original envelope");
+        };
+        assert_eq!(envelope.dest(), &dropped_destination);
+        assert_eq!(endpoint.submissions.load(Ordering::SeqCst), 2);
     }
 }
