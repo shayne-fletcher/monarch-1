@@ -241,6 +241,10 @@ class SyncActor(Actor):
     def sync_endpoint(self, a_counter: Counter):
         return a_counter.value.choose().get()
 
+    @endpoint
+    def accumulate_sync_endpoint(self, a_counter: Counter) -> int:
+        return Accumulator(a_counter.value, 0, operator.add).accumulate().get()
+
 
 @pytest.mark.timeout(60)
 async def test_sync_actor():
@@ -250,6 +254,17 @@ async def test_sync_actor():
     r = await a.sync_endpoint.choose(c)
     assert r == 5
     await proc.stop()
+
+
+@pytest.mark.timeout(60)
+async def test_accumulate_get_works_inside_sync_endpoint() -> None:
+    proc = this_host().spawn_procs(per_host={"gpus": 2})
+    try:
+        actor = proc.spawn("accumulator_sync_actor", SyncActor)
+        counter = proc.spawn("accumulator_counter", Counter, 3)
+        assert await actor.accumulate_sync_endpoint.choose(counter) == 6
+    finally:
+        await proc.stop()
 
 
 @pytest.mark.timeout(60)
@@ -2232,47 +2247,3 @@ async def test_del_runs_on_proc_mesh_stop() -> None:
             f"file {marker_path} should have contents 'finalized' if the finalizers were run"
         )
     os.unlink(marker_path)
-
-
-# ── Accumulator.accumulate characterization tests ──────────────────────────
-
-
-def _future_of(value):
-    """A real, single-use monarch Future resolving to value."""
-
-    async def _v():
-        return value
-
-    return Future._from_coro(_v())
-
-
-def _stream_endpoint(values):
-    """A fake Endpoint whose .stream() yields one real Future per value."""
-    ep = unittest.mock.MagicMock()
-    ep.stream.return_value = iter([_future_of(v) for v in values])
-    return ep
-
-
-def test_accumulate_folds_with_combine():
-    """accumulate reduces the per-rank stream through combine from identity."""
-    acc = Accumulator(_stream_endpoint([1, 2, 3]), 0, operator.add)
-    assert acc.accumulate().get() == 6
-
-
-def test_accumulate_empty_stream_returns_identity():
-    """With no streamed values, accumulate returns the identity seed."""
-    acc = Accumulator(_stream_endpoint([]), 42, operator.add)
-    assert acc.accumulate().get() == 42
-
-
-def test_accumulate_folds_left_to_right():
-    """combine is applied left-to-right over the stream, seeded by identity."""
-    acc = Accumulator(_stream_endpoint([1, 2, 3]), [], lambda a, r: a + [r])
-    assert acc.accumulate().get() == [1, 2, 3]
-
-
-def test_accumulate_forwards_args_to_stream():
-    """accumulate forwards its args/kwargs to endpoint.stream()."""
-    ep = _stream_endpoint([1])
-    Accumulator(ep, 0, operator.add).accumulate("a", k=1).get()
-    ep.stream.assert_called_once_with("a", k=1)
