@@ -16,11 +16,9 @@ to be reused.
 
 import pytest
 from isolate_in_subprocess import isolate_in_subprocess
-from monarch._rust_bindings.monarch_hyperactor.pytokio import (
-    is_tokio_thread,
-    PythonTask,
-    WouldBlockRuntime,
-)
+from monarch._rust_bindings.monarch_hyperactor.handle import WouldBlockRuntime
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
 from monarch._src.actor.host_mesh import this_host
 from monarch.actor import Actor, endpoint
 
@@ -31,7 +29,7 @@ def _probe_fresh_bootstrap() -> str:
     """Ask for a context on a Tokio thread with neither actor nor client."""
     from monarch._src.actor.actor_mesh import _client_context, _context, context
 
-    if not is_tokio_thread():
+    if not _is_in_tokio_runtime():
         return "precondition: not a tokio thread"
     if _client_context.try_get() is not None:
         return "precondition: client already initialized"
@@ -56,7 +54,7 @@ def _probe_fresh_bootstrap() -> str:
 async def _probe_fresh_bootstrap_on_worker() -> str:
     """The incident shape: a runtime *worker* thread, where block_on panics.
 
-    ``spawn_blocking`` threads report ``is_tokio_thread()`` but tolerate
+    ``spawn_blocking`` threads are in a Tokio runtime context but tolerate
     ``block_on``; a worker thread does not. This is the case that motivated
     the guard.
     """
@@ -67,7 +65,7 @@ def _probe_attach() -> str:
     """``attach()`` bootstraps directly, bypassing ``context()``."""
     from monarch._src.actor.actor_mesh import _client_context, attach
 
-    if not is_tokio_thread():
+    if not _is_in_tokio_runtime():
         return "precondition: not a tokio thread"
     if _client_context.try_get() is not None:
         return "precondition: client already initialized"
@@ -87,7 +85,7 @@ def _probe_reuse() -> str:
     """An initialized client must still be handed back on a Tokio thread."""
     from monarch._src.actor.actor_mesh import _client_context, _context, context
 
-    if not is_tokio_thread():
+    if not _is_in_tokio_runtime():
         return "precondition: not a tokio thread"
     expected = _client_context.try_get()
     if expected is None:

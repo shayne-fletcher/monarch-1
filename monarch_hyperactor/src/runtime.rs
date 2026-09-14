@@ -93,6 +93,24 @@ pub fn get_tokio_runtime() -> Handle {
     global_runtime().handle.clone()
 }
 
+/// Return whether the current thread has entered any Tokio runtime context.
+///
+/// This deliberately uses Tokio's context rather than Monarch's runtime-kind
+/// tag: synchronous entry must be refused on foreign Tokio workers and blocking
+/// pools as well as Monarch's own runtime.
+#[pyfunction(name = "_is_in_tokio_runtime")]
+pub(crate) fn is_in_tokio_runtime() -> bool {
+    Handle::try_current().is_ok()
+}
+
+/// Ensure the embedded Python interpreter is initialized exactly once for
+/// Rust tests.
+#[cfg(test)]
+pub(crate) fn ensure_python() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(Python::initialize);
+}
+
 /// Record an actor's event loop on the `threading.Thread` running it, so the
 /// interpreter-exit reaper can find it again.
 ///
@@ -390,6 +408,13 @@ fn wait_on_event_for_exit_test(
 
 /// Initialize the runtime module and expose Python functions
 pub fn register_python_bindings(runtime_mod: &Bound<'_, PyModule>) -> PyResult<()> {
+    let is_in_tokio_runtime_fn = wrap_pyfunction!(is_in_tokio_runtime, runtime_mod.py())?;
+    is_in_tokio_runtime_fn.setattr(
+        "__module__",
+        "monarch._rust_bindings.monarch_hyperactor.runtime",
+    )?;
+    runtime_mod.add_function(is_in_tokio_runtime_fn)?;
+
     let sleep_indefinitely_fn =
         wrap_pyfunction!(sleep_indefinitely_for_unit_tests, runtime_mod.py())?;
     sleep_indefinitely_fn.setattr(
@@ -700,5 +725,32 @@ mod tests {
                 .unwrap()
         });
         assert_eq!(kind, Some(RuntimeKind::ControlPlane));
+    }
+
+    // Attests HDL-6.
+    #[test]
+    fn runtime_context_predicate_detects_foreign_worker_and_blocking_pool() {
+        assert!(
+            !is_in_tokio_runtime(),
+            "the ordinary test thread should begin outside a Tokio runtime"
+        );
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("foreign Tokio runtime should build");
+        let worker = runtime.spawn(async { is_in_tokio_runtime() });
+        let blocking = runtime.spawn_blocking(is_in_tokio_runtime);
+        let (worker, blocking) = runtime.block_on(async { tokio::join!(worker, blocking) });
+
+        assert!(
+            worker.expect("foreign runtime worker should join"),
+            "a foreign Tokio worker must be recognized as a runtime context"
+        );
+        assert!(
+            blocking.expect("foreign runtime blocking task should join"),
+            "a foreign Tokio blocking-pool thread must be recognized as a runtime context"
+        );
     }
 }
