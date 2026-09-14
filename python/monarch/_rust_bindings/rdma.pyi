@@ -7,7 +7,8 @@
 # pyre-strict
 from typing import Any, final
 
-from monarch._rust_bindings.monarch_hyperactor.pytokio import Handle, PythonTask
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 
 @final
 class _RdmaMemoryRegionView:

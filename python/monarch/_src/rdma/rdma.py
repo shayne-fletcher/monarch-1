@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     import torch
 
-from monarch._rust_bindings.monarch_hyperactor.pytokio import Handle
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 from monarch._src.actor.actor_mesh import context
 from monarch._src.actor.future import Future
 from monarch._src.actor.proc_mesh import ProcMesh
