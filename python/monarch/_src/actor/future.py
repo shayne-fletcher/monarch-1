@@ -83,6 +83,14 @@ class Future(Generic[R]):
         )
         return future
 
+    @classmethod
+    def _from_handle(cls, handle: Handle[R]) -> "Future[R]":
+        if not isinstance(handle, Handle):
+            raise TypeError(f"expected Handle, got {type(handle).__name__}")
+        future = cast("Future[R]", object.__new__(cls))
+        future._status = _Handle(handle)
+        return future
+
     def _take_inner(self) -> "PythonTask[R]":
         """Take the underlying one-shot ``PythonTask`` from this Future.
 
@@ -98,6 +106,19 @@ class Future(Generic[R]):
                 return cast("PythonTask[R]", coro)
             case _:
                 raise ValueError("Future has already been awaited or resolved.")
+
+    def _as_handle(self) -> "Handle[R]":
+        match self._status:
+            case _Unawaited(coro=coro):
+                handle = coro.spawn_handle()
+                self._status = _Handle(handle)
+                return cast("Handle[R]", handle)
+            case _Handle(handle=handle):
+                return cast("Handle[R]", handle)
+            case _Complete() | _Exception() | _Taken():
+                raise ValueError("Future does not have a Handle in its current state.")
+            case _:
+                raise RuntimeError("unknown status")
 
     def get(self, timeout: Optional[float] = None) -> R:
         """Get the result of the Future.
@@ -214,6 +235,9 @@ class Future(Generic[R]):
                 raise RuntimeError("unknown status")
 
     def __await__(self) -> Generator[Any, Any, R]:
+        match self._status:
+            case _Handle(handle=handle):
+                return handle.__await__()
         if asyncio._get_running_loop() is not None:
             # Asyncio callers observe through the Handle; `__await__` delegates
             # to `as_asyncio()`.
@@ -224,11 +248,6 @@ class Future(Generic[R]):
                     raise RuntimeError(
                         "Future cannot be awaited on a Tokio thread; observe it "
                         "from an asyncio loop or synchronous context."
-                    )
-                case _Handle(_):
-                    raise ValueError(
-                        "Future is backed by a Handle and is not awaitable on a tokio thread; "
-                        "use get() or as_asyncio() from a sync/asyncio context."
                     )
                 case _Taken():
                     raise ValueError("Future was consumed.")
@@ -255,14 +274,10 @@ class Future(Generic[R]):
         if loop is None:
             raise RuntimeError("as_asyncio() requires a running asyncio event loop.")
         match self._status:
-            case _Unawaited(coro=coro):
-                # The loop is confirmed above, so spawning is safe: an off-loop
-                # call raised already, leaving the Future in `_Unawaited`.
-                handle = coro.spawn_handle()
-                self._status = _Handle(handle)
-                return handle.as_asyncio()
-            case _Handle(handle=handle):
-                return handle.as_asyncio()
+            case _Unawaited() | _Handle():
+                # The loop is confirmed above, so an off-loop call cannot make
+                # `_as_handle()` spawn or mutate the Future.
+                return self._as_handle().as_asyncio()
             case _Complete(value=value):
                 done = loop.create_future()
                 done.set_result(value)
