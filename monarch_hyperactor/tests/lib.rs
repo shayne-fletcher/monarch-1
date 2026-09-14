@@ -9,4 +9,5 @@
 mod actor_environment;
 mod client_root;
 mod code_sync;
+mod handle;
 mod telemetry;

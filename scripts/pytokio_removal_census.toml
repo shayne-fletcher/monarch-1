@@ -278,7 +278,13 @@ per_file_operations = ["pytokio_module_ref"]
 
 # Some patterns name a symbol that exists elsewhere under a different owner:
 # tokio has its own spawn_blocking. Scope those operations to the file that
-# owns them.
+# owns them. The scanner has no per-operation exclusion: its global exclusion
+# would hide every operation in the same file. After 6.1, the only available
+# way to exclude the permanent definitions while continuing to scan those files
+# for other residue is therefore to restrict helper_definition to the three
+# legacy owner files. This gives up unknown-site detection for a same-named
+# helper introduced elsewhere, so the independent 6.8 code search remains the
+# final repository-wide proof.
 [config.operation_paths]
 take_inner_retire = ["fbcode/monarch/python/monarch/_src/actor/future.py"]
 bootstrap_storage_spawn = ["fbcode/monarch/python/monarch/_src/actor/bootstrap.py"]
@@ -286,7 +292,11 @@ caller_free_primitive = ["fbcode/monarch/monarch_hyperactor/src/pytokio.rs"]
 mesh_state_resolve = ["fbcode/monarch/monarch_hyperactor/src/pickle.rs"]
 reserve_binding = ["fbcode/monarch/monarch_hyperactor/src/pickle.rs"]
 would_block_surface = [
-  "fbcode/monarch/monarch_hyperactor/src/handle.rs",
+  "fbcode/monarch/monarch_hyperactor/src/pytokio.rs",
+]
+helper_definition = [
+  "fbcode/monarch/monarch_extension/src/mesh_controller.rs",
+  "fbcode/monarch/monarch_hyperactor/src/actor.rs",
   "fbcode/monarch/monarch_hyperactor/src/pytokio.rs",
 ]
 binding_stub_symbol = [
@@ -308,7 +318,7 @@ rust_from_coro = "\"_from_coro\""
 pytokio_module_ref = "crate::pytokio|monarch_hyperactor::pytokio|^pub mod pytokio"
 helper_symbol = "(?:crate|monarch_hyperactor)::pytokio::(\\w+)"
 caller_free_primitive = "^\\s*fn\\s+(select_one|with_timeout|spawn_blocking|sleep)\\s*\\("
-helper_definition = "^\\s*(?:pub(?:\\(crate\\))?\\s+)?(?:fn|struct)\\s+(is_tokio_thread|send_result|to_py_error|WouldBlockRuntime)\\b|attr\\s+(ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK)"
+helper_definition = "^\\s*(?:pub(?:\\(crate\\))?\\s+)?(?:fn|struct)\\s+(is_in_tokio_runtime|is_tokio_thread|send_result|to_py_error|WouldBlockRuntime)\\b|attr\\s+(ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK)"
 
 [config.patterns.python_calls]
 from_coro = "Future._from_coro"
@@ -351,13 +361,13 @@ mesh_state_resolve = 1
 shared_reconstruction = 2
 reserve_binding = 1
 py_mesh_reserve = 2
-py_is_tokio_thread = 3
+py_is_tokio_thread = 0
 pytokio_import = 33
-pytokio_module_ref = 17
-helper_symbol = 26
-helper_definition = 6
-would_block_surface = 2
-binding_stub_symbol = 5
+pytokio_module_ref = 16
+helper_symbol = 22
+helper_definition = 1
+would_block_surface = 0
+binding_stub_symbol = 3
 doc_legacy_surface = 4
 
 # Imports are counted by file; each row also pins its exact member set, so a
@@ -516,6 +526,8 @@ owns = [
 id = "6.1"
 allowed_states = ["migrated", "removed_upstream"]
 owns = [
+  "bs.pytokio.WouldBlockRuntime",
+  "bs.pytokio.is_tokio_thread",
   "hd.actor.to_py_error",
   "hd.handle.WouldBlockRuntime",
   "hd.mesh_controller.to_py_error",
@@ -744,8 +756,6 @@ allowed_states = ["migrated", "removed_upstream"]
 owns = [
   "bs.pytokio.PythonTask",
   "bs.pytokio.Shared",
-  "bs.pytokio.WouldBlockRuntime",
-  "bs.pytokio.is_tokio_thread",
   "cf.pytokio.select_one",
   "cf.pytokio.sleep",
   "cf.pytokio.spawn_blocking",
@@ -840,8 +850,9 @@ path = "fbcode/monarch/python/monarch/_rust_bindings/monarch_hyperactor/pytokio.
 symbol = "WouldBlockRuntime"
 operation = "binding_stub_symbol"
 scope = "stub"
-state = "legacy"
-transition = "6.8"
+state = "migrated"
+transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "bs.pytokio.is_tokio_thread"
@@ -851,8 +862,9 @@ path = "fbcode/monarch/python/monarch/_rust_bindings/monarch_hyperactor/pytokio.
 symbol = "is_tokio_thread"
 operation = "binding_stub_symbol"
 scope = "stub"
-state = "legacy"
-transition = "6.8"
+state = "migrated"
+transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "ms.bootstrap.attach_to_workers[host_mesh.spawn]"
@@ -1460,8 +1472,9 @@ path = "fbcode/monarch/monarch_extension/src/mesh_controller.rs"
 symbol = "to_py_error"
 operation = "helper_definition"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "hd.actor.to_py_error"
@@ -1471,8 +1484,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/actor.rs"
 symbol = "to_py_error"
 operation = "helper_definition"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "hd.pytokio.ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK"
@@ -1493,8 +1507,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/pytokio.rs"
 symbol = "is_tokio_thread"
 operation = "helper_definition"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "hd.pytokio.send_result"
@@ -1504,8 +1519,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/pytokio.rs"
 symbol = "send_result"
 operation = "helper_definition"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "hd.pytokio.to_py_error"
@@ -1515,8 +1531,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/pytokio.rs"
 symbol = "to_py_error"
 operation = "helper_definition"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "hs.attrs.unawaited_pytokio_traceback"
@@ -1660,8 +1677,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/handle.rs"
 symbol = "ensure_python"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "hs.handle.is_tokio_thread"
@@ -1671,8 +1689,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/handle.rs"
 symbol = "is_tokio_thread"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "hs.handle.send_result"
@@ -1682,8 +1701,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/handle.rs"
 symbol = "send_result"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "hs.handle.to_py_error"
@@ -1693,8 +1713,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/handle.rs"
 symbol = "to_py_error"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "hs.host_mesh.PyPythonTask"
@@ -2024,8 +2045,9 @@ path = "fbcode/monarch/python/monarch/_src/actor/actor_mesh.py"
 symbol = "_init_client_context[is_tokio_thread]"
 operation = "py_is_tokio_thread"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "hs.future.Future.__await__[is_tokio_thread]"
@@ -2035,8 +2057,9 @@ path = "fbcode/monarch/python/monarch/_src/actor/future.py"
 symbol = "Future.__await__[is_tokio_thread]"
 operation = "py_is_tokio_thread"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "hs.future.Future.get[is_tokio_thread]"
@@ -2046,8 +2069,9 @@ path = "fbcode/monarch/python/monarch/_src/actor/future.py"
 symbol = "Future.get[is_tokio_thread]"
 operation = "py_is_tokio_thread"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "ms.host_mesh.HostMesh.__reduce_ex__[reserve_mesh_referenceself._hy_host_mesh]"
@@ -2977,7 +3001,7 @@ operation = "pytokio_import"
 scope = "production"
 state = "legacy"
 transition = "6.3c"
-members = ["PythonTask", "WouldBlockRuntime", "is_tokio_thread"]
+members = ["PythonTask"]
 
 [[site]]
 id = "im.bootstrap.module_2"
@@ -3001,7 +3025,7 @@ operation = "pytokio_import"
 scope = "production"
 state = "legacy"
 transition = "6.7"
-members = ["Handle", "PythonTask", "WouldBlockRuntime", "is_tokio_thread"]
+members = ["PythonTask"]
 
 [[site]]
 id = "im.host_mesh.module_2"
@@ -3145,7 +3169,7 @@ operation = "pytokio_import"
 scope = "test"
 state = "legacy"
 transition = "6.8"
-members = ["PythonTask", "WouldBlockRuntime", "is_tokio_thread"]
+members = ["PythonTask"]
 
 [[site]]
 id = "im.test_future_characterization.module"
@@ -3157,7 +3181,7 @@ operation = "pytokio_import"
 scope = "test"
 state = "legacy"
 transition = "6.8"
-members = ["Handle", "PythonTask", "WouldBlockRuntime", "is_tokio_thread"]
+members = ["PythonTask"]
 
 [[site]]
 id = "im.test_host_mesh.module"
@@ -3363,8 +3387,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/handle.rs"
 symbol = "<file>"
 operation = "pytokio_module_ref"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "mr.host_mesh.file"
@@ -3844,8 +3869,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/handle.rs"
 symbol = "WouldBlockRuntime"
 operation = "would_block_surface"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"
 
 [[site]]
 id = "hd.pytokio.WouldBlockRuntime"
@@ -3855,5 +3881,6 @@ path = "fbcode/monarch/monarch_hyperactor/src/pytokio.rs"
 symbol = "WouldBlockRuntime"
 operation = "would_block_surface"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.1"
+transition_revision = "D120010273"

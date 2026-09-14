@@ -87,9 +87,9 @@
 //!   (`get`/`wait_future`) path, the async (`as_asyncio`) path, and
 //!   `wait_completion`, so an observer raises rather than hanging forever.
 //! - **HDL-11 (`Handle` is not constructible from Python).** The pyclass has no
-//!   `#[new]` and the only `from_value` constructor is `#[cfg(test)]`-gated, so a
-//!   live `Handle` always wraps a producer-supplied core (upholding HDL-1/HDL-2);
-//!   exposing a Python constructor would let user code mint an unresolvable core.
+//!   `#[new]`, and its Rust-only [`PyHandle::from_value`] constructor lives
+//!   outside `#[pymethods]`. Python therefore cannot mint a `Handle` core;
+//!   exposing a Python constructor would let user code create invalid state.
 //! - **HDL-12 (`get()` timeout contract).** `get()` validates the timeout up
 //!   front (rejecting negative/NaN/non-finite as `ValueError` via
 //!   `try_from_secs_f64`, never panicking) and before the ready fast path, so an
@@ -108,9 +108,24 @@
 //!   value on the ready-success fast path (a discriminant-only read, HDL-3) and
 //!   cloning the `PyErr` under the HDL-9 borrow order only on the error path. Both
 //!   are `pub` Rust-only methods outside `#[pymethods]` (HDL-11).
+//! - **HDL-14 (Rust value observation is owned and non-consuming).**
+//!   [`PyHandle::wait_future`] returns a `Send + 'static` future over a cloned
+//!   watch receiver. The waiter borrows nothing from the `PyHandle`, survives
+//!   the wrapper being dropped, and leaves the terminal value available to
+//!   every other observer.
+//! - **HDL-15 (Rust ready construction starts no work).**
+//!   [`PyHandle::from_value`] constructs an already-complete, non-aborting core
+//!   without spawning a task. It is public to Rust callers but remains outside
+//!   `#[pymethods]`, preserving HDL-11.
+//! - **HDL-16 (permanent Python identity).** `Handle` and `WouldBlockRuntime`
+//!   have the canonical module `monarch._rust_bindings.monarch_hyperactor.handle`.
+//!   The temporary `pytokio.Handle` compatibility name refers to the same type
+//!   object rather than registering a second class.
 
+use std::error::Error;
 use std::future::Future;
 
+use monarch_types::SerializablePyErr;
 use monarch_types::py_global;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyRuntimeError;
@@ -121,15 +136,14 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyCFunction;
+use pyo3::types::PyString;
 use pyo3::types::PyType;
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
-use crate::pytokio::is_tokio_thread;
-use crate::pytokio::send_result;
-use crate::pytokio::to_py_error;
 use crate::runtime::GilSite;
 use crate::runtime::get_tokio_runtime;
+use crate::runtime::is_in_tokio_runtime;
 use crate::runtime::monarch_with_gil;
 use crate::runtime::monarch_with_gil_blocking;
 use crate::runtime::signal_safe_block_on;
@@ -140,13 +154,68 @@ use crate::runtime::signal_safe_block_on;
 py_global!(invalid_state_error, "asyncio", "InvalidStateError");
 
 pyo3::create_exception!(
-    pytokio,
+    handle,
     WouldBlockRuntime,
     pyo3::exceptions::PyRuntimeError,
     "raised when a synchronous API refuses to enter or block on Tokio from \
      an existing Tokio runtime context -- Handle.get(), or a fresh root-client \
      bootstrap from the Python layer"
 );
+
+/// Convert a Rust error into the generic Python `ValueError` used by Monarch's
+/// native bindings.
+pub fn to_py_error<T>(error: T) -> PyErr
+where
+    T: Error,
+{
+    PyErr::new::<PyValueError, _>(error.to_string())
+}
+
+/// Format a captured traceback (from `traceback.extract_stack()`) as a single
+/// string suitable for logging.
+fn format_traceback(py: Python<'_>, traceback: &Py<PyAny>) -> PyResult<String> {
+    let tb = py
+        .import("traceback")?
+        .call_method1("format_list", (traceback,))?;
+    PyString::new(py, "")
+        .call_method1("join", (tb,))?
+        .extract::<String>()
+}
+
+/// Publish a completed background-task result to the shared watch channel.
+///
+/// Shared by `PyPythonTask` spawns and the direct [`PyHandle::spawn`] producer
+/// (HDL-13). If the receiver has already been dropped, `watch::Sender::send`
+/// returns the unsent value as `SendError`: no consumer can ever observe it.
+/// An unobserved error is logged with its producer-creation traceback when one
+/// was captured.
+pub(crate) fn send_result(
+    tx: watch::Sender<Option<PyResult<Py<PyAny>>>>,
+    result: PyResult<Py<PyAny>>,
+    traceback: Option<Py<PyAny>>,
+) {
+    if let Err(watch::error::SendError(Some(Err(pyerr)))) = tx.send(Some(result)) {
+        monarch_with_gil_blocking(GilSite::Traceback, |py| {
+            let tb = if let Some(tb) = traceback {
+                format_traceback(py, &tb).unwrap()
+            } else {
+                // No creation traceback was captured: either a capture-disabled
+                // PythonTask (the default when the env var is unset) or the
+                // direct PyHandle::spawn producer, which never captures one.
+                "creation traceback unavailable (PythonTask producers can set \
+                 `MONARCH_HYPERACTOR_ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK=1` to capture one)\n"
+                    .into()
+            };
+            tracing::error!(
+                "a background task errored but is not being awaited; this will not crash your \
+                program, but indicates that something went wrong.\n{}\nTraceback where the task \
+                was created (most recent call last):\n{}",
+                SerializablePyErr::from(py, &pyerr),
+                tb
+            );
+        });
+    }
+}
 
 /// The watch-channel mechanics behind a `Handle`.
 ///
@@ -306,12 +375,13 @@ impl Drop for HandleCore {
 /// The observe-only handle to a background Tokio task.
 ///
 /// Exposed to Python as
-/// `monarch._rust_bindings.monarch_hyperactor.pytokio.Handle`. HDL-11: Python
+/// `monarch._rust_bindings.monarch_hyperactor.handle.Handle`. HDL-11: Python
 /// obtains a `Handle` from a producer and cannot construct one directly -- there
-/// is no `__new__`, and `from_value` is `#[cfg(test)]`-only.
+/// is no `__new__`, and the Rust-only `from_value` method is outside
+/// `#[pymethods]`.
 #[pyclass(
     name = "Handle",
-    module = "monarch._rust_bindings.monarch_hyperactor.pytokio"
+    module = "monarch._rust_bindings.monarch_hyperactor.handle"
 )]
 pub struct PyHandle {
     core: HandleCore,
@@ -325,6 +395,27 @@ impl PyHandle {
     /// is private to this module.
     pub(crate) fn from_core(core: HandleCore) -> Self {
         Self { core }
+    }
+
+    /// Construct an already-complete `Handle` from `value` without spawning a
+    /// producer task (HDL-15).
+    ///
+    /// Rust-only and outside `#[pymethods]`, so making this method public does
+    /// not make `Handle` constructible from Python (HDL-11).
+    pub fn from_value(value: Py<PyAny>) -> PyResult<Self> {
+        Ok(Self {
+            core: HandleCore::from_value(value)?,
+        })
+    }
+
+    /// Return an owned, non-consuming Rust observer for this Handle's value
+    /// (HDL-14).
+    ///
+    /// The returned future owns a cloned watch receiver, so it borrows nothing
+    /// from `self`, survives the `PyHandle` being dropped, and can coexist with
+    /// any number of other observers.
+    pub fn wait_future(&self) -> impl Future<Output = PyResult<Py<PyAny>>> + Send + 'static {
+        self.core.wait_future()
     }
 
     /// Eagerly drive a Rust future to completion and return an observe-only
@@ -498,19 +589,6 @@ mod after_ready_tests {
     }
 }
 
-#[cfg(test)]
-impl PyHandle {
-    /// Construct a resolved `Handle` from `value`.
-    ///
-    /// HDL-11: Rust-only test helper (`#[cfg(test)]`), deliberately not a
-    /// Python-visible method, so a `Handle` cannot be constructed from Python.
-    pub(crate) fn from_value(value: Py<PyAny>) -> PyResult<Self> {
-        Ok(Self {
-            core: HandleCore::from_value(value)?,
-        })
-    }
-}
-
 #[pymethods]
 impl PyHandle {
     /// Block the calling thread until the handle resolves and return its value.
@@ -535,7 +613,7 @@ impl PyHandle {
         // raiser. It is the blocking API, and in a Tokio runtime context
         // blocking would panic the runtime, so refuse unconditionally -- even
         // a ready value -- keying the outcome to context, not producer timing.
-        if is_tokio_thread() {
+        if is_in_tokio_runtime() {
             return Err(WouldBlockRuntime::new_err(
                 "get() cannot be called from a Tokio runtime context; use poll() or as_asyncio()",
             ));
@@ -743,6 +821,21 @@ fn complete_asyncio_future(fut: &Bound<'_, PyAny>, is_exc: bool, value: Py<PyAny
     }
 }
 
+/// Register the permanent Handle Python bindings.
+pub fn register_python_bindings(handle_mod: &Bound<'_, PyModule>) -> PyResult<()> {
+    // HDL-16: this is the sole class registration. The legacy pytokio module
+    // installs an alias to the resulting type object rather than registering a
+    // second class.
+    handle_mod.add_class::<PyHandle>()?;
+    let would_block = handle_mod.py().get_type::<WouldBlockRuntime>();
+    would_block.setattr(
+        "__module__",
+        "monarch._rust_bindings.monarch_hyperactor.handle",
+    )?;
+    handle_mod.add("WouldBlockRuntime", would_block)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use pyo3::IntoPyObjectExt;
@@ -752,7 +845,7 @@ mod tests {
     use pyo3::types::PyTuple;
 
     use super::*;
-    use crate::pytokio::ensure_python;
+    use crate::runtime::ensure_python;
 
     // Build a `Handle` over a controlled, still-pending watch channel and return
     // the sender so the test drives completion explicitly.
@@ -1003,12 +1096,12 @@ def run_two(h):
         let in_tokio = monarch_with_gil_blocking(GilSite::Test, |py| handle.clone_ref(py));
 
         // `block_on` would poll the root future on *this* thread under an
-        // entered runtime -- `is_tokio_thread()` is true there, but it is not a
+        // entered runtime -- `is_in_tokio_runtime()` is true there, but it is not a
         // worker and nested blocking is tolerated. Spawn instead, so the
         // assertion genuinely runs on a runtime worker, and join from here.
         let joined = get_tokio_runtime().spawn(async move {
             assert!(
-                is_tokio_thread(),
+                is_in_tokio_runtime(),
                 "the oracle must observe from a runtime worker"
             );
             monarch_with_gil(GilSite::Test, |py| {

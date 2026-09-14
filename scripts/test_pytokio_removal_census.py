@@ -27,18 +27,30 @@ exclude = ["/build/"]
 suffixes = [".rs", ".py", ".pyi", ".md"]
 doc_suffixes = [".md"]
 defining_module = "src/pytokio.rs"
-defining_module_exempt = ["helper_symbol"]
-symbol_capture_operations = ["helper_symbol"]
+defining_module_exempt = [
+  "helper_symbol",
+  "helper_definition",
+  "would_block_surface",
+]
+symbol_capture_operations = [
+  "helper_symbol",
+  "helper_definition",
+  "would_block_surface",
+]
 per_file_operations = ["pytokio_module_ref"]
 
 [config.operation_paths]
 scoped_only = ["src/owner.rs"]
+helper_definition = ["src/actor.rs", "src/mesh_controller.rs", "src/pytokio.rs"]
+would_block_surface = ["src/pytokio.rs"]
 
 [config.patterns.rust]
 py_python_task_new = "\\\\bPyPythonTask::new\\\\b"
 raw_python_task_new = "(?<!Py)\\\\bPythonTask::new\\\\b"
 pytokio_module_ref = "crate::pytokio"
 helper_symbol = "crate::pytokio::(\\\\w+)"
+helper_definition = "^\\\\s*(?:pub(?:\\\\(crate\\\\))?\\\\s+)?(?:fn|struct)\\\\s+(is_in_tokio_runtime|is_tokio_thread|send_result|to_py_error|WouldBlockRuntime)\\\\b"
+would_block_surface = "pyo3::create_exception!\\\\s*\\\\(\\\\s*\\\\w+,\\\\s*(WouldBlockRuntime)|add\\\\(\\\"(WouldBlockRuntime)\\\""
 scoped_only = "\\\\bspawn_blocking\\\\b"
 
 [config.patterns.python_calls]
@@ -59,6 +71,8 @@ py_python_task_new = 1
 raw_python_task_new = 0
 pytokio_module_ref = 0
 helper_symbol = 0
+helper_definition = 0
+would_block_surface = 0
 scoped_only = 0
 from_coro = 0
 mesh_storage_spawn = 0
@@ -306,6 +320,36 @@ class CensusCheckerTest(unittest.TestCase):
         hits = census.discover(self.fixture.root, self.fixture.manifest()["config"])
         scoped = [h.path for h in hits if h.operation == "scoped_only"]
         self.assertEqual(scoped, ["src/owner.rs"])
+
+    def test_permanent_handle_and_runtime_definitions_are_excluded(self) -> None:
+        self.fixture.write(
+            "src/handle.rs",
+            "pyo3::create_exception!(handle, WouldBlockRuntime, RuntimeError);\n"
+            "fn send_result() {}\n",
+        )
+        self.fixture.write("src/runtime.rs", "fn is_in_tokio_runtime() {}\n")
+
+        hits = census.discover(self.fixture.root, self.fixture.manifest()["config"])
+        permanent_operations = {
+            hit.operation
+            for hit in hits
+            if hit.path in {"src/handle.rs", "src/runtime.rs"}
+        }
+        self.assertNotIn("helper_definition", permanent_operations)
+        self.assertNotIn("would_block_surface", permanent_operations)
+
+    def test_legacy_pytokio_definitions_remain_discoverable(self) -> None:
+        self.fixture.write(
+            "src/pytokio.rs",
+            'fn send_result() {}\nmodule.add("WouldBlockRuntime", would_block);\n',
+        )
+
+        hits = census.discover(self.fixture.root, self.fixture.manifest()["config"])
+        legacy = {
+            (hit.operation, hit.symbol) for hit in hits if hit.path == "src/pytokio.rs"
+        }
+        self.assertIn(("helper_definition", "send_result"), legacy)
+        self.assertIn(("would_block_surface", "WouldBlockRuntime"), legacy)
 
     def test_two_matches_on_one_line_are_both_found(self) -> None:
         """A single line may hold more than one construction."""
