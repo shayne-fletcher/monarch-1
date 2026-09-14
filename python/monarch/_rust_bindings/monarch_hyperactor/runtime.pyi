@@ -10,6 +10,10 @@
 Type hints for the runtime module.
 """
 
+def _is_in_tokio_runtime() -> bool:
+    """Return whether the current thread has entered a Tokio runtime context."""
+    ...
+
 def sleep_indefinitely_for_unit_tests() -> None:
     """
     A test function that sleeps indefinitely in a loop.

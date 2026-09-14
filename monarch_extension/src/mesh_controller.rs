@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::error::Error;
 use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::ops::Deref;
@@ -44,6 +43,7 @@ use monarch_hyperactor::actor::PythonMessage;
 use monarch_hyperactor::actor::PythonMessageKind;
 use monarch_hyperactor::actor::PythonResponseMessage;
 use monarch_hyperactor::context::PyInstance;
+use monarch_hyperactor::handle::to_py_error;
 use monarch_hyperactor::local_state_broker::LocalStateBrokerActor;
 use monarch_hyperactor::mailbox::PyPortId;
 use monarch_hyperactor::ndslice::PySlice;
@@ -91,13 +91,6 @@ struct _Controller {
 }
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-
-fn to_py_error<T>(e: T) -> PyErr
-where
-    T: Error,
-{
-    PyErr::new::<PyValueError, _>(e.to_string())
-}
 
 #[pymethods]
 impl _Controller {

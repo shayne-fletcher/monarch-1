@@ -55,6 +55,7 @@ from monarch._rust_bindings.monarch_hyperactor.channel import BindSpec, ChannelT
 from monarch._rust_bindings.monarch_hyperactor.config import configure
 from monarch._rust_bindings.monarch_hyperactor.context import Instance as HyInstance
 from monarch._rust_bindings.monarch_hyperactor.endpoint import ActorEndpoint
+from monarch._rust_bindings.monarch_hyperactor.handle import WouldBlockRuntime
 from monarch._rust_bindings.monarch_hyperactor.logging import log_endpoint_exception
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
@@ -69,11 +70,8 @@ from monarch._rust_bindings.monarch_hyperactor.pickle import (
     PicklingState,
 )
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorAddr
-from monarch._rust_bindings.monarch_hyperactor.pytokio import (
-    is_tokio_thread,
-    PythonTask,
-    WouldBlockRuntime,
-)
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
 from monarch._rust_bindings.monarch_hyperactor.shape import Point as HyPoint, Shape
 from monarch._rust_bindings.monarch_hyperactor.supervision import MeshFailure
 from monarch._src.actor import config
@@ -480,7 +478,7 @@ def _init_client_context(via: Optional[str] = None) -> Context:
     procs are reached, not the host's identity. Use ``attach``
     to supply ``via`` before the client context is first used.
     """
-    if is_tokio_thread():
+    if _is_in_tokio_runtime():
         raise WouldBlockRuntime(
             "cannot bootstrap a root client from inside the Tokio runtime; "
             "call context(), this_host(), or attach(addr) before entering "

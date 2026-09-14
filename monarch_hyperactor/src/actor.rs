@@ -8,7 +8,6 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::error::Error;
 use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -60,7 +59,6 @@ use ndslice::Point;
 use ndslice::extent;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyRuntimeError;
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::types::PyList;
@@ -72,6 +70,8 @@ use typeuri::Named;
 
 use crate::buffers::FrozenBuffer;
 use crate::context::PyInstance;
+// Preserve the crate-local conversion path used by host_mesh.
+pub(crate) use crate::handle::to_py_error;
 use crate::local_state_broker::BrokerId;
 use crate::local_state_broker::LocalStateBrokerMessage;
 use crate::mailbox::EitherPortRef;
@@ -1943,13 +1943,6 @@ impl Debug for LocalPort {
     }
 }
 
-pub(crate) fn to_py_error<T>(e: T) -> PyErr
-where
-    T: Error,
-{
-    PyErr::new::<PyValueError, _>(e.to_string())
-}
-
 #[pymethods]
 impl LocalPort {
     fn send(&mut self, obj: Py<PyAny>) -> PyResult<()> {
@@ -2140,6 +2133,7 @@ mod tests {
     use hyperactor_mesh::resource::Status;
     use hyperactor_mesh::resource::{self};
     use pyo3::PyTypeInfo;
+    use pyo3::exceptions::PyValueError;
     use pyo3::ffi::c_str;
     use pyo3::panic::PanicException;
 

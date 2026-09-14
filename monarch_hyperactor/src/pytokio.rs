@@ -94,14 +94,12 @@
 /// thread hops, so code calling `context()` inside a `PythonTask`
 /// sees the same actor context as the call site that constructed the
 /// task.
-use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
 
 use hyperactor_config::CONFIG;
 use hyperactor_config::ConfigAttr;
 use hyperactor_config::attrs::declare_attrs;
-use monarch_types::SerializablePyErr;
 use monarch_types::py_global;
 use pyo3::IntoPyObjectExt;
 #[cfg(test)]
@@ -112,7 +110,6 @@ use pyo3::exceptions::PyTimeoutError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyNone;
-use pyo3::types::PyString;
 use pyo3::types::PyTuple;
 use pyo3::types::PyType;
 use tokio::sync::Mutex;
@@ -120,6 +117,7 @@ use tokio::sync::watch;
 
 use crate::handle::HandleCore;
 use crate::handle::PyHandle;
+use crate::handle::send_result;
 use crate::pickle::reduce_shared;
 use crate::runtime::GilSite;
 use crate::runtime::get_tokio_runtime;
@@ -162,17 +160,6 @@ fn current_traceback() -> PyResult<Option<Py<PyAny>>> {
     } else {
         Ok(None)
     }
-}
-
-/// Format a captured traceback (from `traceback.extract_stack()`) as
-/// a single string suitable for logging.
-fn format_traceback(py: Python<'_>, traceback: &Py<PyAny>) -> PyResult<String> {
-    let tb = py
-        .import("traceback")?
-        .call_method1("format_list", (traceback,))?;
-    PyString::new(py, "")
-        .call_method1("join", (tb,))?
-        .extract::<String>()
 }
 
 /// Helper struct to make a Rust/Tokio future (returning a Python
@@ -362,14 +349,6 @@ impl PyPythonTask {
     }
 }
 
-// Helper: convert a Rust error into a generic Python ValueError.
-pub(crate) fn to_py_error<T>(e: T) -> PyErr
-where
-    T: Error,
-{
-    PyErr::new::<PyValueError, _>(e.to_string())
-}
-
 impl PyPythonTask {
     /// Consume this `PythonTask` and return the underlying Rust
     /// future.
@@ -445,45 +424,6 @@ impl PyPythonTask {
             traceback,
         ))
     }
-}
-
-/// Publish a completed background-task result to the `watch` channel.
-///
-/// Shared by `PyPythonTask` spawns and the direct [`PyHandle::spawn`] producer
-/// (HDL-13). If the receiver has already been dropped, `watch::Sender::send`
-/// returns the unsent value as `SendError`. We treat that as "nobody will ever
-/// observe this result".
-///
-/// In the special case where the unobserved result is an error, we log it (and
-/// include the creation-site traceback when available) to avoid silently losing
-/// failures from background tasks.
-pub(crate) fn send_result(
-    tx: tokio::sync::watch::Sender<Option<PyResult<Py<PyAny>>>>,
-    result: PyResult<Py<PyAny>>,
-    traceback: Option<Py<PyAny>>,
-) {
-    // a SendErr just means that there are no consumers of the value left.
-    if let Err(tokio::sync::watch::error::SendError(Some(Err(pyerr)))) = tx.send(Some(result)) {
-        monarch_with_gil_blocking(GilSite::Traceback, |py| {
-            let tb = if let Some(tb) = traceback {
-                format_traceback(py, &tb).unwrap()
-            } else {
-                // No creation traceback was captured: either a capture-disabled
-                // `PythonTask` (the default when the env var is unset) or the
-                // direct `PyHandle::spawn` producer, which never captures one.
-                "creation traceback unavailable (PythonTask producers can set \
-                 `MONARCH_HYPERACTOR_ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK=1` to capture one)\n"
-                    .into()
-            };
-            tracing::error!(
-                "a background task errored but is not being awaited; this will not crash your \
-                program, but indicates that something went wrong.\n{}\nTraceback where the task \
-                was created (most recent call last):\n{}",
-                SerializablePyErr::from(py, &pyerr),
-                tb
-            );
-        });
-    };
 }
 
 #[pymethods]
@@ -912,54 +852,22 @@ impl PyShared {
     }
 }
 
-/// Return true if the current thread is executing within a Tokio
-/// runtime context.
-///
-/// This checks whether `tokio::runtime::Handle::try_current()`
-/// succeeds.
-#[pyfunction]
-pub(crate) fn is_tokio_thread() -> bool {
-    tokio::runtime::Handle::try_current().is_ok()
-}
-
 /// Register the pytokio Python bindings into the given module.
 ///
-/// This wires up the exported pyclasses (`PythonTask`, `Shared`,
-/// `Handle`), the `WouldBlockRuntime` exception, and module-level
-/// functions used by the Monarch Python layer.
+/// This wires up the legacy `PythonTask` and `Shared` pyclasses plus a temporary
+/// alias to the permanent `Handle` type.
 pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     hyperactor_mod.add_class::<PyPythonTask>()?;
     hyperactor_mod.add_class::<PyShared>()?;
-    hyperactor_mod.add_class::<crate::handle::PyHandle>()?;
-    let would_block = hyperactor_mod
-        .py()
-        .get_type::<crate::handle::WouldBlockRuntime>();
-    would_block.setattr(
-        "__module__",
-        "monarch._rust_bindings.monarch_hyperactor.pytokio",
-    )?;
-    hyperactor_mod.add("WouldBlockRuntime", would_block)?;
-    let f = wrap_pyfunction!(is_tokio_thread, hyperactor_mod)?;
-    f.setattr(
-        "__module__",
-        "monarch._rust_bindings.monarch_hyperactor.pytokio",
-    )?;
-    hyperactor_mod.add_function(f)?;
+    // HDL-16: compatibility is an alias to the one permanent class object,
+    // never a second registration.
+    hyperactor_mod.add("Handle", hyperactor_mod.py().get_type::<PyHandle>())?;
 
     Ok(())
 }
 
-/// Ensure the embedded Python interpreter is initialized exactly
-/// once.
-///
-/// Safe to call from multiple threads, multiple times.
 #[cfg(test)]
-pub(crate) fn ensure_python() {
-    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    INIT.get_or_init(|| {
-        pyo3::Python::initialize();
-    });
-}
+pub(crate) use crate::runtime::ensure_python;
 
 #[cfg(test)]
 // Helper: let us "await" a `PyPythonTask` in Rust.
