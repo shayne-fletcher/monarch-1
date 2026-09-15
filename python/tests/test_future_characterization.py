@@ -16,16 +16,14 @@ warning, and the ``_take_inner()`` accessor with its ``_Taken`` terminal state
 """
 
 import asyncio
+import importlib
 import warnings
 from typing import Any, Callable, cast, NamedTuple
 
 import pytest
-from monarch._rust_bindings.monarch_hyperactor.pytokio import (
-    Handle,
-    is_tokio_thread,
-    PythonTask,
-    WouldBlockRuntime,
-)
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle, WouldBlockRuntime
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
 from monarch._rust_bindings.monarch_hyperactor.testing import (
     _make_handle_probe,
     _PROBE_SUCCESS_VALUE,
@@ -79,12 +77,12 @@ def _future_pending() -> "tuple[Any, Callable[[], None]]":
 
 def _run_in_tokio(coro):
     # Drive ``coro`` to completion on the Tokio runtime. Code inside ``coro``
-    # runs on a Tokio worker thread, where ``is_tokio_thread()`` is True and a
+    # runs on a Tokio worker thread, where ``_is_in_tokio_runtime()`` is True and a
     # ``Future`` takes its ``__await__`` tokio branch. ``block_on`` itself runs
     # on the (non-worker) calling thread, so it is allowed to block.
     #
     # ``PythonTask.spawn_blocking`` is NOT an equivalent driver, even though
-    # ``is_tokio_thread()`` is also True there: a blocking-pool thread tolerates
+    # ``_is_in_tokio_runtime()`` is also True there: a blocking-pool thread tolerates
     # nested blocking, while a runtime worker panics on it. Any Tokio case that
     # turns on refusing to block must use this worker path, or it silently
     # proves nothing.
@@ -100,6 +98,24 @@ def _run_in_tokio(coro):
 # _Handle. A Tokio-thread await is rejected without starting the task or
 # changing its state. These pin that lifecycle and its idempotency.
 # ---------------------------------------------------------------------------
+
+
+def test_handle_binding_has_permanent_module_identity():
+    """Attests HDL-16."""
+    pytokio = importlib.import_module(
+        "monarch._rust_bindings.monarch_hyperactor.pytokio"
+    )
+
+    # HDL-16: the compatibility name is an alias to the permanent class, and
+    # the other permanent Handle surfaces no longer leak from pytokio.
+    assert Handle.__module__ == "monarch._rust_bindings.monarch_hyperactor.handle"
+    assert (
+        WouldBlockRuntime.__module__
+        == "monarch._rust_bindings.monarch_hyperactor.handle"
+    )
+    assert pytokio.Handle is Handle
+    assert not hasattr(pytokio, "WouldBlockRuntime")
+    assert not hasattr(pytokio, "is_tokio_thread")
 
 
 def test_direct_construction_is_rejected():
@@ -195,7 +211,7 @@ def test_nested_future_await_raises_without_consuming_inner_future():
     fut: Future[int] = Future._from_coro(value())
 
     async def driver():
-        assert is_tokio_thread()
+        assert _is_in_tokio_runtime()
         with pytest.raises(RuntimeError) as caught:
             await fut
         return str(caught.value)
@@ -389,7 +405,7 @@ def test_get_in_tokio_thread_raises_would_block_and_is_non_consuming(monkeypatch
     fut: Future[int] = Future._from_coro(_value(5))
 
     async def attempt():
-        assert is_tokio_thread()
+        assert _is_in_tokio_runtime()
         return fut.get()
 
     with pytest.raises(
@@ -421,7 +437,7 @@ def test_get_timeout_in_tokio_thread_raises_would_block_and_is_non_consuming(
     fut: Future[int] = Future._from_coro(_value(5))
 
     async def attempt():
-        assert is_tokio_thread()
+        assert _is_in_tokio_runtime()
         return fut.get(timeout=0.1)
 
     with pytest.raises(
@@ -500,8 +516,7 @@ def test_get_in_loop_on_cached_state_traces_without_warning(monkeypatch):
 
 
 def test_handle_and_would_block_runtime_are_importable():
-    """``Handle`` and ``WouldBlockRuntime`` import from the pytokio bindings, and
-    ``WouldBlockRuntime`` subclasses ``RuntimeError``."""
+    """The permanent Handle bindings expose both types, with the right base."""
     assert issubclass(WouldBlockRuntime, RuntimeError)
     assert isinstance(Handle, type)
 
@@ -838,7 +853,7 @@ def _assert_tokio_await_raises_native(make_observable):
     ok = make_observable("success")
 
     async def attempt():
-        assert is_tokio_thread()
+        assert _is_in_tokio_runtime()
         # WouldBlockRuntime subclasses RuntimeError, so a bare match would also
         # accept get()'s refusal or the root-client bootstrap guard. Identify
         # the raiser, and pin the client as initialized so the guard is
@@ -860,7 +875,7 @@ def _assert_ready_get_on_tokio_refuses(make_observable):
     assert ok.get() == _PROBE_SUCCESS_VALUE  # ready before crossing over
 
     async def attempt():
-        assert is_tokio_thread()
+        assert _is_in_tokio_runtime()
         assert _client_context._val is not None, "bootstrap guard could fire"
         with pytest.raises(WouldBlockRuntime) as caught:
             ok.get()
@@ -990,7 +1005,7 @@ def _assert_get_emits_one_tracing_event(facade, monkeypatch):
     fresh = facade.observable("success")
 
     async def attempt():
-        assert is_tokio_thread()
+        assert _is_in_tokio_runtime()
         assert _client_context._val is not None, "bootstrap guard could fire"
         with pytest.raises(WouldBlockRuntime):
             fresh.get()
@@ -1079,7 +1094,7 @@ def test_fm_ready_get_on_tokio_refuses_current_cached_returns_and_reraises():
         failed.get()  # -> _Exception, off loop
 
     async def attempt():
-        assert is_tokio_thread()
+        assert _is_in_tokio_runtime()
         value = done.get()
         try:
             failed.get()

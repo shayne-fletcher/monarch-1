@@ -21,12 +21,9 @@ from typing import (
     TypeVar,
 )
 
-from monarch._rust_bindings.monarch_hyperactor.pytokio import (
-    Handle,
-    is_tokio_thread,
-    PythonTask,
-    WouldBlockRuntime,
-)
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle, WouldBlockRuntime
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
 from monarch._src.actor.telemetry import log_with_tracing
 
 R = TypeVar("R")
@@ -138,7 +135,7 @@ class Future(Generic[R]):
         ```
         """
         in_asyncio = asyncio._get_running_loop() is not None
-        in_tokio = is_tokio_thread()
+        in_tokio = _is_in_tokio_runtime()
         if in_asyncio or in_tokio:
             # Forward the event to Rust tracing for every in-loop/tokio caller,
             # including non-actor driver processes where no `TracingForwarder`
@@ -221,7 +218,7 @@ class Future(Generic[R]):
             # Asyncio callers observe through the Handle; `__await__` delegates
             # to `as_asyncio()`.
             return self.as_asyncio().__await__()
-        elif is_tokio_thread():
+        elif _is_in_tokio_runtime():
             match self._status:
                 case _Unawaited():
                     raise RuntimeError(
