@@ -17,6 +17,7 @@ warning, and the ``_take_inner()`` accessor with its ``_Taken`` terminal state
 
 import asyncio
 import importlib
+import sys
 import warnings
 from typing import Any, Callable, cast, NamedTuple
 
@@ -126,6 +127,110 @@ def test_direct_construction_is_rejected():
         Future()
     with pytest.raises(TypeError, match="unexpected keyword argument 'coro'"):
         Future(coro=None)
+
+
+def test_from_handle_stores_the_supplied_handle_without_starting_work(monkeypatch):
+    probe = _probe("success")
+    handle = cast("Any", probe._handle)
+    observations = []
+    original_get = Handle.get
+
+    def unexpected_observation(*args, **kwargs):
+        observations.append((args, kwargs))
+        raise AssertionError("_from_handle() must not observe the Handle")
+
+    for method in ("poll", "get", "as_asyncio", "__await__"):
+        monkeypatch.setattr(Handle, method, unexpected_observation)
+    try:
+        fut = Future._from_handle(handle)
+        assert isinstance(fut._status, future_mod._Handle)
+        assert fut._status.handle is handle
+        assert not probe._completed
+        assert observations == []
+    finally:
+        original_error = sys.exc_info()[1]
+        probe._release()
+        try:
+            original_get(handle, timeout=2)
+        except Exception as cleanup_error:
+            if original_error is None:
+                raise
+            # BaseException.add_note() is unavailable on the Python 3.10 OSS
+            # test lane. The original failure still takes precedence there.
+            if hasattr(original_error, "add_note"):
+                original_error.add_note(f"cleanup also failed: {cleanup_error!r}")
+
+
+def test_from_handle_rejects_non_handle_values():
+    with pytest.raises(TypeError, match="expected Handle"):
+        Future._from_handle(cast("Any", object()))
+
+
+def test_as_handle_spawns_an_unawaited_task_once(monkeypatch):
+    spawn_calls = 0
+    original_spawn_handle = PythonTask.spawn_handle
+
+    def counted_spawn_handle(task):
+        nonlocal spawn_calls
+        spawn_calls += 1
+        return original_spawn_handle(task)
+
+    monkeypatch.setattr(PythonTask, "spawn_handle", counted_spawn_handle)
+
+    gate = {"released": False}
+    runs = {"started": 0, "completed": 0}
+
+    async def controlled():
+        runs["started"] += 1
+        while not gate["released"]:
+            await PythonTask.sleep(0.005)
+        runs["completed"] += 1
+        return 7
+
+    fut: Future[int] = Future._from_coro(controlled())
+    first = None
+    try:
+        first = fut._as_handle()
+        second = fut._as_handle()
+        assert spawn_calls == 1
+        assert first is second
+
+        gate["released"] = True
+        assert first.get() == 7
+        assert fut.get() == 7
+        assert runs == {"started": 1, "completed": 1}
+    finally:
+        original_error = sys.exc_info()[1]
+        gate["released"] = True
+        try:
+            observer = first if first is not None else fut
+            observer.get(timeout=2)
+        except Exception as cleanup_error:
+            if original_error is None:
+                raise
+            # BaseException.add_note() is unavailable on the Python 3.10 OSS
+            # test lane. The original failure still takes precedence there.
+            if hasattr(original_error, "add_note"):
+                original_error.add_note(f"cleanup also failed: {cleanup_error!r}")
+
+
+def test_as_handle_rejects_terminal_and_taken_states_without_mutation():
+    complete: Future[int] = Future._from_coro(_value(1))
+    assert complete.get() == 1
+
+    failed: Future[int] = Future._from_coro(_raise(ValueError("boom")))
+    with pytest.raises(ValueError, match="boom"):
+        failed.get()
+
+    taken: Future[int] = Future._from_coro(_value(2))
+    task = taken._take_inner()
+    assert task.block_on() == 2
+
+    for fut in (complete, failed, taken):
+        status = fut._status
+        with pytest.raises(ValueError, match="does not have a Handle"):
+            fut._as_handle()
+        assert fut._status is status
 
 
 def test_get_success_transitions_to_complete_and_is_idempotent():
@@ -307,16 +412,17 @@ def test_await_asyncio_live_handle_error_propagates():
 
 
 def test_await_tokio_on_handle_bridged_raises():
-    """Convert on asyncio (_Handle), then await on a tokio thread: the tokio
-    branch intentionally refuses a Future already bridged to asyncio."""
+    """Convert on asyncio (_Handle), then await on a tokio thread: Handle's
+    await path reports asyncio's native no-running-loop error."""
     fut: Future[int] = Future._from_coro(_value(1))
     asyncio.run(_await_once(fut))  # -> _Handle
 
     async def attempt():
         await fut
 
-    with pytest.raises(ValueError, match="not awaitable on a tokio thread"):
+    with pytest.raises(RuntimeError, match="no running event loop") as caught:
         _run_in_tokio(attempt())
+    assert not isinstance(caught.value, WouldBlockRuntime)
 
 
 def test_await_tokio_after_get_raises_synchronous_future():
@@ -675,14 +781,12 @@ async def test_as_asyncio_on_cached_stop_iteration_wraps_in_runtime_error():
 #                                through a real Rust-produced Handle rather
 #                                than through the facade;
 #   * Handle-backed facade    -- how a Future built directly on a Handle
-#                                behaves. Not executable yet: Future has no
-#                                Handle-backed constructor.
+#                                behaves through Future._from_handle().
 #
-# The third layer is a seam, not a promise. Every target assertion lives in an
-# ``_assert_*`` helper that takes a *factory*, never a hard-coded constructor,
-# and each row is driven by one of four registries below. Adding a
-# Handle-backed Future factory to a registry runs that row's assertions against
-# the facade with no edit to the assertion body.
+# Every target assertion lives in an ``_assert_*`` helper that takes a
+# *factory*, never a hard-coded constructor, and each row is driven by one of
+# four registries below. The Handle-backed Future entries run those assertions
+# against the facade without changing the assertion bodies.
 #
 # Assertions that pin an incumbent divergence are deliberately NOT
 # factory-driven: they describe behavior that is going away, and there is
@@ -692,7 +796,7 @@ async def test_as_asyncio_on_cached_stop_iteration_wraps_in_runtime_error():
 #
 #   PRESERVED_BY_BOTH  -- target already satisfied by both representations
 #     fm.repeated_observation, fm.exception_identity, fm.off_loop_as_asyncio
-#   TARGET_ONLY        -- ready observable; only the Handle satisfies it today
+#   TARGET_ONLY        -- ready observables using the target Handle semantics
 #     fm.ready_get_on_loop_warns, fm.ready_get_on_tokio_refuses,
 #     fm.invalid_timeout_on_ready, fm.ready_as_asyncio_settlement,
 #     fm.terminal_baseexception_reobservable, fm.off_loop_await, fm.tokio_await
@@ -770,22 +874,64 @@ def _handle_gated():
     return probe, cast("Any", probe._handle)
 
 
+def _handle_future_observable(outcome: str):
+    """A Future facade over a ready Rust-produced Handle."""
+    return Future._from_handle(_handle_observable(outcome))
+
+
+def _handle_future_gated():
+    """A gated producer observed through a Handle-backed Future."""
+    control, handle = _handle_gated()
+    return control, Future._from_handle(handle)
+
+
+def _handle_future_pending():
+    """A pending Handle-backed Future and a bounded drain callback."""
+    control, future = _handle_future_gated()
+
+    def drain() -> None:
+        original_error = sys.exc_info()[1]
+        control._release()
+        try:
+            future.get(timeout=2)
+        except Exception as cleanup_error:
+            if original_error is None:
+                raise
+            # BaseException.add_note() is unavailable on the Python 3.10 OSS
+            # test lane. The original failure still takes precedence there.
+            if hasattr(original_error, "add_note"):
+                original_error.add_note(f"cleanup also failed: {cleanup_error!r}")
+
+    return future, drain
+
+
 # Target already satisfied by both representations.
 PRESERVED_BY_BOTH = [
     pytest.param(_future_observable, id="current_future"),
     pytest.param(_handle_observable, id="raw_handle"),
+    pytest.param(_handle_future_observable, id="handle_backed_future"),
 ]
 
-# Ready-observable rows where only the Handle satisfies the target today.
-TARGET_ONLY = [pytest.param(_handle_observable, id="raw_handle")]
+# Ready-observable rows that exercise the target Handle semantics.
+TARGET_ONLY = [
+    pytest.param(_handle_observable, id="raw_handle"),
+    pytest.param(_handle_future_observable, id="handle_backed_future"),
+]
 
 # Rows needing a producer held mid-flight, plus the control that releases it.
-GATED_TARGETS = [pytest.param(_handle_gated, id="raw_handle")]
+GATED_TARGETS = [
+    pytest.param(_handle_gated, id="raw_handle"),
+    pytest.param(_handle_future_gated, id="handle_backed_future"),
+]
 
 # Facade-only surfaces: result()/exception()/tracing have no Handle primitive,
 # so the seam starts with the incumbent Future and gains the Handle-backed one.
 FACADE_FACTORIES = [
-    pytest.param(_Facade(_future_observable, _future_pending), id="current_future")
+    pytest.param(_Facade(_future_observable, _future_pending), id="current_future"),
+    pytest.param(
+        _Facade(_handle_future_observable, _handle_future_pending),
+        id="handle_backed_future",
+    ),
 ]
 
 
