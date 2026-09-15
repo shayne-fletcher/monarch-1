@@ -733,7 +733,7 @@ async def test_ensure_init_returns_handle_that_resolves_over_tcp() -> None:
     completes, driven from the raw Shared[ProcMesh] with no Python-side mesh
     resolution (RMB-1, RMB-4). TCP fallback lets init() succeed without a NIC.
     Observation is non-consuming, so a second await also yields None (HDL-3)."""
-    from monarch._rust_bindings.monarch_hyperactor.pytokio import Handle
+    from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 
     # Pin rdma_ibverbs_target so inherited configuration cannot preempt the
     # intended TCP-fallback branch.

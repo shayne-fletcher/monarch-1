@@ -107,14 +107,14 @@ def test_handle_binding_has_permanent_module_identity():
         "monarch._rust_bindings.monarch_hyperactor.pytokio"
     )
 
-    # HDL-16: the compatibility name is an alias to the permanent class, and
-    # the other permanent Handle surfaces no longer leak from pytokio.
+    # HDL-16: Handle has one permanent module, and its surfaces do not leak
+    # from pytokio.
     assert Handle.__module__ == "monarch._rust_bindings.monarch_hyperactor.handle"
     assert (
         WouldBlockRuntime.__module__
         == "monarch._rust_bindings.monarch_hyperactor.handle"
     )
-    assert pytokio.Handle is Handle
+    assert not hasattr(pytokio, "Handle")
     assert not hasattr(pytokio, "WouldBlockRuntime")
     assert not hasattr(pytokio, "is_tokio_thread")
 

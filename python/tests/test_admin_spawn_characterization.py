@@ -23,8 +23,9 @@ from unittest.mock import patch
 
 import pytest
 from isolate_in_subprocess import isolate_in_subprocess
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 from monarch._rust_bindings.monarch_hyperactor.host_mesh import PyMeshAdminRef
-from monarch._rust_bindings.monarch_hyperactor.pytokio import Handle, PythonTask
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._src.actor import future as future_module, host_mesh as host_mesh_module
 from monarch._src.actor.actor_mesh import shutdown_context
 from monarch._src.actor.future import Future

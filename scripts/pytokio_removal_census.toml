@@ -362,7 +362,7 @@ shared_reconstruction = 2
 reserve_binding = 1
 py_mesh_reserve = 2
 py_is_tokio_thread = 0
-pytokio_import = 33
+pytokio_import = 32
 pytokio_module_ref = 16
 helper_symbol = 22
 helper_definition = 1
@@ -546,6 +546,14 @@ owns = [
 ]
 
 [[transition]]
+id = "6.1c"
+allowed_states = ["migrated"]
+owns = [
+  "im.rdma.module_2",
+  "im.test_rdma_initialization.test_ensure_init_returns_handle_that_resolves_over_tcp"
+]
+
+[[transition]]
 id = "6.2"
 allowed_states = ["migrated", "removed_upstream"]
 owns = [
@@ -556,7 +564,6 @@ owns = [
   "hs.actor.PyPythonTask",
   "hs.lib.PyPythonTask",
   "hs.pickle.PyPythonTask",
-  "im.rdma.module_2",
   "mr.actor.file",
   "np.actor.DroppingPort.resolve_and_send",
   "np.actor.LocalPort.resolve_and_send",
@@ -793,7 +800,6 @@ owns = [
   "im.test_proc_mesh.module",
   "im.test_python_actors.module",
   "im.test_rdma_initialization.test_ensure_init_observes_its_supplied_shared",
-  "im.test_rdma_initialization.test_ensure_init_returns_handle_that_resolves_over_tcp",
   "mr.attrs.file",
   "mr.lib.file",
   "mr.lib.file_2"
@@ -2989,7 +2995,7 @@ operation = "pytokio_import"
 scope = "stub"
 state = "legacy"
 transition = "6.8"
-members = ["Handle", "PythonTask"]
+members = ["PythonTask"]
 
 [[site]]
 id = "im.actor_mesh.module_2"
@@ -3071,8 +3077,9 @@ path = "fbcode/monarch/python/monarch/_src/rdma/rdma.py"
 symbol = "<module>"
 operation = "pytokio_import"
 scope = "production"
-state = "legacy"
-transition = "6.2"
+state = "migrated"
+transition = "6.1c"
+transition_revision = "D120038679"
 members = ["Handle"]
 
 [[site]]
@@ -3157,7 +3164,7 @@ operation = "pytokio_import"
 scope = "test"
 state = "legacy"
 transition = "6.8"
-members = ["Handle", "PythonTask"]
+members = ["PythonTask"]
 
 [[site]]
 id = "im.test_client_context_guard.module"
@@ -3276,8 +3283,9 @@ path = "fbcode/monarch/python/tests/test_rdma_initialization.py"
 symbol = "test_ensure_init_returns_handle_that_resolves_over_tcp"
 operation = "pytokio_import"
 scope = "test"
-state = "legacy"
-transition = "6.8"
+state = "migrated"
+transition = "6.1c"
+transition_revision = "D120038679"
 members = ["Handle"]
 
 [[site]]

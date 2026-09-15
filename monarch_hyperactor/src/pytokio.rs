@@ -854,14 +854,10 @@ impl PyShared {
 
 /// Register the pytokio Python bindings into the given module.
 ///
-/// This wires up the legacy `PythonTask` and `Shared` pyclasses plus a temporary
-/// alias to the permanent `Handle` type.
+/// This wires up the legacy `PythonTask` and `Shared` pyclasses.
 pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     hyperactor_mod.add_class::<PyPythonTask>()?;
     hyperactor_mod.add_class::<PyShared>()?;
-    // HDL-16: compatibility is an alias to the one permanent class object,
-    // never a second registration.
-    hyperactor_mod.add("Handle", hyperactor_mod.py().get_type::<PyHandle>())?;
 
     Ok(())
 }

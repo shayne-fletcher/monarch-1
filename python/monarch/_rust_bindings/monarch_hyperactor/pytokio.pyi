@@ -19,7 +19,7 @@ from typing import (
     TypeVar,
 )
 
-from monarch._rust_bindings.monarch_hyperactor.handle import Handle as Handle
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 
 T = TypeVar("T")
 

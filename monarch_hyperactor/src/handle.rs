@@ -119,8 +119,7 @@
 //!   `#[pymethods]`, preserving HDL-11.
 //! - **HDL-16 (permanent Python identity).** `Handle` and `WouldBlockRuntime`
 //!   have the canonical module `monarch._rust_bindings.monarch_hyperactor.handle`.
-//!   The temporary `pytokio.Handle` compatibility name refers to the same type
-//!   object rather than registering a second class.
+//!   The legacy `pytokio` module does not export `Handle`.
 
 use std::error::Error;
 use std::future::Future;
@@ -823,9 +822,7 @@ fn complete_asyncio_future(fut: &Bound<'_, PyAny>, is_exc: bool, value: Py<PyAny
 
 /// Register the permanent Handle Python bindings.
 pub fn register_python_bindings(handle_mod: &Bound<'_, PyModule>) -> PyResult<()> {
-    // HDL-16: this is the sole class registration. The legacy pytokio module
-    // installs an alias to the resulting type object rather than registering a
-    // second class.
+    // HDL-16: this is Handle's sole class registration and Python home.
     handle_mod.add_class::<PyHandle>()?;
     let would_block = handle_mod.py().get_type::<WouldBlockRuntime>();
     would_block.setattr(
