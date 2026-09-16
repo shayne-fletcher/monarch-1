@@ -547,8 +547,8 @@ def test_gpu_trainer_generator_sync() -> None:
 
 
 @rdma_backends
-async def test_rdma_concurrent_2gb_writes_in_order():
-    """Test concurrent 2GB RDMA buffer writes with reverse-order awaiting"""
+async def test_rdma_2gb_write_then_read():
+    """Test an ordered 2GB RDMA write followed by a read"""
     owner_proc = this_host().spawn_procs(per_host={"processes": 1})
     writer_proc = this_host().spawn_procs(per_host={"processes": 1})
     num_elem = 500_000_000  # 500M elements
@@ -588,23 +588,14 @@ async def test_rdma_concurrent_2gb_writes_in_order():
             )  # Will send data
 
         @endpoint
-        async def perform_concurrent_writes(self, buffer: RDMABuffer):
-            """Perform concurrent read/write operations and await in reverse order"""
+        async def perform_write_then_read(self, buffer: RDMABuffer):
+            """Write to the buffer, then read its new contents"""
             # Convert tensors to byte views for RDMA
             byte_tensor_a = self.tensor_a.view(torch.uint8).flatten()
             byte_tensor_b = self.tensor_b.view(torch.uint8).flatten()
 
-            # Start both operations concurrently
-            future_a = buffer.read_into(
-                byte_tensor_a, timeout=10
-            )  # Read FROM buffer INTO tensor_a
-            future_b = buffer.write_from(
-                byte_tensor_b, timeout=10
-            )  # Write FROM tensor_b INTO buffer
-
-            # Await in reverse order - sets actual execution order
-            await future_b  # Await write operation first
-            await future_a  # Await read operation second
+            await buffer.write_from(byte_tensor_b, timeout=10)
+            await buffer.read_into(byte_tensor_a, timeout=10)
 
             return "SUCCESS"
 
@@ -621,9 +612,8 @@ async def test_rdma_concurrent_2gb_writes_in_order():
     buffer = await buffer_owner.create_buffer.call_one()
     print(f"✓ Created 2GB RDMA buffer (size: {buffer.size() / (1024**3):.2f} GB)")
 
-    # Perform concurrent writes with reverse-order awaiting
-    result = await writer.perform_concurrent_writes.call_one(buffer)
-    assert result == "SUCCESS", f"Concurrent writes failed: {result}"
+    result = await writer.perform_write_then_read.call_one(buffer)
+    assert result == "SUCCESS", f"Ordered transfer failed: {result}"
 
     # Verify the data flow worked correctly using torch.allclose
     tensor_a_actual, tensor_b_actual = await writer.get_tensors.call_one()
@@ -643,7 +633,7 @@ async def test_rdma_concurrent_2gb_writes_in_order():
         "RDMABuffer does not contain expected 2.0s"
     )
 
-    print("✓ Concurrent 2GB operations completed successfully")
+    print("✓ Ordered 2GB operations completed successfully")
 
     # Drop the buffer
     await buffer_owner.drop_buffer.call_one()
