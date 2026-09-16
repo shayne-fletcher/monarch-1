@@ -70,7 +70,6 @@ from monarch._rust_bindings.monarch_hyperactor.pickle import (
     PicklingState,
 )
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorAddr
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
 from monarch._rust_bindings.monarch_hyperactor.shape import Point as HyPoint, Shape
 from monarch._rust_bindings.monarch_hyperactor.supervision import MeshFailure
@@ -1507,9 +1506,10 @@ class _Actor:
                 ctx.actor_instance._execution_finish(token)
 
             response = response_port.resolve_and_send(result)
-            if isinstance(response, PythonTask):
-                await Future._from_coro(response)
-            else:
+            # Transitional return shape: LocalPort and DroppingPort complete
+            # synchronously and return None; Port still returns a coroutine. A
+            # later commit will migrate the remaining Port path.
+            if response is not None:
                 await response
         except Exception as e:
             log_endpoint_exception(e, method_name, ctx.actor_instance.actor_id)

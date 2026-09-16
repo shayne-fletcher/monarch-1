@@ -350,9 +350,9 @@ pytokio_import = "monarch._rust_bindings.monarch_hyperactor.pytokio"
 doc_legacy_surface = "PythonTask|PyShared|pytokio"
 
 [totals]
-py_python_task_new = 25
+py_python_task_new = 23
 raw_python_task_new = 5
-from_coro = 17
+from_coro = 16
 rust_from_coro = 2
 from_coroutine = 7
 take_inner = 7
@@ -369,9 +369,9 @@ shared_reconstruction = 2
 reserve_binding = 1
 py_mesh_reserve = 2
 py_is_tokio_thread = 0
-pytokio_import = 31
-pytokio_module_ref = 16
-helper_symbol = 21
+pytokio_import = 30
+pytokio_module_ref = 15
+helper_symbol = 20
 helper_definition = 1
 would_block_surface = 0
 binding_stub_symbol = 3
@@ -571,6 +571,7 @@ owns = [
   "hs.actor.PyPythonTask",
   "hs.lib.PyPythonTask",
   "hs.pickle.PyPythonTask",
+  "im.actor_mesh.module_2",
   "im.rdma.module",
   "mr.actor.file",
   "np.actor.DroppingPort.resolve_and_send",
@@ -652,7 +653,6 @@ owns = [
   "hs.pickle.PyShared",
   "hs.proc_mesh.PyPythonTask",
   "hs.proc_mesh.PyShared",
-  "im.actor_mesh.module_2",
   "im.bootstrap.module_2",
   "im.host_mesh.module_2",
   "im.proc_mesh.module_2",
@@ -1098,8 +1098,9 @@ path = "fbcode/monarch/python/monarch/_src/actor/actor_mesh.py"
 symbol = "_Actor.handle[Future._from_coro(response)]"
 operation = "from_coro"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.2"
+transition_revision = "self"
 
 [[site]]
 id = "fc.actor_mesh.shutdown_context[Future._from_coro_noop]"
@@ -1602,8 +1603,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/actor.rs"
 symbol = "PyPythonTask"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.2"
+transition_revision = "self"
 
 [[site]]
 id = "hs.actor.PythonTask"
@@ -2119,8 +2121,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/actor.rs"
 symbol = "DroppingPort::resolve_and_send"
 operation = "py_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.2"
+transition_revision = "self"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from DroppingPort::resolve_and_send"
 consumer = "_Actor.handle, through its isinstance(response, PythonTask) branch; also handed directly to user endpoint code as the explicit port argument for MethodSpecifier::ExplicitPort"
@@ -2133,7 +2136,7 @@ unobserved_error = "none; the future resolves to Ok(())"
 disposition = "replace with a direct value"
 semantic_class = "ready_no_op_wrapper"
 oracle = [
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::actor::tests::dropping_port_resolve_and_send_completes_and_is_idempotent",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::actor::tests::dropping_port_resolve_and_send_returns_none_and_is_idempotent",
 ]
 
 [[site]]
@@ -2144,8 +2147,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/actor.rs"
 symbol = "LocalPort::resolve_and_send"
 operation = "py_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.2"
+transition_revision = "self"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from LocalPort::resolve_and_send"
 consumer = "_Actor.handle, through its isinstance(response, PythonTask) branch; also handed directly to user endpoint code as the explicit port argument for MethodSpecifier::ExplicitPort"
@@ -2158,8 +2162,8 @@ unobserved_error = "none; the future resolves to Ok(())"
 disposition = "replace with a direct value"
 semantic_class = "ready_no_op_wrapper"
 oracle = [
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::actor::tests::local_port_resolve_and_send_posts_before_the_task_is_observed",
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::actor::tests::local_port_resolve_and_send_task_completes_successfully",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::actor::tests::local_port_resolve_and_send_posts_before_return",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::actor::tests::local_port_resolve_and_send_returns_none",
   "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::actor::tests::local_port_second_resolve_and_send_raises_panic_exception",
 ]
 
@@ -3018,8 +3022,9 @@ path = "fbcode/monarch/python/monarch/_src/actor/actor_mesh.py"
 symbol = "<module>"
 operation = "pytokio_import"
 scope = "production"
-state = "legacy"
-transition = "6.3c"
+state = "migrated"
+transition = "6.2"
+transition_revision = "self"
 members = ["PythonTask"]
 
 [[site]]
@@ -3353,8 +3358,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/actor.rs"
 symbol = "<file>"
 operation = "pytokio_module_ref"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.2"
+transition_revision = "self"
 
 [[site]]
 id = "mr.actor_mesh.file"
