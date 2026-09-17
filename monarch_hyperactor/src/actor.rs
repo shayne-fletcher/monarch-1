@@ -81,7 +81,6 @@ use crate::pickle::PicklingState;
 use crate::pickle::pickle_to_part;
 use crate::proc::PyActorAddr;
 use crate::pympsc;
-use crate::pytokio::PyPythonTask;
 use crate::runtime::GilSite;
 use crate::runtime::get_tokio_runtime;
 use crate::runtime::mark_actor_event_loop_thread;
@@ -1950,9 +1949,8 @@ impl LocalPort {
         port.post(self.instance.deref(), Ok(obj));
         Ok(())
     }
-    fn resolve_and_send(&mut self, obj: Py<PyAny>) -> PyResult<PyPythonTask> {
-        self.send(obj)?;
-        PyPythonTask::new(async { Ok(()) })
+    fn resolve_and_send(&mut self, obj: Py<PyAny>) -> PyResult<()> {
+        self.send(obj)
     }
     fn exception(&mut self, e: Py<PyAny>) -> PyResult<()> {
         let port = self.inner.take().expect("use local port once");
@@ -1979,9 +1977,8 @@ impl DroppingPort {
         Ok(())
     }
 
-    fn resolve_and_send(&self, obj: Py<PyAny>) -> PyResult<PyPythonTask> {
-        self.send(obj)?;
-        PyPythonTask::new(async { Ok(()) })
+    fn resolve_and_send(&self, obj: Py<PyAny>) -> PyResult<()> {
+        self.send(obj)
     }
 
     fn send_message(&self, _message: PythonMessage) -> PyResult<()> {
@@ -2340,19 +2337,10 @@ mod tests {
         });
     }
 
-    // -- ready response ports -------------------------------------------
+    // -- direct response ports ------------------------------------------
     //
-    // Both wrappers complete their effect synchronously inside
-    // `resolve_and_send` and hand back a `PyPythonTask` that only converts the
-    // result. The task is therefore not the operation: observing it cannot
-    // cause the effect, and dropping it cannot undo one. These pin that split
-    // directly on the two methods, because coverage that reaches them through
-    // `Port.send()` or an endpoint reply cannot separate the synchronous half
-    // from the returned task.
-    //
-    // Note what is deliberately NOT claimed: that the returned task is ready on
-    // its first poll. Result conversion can wait on the GIL, so these only
-    // establish that it completes successfully.
+    // Both implementations complete their effect before returning. Python sees
+    // `None`; there is no task to drive or discard.
 
     /// A real `LocalPort` over a live once port, plus its receiver.
     ///
@@ -2384,73 +2372,68 @@ mod tests {
         (port, receiver)
     }
 
-    // The post happens inside `resolve_and_send`, before anything observes the
-    // returned task, and dropping that task cannot undo it.
-    //
     // The single non-yielding poll is what makes this precise. Awaiting the
     // receiver would also accept a post made later by some other task, and
     // would hang rather than fail if the value never arrived at all. Requiring
     // the value to be there without ever yielding is the actual claim.
     #[tokio::test]
-    async fn local_port_resolve_and_send_posts_before_the_task_is_observed() {
+    async fn local_port_resolve_and_send_posts_before_return() {
         pyo3::Python::initialize();
         let (mut port, receiver) = local_port_fixture();
 
-        let task = monarch_with_gil_blocking(GilSite::Test, |py| {
+        monarch_with_gil_blocking(GilSite::Test, |py| {
             let value = 41i64.into_py_any(py).unwrap();
             port.resolve_and_send(value).unwrap()
         });
 
-        // Dropped without ever being driven.
-        drop(task);
-
         let received = receiver
             .recv()
             .now_or_never()
-            .expect("the value must already be posted, with no further polling")
+            .expect("the value must be posted before resolve_and_send returns")
             .unwrap();
         monarch_with_gil_blocking(GilSite::Test, |py| {
             assert_eq!(
                 received.unwrap().extract::<i64>(py).unwrap(),
                 41,
-                "the value must already be posted when the task is discarded"
+                "the synchronously posted value must be preserved"
             );
         });
     }
 
-    // The positive control for the case above: driving the returned task
-    // succeeds rather than erroring, and the value that arrives is the one the
-    // synchronous half already posted. A once port can carry only one value, so
-    // this also shows observation adds no second delivery.
+    // Check the Python-visible return rather than relying only on Rust's unit
+    // return type: PyO3 must expose direct completion as `None`.
     #[tokio::test]
-    async fn local_port_resolve_and_send_task_completes_successfully() {
+    async fn local_port_resolve_and_send_returns_none() {
         pyo3::Python::initialize();
-        let (mut port, receiver) = local_port_fixture();
+        let (port, receiver) = local_port_fixture();
 
-        let mut task = monarch_with_gil_blocking(GilSite::Test, |py| {
-            let value = 42i64.into_py_any(py).unwrap();
-            port.resolve_and_send(value).unwrap()
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            let port = Py::new(py, port).unwrap();
+            let returned = port
+                .bind(py)
+                .call_method1("resolve_and_send", (42,))
+                .unwrap();
+            assert!(returned.is_none(), "direct completion must return None");
         });
-
-        let driven = task.take_task().unwrap().await;
-        assert!(driven.is_ok(), "observing the wrapper must succeed");
 
         let received = receiver
             .recv()
             .now_or_never()
-            .expect("driving the wrapper must not be what delivers the value")
+            .expect("the value must be posted before resolve_and_send returns")
             .unwrap();
         monarch_with_gil_blocking(GilSite::Test, |py| {
-            assert_eq!(received.unwrap().extract::<i64>(py).unwrap(), 42);
+            assert_eq!(
+                received.unwrap().extract::<i64>(py).unwrap(),
+                42,
+                "returning None must not change the posted value"
+            );
         });
     }
 
-    // KNOWN-BAD CURRENT BEHAVIOR, recorded so a later conversion decides
-    // deliberately rather than by accident: a `LocalPort` is one-shot by panic,
-    // not by error. `send` unwraps the taken handle with
-    // `expect("use local port once")`, so a second call aborts the frame rather
-    // than returning `Err`. This is what the code does today; it is not a
-    // contract worth preserving on purpose.
+    // KNOWN-BAD CURRENT BEHAVIOR: `LocalPort` is one-shot by panic, not by
+    // error. `send` unwraps the taken handle with `expect("use local port once")`,
+    // so a second call aborts the frame rather than returning `Err`. This test
+    // characterizes that behavior; it does not make the panic a contract.
     //
     // The first call sits outside the `try` so that only the second call can
     // satisfy the assertions; a first-call failure surfaces as a test error
@@ -2472,7 +2455,7 @@ mod tests {
             py.run(
                 c_str!(
                     r#"
-port.resolve_and_send(1)
+assert port.resolve_and_send(1) is None
 try:
     port.resolve_and_send(2)
 except BaseException as err:
@@ -2505,41 +2488,22 @@ else:
         });
     }
 
-    // `DroppingPort` is stateless, so unlike `LocalPort` it is idempotent:
-    // repeated calls keep returning tasks that complete successfully, and a
-    // discarded task leaves nothing behind because there was never a deferred
-    // effect. This one is a plain `#[test]`: it needs no proc and no port, only
-    // a runtime to drive the returned wrapper.
+    // `DroppingPort` is stateless, so repeated direct completions return `None`.
     #[test]
-    fn dropping_port_resolve_and_send_completes_and_is_idempotent() {
+    fn dropping_port_resolve_and_send_returns_none_and_is_idempotent() {
         pyo3::Python::initialize();
-        let port = DroppingPort;
-
-        for _ in 0..3 {
-            let mut task = monarch_with_gil_blocking(GilSite::Test, |py| {
-                let value = 7i64.into_py_any(py).unwrap();
-                port.resolve_and_send(value).unwrap()
-            });
-            let driven = get_tokio_runtime().block_on(task.take_task().unwrap());
-            assert!(driven.is_ok(), "every DroppingPort task must complete");
-        }
-
-        // A task nobody observes is equally inert.
-        let discarded = monarch_with_gil_blocking(GilSite::Test, |py| {
-            let value = 8i64.into_py_any(py).unwrap();
-            port.resolve_and_send(value).unwrap()
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            let port = Py::new(py, DroppingPort).unwrap();
+            for value in [7, 8, 9] {
+                let returned = port
+                    .bind(py)
+                    .call_method1("resolve_and_send", (value,))
+                    .unwrap();
+                assert!(
+                    returned.is_none(),
+                    "every DroppingPort completion must return None"
+                );
+            }
         });
-        drop(discarded);
-
-        let mut after = monarch_with_gil_blocking(GilSite::Test, |py| {
-            let value = 9i64.into_py_any(py).unwrap();
-            port.resolve_and_send(value).unwrap()
-        });
-        assert!(
-            get_tokio_runtime()
-                .block_on(after.take_task().unwrap())
-                .is_ok(),
-            "discarding a task must not disturb the next call"
-        );
     }
 }

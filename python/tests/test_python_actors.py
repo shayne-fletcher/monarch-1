@@ -1284,12 +1284,18 @@ class PortedActor(Actor):
     def add(self, port: "Port[int]", b: int) -> None:
         port.send(3 + b)
 
+    @endpoint
+    def echo(self, value: int) -> int:
+        return value
+
 
 @pytest.mark.timeout(60)
 def test_ported_actor():
+    """Exercise native direct and Python coroutine response completion."""
     proc_mesh = this_host().spawn_procs(per_host={"gpus": 1})
     a = proc_mesh.spawn("port_actor", PortedActor)
     assert 5 == a.add.call_one(2).get()
+    assert 7 == a.echo.call_one(7).get()
     proc_mesh.stop().get()
 
 
