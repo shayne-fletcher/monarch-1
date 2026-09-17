@@ -1134,7 +1134,7 @@ class Port(Generic[R]):
         message = PendingMessage(kind, state)
         resolved = message.try_resolve_now()
         if resolved is None:
-            resolved = await Future._from_coro(cast(Any, message).resolve())
+            resolved = await message.resolve()
         self.send_message(resolved)
 
     def exception(self, obj: Exception) -> None: ...
@@ -1506,9 +1506,8 @@ class _Actor:
                 ctx.actor_instance._execution_finish(token)
 
             response = response_port.resolve_and_send(result)
-            # Transitional return shape: LocalPort and DroppingPort complete
-            # synchronously and return None; Port still returns a coroutine. A
-            # later commit will migrate the remaining Port path.
+            # LocalPort and DroppingPort complete synchronously; Port returns a
+            # coroutine because mesh references may require async resolution.
             if response is not None:
                 await response
         except Exception as e:

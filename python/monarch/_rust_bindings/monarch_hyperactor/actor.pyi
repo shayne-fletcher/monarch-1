@@ -201,9 +201,8 @@ R = TypeVar("R")
 
 class PortProtocol(Generic[R], Protocol):
     def send(self, obj: R) -> None: ...
-    # Transitional return shape: LocalPort and DroppingPort complete
-    # synchronously and return None; Port still returns an awaitable. A later
-    # commit will migrate the remaining Port path.
+    # LocalPort and DroppingPort complete synchronously; Port returns an
+    # awaitable because mesh references may require async resolution.
     def resolve_and_send(self, obj: R) -> Awaitable[None] | None: ...
     def exception(self, obj: Any) -> None: ...
 
