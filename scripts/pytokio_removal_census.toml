@@ -1100,7 +1100,7 @@ operation = "from_coro"
 scope = "production"
 state = "migrated"
 transition = "6.2"
-transition_revision = "self"
+transition_revision = "D120368519"
 
 [[site]]
 id = "fc.actor_mesh.shutdown_context[Future._from_coro_noop]"
@@ -1605,7 +1605,7 @@ operation = "helper_symbol"
 scope = "production"
 state = "migrated"
 transition = "6.2"
-transition_revision = "self"
+transition_revision = "D120368519"
 
 [[site]]
 id = "hs.actor.PythonTask"
@@ -2123,7 +2123,7 @@ operation = "py_python_task_new"
 scope = "production"
 state = "migrated"
 transition = "6.2"
-transition_revision = "self"
+transition_revision = "D120368519"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from DroppingPort::resolve_and_send"
 consumer = "_Actor.handle, through its isinstance(response, PythonTask) branch; also handed directly to user endpoint code as the explicit port argument for MethodSpecifier::ExplicitPort"
@@ -2149,7 +2149,7 @@ operation = "py_python_task_new"
 scope = "production"
 state = "migrated"
 transition = "6.2"
-transition_revision = "self"
+transition_revision = "D120368519"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from LocalPort::resolve_and_send"
 consumer = "_Actor.handle, through its isinstance(response, PythonTask) branch; also handed directly to user endpoint code as the explicit port argument for MethodSpecifier::ExplicitPort"
@@ -2465,22 +2465,21 @@ scope = "production"
 state = "legacy"
 transition = "6.2"
 constructor = "PyPythonTask"
-return_surface = "PyPythonTask returned from the shared private helper run_worker_loop, surfaced to Python by both public wrappers: run_worker_loop_forever (exit_on_shutdown = true) and run_worker_loop_until_shutdown (exit_on_shutdown = false)"
-consumer = "monarch._src.actor.bootstrap.run_worker_loop_forever and monarch._src.actor.bootstrap.run_worker_loop_until_shutdown, each of which calls block_on immediately after its argument checks; bootstrap_main is the child command captured during construction, not the consumer"
-driver = "PythonTask.block_on consumes the task; on the Python main thread signal_safe_block_on spawns it onto the embedded runtime and blocks the caller while checking signals, while the non-main branch uses runtime.block_on"
+return_surface = "PyPythonTask returned by the two legacy raw bindings: run_worker_loop_forever (exit_on_shutdown = true) and run_worker_loop_until_shutdown (exit_on_shutdown = false). The supported Monarch wrappers use the separate Handle-backed start bindings"
+consumer = "five Mitra job entry points import the legacy raw run_worker_loop_forever binding directly: mitra/ml/monarch/rl/unified_main.py, mitra/ml/monarch/rl/unified_main_sync.py, mitra/ml/monarch/common/unified_main.py, mitra/projects/search_oneflow/runners/ldpo_unified_main.py, and mitra/projects/unirec/training/distill/infra/unified_main.py; bootstrap_main is the child command captured during construction, not a consumer"
+driver = "every Mitra rank-0 path calls spawn, runs its client, then block_on; three non-rank-0 paths call block_on inline, while rl/unified_main.py and common/unified_main.py retain the task across SIGTERM-handler installation before observing it"
 start_point = "source inspection places service-address parsing and child-command/environment capture in the call and host(...) in the returned task. The Rust ownership tests prove that a non-alias TCP host:fdN location calls listen and transfers its listener before return, while a TCP alias listens on and closes any nested fdN listener during parsing. The same parser handles non-alias tls, metatls, quic, and metaquic host:fdN locations"
-abandonment = "possible through the private native binding; the public wrapper offers no ordinary caller-controlled gap before block_on, while signal interruption follows the shared signal_safe_block_on policy"
-eager_effect = "a successful non-alias host:fdN construction for tcp, tls, metatls, quic, or metaquic calls listen and moves the adopted listener into the returned task; a TCP alias listens on and closes any nested fdN listener during the call, so the task retains none"
+abandonment = "possible through the private native binding. Mitra rank 0 spawns immediately; two non-rank-0 paths retain the task briefly for handler/error-boundary setup, while the other three block inline"
+eager_effect = "converting the remaining legacy binding to the supported eager surface would commit the complete worker-loop future during the call. Existing Mitra rank-0 paths already commit by calling spawn immediately, while the two retained non-rank-0 paths would start before their second defensive SIGTERM-handler installation"
 drop_behavior = "source makes a successfully returned non-alias host:fdN task own the listener, so dropping it undriven closes that listener without entering host; the Rust oracle exercises the TCP forms and proves that their address is released. A TCP alias has no nested listener left for task drop to release because parsing closed it before return"
 unobserved_error = "textual address and descriptor-syntax errors raise as PyValueError before a task is returned. Source places host errors inside the returned task; the occupied-numeric-address oracle proves that construction returns a task and block_on publishes the listen failure as PyValueError. The phases are distinguished by whether a task was returned and driven, not by exception type"
-disposition = "replace with a direct blocking binding"
+disposition = "intentionally become eager"
 semantic_class = "sync_partial_effect_lazy_tail"
 oracle = [
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::bootstrap::tests::run_worker_loop_forever_retains_non_alias_tcp_fd_until_drop",
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::bootstrap::tests::run_worker_loop_forever_alias_fd_listens_and_closes_during_construction",
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::bootstrap::tests::run_worker_loop_forever_rejects_invalid_addresses_before_returning_task",
-  "fbcode//monarch/python/tests:test_worker_loop_characterization::test_occupied_numeric_address_fails_when_blocked_on",
-  "fbcode//monarch/python/tests:test_python_actors::test_fd_bootstrap",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::bootstrap::tests::prepare_worker_loop_retains_non_alias_tcp_fd_until_future_drop",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::bootstrap::tests::prepare_worker_loop_alias_fd_listens_and_closes_during_preparation",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::bootstrap::tests::prepare_worker_loop_rejects_invalid_addresses_before_returning_future",
+  "fbcode//monarch/python/tests:test_worker_loop_characterization::test_legacy_occupied_numeric_address_failure_is_published_by_task",
 ]
 
 [[site]]
@@ -3024,7 +3023,7 @@ operation = "pytokio_import"
 scope = "production"
 state = "migrated"
 transition = "6.2"
-transition_revision = "self"
+transition_revision = "D120368519"
 members = ["PythonTask"]
 
 [[site]]
@@ -3360,7 +3359,7 @@ operation = "pytokio_module_ref"
 scope = "production"
 state = "migrated"
 transition = "6.2"
-transition_revision = "self"
+transition_revision = "D120368519"
 
 [[site]]
 id = "mr.actor_mesh.file"

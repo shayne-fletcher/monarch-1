@@ -6,6 +6,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::future::Future;
+
 use futures::future::try_join_all;
 use hyperactor::Gateway;
 use hyperactor::Location;
@@ -31,6 +33,7 @@ use pyo3::types::PyModule;
 use pyo3::types::PyModuleMethods;
 use pyo3::wrap_pyfunction;
 
+use crate::handle::PyHandle;
 use crate::host_mesh::PyHostMesh;
 use crate::pytokio::PyPythonTask;
 use crate::runtime::GilSite;
@@ -119,7 +122,10 @@ pub fn bootstrap_main(py: Python) -> PyResult<Bound<PyAny>> {
     })
 }
 
-fn run_worker_loop(address: &str, exit_on_shutdown: bool) -> PyResult<PyPythonTask> {
+fn prepare_worker_loop(
+    address: &str,
+    exit_on_shutdown: bool,
+) -> PyResult<impl Future<Output = PyResult<()>> + Send + 'static> {
     let (service_proc_addr, listener) = parse_service_proc_addr_for_serve(address)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     // Check if we're running in a PAR/XAR build by looking for FB_XAR_INVOKED_NAME environment variable
@@ -168,7 +174,7 @@ fn run_worker_loop(address: &str, exit_on_shutdown: bool) -> PyResult<PyPythonTa
         }
     });
 
-    PyPythonTask::new(async move {
+    Ok(async move {
         let (_agent_handle, shutdown) = host(
             service_proc_addr,
             command,
@@ -189,16 +195,39 @@ fn run_worker_loop(address: &str, exit_on_shutdown: bool) -> PyResult<PyPythonTa
     })
 }
 
-/// Run a worker loop that halts the process after host shutdown.
+fn run_worker_loop(address: &str, exit_on_shutdown: bool) -> PyResult<PyPythonTask> {
+    PyPythonTask::new(prepare_worker_loop(address, exit_on_shutdown)?)
+}
+
+fn start_worker_loop(address: &str, exit_on_shutdown: bool) -> PyResult<PyHandle> {
+    Ok(PyHandle::spawn(prepare_worker_loop(
+        address,
+        exit_on_shutdown,
+    )?))
+}
+
+/// Construct the legacy lazy worker loop that exits after host shutdown.
 #[pyfunction]
 pub fn run_worker_loop_forever(_py: Python<'_>, address: &str) -> PyResult<PyPythonTask> {
     run_worker_loop(address, true)
 }
 
-/// Run an embedded worker loop that returns after host shutdown.
+/// Construct the legacy lazy embedded worker loop.
 #[pyfunction]
 pub fn run_worker_loop_until_shutdown(_py: Python<'_>, address: &str) -> PyResult<PyPythonTask> {
     run_worker_loop(address, false)
+}
+
+/// Start a worker loop that exits the process after host shutdown.
+#[pyfunction]
+pub fn start_worker_loop_forever(_py: Python<'_>, address: &str) -> PyResult<PyHandle> {
+    start_worker_loop(address, true)
+}
+
+/// Start an embedded worker loop and observe it through a Handle.
+#[pyfunction]
+pub fn start_worker_loop_until_shutdown(_py: Python<'_>, address: &str) -> PyResult<PyHandle> {
+    start_worker_loop(address, false)
 }
 
 #[pyfunction]
@@ -258,6 +287,20 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     hyperactor_mod.add_function(f)?;
 
     let f = wrap_pyfunction!(run_worker_loop_until_shutdown, hyperactor_mod)?;
+    f.setattr(
+        "__module__",
+        "monarch._rust_bindings.monarch_hyperactor.bootstrap",
+    )?;
+    hyperactor_mod.add_function(f)?;
+
+    let f = wrap_pyfunction!(start_worker_loop_forever, hyperactor_mod)?;
+    f.setattr(
+        "__module__",
+        "monarch._rust_bindings.monarch_hyperactor.bootstrap",
+    )?;
+    hyperactor_mod.add_function(f)?;
+
+    let f = wrap_pyfunction!(start_worker_loop_until_shutdown, hyperactor_mod)?;
     f.setattr(
         "__module__",
         "monarch._rust_bindings.monarch_hyperactor.bootstrap",
@@ -406,20 +449,20 @@ mod tests {
     }
 
     /// A non-alias TCP `host:fdN` location transfers descriptor ownership while
-    /// the binding is being called, and the returned task holds that listener.
+    /// the worker-loop future is prepared, and that future holds the listener.
     ///
     /// The test exercises two spellings of this same path, each with its own
     /// freshly bound socket: a bare channel URL using the legacy service proc id
     /// and an explicit `ProcId@location` using a generated instance id. The tls,
     /// metatls, quic, and metaquic schemes use the same `host:fdN` parser but are
     /// not exercised here. A TCP alias is different: its nested listener is
-    /// discarded and closed during parsing rather than retained by the task.
+    /// discarded and closed during parsing rather than retained by the future.
     ///
     /// The address is the durable ownership witness. Rebinding is checked on
     /// both sides of the drop, because a rebind that succeeds afterwards proves
-    /// nothing unless it fails while the task still owns the listener.
+    /// nothing unless it fails while the future still owns the listener.
     #[test]
-    fn run_worker_loop_forever_retains_non_alias_tcp_fd_until_drop() {
+    fn prepare_worker_loop_retains_non_alias_tcp_fd_until_future_drop() {
         pyo3::Python::initialize();
 
         for build_address in [
@@ -438,10 +481,10 @@ mod tests {
                 "the fixture must hand over a bound socket that is not yet listening"
             );
 
-            // Ownership leaves Rust here: the number is all that is passed, and
-            // the binding adopts it.
+            // Ownership leaves `OwnedFd` tracking here: the number is all that
+            // is passed, and worker-loop preparation adopts it.
             //
-            // If construction were to fail instead, this fixture cannot reclaim
+            // If preparation were to fail instead, this fixture cannot reclaim
             // the descriptor. Whether it is still open depends on where the
             // failure happened -- a parse failure leaves it untouched, while a
             // failure after the listener is built has already closed it -- and
@@ -452,10 +495,8 @@ mod tests {
             let transferred = sock.into_raw_fd();
             let address = build_address(transferred);
 
-            let task = monarch_with_gil_blocking(GilSite::Test, |py| {
-                run_worker_loop_forever(py, &address)
-            })
-            .expect("a valid descriptor address should construct a task");
+            let future = prepare_worker_loop(&address, true)
+                .expect("a valid descriptor address should prepare a worker loop");
 
             // SAFETY: `F_GETFD` only reads the flags of a descriptor number and
             // never closes it. A number that is not open is defined input here:
@@ -465,7 +506,7 @@ mod tests {
             let flags = unsafe { libc::fcntl(transferred, libc::F_GETFD) };
             assert_ne!(
                 flags, -1,
-                "construction must leave the transferred descriptor number open"
+                "preparation must leave the transferred descriptor number open"
             );
             // Still open is not enough: the number could have been closed and
             // handed back out by another thread. Requiring it to name the same
@@ -478,39 +519,38 @@ mod tests {
             );
             assert!(
                 getsockopt(&observer, sockopt::AcceptConn).expect("SO_ACCEPTCONN is readable"),
-                "construction must call listen before it returns"
+                "preparation must call listen before it returns"
             );
 
-            // The task must be the only owner left before the address can say
-            // anything about what the task holds.
+            // The future must be the only owner left before the address can say
+            // anything about what the future holds.
             drop(observer);
             assert_eq!(
                 rebind_result(&bound),
                 Err(Errno::EADDRINUSE),
-                "the undriven task must still hold the listener"
+                "the undriven future must still hold the listener"
             );
 
-            monarch_with_gil_blocking(GilSite::Test, |_py| {
-                drop(task);
-                Ok::<_, PyErr>(())
-            })
-            .expect("dropping the task should not fail");
+            // Keep the future unpolled so the rebind below isolates the
+            // listener captured during preparation from anything `host()`
+            // would do.
+            drop(future);
 
             // Deliberately not probing `transferred` here: once released, that
             // number may already belong to another thread's descriptor.
             assert_eq!(
                 rebind_result(&bound),
                 Ok(()),
-                "dropping the undriven task must release the adopted listener"
+                "dropping the undriven future must release the adopted listener"
             );
         }
     }
 
     /// An `fdN` on the bind side of a TCP alias is listened on during parsing,
-    /// but the alias parser discards that listener before the binding returns.
-    /// The returned task therefore retains no ownership of the bind socket.
+    /// but the alias parser discards that listener before preparation returns.
+    /// The returned future therefore retains no ownership of the bind socket.
     #[test]
-    fn run_worker_loop_forever_alias_fd_listens_and_closes_during_construction() {
+    fn prepare_worker_loop_alias_fd_listens_and_closes_during_preparation() {
         pyo3::Python::initialize();
 
         let (sock, bound) = bound_not_listening();
@@ -522,9 +562,8 @@ mod tests {
 
         let transferred = sock.into_raw_fd();
         let address = format!("tcp://127.0.0.1:4444@tcp://127.0.0.1:fd{transferred}");
-        let task =
-            monarch_with_gil_blocking(GilSite::Test, |py| run_worker_loop_forever(py, &address))
-                .expect("a valid alias descriptor address should construct a task");
+        let future = prepare_worker_loop(&address, true)
+            .expect("a valid alias descriptor address should prepare a worker loop");
 
         assert!(
             getsockopt(&observer, sockopt::AcceptConn).expect("SO_ACCEPTCONN is readable"),
@@ -534,26 +573,20 @@ mod tests {
         assert_eq!(
             rebind_result(&bound),
             Ok(()),
-            "the returned task must not retain the alias bind listener"
+            "the returned future must not retain the alias bind listener"
         );
 
-        monarch_with_gil_blocking(GilSite::Test, |_py| {
-            drop(task);
-            Ok::<_, PyErr>(())
-        })
-        .expect("dropping the task should not fail");
+        // Keep the future unpolled: this test covers resources acquired during
+        // alias parsing, not anything `host()` does when the future runs.
+        drop(future);
     }
 
     /// A textual address failure and a descriptor-syntax failure are both
-    /// raised by the call itself, so no task is created.
-    ///
-    /// Both are `ValueError`, as is the later bind failure when a task is
-    /// driven, so the type alone does not say which phase failed. What
-    /// distinguishes these is that there is no task to drive. This says nothing
+    /// raised during preparation, so no future is created. This says nothing
     /// about a numeric descriptor that is syntactically valid; that precondition
     /// belongs to the caller and is not exercised here.
     #[test]
-    fn run_worker_loop_forever_rejects_invalid_addresses_before_returning_task() {
+    fn prepare_worker_loop_rejects_invalid_addresses_before_returning_future() {
         pyo3::Python::initialize();
 
         for (address, cause) in [
@@ -564,8 +597,8 @@ mod tests {
             ("zzz://127.0.0.1:1234", "unsupported ZMQ scheme: zzz"),
         ] {
             monarch_with_gil_blocking(GilSite::Test, |py| {
-                let error = match run_worker_loop_forever(py, address) {
-                    Ok(_) => panic!("{address} must not produce a task"),
+                let error = match prepare_worker_loop(address, true) {
+                    Ok(_) => panic!("{address} must not produce a future"),
                     Err(error) => error,
                 };
 

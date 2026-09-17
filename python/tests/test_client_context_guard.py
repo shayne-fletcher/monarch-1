@@ -6,12 +6,13 @@
 
 # pyre-unsafe
 
-"""Fresh root-client bootstrap must not be attempted from inside Tokio.
+"""Blocking Monarch entry points must reject unsafe Tokio re-entry.
 
 Bootstrapping a client ends in ``block_on()``, which panics on a Tokio runtime
 worker. The guard rejects fresh bootstrap from every Tokio runtime context,
 including its blocking pool, while still allowing an already-initialized client
-to be reused.
+to be reused. Worker-loop blocking wrappers likewise reject before eager native
+startup, while the non-blocking start remains allowed.
 """
 
 from unittest.mock import MagicMock, patch
@@ -22,9 +23,59 @@ from monarch._rust_bindings.monarch_hyperactor.handle import WouldBlockRuntime
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
 from monarch._src.actor.host_mesh import this_host
-from monarch.actor import Actor, endpoint
+from monarch.actor import (
+    Actor,
+    endpoint,
+    run_worker_loop_forever,
+    run_worker_loop_until_shutdown,
+    start_worker_loop_forever,
+)
 
 _EXPECTED = "WouldBlockRuntime uninitialized=True"
+
+
+def test_worker_loop_runtime_policy_precedes_native_start() -> None:
+    """Allow eager start on Tokio, but reject blocking before native startup."""
+
+    async def exercise() -> None:
+        from monarch._src.actor import bootstrap
+
+        assert _is_in_tokio_runtime()
+
+        expected = MagicMock()
+        with patch.object(
+            bootstrap,
+            "_start_worker_loop_forever",
+            return_value=expected,
+        ) as start:
+            assert (
+                start_worker_loop_forever(
+                    ca="trust_all_connections",
+                    address="tcp://127.0.0.1:0",
+                )
+                is expected
+            )
+            start.assert_called_once_with("tcp://127.0.0.1:0")
+
+        for operation, native_name in [
+            (run_worker_loop_forever, "_native_start_worker_loop_forever"),
+            (
+                run_worker_loop_until_shutdown,
+                "_native_start_worker_loop_until_shutdown",
+            ),
+        ]:
+            with patch.object(bootstrap, native_name) as native_start:
+                with pytest.raises(
+                    WouldBlockRuntime,
+                    match=rf"{operation.__name__}\(\) cannot block",
+                ):
+                    operation(
+                        ca="trust_all_connections",
+                        address="tcp://127.0.0.1:0",
+                    )
+                native_start.assert_not_called()
+
+    PythonTask.from_coroutine(exercise()).block_on()
 
 
 def test_attach_tracks_process_global_address_and_is_idempotent() -> None:
