@@ -68,6 +68,10 @@ async fn read_bounded(recv: &mut RecvStream, limit: usize) -> io::Result<Vec<u8>
 
 #[tokio::main]
 async fn main() {
+    run().await;
+}
+
+async fn run() {
     // Use an in-memory datagram carrier so we can exercise Chrysalis
     // without configuring UDP. Endpoint 1 will be Alice's location in
     // this network.
@@ -698,4 +702,16 @@ async fn wait_until_visible(node: &Node, pid: Pid) {
     })
     .await
     .expect("process should become visible within five seconds");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn sealed_postcard_completes_all_checkpoints() {
+        tokio::time::timeout(Duration::from_secs(30), super::run())
+            .await
+            .expect("sealed-postcard should complete within thirty seconds");
+    }
 }
