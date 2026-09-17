@@ -136,6 +136,10 @@
 //!   outcome releases the single-flight slot; only a successful,
 //!   input-current snapshot may replace the tree or advance
 //!   `refresh_gen`.
+//! - **TUI-28 (topology-content-fit):** The topology pane is the
+//!   smaller of its natural content width and the former percentage
+//!   allocation. Its width depends only on the expanded rows, localized
+//!   title, and body area, never on cursor position or scroll offset.
 //!
 //! Py-spy overlay invariants:
 //!

@@ -35,6 +35,7 @@ use self::detail_pane::render_detail_pane;
 use self::status_bar::render_footer;
 use self::status_bar::render_header;
 use self::tree_pane::render_topology_tree;
+use self::tree_pane::topology_pane_width;
 use crate::App;
 
 /// Render a full frame of the TUI.
@@ -63,11 +64,23 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
 /// pane. When diagnostics is active the topology tree is dimmed
 /// (non-interactive) and the right pane shows the diagnostics view.
 pub(crate) fn render_body(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, app: &App) {
-    let chunks = Layout::default()
+    let rows = app.visible_rows();
+    let topology_width_ceiling = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area)[0]
+        .width;
+    let topology_width = topology_pane_width(
+        &rows,
+        app.theme.labels.pane_topology,
+        app.theme.labels.selection_caret,
+        topology_width_ceiling,
+    );
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(topology_width), Constraint::Min(0)])
         .split(area);
 
-    render_topology_tree(frame, chunks[0], app);
+    render_topology_tree(frame, chunks[0], app, &rows);
     render_detail_pane(frame, chunks[1], app);
 }
