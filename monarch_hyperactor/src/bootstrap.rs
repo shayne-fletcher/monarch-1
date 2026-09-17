@@ -195,27 +195,11 @@ fn prepare_worker_loop(
     })
 }
 
-fn run_worker_loop(address: &str, exit_on_shutdown: bool) -> PyResult<PyPythonTask> {
-    PyPythonTask::new(prepare_worker_loop(address, exit_on_shutdown)?)
-}
-
 fn start_worker_loop(address: &str, exit_on_shutdown: bool) -> PyResult<PyHandle> {
     Ok(PyHandle::spawn(prepare_worker_loop(
         address,
         exit_on_shutdown,
     )?))
-}
-
-/// Construct the legacy lazy worker loop that exits after host shutdown.
-#[pyfunction]
-pub fn run_worker_loop_forever(_py: Python<'_>, address: &str) -> PyResult<PyPythonTask> {
-    run_worker_loop(address, true)
-}
-
-/// Construct the legacy lazy embedded worker loop.
-#[pyfunction]
-pub fn run_worker_loop_until_shutdown(_py: Python<'_>, address: &str) -> PyResult<PyPythonTask> {
-    run_worker_loop(address, false)
 }
 
 /// Start a worker loop that exits the process after host shutdown.
@@ -273,20 +257,6 @@ pub fn attach_to_workers(
 
 pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     let f = wrap_pyfunction!(bootstrap_main, hyperactor_mod)?;
-    f.setattr(
-        "__module__",
-        "monarch._rust_bindings.monarch_hyperactor.bootstrap",
-    )?;
-    hyperactor_mod.add_function(f)?;
-
-    let f = wrap_pyfunction!(run_worker_loop_forever, hyperactor_mod)?;
-    f.setattr(
-        "__module__",
-        "monarch._rust_bindings.monarch_hyperactor.bootstrap",
-    )?;
-    hyperactor_mod.add_function(f)?;
-
-    let f = wrap_pyfunction!(run_worker_loop_until_shutdown, hyperactor_mod)?;
     f.setattr(
         "__module__",
         "monarch._rust_bindings.monarch_hyperactor.bootstrap",
