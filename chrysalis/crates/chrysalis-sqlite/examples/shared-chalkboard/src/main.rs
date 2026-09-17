@@ -183,5 +183,9 @@ async fn open_sqlite(path: &Path) -> Result<Connection> {
     let connection = database
         .connect()
         .with_context(|| format!("connect to SQLite database {path}"))?;
+    connection
+        .execute_batch("PRAGMA busy_timeout = 5000")
+        .await
+        .with_context(|| format!("configure SQLite lock wait for {path}"))?;
     Ok(connection)
 }
