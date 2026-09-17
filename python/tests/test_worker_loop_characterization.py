@@ -6,18 +6,15 @@
 
 # pyre-strict
 
-"""When the occupied-address failure of ``run_worker_loop_forever`` is published.
+"""Worker-loop eager-start, context rejection, errors, and signal behavior.
 
-Constructing the raw binding against an address that is already taken succeeds;
-the failure is published when the returned task is driven. That is the claim
-here, and it is a claim about *publication*, not about attempt timing: this test
-cannot rule out an eager bind attempt whose error was withheld until the drive.
-That the bind is genuinely attempted inside the task is source-grounded instead,
-by ``host(...)`` living in the future the task owns.
+The native start binding returns a ``Handle`` immediately. Host failures are
+published through that Handle, while dropping it does not cancel a successfully
+started worker. A SIGTERM handler installed after startup must remain active
+while that worker is serving.
 
-The drive runs in a child process under a deadline. A regression that makes the
-bind succeed starts a worker that owns its process lifetime, which would hang or
-exit the test process rather than fail it.
+Each case runs in a child process under a deadline because a successful forever
+worker owns its process lifetime.
 """
 
 import os
@@ -39,28 +36,33 @@ _CHILD_CLEANUP_SECONDS: int = 10
 # The uid is a known-valid literal so the child fixture remains deterministic.
 # It is not the value from the binding's address-format help: that example is a
 # placeholder and is rejected as an invalid base58 uid. This one was taken from
-# a generated id and round-trips. A parse failure here would surface loudly, as
-# construction raising before the child ever reaches its drive.
+# a generated id and round-trips. A parse failure here would surface loudly
+# because its message would not describe the host bind failure required below.
 _SERVICE_PROC_ID: str = "service<E4cgvRepadk>"
 
-# The child reports progress as tagged single-line records, so the parent can
-# require that construction succeeded *before* the drive failed and can read the
-# failure text out of its own record rather than out of merged output. It
-# imports only the raw bootstrap binding: reaching the same task through the
-# pytokio module would add a scanned module import to a test that changes no
-# production code.
-_CHILD_SOURCE: str = """
+# The child reports the error as tagged single-line records, so the parent can
+# require its exact type and read the message from its own record rather than
+# from merged output. Importing the raw bindings keeps the assertion on the
+# native error without adding the public wrapper's argument validation.
+_ERROR_CHILD_SOURCE: str = """
 import sys
 
 from monarch._rust_bindings.monarch_hyperactor.bootstrap import (
     run_worker_loop_forever,
+    start_worker_loop_forever,
 )
 
-task = run_worker_loop_forever(sys.argv[1])
-print("CONSTRUCTED", flush=True)
+if sys.argv[2] == "legacy":
+    observer = run_worker_loop_forever(sys.argv[1])
+    observe = observer.block_on
+    print("CONSTRUCTED", flush=True)
+else:
+    observer = start_worker_loop_forever(sys.argv[1])
+    observe = observer.get
+    print("STARTED", flush=True)
 
 try:
-    task.block_on()
+    observe()
 except BaseException as err:
     print("EXACT_VALUE_ERROR", type(err) is ValueError, flush=True)
     print("MESSAGE", str(err).replace("\\n", " "), flush=True)
@@ -68,6 +70,47 @@ except BaseException as err:
 
 print("NO_RAISE", flush=True)
 sys.exit(1)
+"""
+
+_LIFETIME_CHILD_SOURCE: str = """
+import os
+import signal
+import sys
+import time
+
+from monarch.actor import attach_to_workers, start_worker_loop_forever
+
+
+def sentinel(_signum, _frame):
+    print("SIGTERM_HANDLED", flush=True)
+
+
+signal.signal(signal.SIGTERM, sentinel)
+worker = start_worker_loop_forever(
+    ca="trust_all_connections",
+    address=sys.argv[1],
+)
+signal.signal(signal.SIGTERM, sentinel)
+del worker
+print("OBSERVER_DROPPED", flush=True)
+
+hosts = attach_to_workers(
+    ca="trust_all_connections",
+    workers=[sys.argv[1]],
+)
+hosts.initialized.get(timeout=30)
+print("SERVING", flush=True)
+print(
+    "HANDLER_IS_SENTINEL",
+    signal.getsignal(signal.SIGTERM) is sentinel,
+    flush=True,
+)
+os.kill(os.getpid(), signal.SIGTERM)
+hosts.shutdown().get(timeout=30)
+print("SHUTDOWN_REQUESTED", flush=True)
+time.sleep(30)
+print("DID_NOT_EXIT", flush=True)
+sys.exit(3)
 """
 
 
@@ -114,7 +157,9 @@ def _kill_and_reap(child: "subprocess.Popen[str]") -> None:
             ) from error
 
 
-def test_occupied_numeric_address_fails_when_blocked_on() -> None:
+def _assert_occupied_numeric_address_failure(
+    *, driver: str, returned_marker: str, observer_name: str
+) -> None:
     occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     child = None
     try:
@@ -133,8 +178,9 @@ def test_occupied_numeric_address_fails_when_blocked_on() -> None:
             [
                 sys.executable,
                 "-c",
-                _CHILD_SOURCE,
+                _ERROR_CHILD_SOURCE,
                 f"{_SERVICE_PROC_ID}@tcp://127.0.0.1:{port}",
+                driver,
             ],
             env=env,
             stdout=subprocess.PIPE,
@@ -151,21 +197,20 @@ def test_occupied_numeric_address_fails_when_blocked_on() -> None:
                 partial_output = partial_output.decode(errors="replace")
             output = partial_output or ""
             raise AssertionError(
-                "the occupied address must fail when the task is driven; a "
-                "child that keeps running means the failure is no longer "
-                f"published by the drive. child output:\n{output}"
+                f"the occupied address must fail through {observer_name}; "
+                "a child that keeps running means the failure is no longer "
+                f"published to its observer. child output:\n{output}"
             ) from None
 
         assert child.returncode == 0, f"child did not observe a failure:\n{output}"
 
-        lines = output.splitlines()
-        assert "CONSTRUCTED" in lines, (
-            "construction must succeed on an occupied address, which is what "
-            f"shows the failure is not published by the call. child output:\n{output}"
+        assert returned_marker in output.splitlines(), (
+            f"the binding must return {observer_name} before the host failure is "
+            f"observed. child output:\n{output}"
         )
         kinds = _records(output, "EXACT_VALUE_ERROR")
         assert kinds == ["True"], (
-            f"the drive must raise exactly ValueError. child output:\n{output}"
+            f"{observer_name} must raise exactly ValueError. child output:\n{output}"
         )
 
         messages = _records(output, "MESSAGE")
@@ -193,3 +238,82 @@ def test_occupied_numeric_address_fails_when_blocked_on() -> None:
                 _kill_and_reap(child)
         finally:
             occupied.close()
+
+
+def test_legacy_occupied_numeric_address_failure_is_published_by_task() -> None:
+    _assert_occupied_numeric_address_failure(
+        driver="legacy",
+        returned_marker="CONSTRUCTED",
+        observer_name="PythonTask.block_on()",
+    )
+
+
+def test_occupied_numeric_address_failure_is_published_by_handle() -> None:
+    _assert_occupied_numeric_address_failure(
+        driver="handle",
+        returned_marker="STARTED",
+        observer_name="Handle.get()",
+    )
+
+
+def test_dropped_start_keeps_serving_and_preserves_sigterm_handler() -> None:
+    child = None
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved:
+        reserved.bind(("127.0.0.1", 0))
+        port = reserved.getsockname()[1]
+
+    try:
+        env = {**os.environ}
+        if "FB_XAR_INVOKED_NAME" in os.environ:
+            env["PYTHONPATH"] = ":".join(sys.path)
+
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                _LIFETIME_CHILD_SOURCE,
+                f"{_SERVICE_PROC_ID}@tcp://127.0.0.1:{port}",
+            ],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+
+        try:
+            output = child.communicate(timeout=_CHILD_DEADLINE_SECONDS)[0]
+        except subprocess.TimeoutExpired as error:
+            partial_output = error.stdout
+            if isinstance(partial_output, bytes):
+                partial_output = partial_output.decode(errors="replace")
+            output = partial_output or ""
+            raise AssertionError(
+                "the dropped observer must leave a serving worker whose "
+                f"SIGTERM handler remains active. child output:\n{output}"
+            ) from None
+
+        assert child.returncode == 0, f"worker child failed:\n{output}"
+        assert "DID_NOT_EXIT" not in output, (
+            "the forever worker must exit the process after normal host shutdown. "
+            f"child output:\n{output}"
+        )
+        lines = output.splitlines()
+        assert "OBSERVER_DROPPED" in lines, (
+            f"the child must discard the observer. child output:\n{output}"
+        )
+        assert "SERVING" in lines, (
+            "the worker must become reachable after its observer is discarded. "
+            f"child output:\n{output}"
+        )
+        assert "HANDLER_IS_SENTINEL True" in lines, (
+            "native startup must not replace the post-start SIGTERM handler. "
+            f"child output:\n{output}"
+        )
+        assert "SIGTERM_HANDLED" in lines, (
+            "SIGTERM must run the Python handler rather than Folly's handler. "
+            f"child output:\n{output}"
+        )
+    finally:
+        if child is not None:
+            _kill_and_reap(child)

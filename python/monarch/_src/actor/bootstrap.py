@@ -12,11 +12,13 @@ from typing import Literal, Optional, Sequence, Union
 
 from monarch._rust_bindings.monarch_hyperactor.bootstrap import (
     attach_to_workers as _attach_to_workers,
-    run_worker_loop_forever as _run_worker_loop_forever,
-    run_worker_loop_until_shutdown as _run_worker_loop_until_shutdown,
+    start_worker_loop_forever as _native_start_worker_loop_forever,
+    start_worker_loop_until_shutdown as _native_start_worker_loop_until_shutdown,
 )
+from monarch._rust_bindings.monarch_hyperactor.handle import WouldBlockRuntime
 from monarch._rust_bindings.monarch_hyperactor.host_mesh import HostMesh as HyHostMesh
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
 from monarch._rust_bindings.monarch_hyperactor.shape import Extent
 from monarch._src.actor.actor_mesh import _Lazy
 from monarch._src.actor.future import Future
@@ -52,15 +54,29 @@ def _validate_worker_loop_args(
         )
 
 
-def run_worker_loop_forever(
+def _reject_blocking_worker_loop_in_tokio(operation: str) -> None:
+    if _is_in_tokio_runtime():
+        raise WouldBlockRuntime(
+            f"{operation}() cannot block from within a Tokio runtime; "
+            "invoke it from a synchronous context"
+        )
+
+
+def _start_worker_loop_forever(address: str) -> Future[None]:
+    return Future._from_handle(_native_start_worker_loop_forever(address))
+
+
+def start_worker_loop_forever(
     *,
     private_key: PrivateKey = None,
     ca: CA,
     address: str,
-) -> None:
-    """
-    Start a monarch server at "address" capable of letting this machine participate in
-    a monarch process.
+) -> Future[None]:
+    """Start a Monarch server and return an observer of its lifetime.
+
+    Starting the server is committed before this function returns, and the work
+    continues if the returned Future is discarded. Call ``get()`` to block until
+    it fails or shuts down.
 
     ``address`` accepts either of these string formats:
 
@@ -111,9 +127,23 @@ def run_worker_loop_forever(
     on a service that evals python code, so we should just build it in.
     """
     _validate_worker_loop_args(private_key=private_key, ca=ca, address=address)
-    # we maybe want to actually return the future and let you do other stuff,
-    # not sure ...
-    _run_worker_loop_forever(address).block_on()
+    return _start_worker_loop_forever(address)
+
+
+def run_worker_loop_forever(
+    *,
+    private_key: PrivateKey = None,
+    ca: CA,
+    address: str,
+) -> None:
+    """Run a worker server until host shutdown terminates this process.
+
+    Address and security arguments have the same meaning as in
+    :func:`start_worker_loop_forever`.
+    """
+    _validate_worker_loop_args(private_key=private_key, ca=ca, address=address)
+    _reject_blocking_worker_loop_in_tokio("run_worker_loop_forever")
+    _start_worker_loop_forever(address).get()
 
 
 def run_worker_loop_until_shutdown(
@@ -129,7 +159,8 @@ def run_worker_loop_until_shutdown(
     meaning as in :func:`run_worker_loop_forever`.
     """
     _validate_worker_loop_args(private_key=private_key, ca=ca, address=address)
-    _run_worker_loop_until_shutdown(address).block_on()
+    _reject_blocking_worker_loop_in_tokio("run_worker_loop_until_shutdown")
+    _native_start_worker_loop_until_shutdown(address).get()
 
 
 def attach_to_workers(

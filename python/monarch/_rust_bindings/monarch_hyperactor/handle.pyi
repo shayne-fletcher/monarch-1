@@ -56,10 +56,10 @@ class WouldBlockRuntime(RuntimeError):
     Raised when a synchronous API refuses to enter or block on Tokio from an
     existing Tokio runtime context.
 
-    Two raisers today: ``Handle.get()``, and a fresh root-client bootstrap
-    (``context()`` with no actor context and no initialized client, or
-    ``attach()``). Reusing an already-initialized client does not block and so
-    does not raise.
+    Raised by ``Handle.get()``, a fresh root-client bootstrap (``context()``
+    with no actor context and no initialized client, or ``attach()``), and the
+    blocking worker-loop wrappers. Reusing an already-initialized client does
+    not block and so does not raise.
     """
 
     ...

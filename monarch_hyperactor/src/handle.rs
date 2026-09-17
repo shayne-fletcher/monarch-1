@@ -57,8 +57,9 @@
 //!   runtime context; `as_asyncio()`/`__await__` off a loop raise the native
 //!   `RuntimeError` instead. The exception type itself is not private to this
 //!   module: it marks synchronous APIs that refuse to enter or block on Tokio
-//!   from an existing Tokio runtime context. The Python layer also raises it
-//!   for fresh root-client bootstrap (`monarch._src.actor.actor_mesh`).
+//!   from an existing Tokio runtime context. The Python layer also raises it for
+//!   fresh root-client bootstrap (`monarch._src.actor.actor_mesh`) and the
+//!   blocking worker-loop wrappers (`monarch._src.actor.bootstrap`).
 //! - **HDL-7 (`as_asyncio` publish).** The observer waits borrow-first (via
 //!   `wait_ready`, never `changed()`-first) and sets a result only on a
 //!   non-cancelled future, swallowing `InvalidStateError`; any `StopIteration`
@@ -157,8 +158,8 @@ pyo3::create_exception!(
     WouldBlockRuntime,
     pyo3::exceptions::PyRuntimeError,
     "raised when a synchronous API refuses to enter or block on Tokio from \
-     an existing Tokio runtime context -- Handle.get(), or a fresh root-client \
-     bootstrap from the Python layer"
+     an existing Tokio runtime context -- Handle.get(), fresh root-client \
+     bootstrap, or a blocking worker-loop wrapper"
 );
 
 /// Convert a Rust error into the generic Python `ValueError` used by Monarch's
