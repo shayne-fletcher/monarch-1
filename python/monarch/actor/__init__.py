@@ -39,6 +39,7 @@ from monarch._src.actor.bootstrap import (
     attach_to_workers,
     run_worker_loop_forever,
     run_worker_loop_until_shutdown,
+    start_worker_loop_forever,
 )
 from monarch._src.actor.debugger.debug_controller import debug_controller
 from monarch._src.actor.endpoint import endpoint
@@ -85,6 +86,7 @@ __all__ = [
     "Extent",
     "run_worker_loop_forever",
     "run_worker_loop_until_shutdown",
+    "start_worker_loop_forever",
     "attach_to_workers",
     "attach",
     "enable_transport",
