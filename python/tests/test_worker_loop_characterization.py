@@ -42,27 +42,18 @@ _SERVICE_PROC_ID: str = "service<E4cgvRepadk>"
 
 # The child reports the error as tagged single-line records, so the parent can
 # require its exact type and read the message from its own record rather than
-# from merged output. Importing the raw bindings keeps the assertion on the
+# from merged output. Importing the raw binding keeps the assertion on the
 # native error without adding the public wrapper's argument validation.
 _ERROR_CHILD_SOURCE: str = """
 import sys
 
-from monarch._rust_bindings.monarch_hyperactor.bootstrap import (
-    run_worker_loop_forever,
-    start_worker_loop_forever,
-)
+from monarch._rust_bindings.monarch_hyperactor.bootstrap import start_worker_loop_forever
 
-if sys.argv[2] == "legacy":
-    observer = run_worker_loop_forever(sys.argv[1])
-    observe = observer.block_on
-    print("CONSTRUCTED", flush=True)
-else:
-    observer = start_worker_loop_forever(sys.argv[1])
-    observe = observer.get
-    print("STARTED", flush=True)
+observer = start_worker_loop_forever(sys.argv[1])
+print("STARTED", flush=True)
 
 try:
-    observe()
+    observer.get()
 except BaseException as err:
     print("EXACT_VALUE_ERROR", type(err) is ValueError, flush=True)
     print("MESSAGE", str(err).replace("\\n", " "), flush=True)
@@ -157,9 +148,7 @@ def _kill_and_reap(child: "subprocess.Popen[str]") -> None:
             ) from error
 
 
-def _assert_occupied_numeric_address_failure(
-    *, driver: str, returned_marker: str, observer_name: str
-) -> None:
+def test_occupied_numeric_address_failure_is_published_by_handle() -> None:
     occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     child = None
     try:
@@ -180,7 +169,6 @@ def _assert_occupied_numeric_address_failure(
                 "-c",
                 _ERROR_CHILD_SOURCE,
                 f"{_SERVICE_PROC_ID}@tcp://127.0.0.1:{port}",
-                driver,
             ],
             env=env,
             stdout=subprocess.PIPE,
@@ -197,20 +185,20 @@ def _assert_occupied_numeric_address_failure(
                 partial_output = partial_output.decode(errors="replace")
             output = partial_output or ""
             raise AssertionError(
-                f"the occupied address must fail through {observer_name}; "
+                "the occupied address must fail through Handle.get(); "
                 "a child that keeps running means the failure is no longer "
                 f"published to its observer. child output:\n{output}"
             ) from None
 
         assert child.returncode == 0, f"child did not observe a failure:\n{output}"
 
-        assert returned_marker in output.splitlines(), (
-            f"the binding must return {observer_name} before the host failure is "
+        assert "STARTED" in output.splitlines(), (
+            "the binding must return Handle before the host failure is "
             f"observed. child output:\n{output}"
         )
         kinds = _records(output, "EXACT_VALUE_ERROR")
         assert kinds == ["True"], (
-            f"{observer_name} must raise exactly ValueError. child output:\n{output}"
+            f"Handle.get() must raise exactly ValueError. child output:\n{output}"
         )
 
         messages = _records(output, "MESSAGE")
@@ -238,22 +226,6 @@ def _assert_occupied_numeric_address_failure(
                 _kill_and_reap(child)
         finally:
             occupied.close()
-
-
-def test_legacy_occupied_numeric_address_failure_is_published_by_task() -> None:
-    _assert_occupied_numeric_address_failure(
-        driver="legacy",
-        returned_marker="CONSTRUCTED",
-        observer_name="PythonTask.block_on()",
-    )
-
-
-def test_occupied_numeric_address_failure_is_published_by_handle() -> None:
-    _assert_occupied_numeric_address_failure(
-        driver="handle",
-        returned_marker="STARTED",
-        observer_name="Handle.get()",
-    )
 
 
 def test_dropped_start_keeps_serving_and_preserves_sigterm_handler() -> None:

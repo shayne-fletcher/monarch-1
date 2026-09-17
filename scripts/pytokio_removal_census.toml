@@ -350,7 +350,7 @@ pytokio_import = "monarch._rust_bindings.monarch_hyperactor.pytokio"
 doc_legacy_surface = "PythonTask|PyShared|pytokio"
 
 [totals]
-py_python_task_new = 23
+py_python_task_new = 22
 raw_python_task_new = 5
 from_coro = 16
 rust_from_coro = 2
@@ -2462,8 +2462,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/bootstrap.rs"
 symbol = "run_worker_loop"
 operation = "py_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.2"
+transition_revision = "self"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned by the two legacy raw bindings: run_worker_loop_forever (exit_on_shutdown = true) and run_worker_loop_until_shutdown (exit_on_shutdown = false). The supported Monarch wrappers use the separate Handle-backed start bindings"
 consumer = "five Mitra job entry points import the legacy raw run_worker_loop_forever binding directly: mitra/ml/monarch/rl/unified_main.py, mitra/ml/monarch/rl/unified_main_sync.py, mitra/ml/monarch/common/unified_main.py, mitra/projects/search_oneflow/runners/ldpo_unified_main.py, and mitra/projects/unirec/training/distill/infra/unified_main.py; bootstrap_main is the child command captured during construction, not a consumer"
@@ -2479,7 +2480,7 @@ oracle = [
   "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::bootstrap::tests::prepare_worker_loop_retains_non_alias_tcp_fd_until_future_drop",
   "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::bootstrap::tests::prepare_worker_loop_alias_fd_listens_and_closes_during_preparation",
   "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::bootstrap::tests::prepare_worker_loop_rejects_invalid_addresses_before_returning_future",
-  "fbcode//monarch/python/tests:test_worker_loop_characterization::test_legacy_occupied_numeric_address_failure_is_published_by_task",
+  "fbcode//monarch/python/tests:test_worker_loop_characterization::test_occupied_numeric_address_failure_is_published_by_handle",
 ]
 
 [[site]]
