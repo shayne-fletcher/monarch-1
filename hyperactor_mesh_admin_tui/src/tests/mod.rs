@@ -2852,3 +2852,53 @@ fn render_header_shows_content_clipped_alert() {
         "no alert when detail is not clipped"
     );
 }
+
+// TUI-28: topology width is independent of cursor position and scroll offset,
+// including when a theme reserves a marker wider than the unselected prefix.
+#[test]
+fn topology_width_ignores_navigation_state() {
+    use crate::render::tree_pane::topology_pane_width;
+
+    let mut app = make_app_with_cursor(vec![proc_node("a"), proc_node("longest")], 0);
+    app.theme.labels.selection_caret = ">>> ";
+
+    let initial_rows = app.visible_rows();
+    let initial_width = topology_pane_width(
+        &initial_rows,
+        app.theme.labels.pane_topology,
+        app.theme.labels.selection_caret,
+        100,
+    );
+    drop(initial_rows);
+
+    app.cursor.set_pos(1);
+    app.tree_scroll_offset = 1;
+    let moved_rows = app.visible_rows();
+    let moved_width = topology_pane_width(
+        &moved_rows,
+        app.theme.labels.pane_topology,
+        app.theme.labels.selection_caret,
+        100,
+    );
+
+    assert_eq!(initial_width, moved_width);
+}
+
+// TUI-28: content fitting assigns space reclaimed from the topology pane to
+// the detail pane rather than leaving the old 40% allocation in place.
+#[test]
+fn render_body_assigns_reclaimed_width_to_detail_pane() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let app = make_app_with_cursor(vec![proc_node("x")], 0);
+    let backend = TestBackend::new(100, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::render::render_body(frame, frame.area(), &app))
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(9, 0)].symbol(), "┐");
+    assert_eq!(buffer[(10, 0)].symbol(), "┌");
+}
