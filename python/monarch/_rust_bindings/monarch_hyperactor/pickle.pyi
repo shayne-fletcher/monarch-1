@@ -14,6 +14,7 @@ from monarch._rust_bindings.monarch_hyperactor.actor import (
 )
 from monarch._rust_bindings.monarch_hyperactor.buffers import FrozenBuffer
 from monarch._rust_bindings.monarch_hyperactor.context import Instance
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 from monarch._rust_bindings.monarch_hyperactor.pytokio import Shared
 
 class PicklingState:
@@ -99,6 +100,10 @@ class PendingMessage:
         Returns None without consuming the message when asynchronous resolution
         is still required.
         """
+        ...
+
+    def resolve(self) -> Handle[PythonMessage]:
+        """Resolve pending mesh fills and return the completed message."""
         ...
 
 def pickle(

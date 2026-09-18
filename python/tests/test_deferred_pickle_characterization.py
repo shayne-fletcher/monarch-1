@@ -46,6 +46,7 @@ test combines a real pending ActorMesh with the complete production round trip.
 from __future__ import annotations
 
 import pickle
+from typing import cast
 
 import pytest
 from isolate_in_subprocess import isolate_in_subprocess
@@ -55,7 +56,7 @@ from monarch._rust_bindings.monarch_hyperactor.pickle import (
     _reset_mesh_pop_count,
     _reset_pending_reserve_count,
 )
-from monarch._src.actor.actor_mesh import Actor
+from monarch._src.actor.actor_mesh import Actor, Port
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.host_mesh import this_host
 from monarch._src.job.process import ProcessJob
@@ -82,6 +83,38 @@ class _Spawner(Actor):
         # Spawn a fresh mesh and return it without awaiting init, so it is
         # pending when this reply is pickled.
         return this_host().spawn_procs(name="inner_proc").spawn("inner", _Target)
+
+
+class _PickleProbe:
+    def __init__(self) -> None:
+        self.was_reduced = False
+
+    def __reduce__(self) -> tuple[type[str], tuple[str]]:
+        self.was_reduced = True
+        return str, ("payload",)
+
+
+class _RecordingPort:
+    _rank: int | None = None
+
+    def __init__(self) -> None:
+        self.sent_messages: list[object] = []
+
+    def send_message(self, message: object) -> None:
+        self.sent_messages.append(message)
+
+
+def test_unawaited_port_resolve_and_send_starts_nothing() -> None:
+    """Creating the public coroutine does not pickle or send its result."""
+    result = _PickleProbe()
+    port = _RecordingPort()
+
+    coroutine = Port.resolve_and_send(cast(Port, port), result)
+    try:
+        assert not result.was_reduced
+        assert port.sent_messages == []
+    finally:
+        coroutine.close()
 
 
 @pytest.mark.timeout(60)

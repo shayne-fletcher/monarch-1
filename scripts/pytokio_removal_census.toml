@@ -350,9 +350,9 @@ pytokio_import = "monarch._rust_bindings.monarch_hyperactor.pytokio"
 doc_legacy_surface = "PythonTask|PyShared|pytokio"
 
 [totals]
-py_python_task_new = 22
+py_python_task_new = 21
 raw_python_task_new = 5
-from_coro = 16
+from_coro = 15
 rust_from_coro = 2
 from_coroutine = 7
 take_inner = 7
@@ -371,7 +371,7 @@ py_mesh_reserve = 2
 py_is_tokio_thread = 0
 pytokio_import = 30
 pytokio_module_ref = 15
-helper_symbol = 20
+helper_symbol = 19
 helper_definition = 1
 would_block_surface = 0
 binding_stub_symbol = 3
@@ -1058,8 +1058,9 @@ path = "fbcode/monarch/python/monarch/_src/actor/actor_mesh.py"
 symbol = "Port.resolve_and_send[Future._from_coro(cast(Any, message).resolve())]"
 operation = "from_coro"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.2"
+transition_revision = "self"
 
 [[site]]
 id = "fc.actor_mesh.PortReceiver.recv[Future._from_coroself._recv]"
@@ -1808,8 +1809,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/pickle.rs"
 symbol = "PyPythonTask"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.2"
+transition_revision = "self"
 
 [[site]]
 id = "hs.pickle.PyShared"
@@ -2464,7 +2466,7 @@ operation = "py_python_task_new"
 scope = "production"
 state = "migrated"
 transition = "6.2"
-transition_revision = "self"
+transition_revision = "D120441220"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned by the two legacy raw bindings: run_worker_loop_forever (exit_on_shutdown = true) and run_worker_loop_until_shutdown (exit_on_shutdown = false). The supported Monarch wrappers use the separate Handle-backed start bindings"
 consumer = "five Mitra job entry points import the legacy raw run_worker_loop_forever binding directly: mitra/ml/monarch/rl/unified_main.py, mitra/ml/monarch/rl/unified_main_sync.py, mitra/ml/monarch/common/unified_main.py, mitra/projects/search_oneflow/runners/ldpo_unified_main.py, and mitra/projects/unirec/training/distill/infra/unified_main.py; bootstrap_main is the child command captured during construction, not a consumer"
@@ -2740,8 +2742,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/pickle.rs"
 symbol = "PendingMessage::py_resolve"
 operation = "py_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.2"
+transition_revision = "self"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from PendingMessage::py_resolve"
 consumer = "Port.resolve_and_send, on the actor loop"
@@ -2751,13 +2754,14 @@ abandonment = "possible; the message has already been taken out of the PendingMe
 eager_effect = "consumes the source; take() moves the kind and the pickling state out, so the PendingMessage is spent whether or not the returned task is ever driven"
 drop_behavior = "the taken message is lost: slots are never filled and no reply is sent"
 unobserved_error = "none until the returned task is driven; driving it reports either a pending handle's failure or the mesh conversion that follows, with the original exception type and message, and the source stays consumed either way. What a producer behind a pending handle does with its own failure is that producer's policy, not this task's"
-disposition = "preserve timing"
+disposition = "intentionally become eager"
 semantic_class = "sync_partial_effect_lazy_tail"
 oracle = [
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::pickle::tests::py_resolve_consumes_the_source_before_returning_its_task",
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::pickle::tests::py_resolve_retains_no_waiter_on_a_pending_handle",
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::pickle::tests::py_resolve_task_surfaces_a_failed_pending_handle_error",
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::pickle::tests::py_resolve_task_surfaces_the_fill_error_and_leaves_the_source_consumed",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::pickle::tests::py_resolve_consumes_the_source_before_returning_its_handle",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::pickle::tests::py_resolve_starts_resolution_and_survives_returned_handle_drop",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::pickle::tests::py_resolve_handle_surfaces_a_failed_pending_handle_error",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::pickle::tests::py_resolve_handle_surfaces_the_fill_error_and_leaves_the_source_consumed",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::pickle::tests::py_resolve_handle_surfaces_unfilled_slot_error_and_leaves_source_consumed",
   "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::pickle::tests::resolve_fills_nonadjacent_slots_in_place_without_touching_the_payload",
 ]
 
