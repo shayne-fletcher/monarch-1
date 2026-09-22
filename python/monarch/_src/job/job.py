@@ -6,6 +6,8 @@
 
 # pyre-unsafe
 
+"""Implementation of Monarch's public job lifecycle and command API."""
+
 import contextlib
 import logging
 import os
@@ -15,14 +17,25 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import traceback
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, NamedTuple, Optional, Sequence
 
+from monarch._rust_bindings.monarch_hyperactor.handle import (
+    _HandleCompleter,
+    _new_handle_pair,
+    Handle,
+)
 from monarch._rust_bindings.monarch_hyperactor.proc import ProcId
-from monarch._src.actor.actor_mesh import _client_attached_to
+from monarch._src.actor.actor_mesh import (
+    _client_attached_to,
+    _reset_context,
+    _set_context,
+    Context,
+)
 from monarch._src.actor.bootstrap import attach_to_workers
 from monarch._src.job._batch_env import in_batch_job, MONARCH_BATCH_JOB_ENV
 from monarch._src.job._telemetry_query_client import QueryEngineClient
@@ -39,6 +52,7 @@ from monarch._src.job.telemetry_config import TelemetryConfig
 from monarch.actor import (
     Actor,
     attach,
+    context,
     current_rank,
     enable_transport,
     endpoint,
@@ -941,6 +955,35 @@ def load_current_job() -> JobTrait:
     return _import_job_from_spec(module_path)
 
 
+def _start_exec_command(
+    monarch_context: Context, operation: Callable[[], int]
+) -> Handle[int]:
+    """Run ``operation`` on a dedicated Python thread and return its result as a Handle."""
+    pair: tuple[Handle[int], _HandleCompleter[int]] = _new_handle_pair()
+    handle, completer = pair
+
+    def run() -> None:
+        try:
+            token = _set_context(monarch_context)
+            try:
+                result = operation()
+            finally:
+                _reset_context(token)
+        # Every terminal outcome must settle the Handle; a BaseException must
+        # not kill the worker and leave its observers pending.
+        except BaseException as error:  # noqa: B036
+            completer.set_exception(error)
+        else:
+            completer.set_result(result)
+
+    threading.Thread(
+        name="monarch-exec-command",
+        target=run,
+        daemon=False,
+    ).start()
+    return handle
+
+
 def exec_command(
     host_mesh: HostMesh,
     cmd: List[str],
@@ -951,7 +994,19 @@ def exec_command(
     point: Optional[Dict[str, int]] = None,
     per_host: Optional[Dict[str, int]] = None,
 ) -> "Future[int]":
-    """Run a command on *host_mesh* via BashActor.
+    """Run a command on *host_mesh* and return its maximum rank exit code.
+
+    Calling this function commits the operation immediately by starting
+    background work. The returned Future only observes the operation:
+    discarding it, timing out, or cancelling an observer does not cancel the
+    command. Normal interpreter shutdown waits for committed work to finish.
+    Once its process mesh has been created, that mesh is stopped before the
+    Future completes.
+
+    The current Monarch context is captured and the worker is started before
+    this function returns, so failures in either step raise directly. Failures
+    after the worker starts, including command execution, context restoration,
+    and proc cleanup, are reported when the returned Future is observed.
 
     Args:
         host_mesh: The HostMesh to execute on.
@@ -974,7 +1029,7 @@ def exec_command(
         A Future resolving to the maximum return code across all ranks (0 = success).
     """
 
-    async def _impl() -> int:
+    def _impl() -> int:
         if point is not None:
             host_mesh_s = host_mesh.slice(**point)
         elif rank is not None:
@@ -989,13 +1044,13 @@ def exec_command(
             client_cwd = os.getcwd()
 
             if cmd[0].endswith(".py") or cmd[0] == "-m":
-                results = await bash_actors.run_python.call(
+                results = bash_actors.run_python.call(
                     cmd,
                     env=env,
                     workdir=workdir,
                     client_cwd=client_cwd,
                     output_dir=output_dir,
-                )._take_inner()
+                ).get()
             else:
                 lines: List[str] = ["#!/bin/bash"]
                 if env:
@@ -1009,9 +1064,7 @@ def exec_command(
                     )
                 lines.append(shlex.join(cmd))
                 script = "\n".join(lines) + "\n"
-                results = await bash_actors.run.call(
-                    script, output_dir=output_dir
-                )._take_inner()
+                results = bash_actors.run.call(script, output_dir=output_dir).get()
             max_rc = 0
             for _rank_key, result in results:
                 rc = result.get("returncode", 1)
@@ -1026,9 +1079,10 @@ def exec_command(
             # pyrefly: ignore [bad-return]
             return max_rc
         finally:
-            await procs.stop()._take_inner()
+            procs.stop().get()
 
-    return Future._from_coro(_impl())
+    monarch_context = context()
+    return Future._from_handle(_start_exec_command(monarch_context, _impl))
 
 
 class LocalJob(JobTrait):
