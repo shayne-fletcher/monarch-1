@@ -84,9 +84,11 @@
 //!   partly by construction; exercised by the multi-observer/blocking tests.
 //! - **HDL-10 (dropped producer surfaces, never hangs).** If every producer drops
 //!   its sender without sending, the wait loop's `changed().await?` yields a
-//!   `RecvError` turned into a Python exception (`to_py_error`) on the sync
-//!   (`get`/`wait_future`) path, the async (`as_asyncio`) path, and
-//!   `wait_completion`, so an observer raises rather than hanging forever.
+//!   `RecvError` converted to `RuntimeError("Handle producer ended without
+//!   publishing a result")` on the non-blocking (`poll`), sync
+//!   (`get`/`wait_future`), async (`as_asyncio`), and `wait_completion` paths,
+//!   so every observer receives the same producer-lifecycle failure rather than
+//!   waiting forever.
 //! - **HDL-11 (`Handle` is not constructible from Python).** The pyclass has no
 //!   `#[new]`, and its Rust-only [`PyHandle::from_value`] constructor lives
 //!   outside `#[pymethods]`. Python therefore cannot mint a `Handle` core;
@@ -169,6 +171,11 @@ where
     T: Error,
 {
     PyErr::new::<PyValueError, _>(error.to_string())
+}
+
+/// Report that a Handle lost its producer before receiving a terminal value.
+fn handle_producer_ended_error(_: watch::error::RecvError) -> PyErr {
+    PyRuntimeError::new_err("Handle producer ended without publishing a result")
 }
 
 /// Format a captured traceback (from `traceback.extract_stack()`) as a single
@@ -267,13 +274,17 @@ impl HandleCore {
     /// Non-blocking, non-consuming check for completion.
     ///
     /// Returns `Ok(None)` while pending, `Ok(Some(obj))` on success, or
-    /// `Err(pyerr)` if the producer completed with an exception.
+    /// `Err(pyerr)` if the producer completed with an exception or disappeared
+    /// before completion.
     pub(crate) fn poll(&self) -> PyResult<Option<Py<PyAny>>> {
         // HDL-9: release the watch read guard before taking the GIL; holding it
         // across the GIL acquisition would invert lock order against the
         // producer's write-lock send. Re-borrowing under the GIL is safe by HDL-1
         // (one-shot: once `Some`, never reset or replaced).
         if self.rx.borrow().is_none() {
+            // HDL-10: a closed channel with no value is terminal producer loss,
+            // not a still-pending Handle.
+            self.rx.has_changed().map_err(handle_producer_ended_error)?;
             return Ok(None);
         }
         monarch_with_gil_blocking(GilSite::Convert, |py| {
@@ -300,8 +311,7 @@ impl HandleCore {
         // the value out under the GIL.
         let ready = self.wait_ready();
         async move {
-            // HDL-10: a dropped producer surfaces as a Python exception here.
-            let rx = ready.await.map_err(to_py_error)?;
+            let rx = ready.await?;
             monarch_with_gil(GilSite::Convert, |py| {
                 match rx
                     .borrow()
@@ -319,16 +329,14 @@ impl HandleCore {
     /// Await this core's completion without touching the GIL.
     ///
     /// Yields the cloned receiver positioned at the completed value, or a
-    /// `RecvError` if every producer dropped its sender without sending. Unlike
+    /// `RuntimeError` if every producer dropped its sender without sending. Unlike
     /// `wait_future`, which clones the value out under its own GIL acquisition,
     /// the caller clones under a GIL it holds anyway (e.g. `as_asyncio`'s
     /// scheduling), so completion touches the GIL exactly once.
     pub(crate) fn wait_ready(
         &self,
-    ) -> impl Future<
-        Output = Result<watch::Receiver<Option<PyResult<Py<PyAny>>>>, watch::error::RecvError>,
-    > + Send
-    + 'static {
+    ) -> impl Future<Output = PyResult<watch::Receiver<Option<PyResult<Py<PyAny>>>>>> + Send + 'static
+    {
         // HDL-9: the returned future owns a cloned receiver (Send + 'static,
         // borrowing nothing from &self), so a caller can drop its PyRef / release
         // the GIL before awaiting and can spawn this future.
@@ -337,9 +345,10 @@ impl HandleCore {
             // HDL-1: loop until the value is actually `Some` (one-shot). HDL-9:
             // the temporary borrow is dropped before each `.await`, never held
             // across it. HDL-10: a dropped producer makes `changed()` yield a
-            // RecvError, which propagates out rather than hanging.
+            // RecvError, which becomes the producer-lifecycle error rather than
+            // leaking the watch-channel implementation or hanging.
             while rx.borrow().is_none() {
-                rx.changed().await?;
+                rx.changed().await.map_err(handle_producer_ended_error)?;
             }
             Ok(rx)
         }
@@ -464,8 +473,7 @@ impl PyHandle {
     pub fn wait_completion(&self) -> impl Future<Output = PyResult<()>> + Send + 'static {
         let ready = self.core.wait_ready();
         async move {
-            // HDL-10: a dropped producer surfaces as a Python exception here.
-            let rx = ready.await.map_err(to_py_error)?;
+            let rx = ready.await?;
             // Read only the success/error discriminant under a watch borrow that
             // holds no GIL, then drop it. HDL-1: the value is `Some` and, once
             // set, never changes.
@@ -672,7 +680,9 @@ impl PyHandle {
     /// Non-blocking, non-consuming check for completion.
     ///
     /// Returns `None` while pending, the value on success, or raises the stored
-    /// exception. A ready value stays observable by later observers.
+    /// exception. If the producer disappears before completion, raises the
+    /// producer-lifecycle `RuntimeError`. A ready value stays observable by
+    /// later observers.
     fn poll(&self) -> PyResult<Option<Py<PyAny>>> {
         self.core.poll()
     }
@@ -719,7 +729,7 @@ impl PyHandle {
                         Err(err) => Err(err.clone_ref(py)),
                     },
                     // HDL-10: a dropped producer surfaces as a set_exception.
-                    Err(e) => Err(to_py_error(e)),
+                    Err(e) => Err(e),
                 };
                 schedule_completion(py, loop_handle.bind(py), fut_handle.bind(py), result)
             })
@@ -853,6 +863,17 @@ mod tests {
             core: HandleCore::new(rx, None, None),
         };
         (tx, handle)
+    }
+
+    fn assert_producer_ended_error(py: Python<'_>, error: &PyErr) {
+        assert!(
+            error.is_instance_of::<PyRuntimeError>(py),
+            "a dropped producer should surface a RuntimeError"
+        );
+        assert_eq!(
+            error.to_string(),
+            "RuntimeError: Handle producer ended without publishing a result"
+        );
     }
 
     // A Python helper module providing loop drivers for the `asyncio` tests.
@@ -1477,11 +1498,43 @@ def run_two(h):
         drop(tx);
         monarch_with_gil_blocking(GilSite::Test, |py| {
             let r = Py::new(py, handle).unwrap();
+            let poll_err = r.borrow(py).poll().unwrap_err();
+            assert_producer_ended_error(py, &poll_err);
             let err = PyHandle::get(r.borrow(py), py, None).unwrap_err();
-            assert!(
-                err.is_instance_of::<pyo3::exceptions::PyException>(py),
-                "a dropped producer should surface an exception, not hang"
-            );
+            assert_producer_ended_error(py, &err);
+        });
+    }
+
+    // The blocking future path reports producer loss even without poll()/get().
+    // Attests HDL-10.
+    #[test]
+    fn wait_future_dropped_producer_surfaces_runtime_error() {
+        ensure_python();
+        let (tx, handle) = pending_handle();
+        drop(tx);
+
+        let err = get_tokio_runtime()
+            .block_on(handle.core.wait_future())
+            .unwrap_err();
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            assert_producer_ended_error(py, &err);
+        });
+    }
+
+    // The Rust-only completion observer reports the same producer-lifecycle
+    // failure as Python's synchronous and asyncio observers.
+    // Attests HDL-10.
+    #[test]
+    fn wait_completion_dropped_producer_surfaces_runtime_error() {
+        ensure_python();
+        let (tx, handle) = pending_handle();
+        drop(tx);
+
+        let err = get_tokio_runtime()
+            .block_on(handle.wait_completion())
+            .unwrap_err();
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            assert_producer_ended_error(py, &err);
         });
     }
 
@@ -1603,15 +1656,16 @@ class RaisingFuture:
         ensure_python();
         let (tx, handle) = pending_handle();
         drop(tx);
-        let raised = monarch_with_gil_blocking(GilSite::Test, |py| -> bool {
+        monarch_with_gil_blocking(GilSite::Test, |py| {
             let h = Py::new(py, handle).unwrap();
             let helper = loop_helper(py);
-            helper.getattr("run_await").unwrap().call1((h,)).is_err()
+            let err = helper
+                .getattr("run_await")
+                .unwrap()
+                .call1((h,))
+                .unwrap_err();
+            assert_producer_ended_error(py, &err);
         });
-        assert!(
-            raised,
-            "awaiting a handle whose producer dropped its sender should raise, not hang"
-        );
     }
 
     // A StopIteration producer error is wrapped in RuntimeError before
