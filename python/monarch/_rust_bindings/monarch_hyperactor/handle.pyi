@@ -11,9 +11,15 @@ from typing import Any, Generator, Generic, Optional, TypeVar
 
 T = TypeVar("T")
 
+class _HandleCompleter(Generic[T]):
+    """The private one-shot producer returned with a pending ``Handle``."""
+
+    def set_result(self, value: T) -> None: ...
+    def set_exception(self, error: BaseException) -> None: ...
+
 class Handle(Generic[T]):
     """
-    An observe-only handle to a background task. It resolves once and stays
+    An observe-only handle to a background operation. It resolves once and stays
     observable by any number of later observers. Unlike Shared, a Handle never
     drives a Python coroutine. If its producer ends before publishing a result,
     every observer raises RuntimeError.
@@ -54,6 +60,10 @@ class Handle(Generic[T]):
         Await the handle on a running asyncio loop, delegating to as_asyncio().
         """
         ...
+
+def _new_handle_pair() -> tuple[Handle[T], _HandleCompleter[T]]:
+    """Create a pending ``Handle`` and its sole completion endpoint."""
+    ...
 
 class WouldBlockRuntime(RuntimeError):
     """
