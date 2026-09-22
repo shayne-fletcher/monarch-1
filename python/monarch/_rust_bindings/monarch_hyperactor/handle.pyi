@@ -15,7 +15,8 @@ class Handle(Generic[T]):
     """
     An observe-only handle to a background task. It resolves once and stays
     observable by any number of later observers. Unlike Shared, a Handle never
-    drives a Python coroutine.
+    drives a Python coroutine. If its producer ends before publishing a result,
+    every observer raises RuntimeError.
     """
 
     def get(self, timeout: Optional[float] = None) -> T:
@@ -33,7 +34,8 @@ class Handle(Generic[T]):
 
     def poll(self) -> Optional[T]:
         """
-        If the handle has resolved, return the value; otherwise return None.
+        If the handle has resolved, return the value; otherwise return None. If
+        its producer has ended without publishing a result, raise RuntimeError.
         Non-consuming: the value stays observable by later observers.
         """
         ...
@@ -41,7 +43,9 @@ class Handle(Generic[T]):
     def as_asyncio(self) -> "asyncio.Future[T]":
         """
         Return a standard asyncio.Future that resolves when the handle does.
-        Requires a running event loop; off a loop it raises RuntimeError.
+        Requires a running event loop; off a loop it raises RuntimeError. If the
+        producer ends without publishing a result, the Future resolves with
+        RuntimeError.
         """
         ...
 
