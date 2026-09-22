@@ -6,10 +6,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-//! `Handle`: an observe-only handle to a background Tokio task.
+//! `Handle`: an observe-only handle to a background operation.
 //!
 //! A `Handle` wraps a `watch` channel that a producer fulfills exactly once with
-//! the task's `PyResult<Py<PyAny>>`. You observe its eventual result:
+//! the operation's `PyResult<Py<PyAny>>`. You observe its eventual result:
 //! synchronously via `get()`, on an `asyncio` loop via `as_asyncio()`/`await`, or
 //! without blocking via `poll()`. The channel is multi-observer, so a resolved
 //! value stays observable by any number of later observers.
@@ -89,10 +89,18 @@
 //!   (`get`/`wait_future`), async (`as_asyncio`), and `wait_completion` paths,
 //!   so every observer receives the same producer-lifecycle failure rather than
 //!   waiting forever.
-//! - **HDL-11 (`Handle` is not constructible from Python).** The pyclass has no
-//!   `#[new]`, and its Rust-only [`PyHandle::from_value`] constructor lives
-//!   outside `#[pymethods]`. Python therefore cannot mint a `Handle` core;
-//!   exposing a Python constructor would let user code create invalid state.
+//! - **HDL-11 (Python construction is paired).** Neither `Handle` nor
+//!   `_HandleCompleter` has `#[new]`. Internal Python may call the private
+//!   `_new_handle_pair()`, which atomically creates a pending `Handle` and its
+//!   sole producer. The factory initializes the completer with `Some(sender)`.
+//!   `set_exception()` rejects a non-`BaseException` before taking it; the first
+//!   `set_result()` or valid `set_exception()` takes it, producing the only
+//!   state transition to `None`, and any later completion attempt raises. No
+//!   sender clone escapes. Dropping the completer unresolved closes the channel
+//!   and surfaces through HDL-10. Python therefore cannot create a pending
+//!   `Handle` without its producer. Native producers remain the default; this
+//!   private pair is reserved for operations whose semantics and scheduling are
+//!   owned by Python.
 //! - **HDL-12 (`get()` timeout contract).** `get()` validates the timeout up
 //!   front (rejecting negative/NaN/non-finite as `ValueError` via
 //!   `try_from_secs_f64`, never panicking) and before the ready fast path, so an
@@ -119,7 +127,7 @@
 //! - **HDL-15 (Rust ready construction starts no work).**
 //!   [`PyHandle::from_value`] constructs an already-complete, non-aborting core
 //!   without spawning a task. It is public to Rust callers but remains outside
-//!   `#[pymethods]`, preserving HDL-11.
+//!   `#[pymethods]`, preserving HDL-11's direct-construction restriction.
 //! - **HDL-16 (permanent Python identity).** `Handle` and `WouldBlockRuntime`
 //!   have the canonical module `monarch._rust_bindings.monarch_hyperactor.handle`.
 //!   The legacy `pytokio` module does not export `Handle`.
@@ -130,9 +138,11 @@ use std::future::Future;
 use monarch_types::SerializablePyErr;
 use monarch_types::py_global;
 use pyo3::IntoPyObjectExt;
+use pyo3::exceptions::PyBaseException;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyStopIteration;
 use pyo3::exceptions::PyTimeoutError;
+use pyo3::exceptions::PyTypeError;
 use pyo3::exceptions::PyUserWarning;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -191,11 +201,11 @@ fn format_traceback(py: Python<'_>, traceback: &Py<PyAny>) -> PyResult<String> {
 
 /// Publish a completed background-task result to the shared watch channel.
 ///
-/// Shared by `PyPythonTask` spawns and the direct [`PyHandle::spawn`] producer
-/// (HDL-13). If the receiver has already been dropped, `watch::Sender::send`
-/// returns the unsent value as `SendError`: no consumer can ever observe it.
-/// An unobserved error is logged with its producer-creation traceback when one
-/// was captured.
+/// Shared by `PyPythonTask` spawns, the direct [`PyHandle::spawn`] producer
+/// (HDL-13), and the private Python completion pair (HDL-11). If the receiver
+/// has already been dropped, `watch::Sender::send` returns the unsent value as
+/// `SendError`: no consumer can ever observe it. An unobserved error is logged
+/// with its producer-creation traceback when one was captured.
 pub(crate) fn send_result(
     tx: watch::Sender<Option<PyResult<Py<PyAny>>>>,
     result: PyResult<Py<PyAny>>,
@@ -207,8 +217,8 @@ pub(crate) fn send_result(
                 format_traceback(py, &tb).unwrap()
             } else {
                 // No creation traceback was captured: either a capture-disabled
-                // PythonTask (the default when the env var is unset) or the
-                // direct PyHandle::spawn producer, which never captures one.
+                // PythonTask (the default when the env var is unset) or a direct
+                // Handle producer, which never captures one.
                 "creation traceback unavailable (PythonTask producers can set \
                  `MONARCH_HYPERACTOR_ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK=1` to capture one)\n"
                     .into()
@@ -381,13 +391,55 @@ impl Drop for HandleCore {
     }
 }
 
-/// The observe-only handle to a background Tokio task.
+/// Private one-shot producer paired with a Python-visible `Handle`.
+///
+/// The class has no Python constructor. `_new_handle_pair()` creates it with
+/// the only sender for its Handle; completion consumes that sender before
+/// publishing, and dropping it unresolved closes the channel (HDL-10/HDL-11).
+#[pyclass(
+    name = "_HandleCompleter",
+    module = "monarch._rust_bindings.monarch_hyperactor.handle"
+)]
+struct PyHandleCompleter {
+    // `Some` from `_new_handle_pair()` until the first valid completion;
+    // `None` thereafter.
+    tx: Option<watch::Sender<Option<PyResult<Py<PyAny>>>>>,
+}
+
+impl PyHandleCompleter {
+    /// Publish the terminal result exactly once.
+    fn complete(&mut self, result: PyResult<Py<PyAny>>) -> PyResult<()> {
+        let tx = self
+            .tx
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("Handle has already been completed"))?;
+        send_result(tx, result, None);
+        Ok(())
+    }
+}
+
+#[pymethods]
+impl PyHandleCompleter {
+    /// Resolve the paired Handle successfully.
+    fn set_result(&mut self, value: Py<PyAny>) -> PyResult<()> {
+        self.complete(Ok(value))
+    }
+
+    /// Resolve the paired Handle with a Python exception.
+    fn set_exception(&mut self, error: Bound<'_, PyAny>) -> PyResult<()> {
+        if !error.is_instance_of::<PyBaseException>() {
+            return Err(PyTypeError::new_err("error must be a BaseException"));
+        }
+        self.complete(Err(PyErr::from_value(error)))
+    }
+}
+
+/// The observe-only handle to a background Tokio task or Python-owned operation.
 ///
 /// Exposed to Python as
 /// `monarch._rust_bindings.monarch_hyperactor.handle.Handle`. HDL-11: Python
-/// obtains a `Handle` from a producer and cannot construct one directly -- there
-/// is no `__new__`, and the Rust-only `from_value` method is outside
-/// `#[pymethods]`.
+/// cannot construct one directly. Internal Python may obtain one only from the
+/// private `_new_handle_pair()` factory together with its sole producer.
 #[pyclass(
     name = "Handle",
     module = "monarch._rust_bindings.monarch_hyperactor.handle"
@@ -396,12 +448,24 @@ pub struct PyHandle {
     core: HandleCore,
 }
 
+/// Atomically create a pending Handle and its sole Python completion endpoint.
+///
+/// Native producers remain the default. This private pair is for operations
+/// whose semantics and scheduling are owned by Python (HDL-11).
+#[pyfunction]
+fn _new_handle_pair() -> (PyHandle, PyHandleCompleter) {
+    let (tx, rx) = watch::channel(None);
+    (
+        PyHandle::from_core(HandleCore::new(rx, None, None)),
+        PyHandleCompleter { tx: Some(tx) },
+    )
+}
+
 impl PyHandle {
     /// Wrap an already-built `HandleCore` in a `PyHandle`.
     ///
-    /// Producers in `pytokio.rs` build the core (watch channel + spawned task)
-    /// and hand back an observe-only `Handle` through this; `PyHandle`'s field
-    /// is private to this module.
+    /// Native producers build the core and hand back an observe-only `Handle`
+    /// through this; `PyHandle`'s field is private to this module.
     pub(crate) fn from_core(core: HandleCore) -> Self {
         Self { core }
     }
@@ -410,7 +474,7 @@ impl PyHandle {
     /// producer task (HDL-15).
     ///
     /// Rust-only and outside `#[pymethods]`, so making this method public does
-    /// not make `Handle` constructible from Python (HDL-11).
+    /// not make `Handle` directly constructible from Python (HDL-11).
     pub fn from_value(value: Py<PyAny>) -> PyResult<Self> {
         Ok(Self {
             core: HandleCore::from_value(value)?,
@@ -835,6 +899,8 @@ fn complete_asyncio_future(fut: &Bound<'_, PyAny>, is_exc: bool, value: Py<PyAny
 pub fn register_python_bindings(handle_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     // HDL-16: this is Handle's sole class registration and Python home.
     handle_mod.add_class::<PyHandle>()?;
+    handle_mod.add_class::<PyHandleCompleter>()?;
+    handle_mod.add_function(wrap_pyfunction!(_new_handle_pair, handle_mod)?)?;
     let would_block = handle_mod.py().get_type::<WouldBlockRuntime>();
     would_block.setattr(
         "__module__",
@@ -1767,20 +1833,117 @@ class MyStop(StopIteration):
         }
     }
 
-    // A Handle cannot be constructed from Python -- the pyclass has no #[new],
-    // so calling the type object raises TypeError.
+    // Neither side of the private completion pair can be constructed directly
+    // from Python -- both pyclasses have no #[new].
     // Attests HDL-11.
     #[test]
-    fn handle_not_constructible_from_python() {
+    fn handle_and_completer_not_constructible_from_python() {
         ensure_python();
         monarch_with_gil_blocking(GilSite::Test, |py| {
             let handle_type = py.get_type::<PyHandle>();
-            let err = handle_type.call0().unwrap_err();
+            let handle_error = handle_type.call0().unwrap_err();
             assert!(
-                err.is_instance_of::<pyo3::exceptions::PyTypeError>(py),
+                handle_error.is_instance_of::<pyo3::exceptions::PyTypeError>(py),
                 "constructing Handle() from Python should raise TypeError (no __new__)"
             );
+            let completer_type = py.get_type::<PyHandleCompleter>();
+            let completer_error = completer_type.call0().unwrap_err();
+            assert!(
+                completer_error.is_instance_of::<pyo3::exceptions::PyTypeError>(py),
+                "constructing _HandleCompleter() from Python should raise TypeError (no __new__)"
+            );
         });
+    }
+
+    // A pending Handle releases the GIL while blocking, allowing the paired
+    // producer on another thread to acquire it, publish, and wake the observer.
+    // The zero-capacity channel ensures the worker has reached the gate
+    // immediately before its GIL acquisition when observation starts.
+    // Attests HDL-1, HDL-2, HDL-9, HDL-11.
+    #[test]
+    fn python_pair_resolves_pending_handle_across_threads() {
+        use std::sync::mpsc::sync_channel;
+        use std::time::Duration;
+
+        ensure_python();
+        let (worker, observed) = monarch_with_gil_blocking(GilSite::Test, |py| {
+            let (handle, completer) = _new_handle_pair();
+            let handle = Py::new(py, handle).unwrap();
+            let completer = Py::new(py, completer).unwrap();
+            let (ready_tx, ready_rx) = sync_channel(0);
+            let worker = std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                monarch_with_gil_blocking(GilSite::Test, |py| {
+                    completer
+                        .borrow_mut(py)
+                        .set_result(42i64.into_py_any(py).unwrap())
+                        .unwrap();
+                });
+            });
+
+            ready_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("completion worker should reach its pre-GIL gate");
+            assert!(
+                PyHandle::poll(&handle.borrow(py)).unwrap().is_none(),
+                "the Handle should still be pending before the worker acquires the GIL"
+            );
+            let value = PyHandle::get(handle.borrow(py), py, Some(2.0))
+                .unwrap()
+                .extract::<i64>(py)
+                .unwrap();
+            (worker, value)
+        });
+
+        worker.join().expect("completion worker should exit");
+        assert_eq!(
+            observed, 42,
+            "the pending observer should receive the value"
+        );
+    }
+
+    // Failure publication follows the same pending cross-thread path and wakes
+    // the observer with the original Python error.
+    // Attests HDL-1, HDL-2, HDL-9, HDL-11.
+    #[test]
+    fn python_pair_publishes_exception_to_pending_handle_across_threads() {
+        use std::sync::mpsc::sync_channel;
+        use std::time::Duration;
+
+        ensure_python();
+        let worker = monarch_with_gil_blocking(GilSite::Test, |py| {
+            let (handle, completer) = _new_handle_pair();
+            let handle = Py::new(py, handle).unwrap();
+            let completer = Py::new(py, completer).unwrap();
+            let (ready_tx, ready_rx) = sync_channel(0);
+            let worker = std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                monarch_with_gil_blocking(GilSite::Test, |py| {
+                    let error = PyRuntimeError::new_err("cross-thread failure")
+                        .into_value(py)
+                        .into_bound(py)
+                        .into_any();
+                    completer.borrow_mut(py).set_exception(error).unwrap();
+                });
+            });
+
+            ready_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("completion worker should reach its pre-GIL gate");
+            assert!(
+                PyHandle::poll(&handle.borrow(py)).unwrap().is_none(),
+                "the Handle should still be pending before the worker acquires the GIL"
+            );
+            let error = PyHandle::get(handle.borrow(py), py, Some(2.0)).unwrap_err();
+            assert!(
+                error.is_instance_of::<PyRuntimeError>(py),
+                "the pending observer should receive the worker's exception"
+            );
+            assert_eq!(error.to_string(), "RuntimeError: cross-thread failure");
+            worker
+        });
+
+        worker.join().expect("completion worker should exit");
     }
 
     // spawn() eagerly runs its producer -- before any observer exists -- and

@@ -6,13 +6,14 @@
 
 # pyre-unsafe
 
-"""Characterization oracle for the public ``monarch`` ``Future`` state machine.
+"""Characterization oracle for ``Future`` and its permanent ``Handle`` carrier.
 
 Pins the behavior of ``monarch._src.actor.future.Future`` -- its internal
 states and the transitions between them, ``as_asyncio()`` and the ``__await__``
 shim over it, rejection of Tokio-thread awaits, the ``get()``-inside-a-loop
 warning, and the ``_take_inner()`` accessor with its ``_Taken`` terminal state
--- so that any change to that behavior is caught here and made explicit.
+-- plus the construction and completion invariants of its permanent ``Handle``
+carrier, so that any change to that behavior is caught here and made explicit.
 """
 
 import asyncio
@@ -22,7 +23,12 @@ import warnings
 from typing import Any, Callable, cast, NamedTuple
 
 import pytest
-from monarch._rust_bindings.monarch_hyperactor.handle import Handle, WouldBlockRuntime
+from monarch._rust_bindings.monarch_hyperactor.handle import (
+    _HandleCompleter,
+    _new_handle_pair,
+    Handle,
+    WouldBlockRuntime,
+)
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
 from monarch._rust_bindings.monarch_hyperactor.testing import (
@@ -625,6 +631,87 @@ def test_handle_and_would_block_runtime_are_importable():
     """The permanent Handle bindings expose both types, with the right base."""
     assert issubclass(WouldBlockRuntime, RuntimeError)
     assert isinstance(Handle, type)
+
+
+def test_handle_completion_pair_resolves_once_and_replays_value():
+    """The private producer publishes once; Handle observation is repeatable."""
+    handle, completer = _new_handle_pair()
+
+    completer.set_result(42)
+
+    assert handle.get() == 42
+    assert handle.get() == 42
+    with pytest.raises(RuntimeError, match="already been completed"):
+        completer.set_result(7)
+    assert handle.get() == 42
+
+
+def test_handle_completion_pair_preserves_exception():
+    """Failure publication preserves the exception object for every observer."""
+
+    class CompletionFailure(BaseException):
+        pass
+
+    error = CompletionFailure("completion failed")
+    handle, completer = _new_handle_pair()
+    completer.set_exception(error)
+
+    for _ in range(2):
+        with pytest.raises(CompletionFailure) as raised:
+            handle.get()
+        assert raised.value is error
+
+
+def test_handle_completion_pair_accepts_exception_as_value():
+    """The caller, not the value's type, chooses success versus failure."""
+    value = RuntimeError("successful value")
+    handle, completer = _new_handle_pair()
+
+    completer.set_result(value)
+
+    assert handle.get() is value
+
+
+def test_handle_completion_pair_rejects_non_exception_without_consuming():
+    """set_exception() rejects non-exceptions without consuming the completer."""
+    handle, completer = _new_handle_pair()
+
+    with pytest.raises(TypeError, match="BaseException"):
+        cast(Any, completer).set_exception("not an exception")
+    completer.set_result(42)
+
+    assert handle.get() == 42
+
+
+def test_dropped_handle_completer_surfaces_error():
+    """Dropping the sole producer closes the Handle instead of stranding it."""
+    handle, completer = _new_handle_pair()
+
+    del completer
+
+    with pytest.raises(
+        RuntimeError, match="Handle producer ended without publishing a result"
+    ):
+        handle.get(timeout=2)
+
+
+def test_handle_completion_survives_observer_drop():
+    """Dropping the Handle does not consume or invalidate its producer."""
+    handle, completer = _new_handle_pair()
+
+    del handle
+
+    completer.set_result(42)
+    with pytest.raises(RuntimeError, match="already been completed"):
+        completer.set_result(7)
+
+
+def test_handle_completion_pair_types_are_not_directly_constructible():
+    """HDL-11 permits only atomic creation through the private pair factory."""
+    with pytest.raises(TypeError):
+        Handle()
+    with pytest.raises(TypeError):
+        _HandleCompleter()
 
 
 # ---------------------------------------------------------------------------
