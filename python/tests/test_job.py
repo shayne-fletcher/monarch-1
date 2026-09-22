@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import types
@@ -27,8 +28,11 @@ import monarch._src.job._job_sidecar_worker as js_worker
 import monarch._src.job.job_components as jc
 import monarch._src.job.job_sidecar as js
 import pytest
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle, WouldBlockRuntime
 from monarch._rust_bindings.monarch_hyperactor.proc import ProcId, Uid
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
+from monarch._rust_bindings.monarch_hyperactor.testing import _make_handle_probe
 
 # Import directly from _src since job module isn't properly exposed
 from monarch._src.job.job import (
@@ -51,7 +55,7 @@ from monarch._src.job.service_identity import (
     deserialize_service_proc_ids,
     serialize_service_proc_ids,
 )
-from monarch.actor import Future, HostMesh
+from monarch.actor import context as current_context, Future, HostMesh
 
 
 def test_explicit_uid_values_are_instance_identities() -> None:
@@ -2112,35 +2116,381 @@ def test_exec_command_output_dir_suppresses_printing(capsys):
 
 
 @pytest.mark.timeout(10)
-def test_exec_command_spawns_no_procs_before_observation():
-    """Discarding an unobserved command does not enter its deferred body."""
+def test_exec_command_starts_before_observation_and_survives_discard():
+    """Calling commits the command; discarding its observer does not cancel it."""
     host_mesh, procs, bash_actors, markers = _exec_env()
     selected = MagicMock()
     selected.spawn_procs.return_value = procs
     host_mesh.slice.return_value = selected
-    bash_actors.run.call.return_value = _results_future(
-        [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
-    )
+    command_entered = threading.Event()
+    release_command = threading.Event()
+
+    def run_command(*_args, **_kwargs):
+        command_entered.set()
+        if not release_command.wait(timeout=2):
+            raise TimeoutError("command release was not signalled")
+        return _results_future(
+            [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+        )
+
+    bash_actors.run.call.side_effect = run_command
 
     discarded = exec_command(host_mesh, ["echo", "hi"], point={"gpu": 2})
-    del discarded
+    try:
+        assert command_entered.wait(timeout=2)
+        del discarded
+        release_command.set()
+        deadline = time.monotonic() + 2
+        while not markers["stop_driven"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert markers["stop_driven"]
+    finally:
+        release_command.set()
 
-    host_mesh.slice.assert_not_called()
-    host_mesh.spawn_procs.assert_not_called()
-    selected.spawn_procs.assert_not_called()
-    procs.spawn.assert_not_called()
-    bash_actors.run.call.assert_not_called()
-    procs.stop.assert_not_called()
-    assert not markers["stop_driven"]
-
-    assert exec_command(host_mesh, ["echo", "hi"], point={"gpu": 2}).get() == 0
     host_mesh.slice.assert_called_once_with(gpu=2)
     host_mesh.spawn_procs.assert_not_called()
     selected.spawn_procs.assert_called_once_with(per_host=None)
     procs.spawn.assert_called_once()
     bash_actors.run.call.assert_called_once()
     procs.stop.assert_called_once()
+
+
+def test_exec_command_returns_ordinary_handle_backed_future():
+    """The eager operation uses the standard Future and Handle path."""
+    host_mesh, _procs, bash_actors, _markers = _exec_env()
+    bash_actors.run.call.return_value = _results_future(
+        [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+    )
+
+    result = exec_command(host_mesh, ["echo", "hi"])
+
+    assert type(result) is Future
+    assert isinstance(result._as_handle(), Handle)
+    assert result.get() == 0
+
+
+def test_exec_command_observes_command_without_take_inner():
+    """Command results need only the public blocking observation method."""
+
+    class GetOnlyResult:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get(self):
+            self.calls += 1
+            return [("rank0", {"returncode": 3, "stdout": "", "stderr": ""})]
+
+    host_mesh, _procs, bash_actors, _markers = _exec_env()
+    command_result = GetOnlyResult()
+    bash_actors.run.call.return_value = command_result
+
+    assert exec_command(host_mesh, ["exit", "3"]).get() == 3
+    assert command_result.calls == 1
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_waits_for_handle_backed_cleanup():
+    """Completion waits for a real Handle-backed cleanup operation."""
+    host_mesh, procs, bash_actors, _markers = _exec_env()
+    bash_actors.run.call.return_value = _results_future(
+        [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+    )
+    cleanup = _make_handle_probe("success")
+    cleanup_called = threading.Event()
+
+    def stop():
+        cleanup_called.set()
+        return Future._from_handle(cleanup._handle)
+
+    procs.stop.side_effect = stop
+    result = exec_command(host_mesh, ["echo", "hi"])
+
+    try:
+        assert cleanup_called.wait(timeout=2)
+        with pytest.raises(TimeoutError):
+            result.get(timeout=0.05)
+        cleanup._release()
+        assert result.get(timeout=2) == 0
+    finally:
+        cleanup._release()
+        deadline = time.monotonic() + 2
+        while not cleanup._completed and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+    assert cleanup._completed
+    procs.stop.assert_called_once()
+
+
+def test_exec_command_context_failure_is_synchronous():
+    """Context bootstrap fails before the background worker can start."""
+    error = RuntimeError("context failed")
+    host_mesh = MagicMock()
+
+    with (
+        patch("monarch._src.job.job.context", side_effect=error),
+        patch("monarch._src.job.job._start_exec_command") as start,
+        pytest.raises(RuntimeError) as raised,
+    ):
+        exec_command(host_mesh, ["echo", "hi"])
+
+    assert raised.value is error
+    start.assert_not_called()
+    host_mesh.spawn_procs.assert_not_called()
+
+
+def test_exec_command_worker_construction_failure_is_synchronous():
+    """Thread construction failure raises before a Future or command exists."""
+    error = RuntimeError("thread construction failed")
+    host_mesh = MagicMock()
+
+    with (
+        patch("monarch._src.job.job.context", return_value=object()),
+        patch("monarch._src.job.job.threading.Thread", side_effect=error),
+        pytest.raises(RuntimeError) as raised,
+    ):
+        exec_command(host_mesh, ["echo", "hi"])
+
+    assert raised.value is error
+    host_mesh.spawn_procs.assert_not_called()
+
+
+def test_exec_command_worker_start_failure_is_synchronous():
+    """Thread startup failure raises before a Future or command exists."""
+    error = RuntimeError("thread start failed")
+    host_mesh = MagicMock()
+
+    with (
+        patch("monarch._src.job.job.context", return_value=object()),
+        patch.object(threading.Thread, "start", side_effect=error),
+        pytest.raises(RuntimeError) as raised,
+    ):
+        exec_command(host_mesh, ["echo", "hi"])
+
+    assert raised.value is error
+    host_mesh.spawn_procs.assert_not_called()
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_context_reset_failure_settles_result():
+    """Context restoration failure settles the Handle after cleanup."""
+    host_mesh, procs, bash_actors, markers = _exec_env()
+    bash_actors.run.call.return_value = _results_future(
+        [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+    )
+    error = RuntimeError("context reset failed")
+
+    with (
+        patch("monarch._src.job.job.context", return_value=object()),
+        patch("monarch._src.job.job._reset_context", side_effect=error),
+    ):
+        result = exec_command(host_mesh, ["echo", "hi"])
+        with pytest.raises(RuntimeError) as raised:
+            result.get(timeout=2)
+
+    assert raised.value is error
+    procs.stop.assert_called_once()
     assert markers["stop_driven"]
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_preserves_context_on_worker():
+    """The Python worker installs the Monarch context captured by the caller."""
+    host_mesh, _procs, bash_actors, _markers = _exec_env()
+    captured_context = object()
+    observed_contexts = []
+    observed_runtime_contexts = []
+
+    def run_command(*_args, **_kwargs):
+        observed_contexts.append(current_context())
+        observed_runtime_contexts.append(_is_in_tokio_runtime())
+        return _results_future(
+            [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+        )
+
+    bash_actors.run.call.side_effect = run_command
+
+    with patch("monarch._src.job.job.context", return_value=captured_context):
+        result = exec_command(host_mesh, ["echo", "hi"])
+
+    assert result.get() == 0
+    assert observed_contexts == [captured_context]
+    assert observed_runtime_contexts == [False]
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_invalid_observation_does_not_cancel():
+    """Rejected observers do not cancel the eagerly running command."""
+    host_mesh, procs, bash_actors, markers = _exec_env()
+    command_entered = threading.Event()
+    release_command = threading.Event()
+
+    def run_command(*_args, **_kwargs):
+        command_entered.set()
+        if not release_command.wait(timeout=2):
+            raise TimeoutError("command release was not signalled")
+        return _results_future(
+            [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+        )
+
+    bash_actors.run.call.side_effect = run_command
+    result = exec_command(host_mesh, ["echo", "hi"])
+
+    try:
+        assert command_entered.wait(timeout=2)
+        for invalid_timeout in (-1, float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="invalid timeout"):
+                result.get(invalid_timeout)
+        with pytest.raises(RuntimeError, match="requires a running asyncio"):
+            result.as_asyncio()
+        with pytest.raises(WouldBlockRuntime):
+            PythonTask.spawn_blocking(result.get).block_on()
+    finally:
+        release_command.set()
+
+    assert result.get(timeout=2) == 0
+    bash_actors.run.call.assert_called_once()
+    procs.stop.assert_called_once()
+    assert markers["stop_driven"]
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_timeout_does_not_cancel():
+    """A timed-out observer leaves the command and cleanup running."""
+    host_mesh, procs, bash_actors, markers = _exec_env()
+    command_entered = threading.Event()
+    release_command = threading.Event()
+
+    def run_command(*_args, **_kwargs):
+        command_entered.set()
+        if not release_command.wait(timeout=2):
+            raise TimeoutError("command release was not signalled")
+        return _results_future(
+            [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+        )
+
+    bash_actors.run.call.side_effect = run_command
+    result = exec_command(host_mesh, ["echo", "hi"])
+
+    try:
+        assert command_entered.wait(timeout=2)
+        with pytest.raises(TimeoutError):
+            result.get(timeout=0.05)
+        release_command.set()
+        assert result.get(timeout=2) == 0
+    finally:
+        release_command.set()
+
+    bash_actors.run.call.assert_called_once()
+    procs.stop.assert_called_once()
+    assert markers["stop_driven"]
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_get_on_asyncio_loop_warns_and_completes():
+    """Blocking observation on asyncio retains the ordinary Future warning."""
+    host_mesh, _procs, bash_actors, _markers = _exec_env()
+    bash_actors.run.call.return_value = _results_future(
+        [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+    )
+    result = exec_command(host_mesh, ["echo", "hi"])
+
+    async def observe():
+        with pytest.warns(UserWarning, match="running asyncio event loop"):
+            return result.get(timeout=2)
+
+    assert asyncio.run(observe()) == 0
+
+
+@pytest.mark.timeout(10)
+def test_exec_command_worker_exits_after_completion():
+    """The Python worker terminates after publishing the command result."""
+    task_directory = "/proc/self/task"
+    if not os.path.isdir(task_directory):
+        pytest.skip("requires Linux task information")
+
+    host_mesh, _procs, bash_actors, _markers = _exec_env()
+    command_entered = threading.Event()
+    release_command = threading.Event()
+    worker_native_id = []
+
+    def run_command(*_args, **_kwargs):
+        worker_native_id.append(threading.get_native_id())
+        command_entered.set()
+        if not release_command.wait(timeout=2):
+            raise TimeoutError("command release was not signalled")
+        return _results_future(
+            [("rank0", {"returncode": 0, "stdout": "", "stderr": ""})]
+        )
+
+    bash_actors.run.call.side_effect = run_command
+    result = exec_command(host_mesh, ["echo", "hi"])
+
+    try:
+        assert command_entered.wait(timeout=2)
+        worker_path = f"{task_directory}/{worker_native_id[0]}"
+        assert os.path.exists(worker_path)
+        release_command.set()
+        assert result.get(timeout=2) == 0
+    finally:
+        release_command.set()
+
+    deadline = time.monotonic() + 2
+    while os.path.exists(worker_path) and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert not os.path.exists(worker_path)
+
+
+@pytest.mark.timeout(15)
+def test_exec_command_normal_shutdown_waits_for_worker():
+    """Normal interpreter shutdown waits for committed Handle-backed work."""
+    child_code = textwrap.dedent(
+        """
+        import pathlib
+        import sys
+        import threading
+
+        from monarch._rust_bindings.monarch_hyperactor.testing import _make_handle_probe
+        from monarch._src.job.job import _start_exec_command
+        from monarch.actor import context
+
+        marker = pathlib.Path(sys.argv[1])
+        entered = threading.Event()
+        probe = _make_handle_probe("success")
+
+        def operation():
+            entered.set()
+            probe._handle.get()
+            marker.write_text("completed")
+            return 0
+
+        _start_exec_command(context(), operation)
+
+        if not entered.wait(timeout=2):
+            probe._release()
+            raise TimeoutError("exec_command worker did not start")
+
+        # This CPython hook runs immediately before non-daemon threads are
+        # joined, so releasing here proves shutdown waits for the worker.
+        threading._register_atexit(probe._release)
+        """
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+        marker = os.path.join(directory, "worker-completed")
+        result = subprocess.run(
+            [sys.executable, "-c", child_code, marker],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        assert result.returncode == 0, (
+            f"child exited with {result.returncode}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+        with open(marker) as completed:
+            assert completed.read() == "completed"
 
 
 @pytest.mark.timeout(10)
@@ -2278,17 +2628,20 @@ def test_exec_command_drives_cleanup_on_base_exception():
     class _CommandAbort(BaseException):
         pass
 
+    command_error = _CommandAbort("command aborted")
+
     async def fail_command():
-        raise _CommandAbort("command aborted")
+        raise command_error
 
     host_mesh, procs, bash_actors, markers = _exec_env()
     bash_actors.run.call.return_value = Future._from_coro(fail_command())
 
-    with pytest.raises(_CommandAbort) as raised:
-        exec_command(host_mesh, ["echo", "hi"]).get()
+    result = exec_command(host_mesh, ["echo", "hi"])
+    for _ in range(2):
+        with pytest.raises(_CommandAbort) as raised:
+            result.get()
+        assert raised.value is command_error
 
-    assert type(raised.value) is _CommandAbort
-    assert str(raised.value) == "command aborted"
     procs.stop.assert_called_once()
     assert markers["stop_driven"]
 
@@ -2369,8 +2722,6 @@ def test_exec_command_observer_cancellation_still_cleans_up():
     result = exec_command(host_mesh, ["exit", "6"])
 
     async def cancel_after_start():
-        # Observation starts the outer producer; without this first step the
-        # command cannot reach the gate and the entry wait would deadlock.
         observer = result.as_asyncio()
 
         async def wait_for_command_entry():

@@ -352,10 +352,10 @@ doc_legacy_surface = "PythonTask|PyShared|pytokio"
 [totals]
 py_python_task_new = 21
 raw_python_task_new = 5
-from_coro = 15
+from_coro = 14
 rust_from_coro = 2
 from_coroutine = 7
-take_inner = 7
+take_inner = 4
 rust_take_inner = 2
 take_inner_retire = 2
 caller_free_primitive = 4
@@ -1345,8 +1345,9 @@ path = "fbcode/monarch/python/monarch/_src/job/job.py"
 symbol = "exec_command[Future._from_coro(_impl())]"
 operation = "from_coro"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4b"
+transition_revision = "self"
 public_operation = "job.exec_command(...)"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
@@ -1358,7 +1359,7 @@ eager_effect = "an eager Handle would make _impl eligible to run independently b
 drop_behavior = "Before observation, dropping the Future leaves _impl unrun and no cleanup owed after the already-completed context capture. After Handle-backed observation starts, dropping or cancelling that observer does not abort the producer or its cleanup. Mesh selection and spawn_procs are outside the try, so cleanup is owed only after spawn_procs returns procs. Once reached, the command and cleanup Futures are spent one-shot by ot.job.exec_command._impl[bash_actors.run.callscript, output_dir=output_dir._take_inner], ot.job.exec_command._impl[bash_actors.run_python.callcmd, env=env, workdir=workdir, client_cwd=client_cwd, output_dir=output_dir._take_inner], and ot.job.exec_command._impl[procs.stop._take_inner]"
 first_side_effect = "source-grounded: synchronous construction-time context capture is the first effect; tested: proc spawn is the first worker-visible effect and waits for observation"
 unobserved_error = "A synchronous construction or context failure raises before any Future exists. A never-driven _impl produces no error. Tested: an ordinary cleanup Exception that supersedes an awaited command Exception is replayed on a second observation with procs.stop() still called once. Source-grounded: after Handle-backed start, cancelling one asyncio observer does not abort an ordinary failure; another observer of the live outer Future can still receive it, while the cancelled observer receives nothing. A get-first BaseException is not cached: cleanup runs, but the consumed task leaves the outer Future poisoned for a second observation, as pinned by fbcode//monarch/python/tests:test_future_characterization::test_fm_terminal_baseexception_current_poisons_the_future"
-disposition = "require a binding-specific design"
+disposition = "intentionally become eager"
 semantic_class = "deferred_side_effect"
 oracle = [
   "fbcode//monarch/python/tests:test_job::test_exec_command_returns_max_returncode",
@@ -1370,7 +1371,20 @@ oracle = [
   "fbcode//monarch/python/tests:test_job::test_exec_command_slices_by_rank",
   "fbcode//monarch/python/tests:test_job::test_exec_command_prints_output_when_no_output_dir",
   "fbcode//monarch/python/tests:test_job::test_exec_command_output_dir_suppresses_printing",
-  "fbcode//monarch/python/tests:test_job::test_exec_command_spawns_no_procs_before_observation",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_starts_before_observation_and_survives_discard",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_returns_ordinary_handle_backed_future",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_observes_command_without_take_inner",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_waits_for_handle_backed_cleanup",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_context_failure_is_synchronous",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_worker_construction_failure_is_synchronous",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_worker_start_failure_is_synchronous",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_context_reset_failure_settles_result",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_preserves_context_on_worker",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_invalid_observation_does_not_cancel",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_timeout_does_not_cancel",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_get_on_asyncio_loop_warns_and_completes",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_worker_exits_after_completion",
+  "fbcode//monarch/python/tests:test_job::test_exec_command_normal_shutdown_waits_for_worker",
   "fbcode//monarch/python/tests:test_job::test_exec_command_repeated_get_spawns_and_cleans_up_once",
   "fbcode//monarch/python/tests:test_job::test_exec_command_reobserved_asyncio_shares_one_run",
   "fbcode//monarch/python/tests:test_job::test_exec_command_dispatches_to_run_python_for_dash_m",
@@ -3845,8 +3859,9 @@ path = "fbcode/monarch/python/monarch/_src/job/job.py"
 symbol = "exec_command._impl[bash_actors.run.call(script, output_dir=output_dir)._take_inner]"
 operation = "take_inner"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4b"
+transition_revision = "self"
 
 [[site]]
 id = "ot.job.exec_command._impl[bash_actors.run_python.callcmd, env=env, workdir=workdir, client_cwd=client_cwd, output_dir=output_dir._take_inner]"
@@ -3856,8 +3871,9 @@ path = "fbcode/monarch/python/monarch/_src/job/job.py"
 symbol = "exec_command._impl[bash_actors.run_python.call(cmd, env=env, workdir=workdir, client_cwd=client_cwd, output_dir=output_dir)._take_inner]"
 operation = "take_inner"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4b"
+transition_revision = "self"
 
 [[site]]
 id = "ot.job.exec_command._impl[procs.stop._take_inner]"
@@ -3867,8 +3883,9 @@ path = "fbcode/monarch/python/monarch/_src/job/job.py"
 symbol = "exec_command._impl[procs.stop()._take_inner]"
 operation = "take_inner"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4b"
+transition_revision = "self"
 
 [[site]]
 id = "ret.future._Taken"

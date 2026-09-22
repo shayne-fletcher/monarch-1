@@ -8,6 +8,8 @@
 
 from typing import Any, final
 
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
+
 @final
 class TestStruct:
     """Minimal Rust struct for testing @rust_struct mixin patching."""
@@ -30,13 +32,11 @@ class _HandleProbe:
     accepts no coroutine, awaitable, callable, future or producer function: it
     only puts a genuine ``Handle`` into one of three reviewed terminal states.
 
-    ``_handle`` is typed ``Any`` rather than ``Handle[Any]`` so this stub does
-    not import the legacy ``pytokio`` module solely for typing; the
-    characterization suite casts it privately.
+    The probe exposes the permanent Handle type used by production bindings.
     """
 
     @property
-    def _handle(self) -> Any: ...
+    def _handle(self) -> Handle[Any]: ...
     @property
     def _started(self) -> bool: ...
     @property
