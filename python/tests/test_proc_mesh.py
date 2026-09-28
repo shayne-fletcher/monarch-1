@@ -665,6 +665,15 @@ async def test_actor_spawn_then_immediate_shutdown() -> None:
             host_flush_called = True
             await flush_from_tokio()
 
+        # Constructing the first TestActor on a proc imports this module, pytest
+        # included, on the actor's event loop. A stop during that import queues
+        # the actor's cleanup behind it, where the cleanup deadline can expire
+        # and fail the actor (T290443991). This test is about draining pending
+        # spawns, so construct one first and start the actor below from the
+        # cached module.
+        warm_mesh = proc_mesh.spawn("warm_actor", TestActor, 0)
+        assert await warm_mesh.get_value.call_one() == 0
+
         # spawn actor but do NOT await initialized — immediately shutdown
         actor_mesh = proc_mesh.spawn("test_actor", TestActor, 42)
         drain_order: list[str] = []
