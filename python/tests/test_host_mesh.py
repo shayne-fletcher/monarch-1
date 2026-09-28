@@ -1312,6 +1312,7 @@ class DuplexProcessJob(ProcessJob):
 
         self._tmpdir = tempfile.mkdtemp(prefix="monarch_duplex_job_")
 
+        first_proc: Optional["subprocess.Popen[bytes]"] = None
         for mesh_name, count in self._meshes.items():
             for i in range(count):
                 host_key = f"{mesh_name}_{i}"
@@ -1330,21 +1331,29 @@ class DuplexProcessJob(ProcessJob):
                     'ca="trust_all_connections")',
                 ]
                 proc = subprocess.Popen(cmd, env=worker_env, start_new_session=True)
+                first_proc = first_proc or proc
                 self._host_to_pid[host_key] = ProcessState(proc.pid, proc_addr)
 
         # Wait for the first worker's frontend socket to appear.
         # The duplex server is now on the same address as the frontend.
+        # Worker start-up can wait on configuration services before binding,
+        # so allow the 60 s attach gives a host (MESH_ATTACH_CONFIG_TIMEOUT),
+        # and fail at once if the worker exits.
         first_key = f"{next(iter(self._meshes))}_0"
-        assert self._tmpdir is not None
+        assert self._tmpdir is not None and first_proc is not None
         sock_path = os.path.join(self._tmpdir, first_key)
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if os.path.exists(sock_path):
-                break
+        deadline = time.monotonic() + 60
+        while not os.path.exists(sock_path):
+            if first_proc.poll() is not None:
+                self._kill()
+                raise RuntimeError(
+                    f"worker exited with code {first_proc.returncode} "
+                    "before its frontend socket appeared"
+                )
+            if time.monotonic() >= deadline:
+                self._kill()
+                raise RuntimeError("frontend socket did not appear in time")
             time.sleep(0.05)
-        else:
-            self._kill()
-            raise RuntimeError("frontend socket did not appear in time")
         # The duplex addr is the first worker's frontend (they share
         # the same address now). Use ipc:// format for zmq URL parsing.
         self._duplex_addr = f"ipc://{sock_path}"
