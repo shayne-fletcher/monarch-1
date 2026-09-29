@@ -363,17 +363,15 @@ impl ProcAgent {
         proc: Proc,
         shutdown_tx: Option<tokio::sync::oneshot::Sender<i32>>,
     ) -> Result<ActorHandle<Self>, anyhow::Error> {
-        let cast_handle = proc.spawn_with_uid(
+        proc.spawn_bound_with_uid(
             Uid::singleton(Label::strip(CAST_ACTOR_NAME)),
             hyperactor_cast::cast_actor::CastActor::default(),
         )?;
-        cast_handle.bind::<hyperactor_cast::cast_actor::CastActor>();
 
         // `spawn_data` discovers the per-proc ActorSpawner at its well-known UID,
         // so legacy ProcAgent bootstrapping must install it. This compatibility
         // step goes away when proc bootstrapping moves off ProcAgent entirely.
-        let actor_spawner_handle = proc.spawn_with_uid(actor_spawner_uid(), ActorSpawner)?;
-        let _well_known_actor = actor_spawner_handle.bind::<ActorSpawner>();
+        proc.spawn_bound_with_uid(actor_spawner_uid(), ActorSpawner)?;
 
         let orphan_timeout = hyperactor_config::global::get(MESH_ORPHAN_TIMEOUT);
         let agent = ProcAgent {
@@ -387,7 +385,7 @@ impl ProcAgent {
             mesh_orphan_timeout: orphan_timeout,
             client_root_services: HashMap::new(),
         };
-        proc.spawn_with_uid::<Self>(
+        proc.spawn_bound_with_uid::<Self>(
             Uid::singleton(Label::new(PROC_AGENT_ACTOR_NAME).unwrap()),
             agent,
         )
@@ -1509,6 +1507,44 @@ mod tests {
     struct ExtraActor;
     impl hyperactor::Actor for ExtraActor {}
     hyperactor::register_spawnable!(ExtraActor);
+
+    // The `ProcAgent` address is known before `boot_v1` runs. The proc buffers
+    // a message sent there; because `boot_v1` spawns the agent with its
+    // handlers bound, the message is handled rather than returned.
+    #[tokio::test]
+    async fn boot_v1_handles_messages_sent_before_boot() {
+        use hyperactor::Proc;
+        use hyperactor::channel::ChannelTransport;
+
+        let config = hyperactor_config::global::lock();
+        let _timeout = config.override_key(
+            hyperactor::config::PENDING_ACTOR_DELIVERY_TIMEOUT,
+            Duration::from_secs(30),
+        );
+
+        let proc = Proc::direct(ChannelTransport::Unix.any(), "early".to_string()).unwrap();
+        let client = proc.client("client");
+        let agent: ActorRef<ProcAgent> =
+            ActorRef::attest(proc.proc_addr().actor_addr(PROC_AGENT_ACTOR_NAME));
+        let id = ResourceId::instance(Label::new("absent").unwrap());
+        let (reply, mut reply_rx) = client.open_port::<resource::State<ActorState>>();
+        agent.post(
+            &client,
+            resource::GetState {
+                id: id.clone(),
+                reply: reply.bind(),
+            },
+        );
+
+        let _agent = ProcAgent::boot_v1(proc.clone(), None).unwrap();
+
+        let state = tokio::time::timeout(Duration::from_secs(10), reply_rx.recv())
+            .await
+            .expect("the agent should answer the message sent before boot")
+            .unwrap();
+        assert_eq!(state.id, id);
+        assert_eq!(state.status, resource::Status::NotExist);
+    }
     // Verifies that QueryChild(Addr::Proc) on a ProcAgent returns
     // a live IntrospectResult whose children reflect actors spawned
     // directly on the proc — i.e. via proc.spawn_with_label(), which bypasses the

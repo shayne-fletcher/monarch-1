@@ -359,20 +359,18 @@ impl HostMesh {
         let addr = host.addr().clone();
         let system_proc = host.system_proc().clone();
         let host_mesh_agent = system_proc
-            .spawn_with_uid(
+            .spawn_bound_with_uid(
                 Uid::singleton(Label::new(host_agent::HOST_MESH_AGENT_ACTOR_NAME).unwrap()),
                 HostAgent::new_process(host, None),
             )
             .map_err(crate::Error::SingletonActorSpawnError)?;
         HostAgent::wait_initialized(&host_mesh_agent).await?;
-        host_mesh_agent.bind::<HostAgent>();
-        let cast_handle = system_proc
-            .spawn_with_uid(
+        system_proc
+            .spawn_bound_with_uid(
                 Uid::singleton(Label::strip(CAST_ACTOR_NAME)),
                 CastActor::default(),
             )
             .map_err(crate::Error::SingletonActorSpawnError)?;
-        cast_handle.bind::<CastActor>();
 
         let host_mesh_ref = HostMeshRef::new(
             HostMeshId::instance(Label::new("local").unwrap()),
@@ -440,22 +438,19 @@ impl HostMesh {
         let addr = host.addr().clone();
         let system_proc = host.system_proc().clone();
         let host_mesh_agent = system_proc
-            .spawn_with_uid(
+            .spawn_bound_with_uid(
                 Uid::singleton(Label::new(host_agent::HOST_MESH_AGENT_ACTOR_NAME).unwrap()),
                 HostAgent::new_local(host),
             )
             .map_err(crate::Error::SingletonActorSpawnError)?;
         HostAgent::wait_initialized(&host_mesh_agent).await?;
-        host_mesh_agent.bind::<HostAgent>();
 
-        let cast_handle = system_proc
-            .spawn_with_uid(
+        system_proc
+            .spawn_bound_with_uid(
                 Uid::singleton(Label::strip(CAST_ACTOR_NAME)),
                 CastActor::default(),
             )
             .map_err(crate::Error::SingletonActorSpawnError)?;
-
-        cast_handle.bind::<CastActor>();
 
         Ok(addr)
     }
@@ -1874,7 +1869,7 @@ pub async fn spawn_admin(
     // Spawn the admin on the caller's local proc. Placement now
     // follows the caller context rather than mesh topology.
     let local_proc = cx.instance().proc();
-    let agent_handle = local_proc.spawn_with_uid(
+    let agent_handle = local_proc.spawn_bound_with_uid(
         Uid::singleton(Label::new(crate::mesh_admin::MESH_ADMIN_ACTOR_NAME).unwrap()),
         crate::mesh_admin::MeshAdminAgent::new(
             hosts,

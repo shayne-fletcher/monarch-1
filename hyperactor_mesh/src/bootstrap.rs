@@ -345,19 +345,19 @@ pub async fn host(
     // host address is published only after HostAgent binds its handler.
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<HostShutdownHandles>();
 
+    // Spawned bound: the frontend already accepts connections, and a client
+    // that knows this address may have sent to these singletons already.
     let system_proc = host.system_proc().clone();
-    let host_mesh_agent = system_proc.spawn_with_uid(
+    let host_mesh_agent = system_proc.spawn_bound_with_uid(
         Uid::singleton(Label::new(HOST_MESH_AGENT_ACTOR_NAME).unwrap()),
         HostAgent::new_process(host, Some(shutdown_tx)),
     )?;
     HostAgent::wait_initialized(&host_mesh_agent).await?;
 
-    let cast_handle = system_proc.spawn_with_uid(
+    system_proc.spawn_bound_with_uid(
         Uid::singleton(Label::strip(CAST_ACTOR_NAME)),
         hyperactor_cast::cast_actor::CastActor::default(),
     )?;
-
-    cast_handle.bind::<hyperactor_cast::cast_actor::CastActor>();
 
     tracing::info!(
         "serving host at {}, agent: {}",
