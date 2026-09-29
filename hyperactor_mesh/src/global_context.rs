@@ -433,7 +433,7 @@ async fn bootstrap_host() -> GlobalState {
 
     // 3. Spawn HostAgent on system_proc (takes ownership of Host).
     let host_agent = system_proc
-        .spawn_with_uid(
+        .spawn_bound_with_uid(
             Uid::singleton(Label::new(HOST_MESH_AGENT_ACTOR_NAME).unwrap()),
             HostAgent::new_local(host),
         )
@@ -442,14 +442,12 @@ async fn bootstrap_host() -> GlobalState {
         .await
         .expect("failed to initialize host agent");
 
-    let cast_handle = system_proc
-        .spawn_with_uid(
+    system_proc
+        .spawn_bound_with_uid(
             Uid::singleton(Label::strip(CAST_ACTOR_NAME)),
             hyperactor_cast::cast_actor::CastActor::default(),
         )
         .expect("failed to spawn cast actor");
-
-    cast_handle.bind::<hyperactor_cast::cast_actor::CastActor>();
 
     // 4. Build HostMeshRef.
     let host_mesh = HostMeshRef::from_host_agent(

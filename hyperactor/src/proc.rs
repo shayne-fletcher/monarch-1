@@ -1261,6 +1261,22 @@ impl Proc {
         self.spawn_with_uid_in_environment(uid, actor, ActorEnvironment::default())
     }
 
+    /// Like [`spawn_with_uid`](Self::spawn_with_uid), but binds `A`'s handler
+    /// ports before the actor becomes reachable.
+    ///
+    /// Use this for an actor whose address is known before it is spawned,
+    /// such as a singleton. The proc buffers messages sent to that address
+    /// before the actor exists; with this spawn they are delivered once the
+    /// actor starts, instead of being returned as undeliverable because no
+    /// handler is bound yet.
+    pub fn spawn_bound_with_uid<A: Actor + Binds<A>>(
+        &self,
+        uid: Uid,
+        actor: A,
+    ) -> Result<ActorHandle<A>, anyhow::Error> {
+        self.spawn_bound_with_uid_in_environment(uid, actor, ActorEnvironment::default())
+    }
+
     /// Spawn a root actor on this proc using an explicit uid and an explicit
     /// environment.
     ///
@@ -5295,6 +5311,8 @@ mod tests {
     use crate::OncePortRef;
     use crate::PortRef;
     use crate::channel::ChannelTransport;
+    use crate::mailbox::DeliveryFailureKind;
+    use crate::mailbox::InvalidReferenceReason;
     use crate::mailbox::MailboxClient;
     use crate::mailbox::PanickingMailboxSender;
     use crate::port::Port;
@@ -6049,6 +6067,130 @@ mod tests {
         parent.drain_and_stop("test").unwrap();
         child.await;
         parent.await;
+    }
+
+    /// Forwards every `u64` it handles to `seen`. Like `HostAgent`, it binds
+    /// its handlers first thing in `init`.
+    #[derive(Debug)]
+    #[hyperactor::export(handlers = [u64])]
+    struct Recorder {
+        seen: mpsc::UnboundedSender<u64>,
+    }
+
+    #[async_trait]
+    impl Actor for Recorder {
+        async fn init(&mut self, this: &Instance<Self>) -> anyhow::Result<()> {
+            this.bind::<Self>();
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Handler<u64> for Recorder {
+        async fn handle(&mut self, _cx: &Context<Self>, value: u64) -> anyhow::Result<()> {
+            self.seen
+                .send(value)
+                .expect("test receiver should remain open");
+            Ok(())
+        }
+    }
+
+    /// Posts `value` to the singleton `recorder` on `proc` before it exists,
+    /// so the proc buffers it. Returns the return port with a live handle,
+    /// so an empty port reads as "nothing returned" rather than closed.
+    fn post_to_unspawned_recorder(
+        proc: &Proc,
+        value: u64,
+    ) -> (
+        PortHandle<Undeliverable<MessageEnvelope>>,
+        PortReceiver<Undeliverable<MessageEnvelope>>,
+    ) {
+        let dest = proc
+            .proc_addr()
+            .actor_addr("recorder")
+            .port_addr(Port::handler::<u64>());
+        let mut envelope =
+            MessageEnvelope::serialize(test_actor_id("0", "sender"), dest, &value, Flattrs::new())
+                .expect("serialize");
+        envelope.set_header(SEQ_INFO, SeqInfo::Direct);
+        let (return_handle, return_rx) = Mailbox::new(test_actor_id("0", "returns"))
+            .open_port::<Undeliverable<MessageEnvelope>>();
+        proc.post(envelope, return_handle.clone());
+        (return_handle, return_rx)
+    }
+
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_spawn_bound_with_uid_delivers_messages_sent_before_spawn() {
+        let config = hyperactor_config::global::lock();
+        let _timeout = config.override_key(
+            crate::config::PENDING_ACTOR_DELIVERY_TIMEOUT,
+            Duration::from_secs(30),
+        );
+        let proc = Proc::isolated();
+        let (_return_handle, mut return_rx) = post_to_unspawned_recorder(&proc, 7);
+
+        let (seen, mut seen_rx) = mpsc::unbounded_channel();
+        let handle = proc
+            .spawn_bound_with_uid(
+                Uid::singleton(Label::new("recorder").unwrap()),
+                Recorder { seen },
+            )
+            .unwrap();
+
+        assert_eq!(
+            seen_rx.recv().await,
+            Some(7),
+            "the message buffered before spawn should be handled"
+        );
+        assert!(
+            return_rx.try_recv().unwrap().is_none(),
+            "no message should be returned"
+        );
+
+        handle.drain_and_stop("test").unwrap();
+        handle.await;
+    }
+
+    // Negative case: a plain spawn publishes the actor before `init` binds its
+    // handlers, so the buffered message is returned even though `init` binds
+    // first thing.
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_spawn_with_uid_returns_messages_sent_before_spawn() {
+        let config = hyperactor_config::global::lock();
+        let _timeout = config.override_key(
+            crate::config::PENDING_ACTOR_DELIVERY_TIMEOUT,
+            Duration::from_secs(30),
+        );
+        let proc = Proc::isolated();
+        let (_return_handle, mut return_rx) = post_to_unspawned_recorder(&proc, 7);
+
+        let (seen, _seen_rx) = mpsc::unbounded_channel();
+        let handle = proc
+            .spawn_with_uid(
+                Uid::singleton(Label::new("recorder").unwrap()),
+                Recorder { seen },
+            )
+            .unwrap();
+
+        let undelivered = tokio::time::timeout(Duration::from_secs(10), return_rx.recv())
+            .await
+            .expect("timed out waiting for the returned message")
+            .expect("return port closed")
+            .into_message()
+            .expect("expected a returned envelope");
+        let root_failure = undelivered
+            .root_delivery_failure()
+            .expect("expected a root delivery failure");
+        let DeliveryFailureKind::InvalidReference(invalid_reference) = &root_failure.kind else {
+            panic!("expected an invalid reference, got {root_failure}");
+        };
+        assert_eq!(
+            invalid_reference.reason,
+            InvalidReferenceReason::HandlerNotBound
+        );
+
+        handle.drain_and_stop("test").unwrap();
+        handle.await;
     }
 
     #[async_timed_test(timeout_secs = 30)]
