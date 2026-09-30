@@ -297,6 +297,12 @@ def concurrent_endpoint(
     second. This is only a start-order guarantee: the first endpoint runs until
     its first ``await``, not to completion, before the second starts.
 
+    While an actor has queued messages, it periodically yields to its event
+    loop, so queued concurrent calls start without waiting for one another and
+    other ready tasks on the loop are not starved. How often it yields is an
+    implementation detail and may change. This does not limit how long one
+    endpoint body runs before its first ``await``.
+
     If you mix ``@concurrent_endpoint`` with normal ``@endpoint`` methods, a
     normal endpoint that follows a concurrent endpoint may run before the
     concurrent endpoint body has started.
