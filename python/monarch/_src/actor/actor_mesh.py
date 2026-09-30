@@ -1315,6 +1315,28 @@ class _QueuePanicFlag:
         self.panic_exception = ex
 
 
+# Queue-dispatch invariants:
+#
+# QD-1 (bounded-dispatch-streak): `_dispatch_loop` dispatches at most
+#   `_DISPATCH_BATCH` messages between two of its own yields to the event loop,
+#   and only those yields reset the count: a handler's suspensions and an
+#   empty-receiver wait in `recv()` do not. It yields before taking the next
+#   message, so cancelling it during the yield leaves that message queued. It
+#   bounds completed dispatches, not how long one handler runs. Enforced by the
+#   streak counter in `_dispatch_loop`.
+# QD-2 (dispatch-order): messages are dispatched in queue order, and a yield
+#   between batches does not reorder them. Enforced by the single FIFO receiver
+#   and asyncio's FIFO ready queue.
+
+# Messages `_dispatch_loop` dispatches back to back before it yields (QD-1).
+_DISPATCH_BATCH = 64
+
+
+async def _yield_to_loop() -> None:
+    """Give every ready task on the actor's loop a chance to run (QD-1)."""
+    await asyncio.sleep(0)
+
+
 # HOT PATH: Be mindful of performance when making changes here.
 # To test how performance is affected by a change, run the RPC benchmarks in
 # `monarch/python/benches/`.
@@ -1326,15 +1348,28 @@ async def _dispatch_loop(
     """
     Message loop for queue-dispatch mode. Called from Rust Actor::init.
 
+    Yields to the event loop after at most `_DISPATCH_BATCH` messages
+    dispatched back to back, so a backlog cannot hold the loop indefinitely
+    (QD-1).
+
     Args:
         actor: The Python actor object that implements ``handle``.
         receiver: Channel receiver for queued messages.
         self_instance: The actor's own Instance, used to kill self on
             an unhandled exception.
     """
+    # Messages dispatched since this loop last yielded (QD-1).
+    streak = 0
     while True:
         try:
+            # QD-1: yield before taking the next message, so a cancellation
+            # here leaves it queued. Only this yield resets the count, not a
+            # wait inside `recv()` or a handler's suspension.
+            if streak == _DISPATCH_BATCH:
+                await _yield_to_loop()
+                streak = 0
             msg = await receiver.recv()
+            streak += 1
             await _handle_queued_message(actor, msg)
         except asyncio.CancelledError:
             return
