@@ -158,12 +158,10 @@
 //!   targets the proc ref directly on Proc; targets the owning proc
 //!   from visible-tree ancestry on Actor, independently of detail
 //!   loading.
-//! - **PY-5 (overlay-isolation):** Diagnostics and py-spy overlays
-//!   must not write into each other's display surface. Enforced by
-//!   `set_job`: `RunDiagnostics` calls `set_job` with the
-//!   `Diagnostics` variant (dropping any live `PySpy` receiver);
-//!   Esc calls `dismiss_job`; `recv_active_job` fires only for the
-//!   variant currently stored.
+//! - **PY-5 (overlay-isolation):** Py-spy and config overlays must not
+//!   write into each other's display surface. Enforced by `set_job`:
+//!   each variant drops any prior receiver; Esc calls `dismiss_job`;
+//!   `recv_active_job` fires only for the variant currently stored.
 //! - **PY-6 (warnings-lead):** Non-fatal warnings on an `Ok` result
 //!   render immediately after the metadata header, before the first
 //!   thread, and are emitted even when there are no stack traces. A
@@ -188,8 +186,8 @@
 //!   on Proc (worker or service); targets the owning proc via
 //!   visible-tree ancestry on Actor; no-op on Root/Host. Backend
 //!   routes to ProcAgent or HostAgent per proc type (same as PY-4).
-//! - **CFG-5 (overlay-isolation):** Config, Diagnostics, and PySpy
-//!   overlays must not write into each other's display surface.
+//! - **CFG-5 (overlay-isolation):** Config and PySpy overlays must not
+//!   write into each other's display surface.
 //!   Enforced by `set_job`: each variant drops any prior receiver;
 //!   `recv_active_job` fires only for the variant currently stored.
 //!
@@ -218,7 +216,6 @@ use tokio as _;
 mod actions;
 mod app;
 pub(crate) mod client;
-mod diagnostics;
 mod fetch;
 mod filter;
 mod format;
@@ -286,7 +283,6 @@ pub struct TuiConfig {
     pub tls_ca: Option<String>,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
-    pub diagnose: bool,
     /// Disable TLS and use plain HTTP, overriding TLS auto-detection.
     pub plaintext: bool,
 }
@@ -312,66 +308,10 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
     Ok(())
 }
 
-async fn run_diagnose(
-    client: reqwest::Client,
-    base_url: String,
-    policy: timeouts::TuiTimeoutPolicy,
-) -> io::Result<()> {
-    use crate::diagnostics::DiagSummary;
-    use crate::diagnostics::run_diagnostics;
-
-    let mut rx = run_diagnostics(client, base_url, &policy);
-    let mut results = Vec::new();
-
-    let timed_out = tokio::time::timeout(
-        policy.workflow_timeout(timeouts::WorkflowOp::DiagnosticsRun),
-        async {
-            while let Some(r) = rx.recv().await {
-                results.push(r);
-            }
-        },
-    )
-    .await
-    .is_err();
-
-    let s = DiagSummary::from_results(&results);
-    let healthy = s.passed == s.total && !timed_out;
-
-    let report = serde_json::json!({
-        "checks": results,
-        "timed_out": timed_out,
-        "summary": {
-            "total": s.total,
-            "passed": s.passed,
-            "failed": s.total - s.passed,
-            "admin_infra_passed": s.admin_passed,
-            "admin_infra_total": s.admin_total,
-            "mesh_passed": s.mesh_passed,
-            "mesh_total": s.mesh_total,
-            "healthy": healthy,
-        }
-    });
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&report).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
-    );
-
-    if !healthy {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
-/// Run the mesh admin TUI. Does not return until the user exits
-/// or diagnostics complete.
+/// Run the mesh admin TUI. Does not return until the user exits.
 pub async fn run(config: TuiConfig) -> io::Result<()> {
     let policy = timeouts::TuiTimeoutPolicy::from_config(&config);
     let (base_url, client) = client::build_client(&config)?;
-
-    if config.diagnose {
-        return run_diagnose(client, base_url, policy).await;
-    }
 
     if !io::stdout().is_terminal() {
         eprintln!("This TUI requires a real terminal.");

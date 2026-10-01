@@ -87,7 +87,7 @@ pub(crate) fn render_topology_tree(
 
     // When any overlay is active the tree is non-interactive.
     // Render it uniformly dim so the user can see it is inactive.
-    // This covers both the diagnostics overlay and the py-spy overlay.
+    // This covers both the py-spy overlay and the config overlay.
     let pane_inactive = app.overlay.is_some();
 
     let items: Vec<ListItem> = rows

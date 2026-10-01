@@ -16,7 +16,7 @@ use hyperactor_mesh::introspect::NodeProperties;
 use hyperactor_mesh::introspect::NodeRef;
 use serde_json::Value;
 
-/// Compact, non-redundant actor identity for tree/diagnostics labels:
+/// Compact, non-redundant actor identity for tree labels:
 /// `name` (singleton), `name<base58>` (labeled instance), or
 /// `<base58>` (unlabeled instance). Single source of truth — `Uid`'s
 /// `Display` already yields the correct, non-duplicated string.

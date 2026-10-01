@@ -61,8 +61,8 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
 /// Render the main body of the UI.
 ///
 /// Splits the screen into a left topology pane and a right detail
-/// pane. When diagnostics is active the topology tree is dimmed
-/// (non-interactive) and the right pane shows the diagnostics view.
+/// pane. When an overlay is active the topology tree is dimmed and
+/// non-interactive while the right pane shows the overlay.
 pub(crate) fn render_body(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, app: &App) {
     let rows = app.visible_rows();
     let topology_width_ceiling = Layout::default()

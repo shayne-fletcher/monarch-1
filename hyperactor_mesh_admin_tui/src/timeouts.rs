@@ -14,16 +14,12 @@
 //!   entry.
 //! - **TP-2:** Refresh cadence and request timeout are distinct
 //!   concepts.
-//! - **TP-4:** Diagnostics thresholds are policy-backed, not
-//!   file-local.
 //! - **TP-5:** Timeout policy is recorded at operation boundaries.
 //! - **TP-6:** `TuiTimeoutPolicy::from_config` produces
 //!   operation-specific request budgets.
 //! - **TP-7:** No client-level timeout. The `reqwest::Client` is
 //!   built without `.timeout()`. All timeout enforcement is
 //!   per-operation via `tokio::time::timeout` at the call boundary.
-//! - **TP-8:** Diagnostics uses only policy-provided thresholds and
-//!   budgets.
 //! - **TP-9:** Each request operation enforces its own budget via
 //!   `tokio::time::timeout` at the operation boundary.
 //! - **TP-10:** The effective refresh policy is derived from active
@@ -60,22 +56,6 @@ pub(crate) const ALL_REQUEST_OPS: &[RequestOp] = &[
     RequestOp::PySpyDump,
 ];
 
-/// Per-probe budgets, applied via `tokio::time::timeout` inside the
-/// probe function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProbeOp {
-    /// Individual diagnostics health check.
-    DiagnosticsProbe,
-}
-
-/// Whole-job ceilings, applied via `tokio::time::timeout` around the
-/// entire job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkflowOp {
-    /// Full diagnostic suite ceiling.
-    DiagnosticsRun,
-}
-
 /// Central timeout policy for the TUI. Every timing decision flows
 /// through this struct.
 ///
@@ -86,18 +66,12 @@ pub(crate) struct TuiTimeoutPolicy {
     /// Base refresh cadence from `--refresh-ms`.
     /// Separation law: not used in any timeout accessor.
     pub refresh_interval: Duration,
-    /// Latency classification threshold for successful diagnostics
-    /// probes: below this is `Pass`, at or above this is `Slow`.
-    /// This is not a timeout budget and does not cancel the probe.
-    pub diagnostics_probe_slow: Duration,
     /// Delay before fetching detail for a newly selected row.
     pub detail_debounce: Duration,
     // Private fields; accessed via typed accessors.
     interactive_fetch: Duration,
     config_dump: Duration,
     pyspy_dump: Duration,
-    diagnostics_probe: Duration,
-    diagnostics_run: Duration,
 }
 
 impl TuiTimeoutPolicy {
@@ -109,21 +83,15 @@ impl TuiTimeoutPolicy {
     /// Request budgets are operation-specific (TP-9). There is no
     /// shared client-level timeout; all enforcement is per-operation
     /// via `tokio::time::timeout` at the call boundary (TP-7).
-    ///
-    /// Diagnostics budgets preserve the existing effective values
-    /// from the pre-policy implementation.
     pub fn from_config(config: &TuiConfig) -> Self {
         Self {
             refresh_interval: Duration::from_millis(config.refresh_ms),
-            diagnostics_probe_slow: Duration::from_millis(500),
             detail_debounce: Duration::from_millis(100),
             interactive_fetch: Duration::from_secs(5),
             config_dump: Duration::from_secs(8),
             pyspy_dump: hyperactor_config::global::get(
                 hyperactor_mesh::config::MESH_ADMIN_PYSPY_CLIENT_TIMEOUT,
             ),
-            diagnostics_probe: Duration::from_secs(5),
-            diagnostics_run: Duration::from_secs(120),
         }
     }
 
@@ -133,20 +101,6 @@ impl TuiTimeoutPolicy {
             RequestOp::InteractiveFetch => self.interactive_fetch,
             RequestOp::ConfigDump => self.config_dump,
             RequestOp::PySpyDump => self.pyspy_dump,
-        }
-    }
-
-    /// Per-probe timeout for a diagnostic probe.
-    pub fn probe_timeout(&self, op: ProbeOp) -> Duration {
-        match op {
-            ProbeOp::DiagnosticsProbe => self.diagnostics_probe,
-        }
-    }
-
-    /// Whole-job ceiling for a workflow operation.
-    pub fn workflow_timeout(&self, op: WorkflowOp) -> Duration {
-        match op {
-            WorkflowOp::DiagnosticsRun => self.diagnostics_run,
         }
     }
 }
@@ -207,7 +161,6 @@ mod tests {
             tls_ca: None,
             tls_cert: None,
             tls_key: None,
-            diagnose: false,
             plaintext: false,
         }
     }
@@ -242,33 +195,6 @@ mod tests {
         assert_eq!(policy.request_timeout(RequestOp::PySpyDump), expected);
     }
 
-    // TP-6: probe budget.
-    #[test]
-    fn from_config_preserves_probe_timeout() {
-        let policy = TuiTimeoutPolicy::from_config(&default_config());
-        assert_eq!(
-            policy.probe_timeout(ProbeOp::DiagnosticsProbe),
-            Duration::from_secs(5),
-        );
-    }
-
-    // TP-6: workflow ceiling.
-    #[test]
-    fn from_config_preserves_workflow_timeout() {
-        let policy = TuiTimeoutPolicy::from_config(&default_config());
-        assert_eq!(
-            policy.workflow_timeout(WorkflowOp::DiagnosticsRun),
-            Duration::from_secs(120),
-        );
-    }
-
-    // TP-6: slow classification threshold.
-    #[test]
-    fn from_config_preserves_slow_threshold() {
-        let policy = TuiTimeoutPolicy::from_config(&default_config());
-        assert_eq!(policy.diagnostics_probe_slow, Duration::from_millis(500));
-    }
-
     // TP-2: separation law — refresh_interval is independent of
     // request timeouts.
     #[test]
@@ -285,14 +211,6 @@ mod tests {
                 default_policy.request_timeout(*op),
             );
         }
-        assert_eq!(
-            policy.probe_timeout(ProbeOp::DiagnosticsProbe),
-            default_policy.probe_timeout(ProbeOp::DiagnosticsProbe),
-        );
-        assert_eq!(
-            policy.workflow_timeout(WorkflowOp::DiagnosticsRun),
-            default_policy.workflow_timeout(WorkflowOp::DiagnosticsRun),
-        );
     }
 
     // TP-2: default cadence from --refresh-ms.

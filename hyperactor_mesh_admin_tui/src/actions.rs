@@ -20,8 +20,6 @@ pub(crate) enum KeyResult {
     NeedsRefresh,
     /// Lazily expand the node at the given (reference, depth).
     ExpandNode(NodeRef, usize),
-    /// Start the self-diagnostic suite against the attached mesh.
-    RunDiagnostics,
     /// Fetch a py-spy stack dump for the given proc.
     RunPySpy(ProcAddr),
     /// Fetch the config dump for the given proc.

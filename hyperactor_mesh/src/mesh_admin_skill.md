@@ -53,30 +53,6 @@ the node may still exist.
 
 All requests require the TLS flags above.
 
-## One-shot diagnostic (recommended starting point)
-
-Run this first to verify reachability and topology of the full mesh
-(root → hosts → service proc actors → every user proc → user actors):
-for each node, the report confirms it returns a valid payload within
-budget. Exit code 0 = all reachable, 1 = any failure.
-
-```
-cargo run -p hyperactor_mesh --bin hyperactor_mesh_admin_tui -- \
-  --addr {base} --diagnose
-```
-
-Each entry in `checks[]` includes `reference` (the exact ref that
-failed), `note` (role), `phase` (AdminInfra or Mesh), and `outcome`
-(Pass/Slow/Fail with `elapsed_ms` and `error`). Use failing
-`reference` values to probe further with the endpoints below.
-
-`--diagnose` covers reachability and topology — can we reach each
-node, does each return a valid payload — and does NOT inspect
-application-level state such as actor reorder buffers. A
-`--diagnose` PASS does not rule out a stalled actor; for ordering
-stalls see "Diagnose ordering stalls" and "Find any stalled actor
-in the mesh" below.
-
 ## Endpoints
 
 Most endpoints are read-only (`GET`). Three endpoints accept `POST`:

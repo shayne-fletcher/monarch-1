@@ -212,9 +212,8 @@ pub(crate) fn render_header(
 
 /// Render the bottom help bar showing the keyboard shortcuts.
 ///
-/// Shows mode-specific hints: topology navigation when the tree is
-/// active, diagnostics navigation when the diagnostics pane is
-/// active.
+/// Shows mode-specific hints for topology navigation and active
+/// overlays.
 pub(crate) fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let text = ActiveJob::footer_text(&app.active_job, &app.theme.labels);
     let footer = Paragraph::new(text)
@@ -233,38 +232,6 @@ mod tests {
 
     fn en_labels() -> Labels {
         Theme::new(ThemeName::Nord, LangName::En).labels
-    }
-
-    // TUI-21: running diagnostics selects the diag-running help text.
-    #[test]
-    fn footer_diag_running() {
-        let labels = en_labels();
-        let job = Some(ActiveJob::Diagnostics {
-            results: vec![],
-            running: true,
-            rx: None,
-            completed_at: None,
-        });
-        assert_eq!(
-            ActiveJob::footer_text(&job, &labels),
-            labels.footer_diag_running_help_text
-        );
-    }
-
-    // TUI-21: completed diagnostics selects the diag-completed help text.
-    #[test]
-    fn footer_diag_completed() {
-        let labels = en_labels();
-        let job = Some(ActiveJob::Diagnostics {
-            results: vec![],
-            running: false,
-            rx: None,
-            completed_at: Some("12:00:00".to_string()),
-        });
-        assert_eq!(
-            ActiveJob::footer_text(&job, &labels),
-            labels.footer_diag_completed_help_text
-        );
     }
 
     // TUI-21: active py-spy overlay selects the py-spy help text.

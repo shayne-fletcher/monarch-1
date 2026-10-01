@@ -50,7 +50,6 @@ use crate::collect_expanded_refs;
 use crate::collect_failed_refs;
 use crate::collect_refs;
 use crate::derive_label;
-use crate::diagnostics::run_diagnostics;
 use crate::fetch_node_state_raw;
 use crate::fetch_with_join;
 use crate::find_at_depth_from_root_mut;
@@ -295,7 +294,7 @@ pub(crate) struct App {
     /// The running or completed overlay-producing async job (TUI-21).
     /// `None` iff `overlay` is also `None`.
     pub(crate) active_job: Option<ActiveJob>,
-    /// Active overlay (py-spy, config, or diagnostics content).
+    /// Active overlay (py-spy or config content).
     /// When `Some`, the detail pane renders the overlay instead of
     /// node details. Dismissed with Esc, scrolled with j/k.
     pub(crate) overlay: Option<Overlay>,
@@ -1351,10 +1350,6 @@ impl App {
                     KeyResult::None
                 }
             }
-            KeyCode::Char('d') => {
-                // Open diagnostics pane (Esc to close, j/k to scroll).
-                KeyResult::RunDiagnostics
-            }
             KeyCode::Char('p') => {
                 if let Some(proc_ref) = self.pyspy_proc_ref() {
                     KeyResult::RunPySpy(proc_ref)
@@ -1420,15 +1415,6 @@ impl App {
                 }
                 self.schedule_selected_detail();
             }
-            KeyResult::RunDiagnostics => {
-                let rx = run_diagnostics(self.client.clone(), self.base_url.clone(), &self.policy);
-                self.set_job(ActiveJob::Diagnostics {
-                    results: Vec::new(),
-                    running: true,
-                    rx: Some(rx),
-                    completed_at: None,
-                });
-            }
             KeyResult::RunPySpy(proc_id) => {
                 self.start_pyspy(proc_id);
             }
@@ -1443,10 +1429,6 @@ impl App {
     /// Dispatch variant-specific rerun keys when an overlay is active.
     pub(crate) fn overlay_rerun_key(&self, key: KeyEvent) -> KeyResult {
         match &self.active_job {
-            Some(ActiveJob::Diagnostics { .. }) => match key.code {
-                KeyCode::Char('r') | KeyCode::Char('d') => KeyResult::RunDiagnostics,
-                _ => KeyResult::None,
-            },
             Some(ActiveJob::PySpy { .. }) => match key.code {
                 KeyCode::Char('p') => {
                     if let Some(proc_ref) = self.pyspy_proc_ref() {
@@ -1764,14 +1746,10 @@ pub(crate) fn config_json_to_lines(
 /// neither receiver is ready, so the `tokio::select!` arm is never woken —
 /// equivalent to disabling the arm without requiring conditional compilation.
 ///
-/// A single function (rather than two separate `recv_diag`/`recv_pyspy` calls)
-/// is necessary so that `tokio::select!` holds only one `&mut active_job` borrow
-/// at a time.
+/// A single function is necessary so that `tokio::select!` holds only
+/// one `&mut active_job` borrow at a time.
 async fn recv_active_job(job: &mut Option<ActiveJob>) -> ActiveJobEvent {
     match job {
-        Some(ActiveJob::Diagnostics { rx: Some(rx), .. }) => {
-            ActiveJobEvent::DiagResult(rx.recv().await)
-        }
         Some(ActiveJob::PySpy {
             rx: Some(inner), ..
         }) => {
@@ -1840,8 +1818,8 @@ async fn recv_refresh_request(request: &mut Option<RefreshRequest>) -> RefreshCo
 /// in-flight (waiting for network) and completed (user reading
 /// results). Refresh resumes only when the overlay is dismissed
 /// (Esc clears the job to None). This prevents topology rebuilds
-/// from disrupting the user's view while they read py-spy stacks,
-/// config dumps, or diagnostics.
+/// from disrupting the user's view while they read py-spy stacks or
+/// config dumps.
 pub(crate) fn refresh_policy_for_job(job: &Option<ActiveJob>) -> crate::timeouts::RefreshPolicy {
     use crate::timeouts::RefreshPolicy;
     match job {
