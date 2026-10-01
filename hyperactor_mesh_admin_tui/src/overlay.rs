@@ -10,7 +10,7 @@
 //!
 //! An `Overlay` takes over the detail pane with scrollable text
 //! content, dismissed with Esc, scrolled with j/k. Used by
-//! diagnostics, py-spy, and future overlays (e.g. config display).
+//! py-spy, config display, and future overlays.
 
 use std::cell::Cell;
 

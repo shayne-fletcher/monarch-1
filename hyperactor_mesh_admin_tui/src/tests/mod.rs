@@ -18,9 +18,6 @@ use crossterm::event::KeyModifiers;
 use hyperactor_mesh::introspect::NodeRef;
 
 use super::*;
-use crate::diagnostics::DiagOutcome;
-use crate::diagnostics::DiagPhase;
-use crate::diagnostics::DiagResult;
 use crate::timeouts::TuiTimeoutPolicy;
 
 mod responsive_navigation;
@@ -36,7 +33,6 @@ fn test_policy() -> TuiTimeoutPolicy {
         tls_ca: None,
         tls_cert: None,
         tls_key: None,
-        diagnose: false,
         plaintext: false,
     })
 }
@@ -1898,72 +1894,6 @@ fn pyspy_json_to_lines_ok_thread_name_and_flags() {
     assert_eq!(line_text(&lines[4]), "");
 }
 
-// ── TUI-21 build_diag_overlay tests ────────────────────────────────────────
-
-// TUI-21: running diagnostics produces a loading overlay with status line.
-#[test]
-fn build_diag_overlay_running() {
-    let theme = Theme::new(ThemeName::Nord, LangName::En);
-    let job = ActiveJob::Diagnostics {
-        results: Vec::new(),
-        running: true,
-        rx: None,
-        completed_at: None,
-    };
-    let overlay = job.build_overlay(&theme);
-    assert!(overlay.loading, "overlay should be loading while running");
-    assert!(
-        overlay.status_line.is_some(),
-        "running overlay needs a status line"
-    );
-    let title_text = line_text(&overlay.title);
-    assert!(
-        title_text.contains("Diagnostics"),
-        "title should contain 'Diagnostics', got: {title_text}"
-    );
-    assert!(
-        title_text.contains("Running"),
-        "title should contain running indicator, got: {title_text}"
-    );
-}
-
-// TUI-21: completed diagnostics with one pass result produces a non-loading
-// overlay whose status line summarises the pass count.
-#[test]
-fn build_diag_overlay_one_result() {
-    let theme = Theme::new(ThemeName::Nord, LangName::En);
-    let job = ActiveJob::Diagnostics {
-        results: vec![DiagResult {
-            label: "root".into(),
-            reference: "root_ref".to_string(),
-            note: None,
-            phase: DiagPhase::AdminInfra,
-            outcome: DiagOutcome::Pass { elapsed_ms: 5 },
-        }],
-        running: false,
-        rx: None,
-        completed_at: Some("12:00:00".into()),
-    };
-    let overlay = job.build_overlay(&theme);
-    assert!(
-        !overlay.loading,
-        "overlay should not be loading when completed"
-    );
-    assert!(
-        !overlay.lines.is_empty(),
-        "overlay should have result lines"
-    );
-    let status_text = overlay
-        .status_line
-        .as_ref()
-        .map(line_text)
-        .unwrap_or_default();
-    assert!(
-        status_text.contains("All 1 checks passed"),
-        "status line should mention pass count, got: {status_text}"
-    );
-}
-
 // TUI-21: set_job establishes the job-overlay biconditional.
 #[test]
 fn set_job_establishes_overlay() {
@@ -1976,10 +1906,10 @@ fn set_job_establishes_overlay() {
     );
     assert!(app.active_job.is_none());
     assert!(app.overlay.is_none());
-    app.set_job(ActiveJob::Diagnostics {
-        results: Vec::new(),
-        running: true,
+    app.set_job(ActiveJob::PySpy {
         rx: None,
+        short: "worker[0]".to_string(),
+        lines: vec![],
         completed_at: None,
     });
     assert!(app.active_job.is_some(), "set_job should set active_job");
@@ -1996,10 +1926,10 @@ fn dismiss_job_clears_both() {
         LangName::En,
         test_policy(),
     );
-    app.set_job(ActiveJob::Diagnostics {
-        results: Vec::new(),
-        running: true,
+    app.set_job(ActiveJob::PySpy {
         rx: None,
+        short: "worker[0]".to_string(),
+        lines: vec![],
         completed_at: None,
     });
     app.dismiss_job();
@@ -2081,59 +2011,6 @@ fn build_overlay_pyspy_completed_empty() {
 
 // ── ActiveJob::on_event tests ──────────────────────────────────────────────
 
-// TUI-21: on_event DiagResult(Some) pushes to results without changing running state.
-#[test]
-fn on_event_diag_result_pushes() {
-    let mut job = ActiveJob::Diagnostics {
-        results: vec![],
-        running: true,
-        rx: None,
-        completed_at: None,
-    };
-    let r = DiagResult {
-        label: "check".into(),
-        reference: "ref".to_string(),
-        note: None,
-        phase: DiagPhase::AdminInfra,
-        outcome: DiagOutcome::Pass { elapsed_ms: 1 },
-    };
-    job.on_event(ActiveJobEvent::DiagResult(Some(r)));
-    if let ActiveJob::Diagnostics {
-        results, running, ..
-    } = &job
-    {
-        assert_eq!(results.len(), 1);
-        assert!(*running, "should still be running after a single result");
-    } else {
-        panic!("job variant changed");
-    }
-}
-
-// TUI-21: on_event DiagResult(None) marks completed — clears rx, sets timestamp.
-#[test]
-fn on_event_diag_stream_end() {
-    let mut job = ActiveJob::Diagnostics {
-        results: vec![],
-        running: true,
-        rx: None,
-        completed_at: None,
-    };
-    job.on_event(ActiveJobEvent::DiagResult(None));
-    if let ActiveJob::Diagnostics {
-        running,
-        rx,
-        completed_at,
-        ..
-    } = &job
-    {
-        assert!(!running, "should be stopped after stream end");
-        assert!(rx.is_none());
-        assert!(completed_at.is_some(), "should have a completion timestamp");
-    } else {
-        panic!("job variant changed");
-    }
-}
-
 // PY-2/PY-3: on_event PySpyResult populates lines, clears rx, sets timestamp.
 #[test]
 fn on_event_pyspy_result() {
@@ -2162,42 +2039,6 @@ fn on_event_pyspy_result() {
 }
 
 // ── overlay_rerun_key tests ────────────────────────────────────────────────
-
-// PY-5: Diagnostics overlay: 'd' and 'r' trigger rerun.
-#[test]
-fn overlay_rerun_key_diag_d() {
-    let mut app = make_app_with_cursor(vec![proc_node("p")], 0);
-    app.active_job = Some(ActiveJob::Diagnostics {
-        results: vec![],
-        running: false,
-        rx: None,
-        completed_at: None,
-    });
-    let key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
-    assert!(matches!(
-        app.overlay_rerun_key(key),
-        KeyResult::RunDiagnostics
-    ));
-    let key_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
-    assert!(matches!(
-        app.overlay_rerun_key(key_r),
-        KeyResult::RunDiagnostics
-    ));
-}
-
-// PY-5: Diagnostics overlay: unrelated key is not dispatched.
-#[test]
-fn overlay_rerun_key_diag_unrelated() {
-    let mut app = make_app_with_cursor(vec![proc_node("p")], 0);
-    app.active_job = Some(ActiveJob::Diagnostics {
-        results: vec![],
-        running: false,
-        rx: None,
-        completed_at: None,
-    });
-    let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
-    assert!(matches!(app.overlay_rerun_key(key), KeyResult::None));
-}
 
 // PY-1: PySpy overlay: 'p' on a proc node triggers fresh fetch.
 #[test]
@@ -2388,20 +2229,6 @@ fn footer_text_config() {
     assert_eq!(text, labels.footer_config_help_text);
 }
 
-// CFG-5: Footer text for Diagnostics overlay (cross-check isolation).
-#[test]
-fn footer_text_diagnostics() {
-    let labels = Labels::en();
-    let job = Some(ActiveJob::Diagnostics {
-        results: vec![],
-        running: true,
-        rx: None,
-        completed_at: None,
-    });
-    let text = ActiveJob::footer_text(&job, &labels);
-    assert_eq!(text, labels.footer_diag_running_help_text);
-}
-
 // CFG-5: Footer text for PySpy overlay (cross-check isolation).
 #[test]
 fn footer_text_pyspy() {
@@ -2502,18 +2329,6 @@ fn refresh_policy_no_job() {
     assert_eq!(refresh_policy_for_job(&None), RefreshPolicy::Baseline);
 }
 
-// TP-10: diagnostics → Suspend.
-#[test]
-fn refresh_policy_diagnostics() {
-    let job = Some(ActiveJob::Diagnostics {
-        results: vec![],
-        running: true,
-        rx: None,
-        completed_at: None,
-    });
-    assert_eq!(refresh_policy_for_job(&job), RefreshPolicy::Suspend);
-}
-
 // TP-10: py-spy in flight → Suspend.
 #[test]
 fn refresh_policy_pyspy_in_flight() {
@@ -2564,18 +2379,6 @@ fn refresh_policy_config_completed() {
     assert_eq!(refresh_policy_for_job(&job), RefreshPolicy::Suspend);
 }
 
-// TP-10: diagnostics completed → Suspend (topology stable while user reads overlay).
-#[test]
-fn refresh_policy_diagnostics_completed() {
-    let job = Some(ActiveJob::Diagnostics {
-        results: vec![],
-        running: false,
-        rx: None,
-        completed_at: Some("14:30:00".to_string()),
-    });
-    assert_eq!(refresh_policy_for_job(&job), RefreshPolicy::Suspend);
-}
-
 // TP-10: policy state transitions through set_job / dismiss_job.
 #[test]
 fn refresh_policy_transitions_with_job_lifecycle() {
@@ -2592,10 +2395,10 @@ fn refresh_policy_transitions_with_job_lifecycle() {
         RefreshPolicy::Baseline,
     );
     // Set a foreground job → Suspend (refresh suppressed).
-    app.set_job(ActiveJob::Diagnostics {
-        results: Vec::new(),
-        running: true,
+    app.set_job(ActiveJob::PySpy {
         rx: None,
+        short: "worker[0]".to_string(),
+        lines: vec![],
         completed_at: None,
     });
     assert_eq!(
@@ -2783,11 +2586,11 @@ fn detail_content_clipped_guards() {
     assert!(!detail_content_clipped(&app, 18));
     app.show_help = false;
 
-    // An overlay (diagnostics / py-spy) owns the pane -> suppressed.
-    app.set_job(ActiveJob::Diagnostics {
-        results: Vec::new(),
-        running: true,
+    // An overlay owns the pane -> suppressed.
+    app.set_job(ActiveJob::PySpy {
         rx: None,
+        short: "worker[0]".to_string(),
+        lines: vec![],
         completed_at: None,
     });
     assert!(app.overlay.is_some());

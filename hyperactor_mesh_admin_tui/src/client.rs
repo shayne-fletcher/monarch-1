@@ -307,7 +307,6 @@ sgomYHxvxrU2hWx+7k53CRdjfaIvT9Ie44z9sSdsU/+blw2S8f/ZTmuECoIAAXYO
             tls_ca,
             tls_cert,
             tls_key,
-            diagnose: false,
             plaintext,
         }
     }

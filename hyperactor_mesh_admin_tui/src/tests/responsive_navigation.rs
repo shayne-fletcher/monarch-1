@@ -914,10 +914,10 @@ async fn refresh_completion_is_deferred_across_foreground_overlay() {
 
     app.request_refresh();
     let completion = app.receive_pending_refresh_for_test().await;
-    app.set_job(ActiveJob::Diagnostics {
-        results: Vec::new(),
-        running: true,
+    app.set_job(ActiveJob::PySpy {
         rx: None,
+        short: "worker[0]".to_string(),
+        lines: vec![],
         completed_at: None,
     });
     app.apply_refresh_completion(completion);
@@ -997,10 +997,10 @@ async fn discarded_snapshot_does_not_advance_generation() {
 
     app.request_refresh();
     let completion = app.receive_pending_refresh_for_test().await;
-    app.set_job(ActiveJob::Diagnostics {
-        results: Vec::new(),
-        running: true,
+    app.set_job(ActiveJob::PySpy {
         rx: None,
+        short: "worker[0]".to_string(),
+        lines: vec![],
         completed_at: None,
     });
     app.apply_refresh_completion(completion);

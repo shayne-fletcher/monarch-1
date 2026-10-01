@@ -63,10 +63,6 @@ struct Args {
     #[arg(long)]
     tls_key: Option<String>,
 
-    /// Run diagnostics and print a JSON report to stdout, then exit.
-    #[arg(long)]
-    diagnose: bool,
-
     /// Disable TLS and use plain HTTP (for a server with no cert, e.g. public infra).
     #[arg(long, conflicts_with_all = ["tls_ca", "tls_cert", "tls_key"])]
     plaintext: bool,
@@ -105,7 +101,6 @@ async fn run() -> io::Result<()> {
         tls_ca: args.tls_ca,
         tls_cert: args.tls_cert,
         tls_key: args.tls_key,
-        diagnose: args.diagnose,
         plaintext: args.plaintext,
     };
 

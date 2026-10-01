@@ -13,12 +13,9 @@ use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
-use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-use crate::diagnostics::DiagResult;
 use crate::overlay::Overlay;
-use crate::render::detail_pane::build_diag_overlay;
 use crate::theme::Labels;
 use crate::theme::Theme;
 
@@ -28,14 +25,6 @@ use crate::theme::Theme;
 /// `active_job: Option<ActiveJob>` which is always `Some` iff
 /// `overlay` is `Some` (TUI-21). Enforced by `set_job`/`dismiss_job`.
 pub(crate) enum ActiveJob {
-    /// A streaming diagnostic run. `running` flips to `false` and
-    /// `rx` to `None` when the mpsc sender closes.
-    Diagnostics {
-        results: Vec<DiagResult>,
-        running: bool,
-        rx: Option<mpsc::Receiver<DiagResult>>,
-        completed_at: Option<String>,
-    },
     /// A single py-spy HTTP fetch.
     ///
     /// Use `rx.is_some()` — not `lines.is_empty()` — to distinguish
@@ -71,12 +60,6 @@ impl ActiveJob {
     /// checker rejects `&App` here.
     pub(crate) fn build_overlay(&self, theme: &Theme) -> Overlay {
         match self {
-            ActiveJob::Diagnostics {
-                results,
-                running,
-                completed_at,
-                ..
-            } => build_diag_overlay(results, *running, completed_at.as_deref(), theme),
             ActiveJob::PySpy {
                 rx,
                 short,
@@ -97,7 +80,7 @@ impl ActiveJob {
                             format!("py-spy: {short}"),
                             Style::default().add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(format!("{sep}{}", labels.diag_running), scheme.info),
+                        Span::styled(format!("{sep}{}", labels.overlay_running), scheme.info),
                     ])
                 } else if let Some(ts) = completed_at {
                     Line::from(vec![
@@ -106,7 +89,7 @@ impl ActiveJob {
                             Style::default().add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
-                            format!("{sep}{}", labels.diag_completed_at),
+                            format!("{sep}{}", labels.overlay_completed_at),
                             scheme.detail_label,
                         ),
                         Span::raw(" "),
@@ -121,7 +104,7 @@ impl ActiveJob {
 
                 let status_line = if loading {
                     Some(Line::from(vec![
-                        Span::styled(labels.diag_running, scheme.info),
+                        Span::styled(labels.overlay_running, scheme.info),
                         Span::styled(format!("{sep}fetching stack trace"), scheme.detail_label),
                     ]))
                 } else {
@@ -154,7 +137,7 @@ impl ActiveJob {
                             format!("config: {short}"),
                             Style::default().add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(format!("{sep}{}", labels.diag_running), scheme.info),
+                        Span::styled(format!("{sep}{}", labels.overlay_running), scheme.info),
                     ])
                 } else if let Some(ts) = completed_at {
                     Line::from(vec![
@@ -163,7 +146,7 @@ impl ActiveJob {
                             Style::default().add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
-                            format!("{sep}{}", labels.diag_completed_at),
+                            format!("{sep}{}", labels.overlay_completed_at),
                             scheme.detail_label,
                         ),
                         Span::raw(" "),
@@ -178,7 +161,7 @@ impl ActiveJob {
 
                 let status_line = if loading {
                     Some(Line::from(vec![
-                        Span::styled(labels.diag_running, scheme.info),
+                        Span::styled(labels.overlay_running, scheme.info),
                         Span::styled(
                             format!("{sep}fetching config snapshot"),
                             scheme.detail_label,
@@ -204,10 +187,6 @@ impl ActiveJob {
     /// Falls back to the default topology help text when no job is active.
     pub(crate) fn footer_text<'a>(job: &Option<Self>, labels: &'a Labels) -> &'a str {
         match job {
-            Some(ActiveJob::Diagnostics { running: true, .. }) => {
-                labels.footer_diag_running_help_text
-            }
-            Some(ActiveJob::Diagnostics { .. }) => labels.footer_diag_completed_help_text,
             Some(ActiveJob::PySpy { .. }) => labels.footer_pyspy_help_text,
             Some(ActiveJob::Config { .. }) => labels.footer_config_help_text,
             None => labels.footer_help_text,
@@ -218,28 +197,6 @@ impl ActiveJob {
     /// Caller always rebuilds the overlay afterward.
     pub(crate) fn on_event(&mut self, event: ActiveJobEvent) {
         match event {
-            ActiveJobEvent::DiagResult(Some(r)) => {
-                if let ActiveJob::Diagnostics { results, .. } = self {
-                    results.push(r);
-                } else {
-                    debug_assert!(false, "DiagResult delivered to non-Diagnostics job");
-                }
-            }
-            ActiveJobEvent::DiagResult(None) => {
-                if let ActiveJob::Diagnostics {
-                    running,
-                    rx,
-                    completed_at,
-                    ..
-                } = self
-                {
-                    *running = false;
-                    *rx = None;
-                    *completed_at = Some(Local::now().format("%H:%M:%S").to_string());
-                } else {
-                    debug_assert!(false, "DiagResult(None) delivered to non-Diagnostics job");
-                }
-            }
             ActiveJobEvent::PySpyResult(new_lines) => {
                 if let ActiveJob::PySpy {
                     rx,
@@ -276,7 +233,6 @@ impl ActiveJob {
 
 /// Result of the active overlay-producing job completing one event.
 pub(crate) enum ActiveJobEvent {
-    DiagResult(Option<DiagResult>),
     PySpyResult(Vec<Line<'static>>),
     ConfigResult(Vec<Line<'static>>),
 }

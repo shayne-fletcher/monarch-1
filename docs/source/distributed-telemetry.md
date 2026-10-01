@@ -178,8 +178,7 @@ and event telemetry describe different views of the same job:
   the parent-process logs for `job sidecar telemetry bootstrap failed`.
 - If a query is empty immediately after work runs, retry briefly; ingestion and
   collector flushes are asynchronous.
-- If rows from one host are missing, inspect collector warnings and use the
-  [Mesh Admin TUI diagnostics](admin-tui) to check that host.
+- If rows from one host are missing, inspect collector warnings and use the [Mesh Admin TUI](admin-tui) to inspect that host.
 - If a SQL request fails, the raised HTTP error includes the DataFusion parse or
   planning detail returned by the query service.
 

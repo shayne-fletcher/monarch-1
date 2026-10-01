@@ -30,7 +30,6 @@ use hyperactor_mesh::casting::CastInfo;
 use hyperactor_mesh::context;
 use hyperactor_mesh::host_mesh::HostMesh;
 use hyperactor_mesh::host_mesh::spawn_admin;
-use hyperactor_mesh::mesh_admin::MeshAdminMessageClient;
 use ndslice::ViewExt;
 use ndslice::extent;
 use serde::Deserialize;
@@ -267,16 +266,7 @@ async fn main() -> Result<ExitCode> {
 
     // Start the mesh admin agent, which aggregates admin state
     // across all hosts and serves an HTTP API.
-    let admin_ref = spawn_admin([&host_mesh], instance, None, None).await?;
-    let mesh_admin_url = admin_ref
-        .get_admin_addr(instance)
-        .await?
-        .addr
-        .ok_or_else(|| anyhow::anyhow!("mesh admin did not report an address"))?;
-    println!(
-        "  - Diagnose:      cargo run -p hyperactor_mesh_admin_tui_lib --bin hyperactor_mesh_admin_tui -- --addr {} --diagnose",
-        mesh_admin_url
-    );
+    let _admin_ref = spawn_admin([&host_mesh], instance, None, None).await?;
     let host_addr = &host_mesh.host_addrs()[0];
     println!(
         "  - Hyper list:    buck2 run fbcode//monarch/hyper:hyper -- list {}\n                   cargo run --manifest-path hyper/Cargo.toml -- list {}",
