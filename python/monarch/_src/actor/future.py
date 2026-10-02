@@ -18,6 +18,7 @@ from typing import (
     Generic,
     NamedTuple,
     Optional,
+    TYPE_CHECKING,
     TypeVar,
 )
 
@@ -26,7 +27,30 @@ from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
 from monarch._src.actor.telemetry import log_with_tracing
 
+# `returns_future` imports `Future` from this module. `_BodyCell` is needed only
+# for annotations, so importing it only during type checking avoids a circular
+# runtime import.
+if TYPE_CHECKING:
+    from monarch._src.actor.returns_future import _BodyCell
+
 R = TypeVar("R")
+
+# Shared by the Python-implemented `Future.get()` paths when a running asyncio
+# loop is detected. Handle-backed Futures enforce the same policy in native
+# `Handle.get()`.
+_GET_ON_LOOP_WARNING = (
+    "Future.get() was called from within an active event loop. Because this method blocks "
+    "synchronously and does not yield control, it may degrade performance by preventing "
+    "other tasks from running, and can potentially cause deadlocks if this future depends "
+    "on them. It is encouraged to use as_asyncio() (or await) instead."
+)
+
+
+def _validate_timeout(timeout: float | None) -> None:
+    if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
+        raise ValueError(
+            f"invalid timeout {timeout}: expected a non-negative, finite number of seconds"
+        )
 
 
 async def _aincomplete(impl: Any, self: Any) -> Any:
@@ -57,7 +81,14 @@ class _Taken(NamedTuple):
     pass
 
 
-_Status = _Unawaited | _Complete | _Exception | _Handle | _Taken
+class _Body(NamedTuple):
+    """The body of a ``@returns_future`` function, run on the loop of its first
+    observer (see ``monarch._src.actor.returns_future``)."""
+
+    body: "_BodyCell"
+
+
+_Status = _Unawaited | _Complete | _Exception | _Handle | _Taken | _Body
 
 
 class Future(Generic[R]):
@@ -99,6 +130,12 @@ class Future(Generic[R]):
         future._status = _Handle(handle)
         return future
 
+    @classmethod
+    def _from_body(cls, body: "_BodyCell") -> "Future[R]":
+        future = cast("Future[R]", object.__new__(cls))
+        future._status = _Body(body)
+        return future
+
     def _take_inner(self) -> "PythonTask[R]":
         """Take the underlying one-shot ``PythonTask`` from this Future.
 
@@ -125,6 +162,10 @@ class Future(Generic[R]):
                 return cast("Handle[R]", handle)
             case _Complete() | _Exception() | _Taken():
                 raise ValueError("Future does not have a Handle in its current state.")
+            case _Body():
+                # RF-6: waiting on the Handle of a body nobody has started
+                # would never finish.
+                raise ValueError("a returns_future Future has no Handle")
             case _:
                 raise RuntimeError("unknown status")
 
@@ -138,7 +179,11 @@ class Future(Generic[R]):
         within an active event loop, it blocks synchronously and does not yield control. That may degrade performance
         by preventing other tasks from running, and can potentially cause deadlocks if this future depends on them.
 
-        A `timeout` never consumes the Future: on `TimeoutError` the underlying task keeps running, so a later `get()`/`await` still observes its result.
+        Except for a Future returned by a `@returns_future` function, a `timeout` never consumes the Future: on `TimeoutError` the underlying task keeps running, so a later `get()`/`await` still observes its result.
+
+        For a Future returned by a `@returns_future` function, the first `get()` runs the body on the calling thread's event loop, as `asyncio.run` does.
+        If it times out or is interrupted, the body is cancelled and the Future fails with `TimeoutError` or `CancelledError`; nothing resumes it.
+        `get()` inside a running event loop raises `WouldBlockRuntime`.
 
         examples:
 
@@ -200,10 +245,7 @@ class Future(Generic[R]):
                     # not start work or flip state to _Handle. Handle.get()
                     # re-validates authoritatively; this only avoids the spawn on
                     # a bad argument.
-                    if not math.isfinite(timeout) or timeout < 0:
-                        raise ValueError(
-                            f"invalid timeout {timeout}: expected a non-negative, finite number of seconds"
-                        )
+                    _validate_timeout(timeout)
                     # A timeout must not destroy the Future. Observe the task
                     # through a Handle, which is non-cancelling on timeout, so a
                     # later get()/poll()/await still resolves. Handle.get() applies
@@ -212,14 +254,7 @@ class Future(Generic[R]):
                     self._status = _Handle(handle)
                     return cast("R", handle.get(timeout))
                 if in_asyncio:
-                    warnings.warn(
-                        "Future.get() was called from within an active event loop. Because this method blocks "
-                        "synchronously and does not yield control, it may degrade performance by preventing "
-                        "other tasks from running, and can potentially cause deadlocks if this future depends "
-                        "on them. It is encouraged to use as_asyncio() (or await) instead.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
+                    warnings.warn(_GET_ON_LOOP_WARNING, UserWarning, stacklevel=2)
                 try:
                     v = coro.block_on()
                     self._status = _Complete(v)
@@ -239,6 +274,15 @@ class Future(Generic[R]):
                 raise exe
             case _Taken():
                 raise ValueError("Future was consumed.")
+            case _Body(body=body):
+                # Refuse before binding, leaving the body unstarted.
+                if in_tokio:
+                    raise WouldBlockRuntime(
+                        "Future.get() cannot block from within a Tokio runtime; "
+                        "observe the Future from a synchronous or asyncio context."
+                    )
+                _validate_timeout(timeout)
+                return cast("R", body.get(timeout))
             case _:
                 raise RuntimeError("unknown status")
 
@@ -252,7 +296,7 @@ class Future(Generic[R]):
             return self.as_asyncio().__await__()
         elif _is_in_tokio_runtime():
             match self._status:
-                case _Unawaited():
+                case _Unawaited() | _Body():
                     raise RuntimeError(
                         "Future cannot be awaited on a Tokio thread; observe it "
                         "from an asyncio loop or synchronous context."
@@ -303,6 +347,8 @@ class Future(Generic[R]):
                 return cast("asyncio.Future[R]", failed)
             case _Taken():
                 raise ValueError("Future was consumed.")
+            case _Body(body=body):
+                return cast("asyncio.Future[R]", body.as_asyncio(loop))
             case _:
                 raise RuntimeError("unknown status")
 
