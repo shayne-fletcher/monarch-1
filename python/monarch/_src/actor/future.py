@@ -183,7 +183,8 @@ class Future(Generic[R]):
 
         For a Future returned by a `@returns_future` function, the first `get()` runs the body on the calling thread's event loop, as `asyncio.run` does.
         If it times out or is interrupted, the body is cancelled and the Future fails with `TimeoutError` or `CancelledError`; nothing resumes it.
-        `get()` inside a running event loop raises `WouldBlockRuntime`.
+        Inside running asyncio code, such as a synchronous endpoint, `get()` runs the body the same way on a short-lived helper thread and waits for it;
+        inside a body that a `get()` is driving, it raises `WouldBlockRuntime`.
 
         examples:
 
