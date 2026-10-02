@@ -12,8 +12,9 @@ if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.actor import Actor, PythonMessage
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
 from monarch._rust_bindings.monarch_hyperactor.context import Instance
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 from monarch._rust_bindings.monarch_hyperactor.pickle import PendingMessage
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
+from monarch._rust_bindings.monarch_hyperactor.pytokio import Shared
 from monarch._rust_bindings.monarch_hyperactor.shape import Region
 
 @final
@@ -35,9 +36,9 @@ class ProcMesh:
         """
         ...
 
-    def stop_nonblocking(self, instance: Instance, reason: str) -> PythonTask[None]:
+    def stop_nonblocking(self, instance: Instance, reason: str) -> Handle[None]:
         """
-        Stop the proc mesh.
+        Start stopping the proc mesh and return an observer for completion.
         """
         ...
 
