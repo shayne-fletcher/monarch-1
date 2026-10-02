@@ -8,13 +8,15 @@
 
 //! Private test-support bindings.
 //!
-//! Two unrelated pieces live here:
+//! Three unrelated pieces live here:
 //!
 //! 1. `TestStruct`, a minimal PyO3 struct for testing `@rust_struct` mixin
 //!    patching. The `#[pyclass]` module is set to the Python file that defines
 //!    the `@rust_struct`-decorated class so the name-validation check passes.
 //! 2. `_HandleProbe`, a closed probe that mints a real Rust-produced `Handle`
 //!    for the `Future`/`Handle` contract suite.
+//! 3. `_make_delayed_handle`, a `Handle` that publishes after registering its
+//!    first waiter, for the `returns_future` overhead benchmark.
 //!
 //! Everything here is private support: nothing is re-exported from `monarch`
 //! and no production Python imports it.
@@ -23,13 +25,19 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 
 use pyo3::exceptions::PyKeyboardInterrupt;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 
+use crate::handle::HandleCore;
 use crate::handle::PyHandle;
+use crate::handle::send_result;
+use crate::runtime::get_tokio_runtime;
 use crate::runtime::signal_safe_block_on;
 
 /// The value a successful probe publishes. Fixed, because the probe accepts no
@@ -182,6 +190,72 @@ fn _make_handle_probe(py: Python<'_>, outcome: &str) -> PyResult<PyHandleProbe> 
     })
 }
 
+/// A `Handle` that publishes `value` after registering its first waiter.
+///
+/// The producer publishes through `send_result` rather than
+/// [`PyHandle::spawn`], which takes the GIL to convert its value on
+/// completion, so completion takes no GIL. The core holds one receiver, and
+/// `get()` or `await` clones another; `poll()` does not. Once the producer
+/// detects the first clone, it waits at least `delay` before publishing. A
+/// later observer waits only for the remaining time. The producer yields
+/// between checks, so it remains runnable on Tokio until the first waiter is
+/// registered, and ends if the Handle is dropped unobserved. The time from its
+/// first poll until it detects that waiter is added to the gate totals read by
+/// `_delayed_handle_gate_stats`.
+fn delayed_handle(delay: Duration, value: Py<PyAny>) -> PyHandle {
+    let (tx, rx) = watch::channel(None);
+    get_tokio_runtime().spawn(async move {
+        let first_poll = Instant::now();
+        while tx.receiver_count() < 2 {
+            if tx.is_closed() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        let gate = u64::try_from(first_poll.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        {
+            let mut stats = GATE_STATS
+                .lock()
+                .expect("should not be poisoned: no holder can panic");
+            stats.0 += 1;
+            stats.1 = stats.1.saturating_add(gate);
+        }
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        send_result(tx, Ok(value), None);
+    });
+    PyHandle::from_core(HandleCore::new(rx, None, None))
+}
+
+/// Build a `Handle` that publishes `None` no sooner than `delay` seconds after
+/// detecting its first registered waiter.
+#[pyfunction]
+fn _make_delayed_handle(py: Python<'_>, delay: f64) -> PyResult<PyHandle> {
+    let delay = Duration::try_from_secs_f64(delay)
+        .map_err(|e| PyValueError::new_err(format!("invalid delay {delay}: {e}")))?;
+    Ok(delayed_handle(delay, py.None()))
+}
+
+/// Delayed Handles whose producer has detected its first waiter, and their
+/// total gate time in nanoseconds, since the last `_delayed_handle_gate_stats`.
+/// One lock guards both, so a read is a snapshot.
+static GATE_STATS: Mutex<(u64, u64)> = Mutex::new((0, 0));
+
+/// Return the number of delayed Handles whose gate opened, and their total
+/// gate time in nanoseconds, since the last call; then reset both.
+///
+/// Gate time is elapsed time, including any time other tasks ran between the
+/// producer's checks, so it is an upper bound on the gate's CPU.
+#[pyfunction]
+fn _delayed_handle_gate_stats() -> (u64, u64) {
+    std::mem::take(
+        &mut *GATE_STATS
+            .lock()
+            .expect("should not be poisoned: no holder can panic"),
+    )
+}
+
 #[pyclass(name = "TestStruct", module = "monarch._src.actor.testing")]
 pub struct PyTestStruct {
     value: i64,
@@ -214,5 +288,59 @@ pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyHandleProbe>()?;
     module.add_function(wrap_pyfunction!(_make_handle_probe, module)?)?;
     module.add("_PROBE_SUCCESS_VALUE", PROBE_SUCCESS_VALUE)?;
+    module.add_function(wrap_pyfunction!(_make_delayed_handle, module)?)?;
+    module.add_function(wrap_pyfunction!(_delayed_handle_gate_stats, module)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::GilSite;
+    use crate::runtime::ensure_python;
+    use crate::runtime::monarch_with_gil_blocking;
+
+    const DELAYS: [Duration; 2] = [Duration::ZERO, Duration::from_millis(10)];
+
+    fn none() -> Py<PyAny> {
+        monarch_with_gil_blocking(GilSite::Test, |py| py.None())
+    }
+
+    // With no observer, the producer never starts its delay.
+    #[test]
+    fn delayed_handle_waits_for_an_observer() {
+        ensure_python();
+        for delay in DELAYS {
+            let handle = delayed_handle(delay, none());
+            std::thread::sleep(Duration::from_millis(30));
+            assert!(
+                handle.poll_ready().unwrap().is_none(),
+                "an unobserved Handle with delay {delay:?} should still be pending"
+            );
+        }
+    }
+
+    // Once observed, it publishes `None`, no sooner than the delay.
+    #[test]
+    fn delayed_handle_publishes_after_its_delay() {
+        ensure_python();
+        for delay in DELAYS {
+            let handle = delayed_handle(delay, none());
+            let observed = Instant::now();
+            let wait = handle.wait_future();
+            // Bounded, so a broken gate fails here rather than at the target's
+            // timeout.
+            let value = get_tokio_runtime()
+                .block_on(async { tokio::time::timeout(Duration::from_secs(5), wait).await })
+                .expect("the Handle should publish within 5 s")
+                .unwrap();
+            assert!(
+                observed.elapsed() >= delay,
+                "the Handle published before its delay of {delay:?}"
+            );
+            monarch_with_gil_blocking(GilSite::Test, |py| {
+                assert!(value.is_none(py), "the Handle should publish None");
+            });
+        }
+    }
 }
