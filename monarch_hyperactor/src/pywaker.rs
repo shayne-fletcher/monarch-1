@@ -46,7 +46,7 @@ use nix::errno::Errno;
 use nix::fcntl::FcntlArg;
 use nix::fcntl::OFlag;
 use nix::fcntl::fcntl;
-use nix::unistd::pipe;
+use nix::unistd;
 use nix::unistd::write;
 use pyo3::Bound;
 use pyo3::Py;
@@ -69,7 +69,7 @@ impl Waker {
     pub fn wake(&self) -> Result<bool, nix::Error> {
         static DATA: [u8; 1] = *b"w";
 
-        match write(&self.write_fd, &DATA) {
+        match retry_eintr(|| write(&self.write_fd, &DATA)) {
             Ok(_) => Ok(true),
             // Pipe is full. This is ok.
             Err(Errno::EAGAIN) => Ok(true),
@@ -125,19 +125,37 @@ impl Drop for PyEvent {
 /// Create a new event, returning the (Rust only) [`Waker`], and
 /// a Python [`PyEvent`], intended for passing to Python code.
 pub fn event() -> Result<(Waker, PyEvent), nix::Error> {
-    let (read_fd, write_fd) = pipe()?;
-
-    set_nonblocking(&read_fd)?;
-    set_nonblocking(&write_fd)?;
+    let (waker, read_fd) = pipe()?;
 
     Ok((
-        Waker { write_fd },
+        waker,
         PyEvent {
             read_fd: read_fd.into_raw_fd(),
             event_loop: None,
             event: None,
         },
     ))
+}
+
+/// Create a non-blocking pipe, returning its write end as a [`Waker`] and
+/// its read end for the caller to register with an event loop.
+pub(crate) fn pipe() -> Result<(Waker, OwnedFd), nix::Error> {
+    let (read_fd, write_fd) = unistd::pipe()?;
+
+    set_nonblocking(&read_fd)?;
+    set_nonblocking(&write_fd)?;
+
+    Ok((Waker { write_fd }, read_fd))
+}
+
+/// Call `f` again for as long as it fails with `EINTR`.
+pub(crate) fn retry_eintr<T>(mut f: impl FnMut() -> nix::Result<T>) -> nix::Result<T> {
+    loop {
+        match f() {
+            Err(Errno::EINTR) => continue,
+            result => return result,
+        }
+    }
 }
 
 fn set_nonblocking(fd: &OwnedFd) -> Result<(), nix::Error> {

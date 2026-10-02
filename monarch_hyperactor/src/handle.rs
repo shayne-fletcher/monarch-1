@@ -61,11 +61,16 @@
 //!   fresh root-client bootstrap (`monarch._src.actor.actor_mesh`) and the
 //!   blocking worker-loop wrappers (`monarch._src.actor.bootstrap`).
 //! - **HDL-7 (`as_asyncio` publish).** The observer waits borrow-first (via
-//!   `wait_ready`, never `changed()`-first) and sets a result only on a
-//!   non-cancelled future, swallowing `InvalidStateError`; any `StopIteration`
-//!   (including subclasses) is wrapped in `RuntimeError` first, since
-//!   `set_exception` rejects `StopIteration` (PEP 479); if the loop has closed it
-//!   logs rather than panics.
+//!   `wait_ready`, never `changed()`-first). The result is published on the
+//!   loop thread through `complete_asyncio_future`, by the wake reader
+//!   (HDL-17) or by the fallback's `call_soon_threadsafe` callback (HDL-21).
+//!   It sets a result only on a non-cancelled future, swallowing
+//!   `InvalidStateError`; any `StopIteration` (including subclasses) is wrapped
+//!   in `RuntimeError` first, since `set_exception` rejects `StopIteration`
+//!   (PEP 479). If the loop has closed, the fallback logs rather than panics
+//!   and the wake reader never runs. A wake-reader failure, including a
+//!   future whose `done()` raises, is reported through the future's loop
+//!   exception handler, as asyncio reports an exception from a callback.
 //! - **HDL-8 (`get()` loop-warning is call-pattern, not outcome).** `get()` on a
 //!   running asyncio loop warns regardless of whether the value is ready: it
 //!   flags the blocking-call-from-a-loop anti-pattern, not whether this call
@@ -79,9 +84,12 @@
 //!   `wait_future` loops drop the temporary `Ref` before each `.await`; and their
 //!   returned futures own a cloned receiver (`Send + 'static`, borrowing nothing
 //!   from `&self`), which is what lets `get()` `drop(slf)` + release the GIL
-//!   before blocking and lets `as_asyncio` `spawn` the observer. Enforced partly
-//!   by the compiler (`Send` bounds, the borrow checker on `drop(slf)`) and
-//!   partly by construction; exercised by the multi-observer/blocking tests.
+//!   before blocking and lets `as_asyncio` `spawn` the observer. `as_asyncio`'s
+//!   fallback observer clones the value under the one GIL acquisition it makes
+//!   to schedule; its wake observer never reads the value (HDL-17). Enforced
+//!   partly by the compiler (`Send` bounds, the borrow checker on `drop(slf)`)
+//!   and partly by construction; exercised by the multi-observer/blocking
+//!   tests.
 //! - **HDL-10 (dropped producer surfaces, never hangs).** If every producer drops
 //!   its sender without sending, the wait loop's `changed().await?` yields a
 //!   `RecvError` converted to `RuntimeError("Handle producer ended without
@@ -131,6 +139,46 @@
 //! - **HDL-16 (permanent Python identity).** `Handle` and `WouldBlockRuntime`
 //!   have the canonical module `monarch._rust_bindings.monarch_hyperactor.handle`.
 //!   The legacy `pytokio` module does not export `Handle`.
+//! - **HDL-17 (GIL-free completion wake).** On a loop that accepts
+//!   `add_reader`, the `as_asyncio` observer task holds a `Notifier` (a token,
+//!   an mpsc sender and an `Arc<Waker>`) and the `wait_ready` future. It
+//!   publishes by pushing the token and writing the loop's pipe, never reading
+//!   the value and taking no GIL; the loop thread reads the value from the
+//!   `Handle` and sets it (see [`crate::handle_wake`]). Enforced by
+//!   construction: `Notifier` has no `Py<_>`, and the task body makes no
+//!   `monarch_with_gil` call.
+//! - **HDL-18 (notification ordering under supported pipe outcomes).** A
+//!   notifier pushes its token before writing the pipe, and the reader drains
+//!   the pipe before the queue, never returning between the two; both retry
+//!   `EINTR`. A write that succeeds or returns `EAGAIN` leaves a byte pending,
+//!   so a token pushed after a queue drain is delivered by a later wake.
+//!   `EPIPE` or a disconnected queue means the channel is gone and the token is
+//!   dropped. Any other errno is logged as a broken wake channel, not claimed
+//!   as delivered.
+//! - **HDL-19 (loop not retained).** The wake registry holds each loop as a
+//!   weak key and its channel through a weak reference; the loop's selector,
+//!   through the channel's reader callback, is the channel's only strong
+//!   owner. A channel holds no reference to its loop. It holds each pending
+//!   await's asyncio future strongly until delivery, cancellation or loop
+//!   close, because asyncio holds tasks weakly and that reference is the
+//!   waiting task's only owner outside the task's own cycle; `__traverse__`
+//!   exposes each entry's future and `Handle` object to the garbage collector.
+//!   Closing a loop therefore releases the channel-owned graph (the channel,
+//!   its pipe, its entries, their futures and `Handle`s), and a loop dropped
+//!   without being closed while an await on a pending `Handle` is registered
+//!   is still freed by the collector. Not freed: a loop dropped without being
+//!   closed while an undelivered entry's `Handle` value references it, and any
+//!   independent cycle through a `Handle`, such as a value that references its
+//!   own `Handle`. Both run through `PyHandle`, which the garbage collector
+//!   does not traverse.
+//! - **HDL-20 (late wake is harmless).** A notify after its channel is gone is
+//!   dropped without error or panic: the send fails, or the write gets `EPIPE`
+//!   (Rust's runtime and CPython both ignore `SIGPIPE`). Every `Notifier` owns
+//!   the write end through its `Arc<Waker>`, so no write reaches a reused
+//!   descriptor.
+//! - **HDL-21 (fallback).** A loop whose `add_reader` raises
+//!   `NotImplementedError` or that cannot be weakly referenced uses the
+//!   `call_soon_threadsafe` path; HDL-7 applies there unchanged.
 
 use std::error::Error;
 use std::future::Future;
@@ -153,6 +201,7 @@ use pyo3::types::PyType;
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
+use crate::handle_wake::LoopWake;
 use crate::runtime::GilSite;
 use crate::runtime::get_tokio_runtime;
 use crate::runtime::is_in_tokio_runtime;
@@ -351,8 +400,9 @@ impl HandleCore {
     /// Yields the cloned receiver positioned at the completed value, or a
     /// `RuntimeError` if every producer dropped its sender without sending. Unlike
     /// `wait_future`, which clones the value out under its own GIL acquisition,
-    /// the caller clones under a GIL it holds anyway (e.g. `as_asyncio`'s
-    /// scheduling), so completion touches the GIL exactly once.
+    /// the caller decides where the value is read: `as_asyncio`'s fallback
+    /// clones it under the GIL it takes to schedule, and its wake path reads it
+    /// on the loop thread instead (HDL-17).
     pub(crate) fn wait_ready(
         &self,
     ) -> impl Future<Output = PyResult<watch::Receiver<Option<PyResult<Py<PyAny>>>>>> + Send + 'static
@@ -499,6 +549,13 @@ impl PyHandle {
     /// any number of other observers.
     pub fn wait_future(&self) -> impl Future<Output = PyResult<Py<PyAny>>> + Send + 'static {
         self.core.wait_future()
+    }
+
+    /// Non-blocking, non-consuming read of this Handle's outcome, for the
+    /// loop-thread wake reader (HDL-17). Rust-only and outside `#[pymethods]`
+    /// (HDL-11).
+    pub(crate) fn poll_ready(&self) -> PyResult<Option<Py<PyAny>>> {
+        self.core.poll()
     }
 
     /// Eagerly drive a Rust future to completion and return an observe-only
@@ -765,15 +822,20 @@ impl PyHandle {
     ///
     /// Requires a running loop; off a loop this raises the native `RuntimeError`
     /// from `asyncio.get_running_loop()`. A Tokio observer of the watch channel
-    /// publishes the completion onto the calling loop via
-    /// `loop.call_soon_threadsafe(...)`; it never drives a Python coroutine.
+    /// waits for completion; it never drives a Python coroutine. It then wakes
+    /// the loop through the loop's [`LoopWake`] channel without the GIL, and the
+    /// loop thread reads the value and sets the result (HDL-17). It instead
+    /// takes the GIL and publishes via `loop.call_soon_threadsafe(...)` when the
+    /// loop's `add_reader` raises `NotImplementedError`, or when the loop cannot
+    /// be weakly referenced (HDL-21). Any other failure to install the channel
+    /// or register the future is raised.
     ///
     /// The observer borrows the current watch value first, so a core that
     /// already holds its value (or one that completes before the observer
-    /// starts) resolves rather than hangs. The result is set in a callback on
-    /// the loop thread. A cancel can race that callback: a cancelled future is
-    /// left alone and the handle continues. If the loop has closed by then,
-    /// `call_soon_threadsafe` raises, and the observer logs rather than panics.
+    /// starts) resolves rather than hangs. The result is set on the loop
+    /// thread. A cancel can race that: a cancelled future is left alone and the
+    /// handle continues. If the loop has closed by then, the result is never
+    /// set, and nothing panics.
     ///
     /// Each call spawns its own observer; cancelling the returned future does
     /// not stop the observer, which exits when the handle resolves.
@@ -781,10 +843,22 @@ impl PyHandle {
         // HDL-6: off a loop this yields the native RuntimeError, not WouldBlockRuntime.
         let event_loop = pyo3_async_runtimes::get_running_loop(py)?;
         let fut = event_loop.call_method0("create_future")?;
+        let wait = slf.core.wait_ready();
 
+        if let Some(channel) = LoopWake::for_loop(py, &event_loop)? {
+            let notifier = LoopWake::register(&channel, &fut, slf.into())?;
+            get_tokio_runtime().spawn(async move {
+                // HDL-17: no GIL on this task. Dropping the receiver before the
+                // pipe write means a readable pipe proves the task got past it.
+                drop(wait.await);
+                notifier.notify();
+            });
+            return Ok(fut);
+        }
+
+        // HDL-21: the fallback, for a loop without a channel.
         let loop_handle = event_loop.clone().unbind();
         let fut_handle = fut.clone().unbind();
-        let wait = slf.core.wait_ready();
 
         get_tokio_runtime().spawn(async move {
             let recv = wait.await;
@@ -876,7 +950,11 @@ thread_local! {
 /// The future may already be settled when this runs: a cancelled future is left
 /// alone, and an already-completed one is swallowed. Any other error propagates.
 #[pyfunction]
-fn complete_asyncio_future(fut: &Bound<'_, PyAny>, is_exc: bool, value: Py<PyAny>) -> PyResult<()> {
+pub(crate) fn complete_asyncio_future(
+    fut: &Bound<'_, PyAny>,
+    is_exc: bool,
+    value: Py<PyAny>,
+) -> PyResult<()> {
     if fut.call_method0("cancelled")?.is_truthy()? {
         return Ok(());
     }
