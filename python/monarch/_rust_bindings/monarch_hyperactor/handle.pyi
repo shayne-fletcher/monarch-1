@@ -51,7 +51,8 @@ class Handle(Generic[T]):
         Return a standard asyncio.Future that resolves when the handle does.
         Requires a running event loop; off a loop it raises RuntimeError. If the
         producer ends without publishing a result, the Future resolves with
-        RuntimeError.
+        RuntimeError. A handle that already holds its outcome returns a Future
+        that is already done, so awaiting it does not yield to the loop.
         """
         ...
 
