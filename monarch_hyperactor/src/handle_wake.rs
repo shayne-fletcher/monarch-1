@@ -27,9 +27,10 @@
 //! channel through a weak reference. Each entry holds its pending await's
 //! future strongly, because that reference is the waiting task's only owner
 //! outside the task's own cycle; asyncio holds tasks weakly. Closing the loop
-//! therefore releases the channel, its pipe, its entries and their futures,
-//! and `__traverse__` lets the garbage collector free an unclosed loop
-//! (HDL-19, which also records the case that is not freed):
+//! therefore releases the channel, its read end, its entries and their
+//! futures; the write end lasts until every notifier is done (HDL-20).
+//! `__traverse__` lets the garbage collector free an unclosed loop (HDL-19,
+//! which also records the case that is not freed):
 //!
 //! ```text
 //! registry:         weak(loop) ──▶ weak(LoopWake)
@@ -338,8 +339,8 @@ impl LoopWake {
     }
 
     /// Remove `token`'s entry. The caller drops or uses it after the lock is
-    /// released: a decref under the lock can free a future and run a reaper
-    /// that takes the same lock.
+    /// released: a decref under the lock can run a finalizer that calls
+    /// `register`, which takes the same lock.
     fn take(&self, token: u64) -> Option<Entry> {
         self.entries
             .lock()
@@ -378,7 +379,7 @@ impl LoopWake {
     /// error and set it as the result of its `asyncio.Future` (HDL-7).
     ///
     /// Does nothing when there is no longer anyone to settle: the entry is
-    /// gone, the future was freed, or the future is already done. Never raises:
+    /// gone or the future is already done. Never raises:
     /// a failure is reported through the future's loop, as asyncio reports an
     /// exception from a callback, and the reader goes on to the next token.
     fn deliver(&self, py: Python<'_>, token: u64) {
@@ -469,10 +470,11 @@ impl LoopWake {
 impl LoopWake {
     /// Expose each entry's future and `Handle` object to the garbage collector,
     /// so a loop dropped without being closed while an await is registered is
-    /// still freed (HDL-19). Every holder of `entries` holds the GIL and runs no
-    /// Python while holding it, so the collector never runs inside it; a missed
-    /// lock could only hide a reference, which delays collection and never
-    /// frees a live object.
+    /// still freed (HDL-19). Every holder of `entries` holds the GIL and
+    /// allocates no Python object while holding it, so the collector never runs
+    /// inside it and `try_lock` succeeds here. A lock missed in only one of the
+    /// collector's passes could free a live future, so no holder may break that
+    /// rule.
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         if let Ok(entries) = self.entries.try_lock() {
             for entry in entries.values() {
@@ -1221,8 +1223,14 @@ def base_done(fut):
             let helper = helper(py);
             let event_loop = helper.getattr("NoReaderLoop").unwrap().call0().unwrap();
             for value in [1i64, 2] {
+                // Pending, so the observation reaches wake-channel installation.
+                let (tx, handle) = pending_handle(py);
+                let fut = helper
+                    .call_method1("start_observer", (&event_loop, &handle))
+                    .unwrap();
+                tx.send(Some(Ok(value.into_py_any(py).unwrap()))).unwrap();
                 let got: i64 = helper
-                    .call_method1("run_await", (&event_loop, ready_handle(py, value)))
+                    .call_method1("run_until_done", (&event_loop, &fut))
                     .unwrap()
                     .extract()
                     .unwrap();
@@ -1249,16 +1257,24 @@ def base_done(fut):
         monarch_with_gil_blocking(GilSite::Test, |py| {
             let helper = helper(py);
             let event_loop = helper.getattr("FlakyReaderLoop").unwrap().call0().unwrap();
+            // Pending, with the producer held, so each observation reaches
+            // wake-channel installation.
+            let (_first_tx, first) = pending_handle(py);
             let err = helper
-                .call_method1("try_observe", (&event_loop, ready_handle(py, 1)))
+                .call_method1("try_observe", (&event_loop, &first))
                 .unwrap();
             assert!(
                 err.is_instance_of::<PyOSError>(),
                 "the first as_asyncio should raise the add_reader failure: {err}"
             );
 
+            let (tx, second) = pending_handle(py);
+            let fut = helper
+                .call_method1("start_observer", (&event_loop, &second))
+                .unwrap();
+            tx.send(Some(Ok(2i64.into_py_any(py).unwrap()))).unwrap();
             let got: i64 = helper
-                .call_method1("run_await", (&event_loop, ready_handle(py, 2)))
+                .call_method1("run_until_done", (&event_loop, &fut))
                 .unwrap()
                 .extract()
                 .unwrap();
@@ -1281,8 +1297,11 @@ def base_done(fut):
         monarch_with_gil_blocking(GilSite::Test, |py| {
             let helper = helper(py);
             let event_loop = helper.getattr("RejectingLoop").unwrap().call0().unwrap();
+            // Pending, with the producer held, so the observation reaches
+            // `LoopWake::register`.
+            let (_tx, handle) = pending_handle(py);
             let err = helper
-                .call_method1("try_observe", (&event_loop, ready_handle(py, 1)))
+                .call_method1("try_observe", (&event_loop, &handle))
                 .unwrap();
             assert!(
                 err.is_instance_of::<PyRuntimeError>(),
@@ -1312,6 +1331,14 @@ def base_done(fut):
             let fut = helper
                 .call_method1("start_observer", (&event_loop, handle))
                 .unwrap();
+            let channel = LoopWake::for_loop(py, &event_loop)
+                .unwrap()
+                .expect("the loop supports the channel");
+            assert_eq!(
+                channel.get().entry_count(),
+                1,
+                "the await should be registered with the channel"
+            );
             tx.send(Some(Ok(7i64.into_py_any(py).unwrap()))).unwrap();
             let got: i64 = helper
                 .call_method1("run_until_done", (&event_loop, &fut))
@@ -1319,9 +1346,6 @@ def base_done(fut):
                 .extract()
                 .unwrap();
             assert_eq!(got, 7, "the channel should resolve the await");
-            let channel = LoopWake::for_loop(py, &event_loop)
-                .unwrap()
-                .expect("the loop supports the channel");
             assert_eq!(
                 channel.get().entry_count(),
                 0,
@@ -1342,8 +1366,11 @@ def base_done(fut):
                 .unwrap()
                 .call0()
                 .unwrap();
+            // Pending, with the producer held, so the observation reaches
+            // `LoopWake::register`.
+            let (_tx, handle) = pending_handle(py);
             let err = helper
-                .call_method1("try_observe", (&event_loop, ready_handle(py, 1)))
+                .call_method1("try_observe", (&event_loop, &handle))
                 .unwrap();
             assert!(
                 err.is_instance_of::<PyTypeError>(),
