@@ -51,6 +51,7 @@ from monarch._src.actor.host_mesh import (
     this_proc,
 )
 from monarch._src.actor.proc_mesh import get_or_spawn_controller, ProcMesh
+from monarch._src.actor.returns_future import returns_future
 from monarch._src.actor.supervision import unhandled_fault_hook
 from monarch._src.actor.telemetry import get_meter, span, traced
 from monarch.actor.concurrent import concurrent_endpoint
@@ -66,6 +67,7 @@ __all__ = [
     "concurrent_endpoint",
     "endpoint",
     "Future",
+    "returns_future",
     "Point",
     "ProcMesh",
     "ProcId",
