@@ -12,8 +12,11 @@ import asyncio
 import contextvars
 import faulthandler
 import gc
+import signal
+import sys
 import threading
 import time
+import traceback
 import unittest
 import unittest.mock
 import warnings
@@ -47,7 +50,12 @@ _TEST_TIMEOUT_S = 60.0
 # RF-5: test_outcome_is_claimed_before_cleanup
 # RF-6: test_other_observers_wait_on_the_handle
 # RF-8: test_inherited_loop_is_replaced_not_closed
-# RF-7: test_get_inside_a_running_loop_raises,
+# RF-7: test_get_inside_a_running_loop_runs_on_a_helper_thread,
+#       test_helper_timeout_cancels_the_body,
+#       test_helper_interrupt_waits_for_cleanup,
+#       test_interrupt_while_the_helper_starts, test_nested_get_raises,
+#       test_get_on_a_loop_this_thread_runs_raises,
+#       test_settled_get_on_its_loop_returns,
 #       test_fake_sync_state_nesting_is_tracked
 
 
@@ -77,6 +85,23 @@ async def _loop_of_body() -> asyncio.AbstractEventLoop:
 
 async def _await(future: Any) -> Any:
     return await future
+
+
+def _interrupt(signum: int, frame: object) -> None:
+    raise KeyboardInterrupt
+
+
+def _main_thread_call(caller: str) -> str | None:
+    """The function the main thread is in that `caller` called directly, if
+    any."""
+    main = threading.main_thread().ident
+    assert main is not None
+    frame = sys._current_frames().get(main)
+    while frame is not None and frame.f_back is not None:
+        if frame.f_back.f_code.co_name == caller:
+            return frame.f_code.co_name
+        frame = frame.f_back
+    return None
 
 
 def _run(coro: Any) -> Any:
@@ -390,28 +415,237 @@ class ReturnsFutureTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             future._as_handle()
 
-    # RF-7: `.get()` inside a running loop, visible or hidden, raises before
-    # observing the body.
-    def test_get_inside_a_running_loop_raises(self) -> None:
-        runs: list[int] = []
+    # RF-7: `.get()` inside a running loop, visible or hidden, runs the body on
+    # a helper thread and shuts its loop down before returning; only a visible
+    # loop warns.
+    def test_get_inside_a_running_loop_runs_on_a_helper_thread(self) -> None:
+        leftover: list[str] = []
 
         @returns_future
-        async def body() -> int:
-            runs.append(1)
-            return 5
+        async def leaves_a_task() -> int:
+            async def forever() -> None:
+                try:
+                    await asyncio.sleep(_DEADLINE_S)
+                except asyncio.CancelledError:
+                    leftover.append("cancelled")
+                    raise
 
-        future = body()
+            asyncio.get_running_loop().create_task(forever())
+            await asyncio.sleep(0)
+            return threading.get_ident()
+
+        async def main() -> tuple[int, int, list[Any], list[Any]]:
+            with warnings.catch_warnings(record=True) as visible:
+                warnings.simplefilter("always")
+                first = leaves_a_task().get()
+            with warnings.catch_warnings(record=True) as hidden:
+                warnings.simplefilter("always")
+                with fake_sync_state():
+                    second = leaves_a_task().get()
+            return first, second, visible, hidden
+
+        first, second, visible, hidden = _run(main())
+        self.assertNotEqual(first, threading.get_ident())
+        self.assertNotEqual(second, threading.get_ident())
+        self.assertEqual(leftover, ["cancelled", "cancelled"])
+        self.assertTrue([w for w in visible if issubclass(w.category, UserWarning)])
+        self.assertFalse([w for w in hidden if issubclass(w.category, UserWarning)])
+
+        # A warning raised as an error leaves the body for a later observer.
+        strict = _value(5)
+
+        async def warn_as_error(future: Any) -> None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", UserWarning)
+                with self.assertRaises(UserWarning):
+                    future.get()
+
+        _run(warn_as_error(strict))
+        status: Any = strict._status
+        self.assertIsNotNone(status.body.unstarted)
+        self.assertEqual(strict.get(), 5)
+
+    # RF-4, RF-7: a timeout on the helper path cancels the body and runs its
+    # cleanup before `.get()` raises; a helper loop that cannot be made fails
+    # every observer.
+    def test_helper_timeout_cancels_the_body(self) -> None:
+        cleaned: list[int] = []
+
+        @returns_future
+        async def blocks() -> None:
+            try:
+                await asyncio.sleep(_DEADLINE_S)
+            finally:
+                cleaned.append(1)
+
+        future = blocks()
 
         async def main() -> None:
-            with self.assertRaises(WouldBlockRuntime):
+            with fake_sync_state():
+                with self.assertRaises(TimeoutError):
+                    future.get(timeout=0.05)
+
+        _run(main())
+        self.assertEqual(cleaned, [1])
+        with self.assertRaises(TimeoutError):
+            future.get()
+
+        # A failure starting the helper reaches every observer; the body is
+        # closed unstarted and no helper is left.
+        async def fail(
+            future: Any, owner: Any, name: str, raised: BaseException
+        ) -> None:
+            with fake_sync_state():
+                with unittest.mock.patch.object(owner, name, side_effect=raised):
+                    with self.assertRaises(type(raised)):
+                        future.get()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            for owner, name, raised in [
+                (asyncio, "new_event_loop", OSError("no loop")),
+                (threading.Thread, "start", RuntimeError("can't start new thread")),
+            ]:
+                failing = _value(1)
+                _run(fail(failing, owner, name, raised))
+                with self.assertRaises(type(raised)) as later:
+                    failing.get()
+                self.assertIs(later.exception, raised)
+                del failing
+            gc.collect()
+        self.assertFalse([w for w in caught if "never awaited" in str(w.message)])
+        self.assertFalse(
+            [t for t in threading.enumerate() if t.name == "returns_future"]
+        )
+
+    # RF-4, RF-7: an interrupt while the caller waits for the helper cancels the
+    # body, and is re-raised only after the body's cleanup has run.
+    def test_helper_interrupt_waits_for_cleanup(self) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            self.skipTest("signal handlers run only on the main thread")
+        main = threading.main_thread().ident
+        assert main is not None
+        self.addCleanup(signal.signal, signal.SIGUSR1, signal.getsignal(signal.SIGUSR1))
+        signal.signal(signal.SIGUSR1, _interrupt)
+        waiting: list[bool] = []
+        cleaned: list[int] = []
+
+        @returns_future
+        async def interrupted() -> None:
+            deadline = time.monotonic() + _DEADLINE_S
+            # Past `Thread.start()`, the caller is waiting for the helper.
+            while _main_thread_call("_drive_on_helper") in (None, "start"):
+                if time.monotonic() > deadline:
+                    return
+                await asyncio.sleep(0.005)
+            waiting.append(True)
+            signal.pthread_kill(main, signal.SIGUSR1)
+            try:
+                await asyncio.sleep(_DEADLINE_S)
+            finally:
+                await asyncio.sleep(0.1)
+                cleaned.append(1)
+
+        future = interrupted()
+        with fake_sync_state():
+            with self.assertRaises(KeyboardInterrupt):
                 future.get()
+        self.assertEqual(waiting, [True])
+        self.assertEqual(cleaned, [1])
+        with self.assertRaises(asyncio.CancelledError):
+            future.get()
+
+    # RF-7: an interrupt that lands inside `Thread.start()`, with the helper
+    # already running the body, is re-raised and fails every observer.
+    def test_interrupt_while_the_helper_starts(self) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            self.skipTest("signal handlers run only on the main thread")
+        main = threading.main_thread().ident
+        assert main is not None
+        interrupted_in: list[str] = []
+
+        def interrupt(signum: int, frame: Any) -> None:
+            interrupted_in.extend(f.name for f in traceback.extract_stack(frame))
+            raise KeyboardInterrupt
+
+        self.addCleanup(signal.signal, signal.SIGUSR1, signal.getsignal(signal.SIGUSR1))
+        signal.signal(signal.SIGUSR1, interrupt)
+        helpers: list[threading.Thread] = []
+
+        class _StartsSlowly(threading.Thread):
+            def start(self) -> None:
+                # Only the helper; Monarch may start its own threads meanwhile.
+                if self.name != "returns_future":
+                    return super().start()
+                helpers.append(self)
+                super().start()
+                threading.Event().wait(_DEADLINE_S)
+
+        @returns_future
+        async def signals() -> int:
+            signal.pthread_kill(main, signal.SIGUSR1)
+            await asyncio.sleep(0.1)
+            return 42
+
+        future = signals()
+        with unittest.mock.patch.object(threading, "Thread", _StartsSlowly):
+            with fake_sync_state():
+                with self.assertRaises(KeyboardInterrupt):
+                    future.get()
+        self.assertIn("start", interrupted_in)
+        with self.assertRaises(asyncio.CancelledError):
+            future.get()
+        helpers[0].join(_DEADLINE_S)
+        self.assertFalse(helpers[0].is_alive())
+
+    # RF-7: `.get()` from code a `.get()` is driving raises, on either path.
+    def test_nested_get_raises(self) -> None:
+        @returns_future
+        async def nests() -> object:
+            return _value(1).get()
+
+        with self.assertRaises(WouldBlockRuntime):
+            nests().get()
+
+        async def main() -> None:
+            with fake_sync_state():
+                with self.assertRaises(WouldBlockRuntime):
+                    nests().get()
+
+        _run(main())
+
+    # RF-7: `.get()` that would wait for a body on a loop this thread is
+    # running raises instead of stopping that loop.
+    def test_get_on_a_loop_this_thread_runs_raises(self) -> None:
+        async def main() -> object:
+            future = _value(3)
+            owner = future.as_asyncio()
             with fake_sync_state():
                 with self.assertRaises(WouldBlockRuntime):
                     future.get()
+            return await owner
+
+        self.assertEqual(_run(main()), 3)
+
+    # RF-7: once a body has settled, `.get()` on the loop that ran it returns its
+    # value or raises its error.
+    def test_settled_get_on_its_loop_returns(self) -> None:
+        @returns_future
+        async def fails() -> None:
+            raise ValueError("boom")
+
+        async def main() -> None:
+            ok, failed = _value(3), fails()
+            self.assertEqual(await ok, 3)
+            with self.assertRaises(ValueError):
+                await failed
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.assertEqual(ok.get(), 3)
+                with self.assertRaises(ValueError):
+                    failed.get()
 
         _run(main())
-        self.assertEqual(runs, [])
-        self.assertEqual(future.get(), 5)
 
     # RF-7: `in_fake_sync_state()` tracks nested `fake_sync_state()` contexts.
     def test_fake_sync_state_nesting_is_tracked(self) -> None:
