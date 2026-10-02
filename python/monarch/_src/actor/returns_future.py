@@ -16,8 +16,9 @@ The body runs where it is first observed:
 * ``.get()`` from synchronous code runs it on the calling thread's own event
   loop until it finishes, as ``asyncio.run`` does; this creates no OS threads.
 
-``.get()`` made while the calling thread is already inside a running event loop
-raises instead of running a second loop inside it (RF-7).
+``.get()`` made while the calling thread is already inside a running event
+loop, as in a synchronous endpoint, runs the body on a short-lived helper
+thread instead of running a second loop inside it (RF-7).
 
 Calling the function does not start the body (RF-1, RF-2). Side effects
 intended to occur when the API is called, such as submitting or broadcasting
@@ -61,10 +62,11 @@ Invariants. Enforcement sites and tests cite them, and
   starts the cancellation but does not bound its cleanup. Before returning,
   ``.get()`` cancels the tasks left running on the loop and drives them to
   completion; a task started during that cleanup survives to the next call. A
-  loop whose cleanup is interrupted is dropped instead of reused. The loop's async generators and default executor
-  stay usable across calls. When the thread exits, the loop shuts them down on
-  that thread, then closes. Enforced by ``_BodyCell.get``, ``_loop``,
-  ``_cancel_leftovers`` and ``_ThreadLoop``.
+  loop whose cleanup is interrupted is dropped instead of reused. The loop's
+  async generators and default executor stay usable across calls. When the
+  thread exits, the loop shuts them down on that thread, then closes.
+  Enforced by ``_BodyCell.get``, ``_loop``, ``_cancel_leftovers`` and
+  ``_ThreadLoop``.
 - **RF-5 (one terminal outcome).** The first outcome published wins and every
   observer receives it. A timeout or interrupt publishes ``TimeoutError`` or
   ``CancelledError`` before cancelling the body, so whatever the body returns
@@ -79,10 +81,18 @@ Invariants. Enforcement sites and tests cite them, and
   waiting on the Handle of a body nobody has started would never finish.
   Enforced by ``_BodyCell.get``, ``_BodyCell.as_asyncio`` and
   ``Future._as_handle``.
-- **RF-7 (no ``.get()`` inside a running loop).** ``.get()`` made while the
-  calling thread is inside a running event loop, whether asyncio reports it or
-  ``fake_sync_state()`` hides it, raises ``WouldBlockRuntime`` before observing
-  the body. Enforced by ``_BodyCell.get``.
+- **RF-7 (``.get()`` inside a running loop).** An owning ``.get()`` made while
+  the calling thread is inside a running event loop, whether asyncio reports it
+  or ``fake_sync_state()`` hides it, runs the body under RF-4 on a short-lived
+  daemon thread with a loop of its own, and waits for that thread, including
+  its loop's shutdown as ``asyncio.run`` does. A ``.get()`` made by code a
+  ``.get()`` is driving, and one that would wait for a body on a loop the
+  calling thread is running, raise ``WouldBlockRuntime`` instead, unless that
+  body has already settled. An interrupt that lands while the helper thread is
+  starting fails the Future with ``CancelledError`` and is re-raised at once;
+  the body may run on to completion on the helper. This bridges synchronous
+  endpoints, which still run on their actor's loop. Enforced by
+  ``_BodyCell.get`` and ``_BodyCell._drive_on_helper``.
 - **RF-8 (forked children).** A Future inherited through ``fork()`` is not
   supported in the child. The child makes its own loop and keeps every loop it
   inherited open for as long as it runs: closing one would unregister the
@@ -102,6 +112,7 @@ import inspect
 import os
 import sys
 import threading
+import warnings
 from collections.abc import Callable, Coroutine
 from typing import Any, ParamSpec, TypeVar
 
@@ -111,7 +122,7 @@ from monarch._rust_bindings.monarch_hyperactor.handle import (
     Handle,
     WouldBlockRuntime,
 )
-from monarch._src.actor.future import Future
+from monarch._src.actor.future import _GET_ON_LOOP_WARNING, Future
 from monarch._src.actor.sync_state import in_fake_sync_state
 
 P = ParamSpec("P")
@@ -133,17 +144,18 @@ class _Settler:
         self.lock: threading.Lock = threading.Lock()
         self.settled: bool = False
 
-    def publish(self, exc: BaseException | None, value: Any = None) -> None:
+    def publish(self, exc: BaseException | None, value: Any = None) -> bool:
         """Publish `exc`, or `value` if `exc` is `None`, unless an outcome was
-        already published."""
+        already published. Return whether this call published."""
         with self.lock:
             if self.settled:
-                return
+                return False
             self.settled = True
         if exc is None:
             self.completer.set_result(value)
         else:
             self.completer.set_exception(exc)
+        return True
 
     def publish_task(self, task: asyncio.Task[Any]) -> None:
         """Publish the outcome of the body's finished task."""
@@ -172,6 +184,8 @@ class _BodyCell:
         # Every observer reads the outcome from `handle` (RF-6).
         self.handle: Handle[Any] = handle
         self.settler: _Settler = _Settler(completer)
+        # The loop the body runs on, once started.
+        self.loop: asyncio.AbstractEventLoop | None = None
 
     def take(self) -> tuple[Coroutine[Any, Any, Any], contextvars.Context] | None:
         """Take the body if this is its first observation (RF-2)."""
@@ -186,22 +200,56 @@ class _BodyCell:
             self.unstarted[0].close()
 
     def get(self, timeout: float | None) -> Any:
-        """Synchronously observe the body.
+        """Synchronously observe a ``@returns_future`` self.
 
         ``Future.get()`` has already rejected a Tokio caller and validated
         ``timeout``.
         """
-        if asyncio.events._get_running_loop() is not None or in_fake_sync_state():
-            # RF-7: a synchronous endpoint's loop is hidden by `fake_sync_state()`.
+        hidden = in_fake_sync_state()
+        visible = asyncio.events._get_running_loop() is not None
+        if (hidden or visible) and getattr(_THIS_THREAD, "driving", False):
             raise WouldBlockRuntime(
-                "Future.get() cannot run a returns_future body inside a running "
-                "event loop; await the Future instead"
+                "Future.get() cannot block inside a returns_future body; await the "
+                "Future instead"
             )
+        if visible and self.unstarted is not None:
+            # Before take(): a warning raised as an error must leave the body unclaimed.
+            warnings.warn(_GET_ON_LOOP_WARNING, UserWarning, stacklevel=3)
         taken = self.take()
         if taken is None:
-            # RF-6: a timed-out wait raises without affecting the body.
+            loop = self.loop
+            if (
+                loop is not None
+                and getattr(loop, "_thread_id", None) == threading.get_ident()
+                and not self.settler.settled
+            ):
+                # RF-7: blocking here would stop the loop the body needs.
+                raise WouldBlockRuntime(
+                    "Future.get() cannot block on an event loop this thread is "
+                    "running; await the Future instead"
+                )
+            # RF-6: a timed-out wait raises without affecting the self.
             return self.handle.get(timeout)
+        if hidden or visible:
+            return self._drive_on_helper(taken, timeout)
+        return self._drive(taken, timeout)
+
+    def as_asyncio(self, loop: asyncio.AbstractEventLoop) -> asyncio.Future[Any]:
+        """Return an asyncio Future on the running `loop` that observes this self,
+        starting the body on `loop` if this is its first observation (RF-3, RF-6)."""
+        taken = self.take()
+        if taken is not None:
+            _start(self, taken, loop)
+        return self.handle.as_asyncio()
+
+    def _drive(
+        self,
+        taken: tuple[Coroutine[Any, Any, Any], contextvars.Context],
+        timeout: float | None,
+    ) -> Any:
+        """Run the body on this thread's loop, as ``asyncio.run`` does (RF-4)."""
         loop = _owning_loop(self, taken, _loop)
+        _THIS_THREAD.driving = True
         try:
             task = _start(self, taken, loop)
             try:
@@ -215,19 +263,95 @@ class _BodyCell:
                 raise error
             return task.result()
         finally:
+            _THIS_THREAD.driving = False
             try:
                 _cancel_leftovers(loop)
             except BaseException:
                 _THIS_THREAD.loop = None
                 raise
 
-    def as_asyncio(self, loop: asyncio.AbstractEventLoop) -> asyncio.Future[Any]:
-        """Return an asyncio Future on the running `loop` that observes the body,
-        starting it on `loop` if this is its first observation (RF-3, RF-6)."""
-        taken = self.take()
-        if taken is not None:
-            _start(self, taken, loop)
-        return self.handle.as_asyncio()
+    def _drive_on_helper(
+        self,
+        taken: tuple[Coroutine[Any, Any, Any], contextvars.Context],
+        timeout: float | None,
+    ) -> Any:
+        """Run the body as `_drive` does, on a short-lived daemon thread with a loop
+        of its own, and wait for that thread (RF-7)."""
+        started = threading.Event()
+        # Set once the helper has closed its loop. Waited on instead of
+        # `Thread.join()`, which before Python 3.13 returns at once after an
+        # interrupted join while the thread still runs.
+        finished = threading.Event()
+        loop = _owning_loop(self, taken, asyncio.new_event_loop)
+        box: dict[str, Any] = {"loop": loop}
+
+        def run() -> None:
+            _THIS_THREAD.driving = True
+            try:
+                box["task"] = _start(self, taken, loop)
+                started.set()
+                try:
+                    loop.run_until_complete(asyncio.wait({box["task"]}))
+                except BaseException:
+                    _cancel(loop, box["task"], self.settler, asyncio.CancelledError())
+                    raise
+            except BaseException as exc:  # noqa: B036 - re-raised by the caller
+                box.setdefault("error", exc)
+            finally:
+                started.set()
+                try:
+                    _close(loop)
+                finally:
+                    finished.set()
+
+        helper = threading.Thread(target=run, name="returns_future", daemon=True)
+        try:
+            helper.start()
+        except RuntimeError as exc:
+            # The thread could not start, so the body never ran.
+            loop.close()
+            taken[0].close()
+            self.settler.publish(exc)
+            raise
+        except BaseException as exc:
+            # Interrupted while the thread starts; it may already run the body.
+            self.settler.publish(_shared(exc))
+            raise
+        try:
+            finished.wait(timeout)
+        except BaseException:
+            self._cancel_on_helper(finished, started, box, asyncio.CancelledError())
+            raise
+        if not finished.is_set():
+            error = TimeoutError("returns_future operation did not finish in time")
+            if self._cancel_on_helper(finished, started, box, error):
+                raise error
+        if "error" in box:
+            raise box["error"]
+        return box["task"].result()
+
+    def _cancel_on_helper(
+        self,
+        finished: threading.Event,
+        started: threading.Event,
+        box: dict[str, Any],
+        outcome: BaseException,
+    ) -> bool:
+        """Publish `outcome`, then cancel the helper's body and wait for the helper
+        to finish (RF-4, RF-5). Return whether `outcome` won; if the body finished
+        first, its own outcome stands."""
+        won = self.settler.publish(outcome)
+        if won:
+            started.wait()
+            task = box.get("task")
+            if task is not None:
+                try:
+                    box["loop"].call_soon_threadsafe(task.cancel)
+                except RuntimeError:
+                    # The loop already closed: the body has finished.
+                    pass
+        finished.wait()
+        return won
 
 
 def _shared(exc: BaseException) -> BaseException:
@@ -245,6 +369,7 @@ def _start(
     finishes. A failure before the task exists is published through
     `_shared`, so other observers raise it too."""
     coro, ctx = taken
+    body.loop = loop
     try:
         # `ctx.run`, because not every supported Python has
         # `create_task(context=)` (RF-1).
@@ -282,7 +407,8 @@ class _ThreadLoop:
             self.loop.close()
 
 
-# Each thread's `_ThreadLoop`.
+# Each thread's `_ThreadLoop`, and whether it is driving a body under `.get()`
+# (RF-7).
 _THIS_THREAD = threading.local()
 
 
@@ -329,6 +455,16 @@ def _cancel_leftovers(loop: asyncio.AbstractEventLoop) -> None:
             )
 
 
+def _close(loop: asyncio.AbstractEventLoop) -> None:
+    """Shut a helper's loop down as ``asyncio.run`` does (RF-7)."""
+    try:
+        _cancel_leftovers(loop)
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.run_until_complete(loop.shutdown_default_executor())
+    finally:
+        loop.close()
+
+
 def _cancel(
     loop: asyncio.AbstractEventLoop,
     task: asyncio.Task[Any],
@@ -359,8 +495,9 @@ def returns_future(
     the calling thread's loop, as ``asyncio.run`` does; if that ``.get()`` times
     out or is interrupted, the body is cancelled and the Future fails with
     ``TimeoutError`` or ``CancelledError``. Later observers share the outcome.
-    ``.get()`` inside a running event loop raises ``WouldBlockRuntime``; await
-    the Future there.
+    ``.get()`` inside a running event loop runs the body the same way on a
+    short-lived helper thread; inside a body that a ``.get()`` is driving it
+    raises ``WouldBlockRuntime``, so await the Future there.
 
     If an API must perform a side effect when called, do that in a synchronous
     wrapper before calling the decorated function. For class or static
