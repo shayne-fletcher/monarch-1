@@ -26,6 +26,7 @@ from monarch._rust_bindings.monarch_hyperactor.actor import (
     PythonMessageKind,
 )
 from monarch._rust_bindings.monarch_hyperactor.buffers import Buffer, FrozenBuffer
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 from monarch._rust_bindings.monarch_hyperactor.pickle import (
     PendingMessage,
     pickle as monarch_pickle,
@@ -125,13 +126,19 @@ def allocate() -> Shared[ProcMesh]:
 
 
 def _python_task_test(
-    fn: Callable[[], Coroutine[Any, Any, None]],
+    fn: Callable[[], Coroutine[Any, Any, Handle[None] | None]],
 ) -> Callable[[], None]:
     """
     Wrapper for tests that use the internal tokio event loop
     APIs and need to run on that event loop.
     """
-    return lambda: PythonTask.from_coroutine(fn()).block_on()
+
+    def run() -> None:
+        result = PythonTask.from_coroutine(fn()).block_on()
+        if result is not None:
+            result.get()
+
+    return run
 
 
 @_python_task_test
@@ -204,7 +211,7 @@ class MyActor:
 
 
 @_python_task_test
-async def test_reducer() -> None:
+async def test_reducer() -> Handle[None]:
     proc_mesh_task = allocate()
 
     # Create an explicit init message
@@ -259,4 +266,4 @@ async def test_reducer() -> None:
 
     #  Note: occasionally test would hang without this stop
     proc_mesh = await proc_mesh_task
-    await proc_mesh.stop_nonblocking(ins._as_rust(), "test cleanup")
+    return proc_mesh.stop_nonblocking(ins._as_rust(), "test cleanup")

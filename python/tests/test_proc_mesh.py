@@ -14,9 +14,11 @@ import pathlib
 import tempfile
 import threading
 import time
+import warnings
 from contextlib import ExitStack
 from functools import partial
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import cloudpickle
@@ -24,6 +26,7 @@ import monarch.actor
 import pytest
 from isolate_in_subprocess import isolate_in_subprocess
 from monarch._rust_bindings.monarch_hyperactor.context import Instance as HyInstance
+from monarch._rust_bindings.monarch_hyperactor.handle import _new_handle_pair, Handle
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
@@ -93,8 +96,72 @@ async def _wait_for_event(event: threading.Event, message: str) -> None:
     assert reached, message
 
 
+class _PendingActorProbe:
+    def __init__(
+        self,
+        name: str,
+        driven: list[str],
+        error: BaseException | None = None,
+        release: threading.Event | None = None,
+    ) -> None:
+        self.entered = threading.Event()
+
+        async def initialize() -> None:
+            driven.append(name)
+            self.entered.set()
+            if release is not None:
+                released = await PythonTask.spawn_blocking(
+                    lambda: release.wait(timeout=30)
+                )
+                if not released:
+                    raise TimeoutError("pending actor release was not published")
+            if error is not None:
+                raise error
+
+        self.initialized = Future._from_coro(initialize())
+
+
+class _LoggingManagerProbe:
+    def __init__(
+        self,
+        inner: Any,
+        phases: list[str],
+        label: str,
+        error: BaseException | None = None,
+        client: object | None = None,
+    ) -> None:
+        self._inner = inner
+        self._phases = phases
+        self._label = label
+        self._error = error
+        self._client = client
+
+    @property
+    def _logging_mesh_client(self) -> object:
+        self._phases.append(self._label)
+        if self._error is not None:
+            raise self._error
+        if self._client is not None:
+            return self._client
+        return self._inner._logging_mesh_client
+
+    async def flush_async(self) -> None:
+        # As `LoggingManager.flush_async`, reading the client once.
+        client: Any = self._logging_mesh_client
+        if client is None:
+            return
+        try:
+            await client.flush(context().actor_instance._as_rust()).spawn_handle()
+        except Exception:
+            pass
+
+
+class _StopAbort(BaseException):
+    pass
+
+
 class _ProcStopCallThrough:
-    """Gate a real native stop task without replacing its behavior."""
+    """Gate a real native stop without replacing its behavior."""
 
     def __init__(self, inner: HyProcMesh, release: threading.Event) -> None:
         self._inner = inner
@@ -102,39 +169,28 @@ class _ProcStopCallThrough:
         self.entered = threading.Event()
         self.calls = 0
 
-    def stop_nonblocking(
-        self,
-        instance: HyInstance,
-        reason: str,
-    ) -> PythonTask[None]:
-        native_task = self._inner.stop_nonblocking(instance, reason)
+    def stop_nonblocking(self, instance: HyInstance, reason: str) -> Handle[None]:
         self.calls += 1
         self.entered.set()
+        handle, completer = _new_handle_pair()
 
-        async def gated() -> None:
-            released = await PythonTask.spawn_blocking(
-                lambda: self._release.wait(timeout=30)
-            )
-            if not released:
-                raise TimeoutError("proc stop release was not published")
-            await native_task
+        # The binding starts its stop when called, so call it only after the
+        # release.
+        def gated() -> None:
+            if not self._release.wait(timeout=30):
+                completer.set_exception(
+                    TimeoutError("proc stop release was not published")
+                )
+                return
+            try:
+                self._inner.stop_nonblocking(instance, reason).get()
+            except Exception as error:
+                completer.set_exception(error)
+            else:
+                completer.set_result(None)
 
-        return PythonTask.from_coroutine(gated())
-
-
-class _PendingActorProbe:
-    def __init__(
-        self,
-        name: str,
-        driven: list[str],
-        error: Exception | None = None,
-    ) -> None:
-        async def initialize() -> None:
-            driven.append(name)
-            if error is not None:
-                raise error
-
-        self.initialized = Future._from_coro(initialize())
+        threading.Thread(target=gated, daemon=True).start()
+        return handle
 
 
 class TestActor(Actor):
@@ -340,10 +396,12 @@ async def test_proc_stop_is_lazy_and_survives_cancelled_observer() -> None:
 
 @pytest.mark.timeout(60)
 @isolate_in_subprocess
-async def test_stop_state_tracks_native_stop_result() -> None:
+def test_stop_state_tracks_native_stop_result() -> None:
     with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
         owner = state.hosts.spawn_procs(per_host={"gpus": 2})
-        assert await asyncio.wait_for(owner.initialized, timeout=30) is True
+        assert owner.initialized.get(timeout=30) is True
+        inner = owner._proc_mesh.poll()
+        assert inner is not None
         logging_manager = owner._logging_manager
         assert logging_manager._logging_mesh_client is not None
         proc_ref = owner.slice(gpus=0)
@@ -359,44 +417,274 @@ async def test_stop_state_tracks_native_stop_result() -> None:
         )
 
         with pytest.raises(ValueError) as public_stop_error:
-            await asyncio.wait_for(proc_ref.stop(), timeout=30)
+            proc_ref.stop().get(timeout=30)
         assert type(public_stop_error.value) is ValueError
         assert str(public_stop_error.value) == str(raw_stop_error.value)
 
         assert not proc_ref._stopped
-        flush_started = False
-        proc_flush_called = False
-        new_flush_task = logging_manager._new_flush_task
-        flush_from_tokio = logging_manager._flush_from_tokio
+        phases: list[str] = []
+        actor_abort = _PendingActorProbe(
+            "actor-base-exception",
+            phases,
+            _StopAbort("actor initialization interrupted"),
+        )
+        owner._pending_actor_spawns.append(cast(ActorMesh, actor_abort))
+        owner._logging_manager = cast(
+            Any,
+            _LoggingManagerProbe(logging_manager, phases, "logging-unreached"),
+        )
 
-        def record_flush_start() -> PythonTask[None]:
-            flush_task = new_flush_task()
+        with pytest.raises(_StopAbort, match="actor initialization interrupted"):
+            owner.stop().get(timeout=30)
+        assert not owner._stopped
+        assert owner._pending_actor_spawns == [actor_abort]
+        assert inner.region is not None
+        assert phases == ["actor-base-exception"]
 
-            async def task() -> None:
-                nonlocal flush_started
-                flush_started = True
-                await flush_task
-
-            return PythonTask.from_coroutine(task())
-
-        async def record_flush_from_tokio() -> None:
-            nonlocal proc_flush_called
-            proc_flush_called = True
-            await flush_from_tokio()
-
-        with (
-            patch.object(logging_manager, "_new_flush_task", record_flush_start),
-            patch.object(
+        owner._pending_actor_spawns.clear()
+        pending_actor = _PendingActorProbe("actor", phases)
+        owner._pending_actor_spawns.append(cast(ActorMesh, pending_actor))
+        owner._logging_manager = cast(
+            Any,
+            _LoggingManagerProbe(
                 logging_manager,
-                "_flush_from_tokio",
-                record_flush_from_tokio,
+                phases,
+                "logging-base-exception",
+                _StopAbort("stop interrupted"),
             ),
-        ):
+        )
+
+        with pytest.raises(_StopAbort, match="stop interrupted"):
+            owner.stop().get(timeout=30)
+        assert not owner._stopped
+        # The drain finished, so its spawn is removed although the stop did not.
+        assert owner._pending_actor_spawns == []
+        assert inner.region is not None
+        assert phases == [
+            "actor-base-exception",
+            "actor",
+            "logging-base-exception",
+        ]
+
+        owner._logging_manager = cast(
+            Any,
+            _LoggingManagerProbe(
+                logging_manager,
+                phases,
+                "logging-read-exception",
+                RuntimeError("logging client unreadable"),
+            ),
+        )
+        with pytest.raises(RuntimeError, match="logging client unreadable"):
+            owner.stop().get(timeout=30)
+        assert not owner._stopped
+        assert inner.region is not None
+
+        owner._pending_actor_spawns.append(
+            cast(ActorMesh, _PendingActorProbe("actor-reason-type", phases))
+        )
+        owner._logging_manager = cast(
+            Any, _LoggingManagerProbe(logging_manager, phases, "logging-reason-type")
+        )
+        reason_type_stop = owner.stop(cast(Any, 42))
+        with pytest.raises(TypeError, match="reason"):
+            reason_type_stop.get(timeout=30)
+        assert not owner._stopped
+        assert inner.region is not None
+
+        owner._pending_actor_spawns.append(
+            cast(ActorMesh, _PendingActorProbe("actor-missing-stop", phases))
+        )
+        owner._logging_manager = cast(
+            Any, _LoggingManagerProbe(logging_manager, phases, "logging-missing-stop")
+        )
+        proc_mesh = owner._proc_mesh
+        owner._proc_mesh = cast(Any, Shared.from_value(object()))
+        missing_stop = owner.stop()
+        with pytest.raises(AttributeError, match="stop_nonblocking"):
+            missing_stop.get(timeout=30)
+        owner._proc_mesh = proc_mesh
+        assert not owner._stopped
+        assert inner.region is not None
+
+        owner._logging_manager = cast(
+            Any,
+            _LoggingManagerProbe(
+                logging_manager,
+                phases,
+                "logging-flush-exception",
+                client=object(),
+            ),
+        )
+        assert owner.stop().get(timeout=30) is None
+        assert phases == [
+            "actor-base-exception",
+            "actor",
+            "logging-base-exception",
+            "logging-read-exception",
+            "actor-reason-type",
+            "logging-reason-type",
+            "actor-missing-stop",
+            "logging-missing-stop",
+            "logging-flush-exception",
+        ]
+        assert owner._pending_actor_spawns == []
+        assert owner._stopped
+
+
+@pytest.mark.timeout(120)
+@isolate_in_subprocess
+def test_proc_stop_completes_for_each_observer_kind() -> None:
+    with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
+        # A synchronous caller runs the stop on its own thread's loop.
+        owner = state.hosts.spawn_procs(per_host={"gpus": 1})
+        assert owner.stop().get(timeout=30) is None
+        assert owner._stopped
+
+        # An asyncio caller runs it on the awaiting loop.
+        owner = state.hosts.spawn_procs(per_host={"gpus": 1})
+
+        async def awaited() -> None:
             assert await asyncio.wait_for(owner.stop(), timeout=30) is None
 
-            assert proc_flush_called
-        assert flush_started
+        asyncio.run(awaited())
         assert owner._stopped
+
+        # A blocking get() inside a running loop, as a synchronous endpoint
+        # makes, runs it on a helper thread.
+        owner = state.hosts.spawn_procs(per_host={"gpus": 1})
+
+        async def blocking() -> None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                assert owner.stop().get(timeout=30) is None
+
+        asyncio.run(blocking())
+        assert owner._stopped
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+def test_proc_stop_creates_no_python_task_from_a_coroutine() -> None:
+    with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
+        owner = state.hosts.spawn_procs(per_host={"gpus": 1})
+        assert owner.initialized.get(timeout=30) is True
+        with patch.object(Future, "_from_coro", wraps=Future._from_coro) as from_coro:
+            assert owner.stop().get(timeout=30) is None
+        assert from_coro.call_count == 0
+        assert owner._stopped
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+def test_proc_stop_drain_waits_for_spawns_added_meanwhile() -> None:
+    driven: list[str] = []
+    release_first, release_added = threading.Event(), threading.Event()
+    first = _PendingActorProbe("first", driven, release=release_first)
+    added = _PendingActorProbe("added", driven, release=release_added)
+    owner = SimpleNamespace(_pending_actor_spawns=[first])
+
+    async def drain_while_appending() -> None:
+        drain = asyncio.ensure_future(
+            ProcMesh._drain_pending_actor_spawns(cast(ProcMesh, owner))
+        )
+        await _wait_for_event(first.entered, "the drain did not reach its first spawn")
+        owner._pending_actor_spawns.append(added)
+        release_first.set()
+        await _wait_for_event(added.entered, "the drain skipped the added spawn")
+        release_added.set()
+        await asyncio.wait_for(drain, timeout=30)
+
+    try:
+        asyncio.run(drain_while_appending())
+    finally:
+        release_first.set()
+        release_added.set()
+    assert driven == ["first", "added"]
+    assert owner._pending_actor_spawns == []
+
+
+class _AppendBeforeRemoval(list[Any]):
+    """A pending list that receives one more spawn just before its first
+    removal, as when another thread spawns at that moment."""
+
+    def __init__(self, items: list[Any], late: Any) -> None:
+        super().__init__(items)
+        self._late: Any = late
+
+    def _arrive(self) -> None:
+        if self._late is not None:
+            late, self._late = self._late, None
+            self.append(late)
+
+    def remove(self, value: Any) -> None:
+        self._arrive()
+        super().remove(value)
+
+    def clear(self) -> None:
+        self._arrive()
+        super().clear()
+
+
+class _CountedSpawn:
+    """A pending spawn that counts reads of its `initialized` Future, so a test
+    can tell when each drain has selected it."""
+
+    def __init__(self, probe: _PendingActorProbe) -> None:
+        self._probe = probe
+        self.reads = 0
+
+    @property
+    def initialized(self) -> Future[None]:
+        self.reads += 1
+        return self._probe.initialized
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+def test_overlapping_stop_drains_wait_for_a_late_spawn() -> None:
+    driven: list[str] = []
+    release_first, release_late = threading.Event(), threading.Event()
+    first_probe = _PendingActorProbe("first", driven, release=release_first)
+    first = _CountedSpawn(first_probe)
+    late = _PendingActorProbe("late", driven, release=release_late)
+    pending = _AppendBeforeRemoval([first], late)
+    owner = SimpleNamespace(_pending_actor_spawns=pending)
+
+    async def overlap() -> None:
+        drains = [
+            asyncio.ensure_future(
+                ProcMesh._drain_pending_actor_spawns(cast(ProcMesh, owner))
+            )
+            for _ in range(2)
+        ]
+        # Both drains must have selected the first spawn before it is released,
+        # so one of them removes an entry the other has also selected.
+        deadline = asyncio.get_running_loop().time() + 30
+        while first.reads < 2:
+            assert asyncio.get_running_loop().time() < deadline, (
+                "both drains did not select the first spawn"
+            )
+            await asyncio.sleep(0.01)
+        assert first.reads == 2
+        await _wait_for_event(
+            first_probe.entered, "the first spawn did not start initializing"
+        )
+        release_first.set()
+        # The late spawn arrives as one drain removes the first; some drain
+        # must wait for it before anything removes it.
+        await _wait_for_event(late.entered, "no drain waited for the late spawn")
+        assert list(pending) == [late]
+        release_late.set()
+        await asyncio.wait_for(asyncio.gather(*drains), timeout=30)
+
+    try:
+        asyncio.run(overlap())
+    finally:
+        release_first.set()
+        release_late.set()
+    assert driven == ["first", "late"]
+    assert list(pending) == []
 
 
 @pytest.mark.timeout(60)
