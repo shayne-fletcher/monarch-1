@@ -352,10 +352,10 @@ doc_legacy_surface = "PythonTask|PyShared|pytokio"
 [totals]
 py_python_task_new = 21
 raw_python_task_new = 5
-from_coro = 14
+from_coro = 13
 rust_from_coro = 2
 from_coroutine = 7
-take_inner = 4
+take_inner = 3
 rust_take_inner = 2
 take_inner_retire = 2
 caller_free_primitive = 4
@@ -986,8 +986,9 @@ path = "fbcode/monarch/python/monarch/_src/actor/actor_mesh.py"
 symbol = "Accumulator.accumulate[Future._from_coro(impl())]"
 operation = "from_coro"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4a"
+transition_revision = "D121902505"
 public_operation = "Accumulator.accumulate(...)"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
@@ -1060,7 +1061,7 @@ operation = "from_coro"
 scope = "production"
 state = "migrated"
 transition = "6.2"
-transition_revision = "self"
+transition_revision = "D120596891"
 
 [[site]]
 id = "fc.actor_mesh.PortReceiver.recv[Future._from_coroself._recv]"
@@ -1347,7 +1348,7 @@ operation = "from_coro"
 scope = "production"
 state = "migrated"
 transition = "6.4b"
-transition_revision = "self"
+transition_revision = "D121088126"
 public_operation = "job.exec_command(...)"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
@@ -1825,7 +1826,7 @@ operation = "helper_symbol"
 scope = "production"
 state = "migrated"
 transition = "6.2"
-transition_revision = "self"
+transition_revision = "D120596891"
 
 [[site]]
 id = "hs.pickle.PyShared"
@@ -2758,7 +2759,7 @@ operation = "py_python_task_new"
 scope = "production"
 state = "migrated"
 transition = "6.2"
-transition_revision = "self"
+transition_revision = "D120596891"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from PendingMessage::py_resolve"
 consumer = "Port.resolve_and_send, on the actor loop"
@@ -3815,8 +3816,9 @@ path = "fbcode/monarch/python/monarch/_src/actor/actor_mesh.py"
 symbol = "Accumulator.accumulate.impl[x._take_inner]"
 operation = "take_inner"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4a"
+transition_revision = "D121902505"
 
 [[site]]
 id = "ot.bootstrap._as_python_task[s._take_inner]"
@@ -3861,7 +3863,7 @@ operation = "take_inner"
 scope = "production"
 state = "migrated"
 transition = "6.4b"
-transition_revision = "self"
+transition_revision = "D121088126"
 
 [[site]]
 id = "ot.job.exec_command._impl[bash_actors.run_python.callcmd, env=env, workdir=workdir, client_cwd=client_cwd, output_dir=output_dir._take_inner]"
@@ -3873,7 +3875,7 @@ operation = "take_inner"
 scope = "production"
 state = "migrated"
 transition = "6.4b"
-transition_revision = "self"
+transition_revision = "D121088126"
 
 [[site]]
 id = "ot.job.exec_command._impl[procs.stop._take_inner]"
@@ -3885,7 +3887,7 @@ operation = "take_inner"
 scope = "production"
 state = "migrated"
 transition = "6.4b"
-transition_revision = "self"
+transition_revision = "D121088126"
 
 [[site]]
 id = "ret.future._Taken"
