@@ -478,8 +478,8 @@ execution_state = "activates_in_6.1"
 
 [[matrix]]
 id = "fm.ready_as_asyncio_settlement"
-disposition = "intentional change"
-execution_state = "activates_in_6.1"
+disposition = "preserve"
+execution_state = "green_in_6.0b"
 
 [[matrix]]
 id = "fm.terminal_baseexception_reobservable"

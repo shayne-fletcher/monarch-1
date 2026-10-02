@@ -894,11 +894,12 @@ async def test_as_asyncio_on_cached_stop_iteration_wraps_in_runtime_error():
 #
 # Incumbent-divergence companions (not factory-driven, no activation):
 #   fm.ready_get_on_tokio_refuses, fm.invalid_timeout_on_ready,
-#   fm.ready_as_asyncio_settlement, fm.terminal_baseexception_reobservable
+#   fm.terminal_baseexception_reobservable
 #
-# fm.cancelled_observer also has an unparametrized current-side test, but it is
-# a *preserve* row: both representations behave identically, so that test is a
-# second oracle for the same behavior, not a divergence.
+# fm.cancelled_observer and fm.ready_as_asyncio_settlement also have an
+# unparametrized current-side test, but both are *preserve* rows: both
+# representations behave identically, so each such test is a second oracle for
+# the same behavior, not a divergence.
 #
 # The permanent Handle-side oracle for fm.tokio_await lives in handle.rs, so
 # that contract does not depend on a PythonTask-driven helper.
@@ -1293,12 +1294,14 @@ async def test_fm_cancelled_observer_survives_cancellation(make_gated):
 
 
 async def test_fm_cancelled_observer_current_survives_cancellation():
-    """Incumbent facade: the cancellation is real, and a later await still
-    resolves."""
+    """Incumbent facade: a cancellation, when it takes, is real, and a later
+    await still resolves. The body can finish before ``as_asyncio()`` checks
+    its Handle, which then returns an already-done observer that cannot be
+    cancelled; the deterministic witness is ``_assert_cancelled_observer``."""
     fut: Future[int] = Future._from_coro(_value(5))
     first = fut.as_asyncio()
-    assert first.cancel() is True
-    assert first.cancelled()
+    if first.cancel():
+        assert first.cancelled()
     assert await fut == 5
 
 
@@ -1370,7 +1373,7 @@ def test_fm_invalid_timeout_on_ready_validates_first(make_observable):
 
 
 async def test_fm_ready_as_asyncio_settlement_current_is_done_synchronously():
-    """Incumbent divergence: a cached Future hands back an already-done loop
+    """Incumbent facade: a cached Future hands back an already-done loop
     future -- ``.done()`` is True before the loop runs."""
     fut: Future[int] = Future._from_coro(_value(9))
     await asyncio.to_thread(fut.get)  # resolve off the loop -> _Complete
@@ -1380,12 +1383,12 @@ async def test_fm_ready_as_asyncio_settlement_current_is_done_synchronously():
 
 
 @pytest.mark.parametrize("make_observable", TARGET_ONLY)
-async def test_fm_ready_as_asyncio_settlement_settles_on_loop(make_observable):
-    """Target behavior: a ready observable's loop future is *not* done
-    synchronously -- it settles through a scheduled callback."""
+async def test_fm_ready_as_asyncio_settlement_is_done_synchronously(make_observable):
+    """Target behavior: a ready observable's loop future is already done, as a
+    cached Future's is (HDL-22)."""
     ok = make_observable("success")
     observer = ok.as_asyncio()
-    assert not observer.done()
+    assert observer.done()
     assert await observer == _PROBE_SUCCESS_VALUE
 
 
