@@ -459,6 +459,41 @@ class _Lazy(Generic[T]):
         return self._val
 
 
+# Client-fork invariants:
+#
+# A Monarch client belongs to the process that begins its bootstrap. Fork
+# copies Python objects, locks and file descriptors into the child, but not the
+# Tokio and actor threads that own them, so once bootstrap has begun the child
+# must treat the inherited state as unusable. The supported child avoids Python
+# finalization entirely through `os._exit()`. Normal child interpreter exit can
+# run both inherited Monarch atexit callbacks, `shutdown_context` registered by
+# `_init_client_context` and the Rust `shutdown_tokio_runtime`, and is not
+# supported. These invariants do not make Monarch generally fork-safe, and they
+# do not govern a Monarch worker process that forks after its own bootstrap.
+#
+# CF-1 (no-client-shutdown-is-inert): if this process has no client,
+#   `shutdown_context()` does nothing: it returns a finished Future, creates
+#   no client and leaves `_shutdown_done` false so a later client still shuts
+#   down. It first takes `_client_context._lock`, so a bootstrap in progress on
+#   another thread finishes before it decides; if that bootstrap produced a
+#   client, shutdown proceeds normally. Enforced by `shutdown_context()`;
+#   witnessed by the two tests in `test_shutdown_without_client.py` (the
+#   produced-client case is untested).
+# CF-2 (client-state-is-process-local): once client bootstrap has begun, the
+#   client context, host, proc and actor meshes and references, and Monarch
+#   Futures and Handles may be used only by the process that began it. A forked
+#   child inherits unusable copies, possibly including a held
+#   `_client_context._lock`, and must not drive them. Importing modules and
+#   using pure data helpers is allowed. An unenforced caller obligation: nothing
+#   resets, reconstructs or cleans up inherited state.
+# CF-3 (post-client-fork-children-hard-exit): a child forked after client
+#   bootstrap has begun, such as a multiprocessing or DataLoader worker, may
+#   run non-Monarch work and must exit through `os._exit()` or an equivalent,
+#   which runs neither inherited atexit callback. Normal interpreter
+#   finalization may drive copied Python, Tokio or actor state. An unenforced
+#   caller obligation.
+
+
 def _init_client_context(via: Optional[str] = None) -> Context:
     """
     Create a client context that bootstraps an actor instance running on a real
@@ -614,7 +649,7 @@ def shutdown_context(host_timeout: float | None = None) -> "Future[None]":
         # whose client must still be shut down.
         with _client_context._lock:
             if _client_context._val is None:
-                # A PythonTask would bootstrap a client just to shut it down.
+                # CF-1: a PythonTask would bootstrap a client just to shut it down.
                 # Leave _shutdown_done false so that a client created later is
                 # still shut down.
                 return Future._resolved(None)
