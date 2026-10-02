@@ -19,15 +19,18 @@ import tempfile
 import textwrap
 import threading
 import time
+import warnings
 import weakref
 from contextlib import ExitStack, suppress
-from typing import Any, cast, Dict, Generator, IO, List, Optional, Set
+from types import SimpleNamespace
+from typing import Any, Callable, cast, Dict, Generator, IO, List, Optional, Set
 from unittest.mock import patch
 
 import cloudpickle
 import pytest
 from isolate_in_subprocess import isolate_in_subprocess
 from monarch._rust_bindings.monarch_hyperactor.context import Instance as HyInstance
+from monarch._rust_bindings.monarch_hyperactor.handle import _new_handle_pair, Handle
 from monarch._rust_bindings.monarch_hyperactor.host_mesh import (
     BootstrapCommand,
     HostMesh as HyHostMesh,
@@ -217,6 +220,13 @@ class _AwaitRecord:
 
         return record().__await__()
 
+    # The drain awaits `shared.task().spawn_handle()`.
+    def task(self) -> "_AwaitRecord":
+        return self
+
+    def spawn_handle(self) -> "_AwaitRecord":
+        return self
+
 
 class _PendingActorRecord:
     """Expose an initializer that records when the real actor queue drives it."""
@@ -253,31 +263,40 @@ class _HostTeardownCallThrough:
         self.entered = threading.Event()
         self.calls: list[str] = []
 
-    def _wrap(self, operation: str, task: PythonTask[None]) -> PythonTask[None]:
+    def _call(self, operation: str, call: Callable[[], Handle[None]]) -> Handle[None]:
         self.calls.append(operation)
         if self._record is not None:
             self._record.append(f"native_{operation}")
         self.entered.set()
         release = self._release
         if release is None:
-            return task
+            return call()
         release_event = cast(threading.Event, release)
+        handle, completer = _new_handle_pair()
 
-        async def gated() -> None:
-            released = await PythonTask.spawn_blocking(
-                lambda: release_event.wait(timeout=30)
-            )
-            if not released:
-                raise TimeoutError("host teardown release was not published")
-            await task
+        # The binding starts its operation when called, so call it only after
+        # the release.
+        def gated() -> None:
+            if not release_event.wait(timeout=30):
+                completer.set_exception(
+                    TimeoutError("host teardown release was not published")
+                )
+                return
+            try:
+                call().get()
+            except Exception as error:
+                completer.set_exception(error)
+            else:
+                completer.set_result(None)
 
-        return PythonTask.from_coroutine(gated())
+        threading.Thread(target=gated, daemon=True).start()
+        return handle
 
-    def shutdown(self, instance: HyInstance) -> PythonTask[None]:
-        return self._wrap("shutdown", self._inner.shutdown(instance))
+    def shutdown(self, instance: HyInstance) -> Handle[None]:
+        return self._call("shutdown", lambda: self._inner.shutdown(instance))
 
-    def stop(self, instance: HyInstance) -> PythonTask[None]:
-        return self._wrap("stop", self._inner.stop(instance))
+    def stop(self, instance: HyInstance) -> Handle[None]:
+        return self._call("stop", lambda: self._inner.stop(instance))
 
 
 def _install_host_teardown_call_through(
@@ -362,7 +381,7 @@ async def test_preconstructed_shutdowns_drain_after_observer_cancellation() -> N
         # queues, not the lifecycle of real proc or actor spawns.
         host._pending_spawns = [cast(Any, _AwaitRecord(order, "pending_proc"))]
         proc_mesh._pending_actor_spawns = [cast(Any, _PendingActorRecord(order))]
-        flush_logging = proc_mesh._logging_manager._flush_from_tokio
+        flush_logging = proc_mesh._logging_manager.flush_async
 
         async def record_logging_flush() -> None:
             await flush_logging()
@@ -381,7 +400,7 @@ async def test_preconstructed_shutdowns_drain_after_observer_cancellation() -> N
 
         with patch.object(
             proc_mesh._logging_manager,
-            "_flush_from_tokio",
+            "flush_async",
             record_logging_flush,
         ):
             observer = first_shutdown.as_asyncio()
@@ -451,6 +470,92 @@ def test_shutdown_host_mesh() -> None:
         assert hm._inner_host_mesh is None
 
 
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("method", ["stop", "shutdown"])
+@pytest.mark.parametrize("observer", ["get", "await", "get_in_loop"])
+@isolate_in_subprocess
+def test_host_teardown_completes_for_each_observer_kind(
+    method: str, observer: str
+) -> None:
+    with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
+        hm = state.hosts
+        assert hm.spawn_procs(per_host={"gpus": 1}).initialized.get(timeout=30)
+
+        async def observe_in_loop() -> object:
+            teardown = getattr(hm, method)()
+            if observer == "await":
+                return await teardown
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                return teardown.get(timeout=30)
+
+        with patch.object(Future, "_from_coro", wraps=Future._from_coro) as from_coro:
+            if observer == "get":
+                assert getattr(hm, method)().get(timeout=30) is None
+            else:
+                assert asyncio.run(observe_in_loop()) is None
+        assert from_coro.call_count == 0
+        if method == "shutdown":
+            assert hm._inner_host_mesh is None
+
+
+@pytest.mark.timeout(60)
+async def test_drain_waits_for_a_spawn_appended_during_an_overlapping_drain() -> None:
+    order: list[str] = []
+    release = asyncio.Event()
+    late = _AwaitRecord(order, "late")
+
+    class _GatedSpawn:
+        selected = 0
+
+        def task(self) -> "_GatedSpawn":
+            return self
+
+        def spawn_handle(self) -> "_GatedSpawn":
+            self.selected += 1
+            return self
+
+        def __await__(self) -> Generator[Any, None, None]:
+            async def wait() -> None:
+                await release.wait()
+                order.append("first")
+
+            return wait().__await__()
+
+    async def noop() -> None:
+        pass
+
+    first = _GatedSpawn()
+    host = SimpleNamespace(_pending_spawns=[first], _proc_meshes=[])
+
+    # The first drain to finish its pending-spawn loop appends the late spawn
+    # while the other drain is still waiting for `first`.
+    appended = False
+
+    async def append_late() -> None:
+        nonlocal appended
+        if not appended:
+            appended = True
+            host._pending_spawns.append(late)
+        await asyncio.sleep(0)
+
+    proc_mesh = SimpleNamespace(
+        _drain_pending_actor_spawns=append_late,
+        _logging_manager=SimpleNamespace(flush_async=noop),
+    )
+    host._proc_meshes.append(proc_mesh)
+    drains = [
+        asyncio.ensure_future(HostMesh._drain_pending_spawns(cast(HostMesh, host)))
+        for _ in range(2)
+    ]
+    while first.selected < 2:
+        await asyncio.sleep(0)
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*drains), timeout=10)
+    assert order == ["first", "first", "late"]
+    assert host._pending_spawns == []
+
+
 @pytest.mark.timeout(60)
 @isolate_in_subprocess
 def test_shutdown_immediately_after_proc_spawn_without_actor() -> None:
@@ -500,19 +605,17 @@ def test_shutdown_waits_for_a_pending_proc_spawn_after_caller_drops_mesh() -> No
             flush_exited = threading.Event()
             release_shutdown = threading.Event()
             cleanup.callback(release_shutdown.set)
-            flush_pending_spawns = hm._flush_pending_spawns
+            flush_pending_spawns = hm._drain_pending_spawns
 
             async def record_flush_entry() -> None:
                 flush_entered.set()
                 await flush_pending_spawns()
                 flush_exited.set()
-                released = await PythonTask.spawn_blocking(
-                    lambda: release_shutdown.wait(timeout=30)
-                )
+                released = await asyncio.to_thread(release_shutdown.wait, 30)
                 if not released:
                     raise TimeoutError("native shutdown release was not published")
 
-            with patch.object(hm, "_flush_pending_spawns", record_flush_entry):
+            with patch.object(hm, "_drain_pending_spawns", record_flush_entry):
                 shutdown = hm.shutdown()
                 shutdown_results: list[None] = []
                 shutdown_errors: list[Exception] = []
@@ -897,13 +1000,13 @@ def test_stop_and_reconnect() -> None:
 
                 order: list[str] = []
                 call_through = _install_host_teardown_call_through(hm, order)
-                flush_pending_spawns = hm._flush_pending_spawns
+                flush_pending_spawns = hm._drain_pending_spawns
 
                 async def record_drain() -> None:
                     order.append("drain")
                     await flush_pending_spawns()
 
-                with patch.object(hm, "_flush_pending_spawns", record_drain):
+                with patch.object(hm, "_drain_pending_spawns", record_drain):
                     # Stop terminates user procs but leaves workers available.
                     assert hm.stop().get(timeout=30) is None
                     assert order == ["drain", "native_stop"]

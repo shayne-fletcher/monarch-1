@@ -55,6 +55,7 @@ use crate::actor::PythonActor;
 use crate::actor::to_py_error;
 use crate::context::PyInstance;
 use crate::context::stop_instance_and_wait;
+use crate::handle::PyHandle;
 use crate::proc_mesh::PyProcMesh;
 use crate::pytokio::PyPythonTask;
 use crate::runtime::GilSite;
@@ -263,7 +264,7 @@ impl PyHostMesh {
         Ok(self.mesh_ref()? == other.mesh_ref()?)
     }
 
-    fn shutdown(&self, instance: &PyInstance) -> PyResult<PyPythonTask> {
+    fn shutdown(&self, instance: &PyInstance) -> PyResult<PyHandle> {
         match self {
             PyHostMesh::Owned(inner) => {
                 let instance = instance.clone();
@@ -282,7 +283,7 @@ impl PyHostMesh {
                         }
                     }
                 };
-                PyPythonTask::new(fut)
+                Ok(PyHandle::spawn(fut))
             }
             PyHostMesh::Ref(_) => Err(PyRuntimeError::new_err(
                 "cannot shut down `HostMesh` that is a reference instead of owned",
@@ -290,7 +291,7 @@ impl PyHostMesh {
         }
     }
 
-    fn stop(&self, instance: &PyInstance) -> PyResult<PyPythonTask> {
+    fn stop(&self, instance: &PyInstance) -> PyResult<PyHandle> {
         match self {
             PyHostMesh::Owned(inner) => {
                 let instance = instance.clone();
@@ -307,7 +308,7 @@ impl PyHostMesh {
                         }
                     }
                 };
-                PyPythonTask::new(fut)
+                Ok(PyHandle::spawn(fut))
             }
             PyHostMesh::Ref(_) => Err(PyRuntimeError::new_err(
                 "cannot stop `HostMesh` that is a reference instead of owned",

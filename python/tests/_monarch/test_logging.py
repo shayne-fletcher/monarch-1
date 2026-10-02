@@ -15,7 +15,7 @@ from unittest.mock import call, Mock, patch
 
 import pytest
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._src.actor.logging import flush_all_proc_mesh_logs, LoggingManager
 
 
@@ -233,54 +233,6 @@ class LoggingManagerTest(TestCase):
         self.assertEqual(str(raised.exception), _FLUSH_BASE_EXCEPTION_MESSAGE)
         mock_new_flush_task.assert_called_once_with()
 
-    def test_flush_from_tokio_awaits_shared_not_handle(self) -> None:
-        mock_task = Mock()
-        shared = _AwaitTracker(Shared.from_value(None))
-        mock_task.spawn.return_value = shared
-        self.logging_manager._logging_mesh_client = Mock()
-
-        with patch.object(
-            self.logging_manager, "_new_flush_task", return_value=mock_task
-        ) as mock_new_flush_task:
-            result = PythonTask.from_coroutine(
-                self.logging_manager._flush_from_tokio()
-            ).block_on()
-
-        self.assertIsNone(result)
-        mock_new_flush_task.assert_called_once_with()
-        mock_task.spawn.assert_called_once_with()
-        mock_task.spawn_handle.assert_not_called()
-        self.assertTrue(shared.awaited)
-        self.assertFalse(shared.get_called)
-
-    def test_flush_from_tokio_without_client_is_noop(self) -> None:
-        with patch.object(
-            self.logging_manager, "_new_flush_task"
-        ) as mock_new_flush_task:
-            result = PythonTask.from_coroutine(
-                self.logging_manager._flush_from_tokio()
-            ).block_on()
-
-        self.assertIsNone(result)
-        mock_new_flush_task.assert_not_called()
-
-    def test_flush_from_tokio_suppresses_ordinary_error(self) -> None:
-        async def fail() -> None:
-            raise RuntimeError("test error")
-
-        self.logging_manager._logging_mesh_client = Mock()
-        with patch.object(
-            self.logging_manager,
-            "_new_flush_task",
-            return_value=PythonTask.from_coroutine(fail()),
-        ) as mock_new_flush_task:
-            result = PythonTask.from_coroutine(
-                self.logging_manager._flush_from_tokio()
-            ).block_on()
-
-        self.assertIsNone(result)
-        mock_new_flush_task.assert_called_once_with()
-
 
 class FlushAllProcMeshLogsTest(TestCase):
     @patch("monarch._src.actor.proc_mesh.get_active_proc_meshes")
@@ -375,35 +327,6 @@ class LoggingManagerAsyncTest(IsolatedAsyncioTestCase):
         ) as mock_new_flush_task:
             with self.assertRaises(_FlushBaseException) as raised:
                 await asyncio.wait_for(self.logging_manager.flush_async(), timeout=10)
-
-        self.assertIs(type(raised.exception), _FlushBaseException)
-        self.assertEqual(str(raised.exception), _FLUSH_BASE_EXCEPTION_MESSAGE)
-        mock_new_flush_task.assert_called_once_with()
-
-    async def test_flush_from_tokio_propagates_base_exception(self) -> None:
-        with patch.object(self.logging_manager, "_new_flush_task") as no_client_task:
-            no_client = PythonTask.from_coroutine(
-                self.logging_manager._flush_from_tokio()
-            )
-            result = await asyncio.wait_for(
-                asyncio.to_thread(no_client.block_on), timeout=10
-            )
-        self.assertIsNone(result)
-        no_client_task.assert_not_called()
-
-        self.logging_manager._logging_mesh_client = Mock()
-        with patch.object(
-            self.logging_manager,
-            "_new_flush_task",
-            return_value=_failing_python_task(
-                _FlushBaseException(_FLUSH_BASE_EXCEPTION_MESSAGE)
-            ),
-        ) as mock_new_flush_task:
-            adapter = PythonTask.from_coroutine(
-                self.logging_manager._flush_from_tokio()
-            )
-            with self.assertRaises(_FlushBaseException) as raised:
-                await asyncio.wait_for(asyncio.to_thread(adapter.block_on), timeout=10)
 
         self.assertIs(type(raised.exception), _FlushBaseException)
         self.assertEqual(str(raised.exception), _FLUSH_BASE_EXCEPTION_MESSAGE)

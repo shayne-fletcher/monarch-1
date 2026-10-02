@@ -205,16 +205,3 @@ class LoggingManager:
             await self._new_flush_task().spawn_handle()
         except Exception:
             pass
-
-    async def _flush_from_tokio(self) -> None:
-        """Flush while Rust's pytokio driver steps this coroutine on Tokio."""
-        if self._logging_mesh_client is None:
-            return
-        try:
-            # Despite being `async def`, this is not an asyncio task. Rust's
-            # pytokio driver advances it on Tokio. `spawn()` starts the Rust
-            # future, and this `await` yields its `Shared` back to pytokio; the
-            # Rust pytokio driver resumes this coroutine when the flush completes.
-            await self._new_flush_task().spawn()
-        except Exception:
-            pass

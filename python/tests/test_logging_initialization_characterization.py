@@ -8,6 +8,7 @@
 
 """Characterize host draining while proc-mesh logging is still initializing."""
 
+import asyncio
 import threading
 from typing import Any
 from unittest.mock import patch
@@ -22,7 +23,7 @@ from scoped_state import scoped_state
 
 @pytest.mark.timeout(90)
 @isolate_in_subprocess
-def test_flush_pending_spawns_does_not_await_logging_init() -> None:
+def test_drain_pending_spawns_does_not_await_logging_init() -> None:
     init_entered = threading.Event()
     release_init = threading.Event()
     real_init = LoggingManager.init
@@ -60,14 +61,14 @@ def test_flush_pending_spawns_does_not_await_logging_init() -> None:
 
                 flush_without_client: list[bool] = []
                 native_flush_constructions = 0
-                flush_from_tokio = proc_mesh._logging_manager._flush_from_tokio
+                flush_async = proc_mesh._logging_manager.flush_async
                 new_flush_task = proc_mesh._logging_manager._new_flush_task
 
-                async def record_flush_from_tokio() -> None:
+                async def record_flush_async() -> None:
                     flush_without_client.append(
                         proc_mesh._logging_manager._logging_mesh_client is None
                     )
-                    await flush_from_tokio()
+                    await flush_async()
 
                 def record_new_flush_task() -> PythonTask[None]:
                     nonlocal native_flush_constructions
@@ -77,8 +78,8 @@ def test_flush_pending_spawns_does_not_await_logging_init() -> None:
                 with (
                     patch.object(
                         proc_mesh._logging_manager,
-                        "_flush_from_tokio",
-                        record_flush_from_tokio,
+                        "flush_async",
+                        record_flush_async,
                     ),
                     patch.object(
                         proc_mesh._logging_manager,
@@ -86,9 +87,9 @@ def test_flush_pending_spawns_does_not_await_logging_init() -> None:
                         record_new_flush_task,
                     ),
                 ):
-                    PythonTask.from_coroutine(
-                        host._flush_pending_spawns()
-                    ).with_timeout(10).block_on()
+                    asyncio.run(
+                        asyncio.wait_for(host._drain_pending_spawns(), timeout=10)
+                    )
 
                 assert flush_without_client == [True]
                 assert native_flush_constructions == 0

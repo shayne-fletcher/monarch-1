@@ -21,6 +21,7 @@ from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Point, Regio
 from monarch._src.actor.actor_mesh import _Lazy, context
 from monarch._src.actor.future import Future
 from monarch._src.actor.proc_mesh import _get_bootstrap_args, ProcMesh
+from monarch._src.actor.returns_future import returns_future
 from monarch._src.actor.shape import MeshTrait, NDSlice, Shape
 from monarch.tools.config.workspace import Workspace
 
@@ -354,21 +355,28 @@ class HostMesh(MeshTrait):
     def _initialized_mesh(self) -> HyHostMesh:
         return self._hy_host_mesh.poll() or self._hy_host_mesh.block_on()
 
-    async def _flush_pending_spawns(self) -> None:
-        for shared in self._pending_spawns:
+    async def _drain_pending_spawns(self) -> None:
+        """Wait for every pending proc spawn, including any added while waiting,
+        then drain each proc mesh's actor spawns and flush its logs."""
+        pending = self._pending_spawns
+        while (shared := next(iter(pending), None)) is not None:
             try:
-                await shared
+                await shared.task().spawn_handle()
             except Exception:
                 pass
-        self._pending_spawns.clear()
+            # Another drain may have removed it while this one waited. Removal
+            # matches by identity in one step, so it cannot drop a different
+            # spawn that was never waited for.
+            try:
+                pending.remove(shared)
+            except ValueError:
+                pass
         for pm in self._proc_meshes:
-            await pm._flush_pending_actor_spawns()
-            try:
-                await pm._logging_manager._flush_from_tokio()
-            except Exception:
-                pass
+            await pm._drain_pending_actor_spawns()
+            await pm._logging_manager.flush_async()
 
-    def shutdown(self) -> Future[None]:
+    @returns_future
+    async def shutdown(self) -> None:
         """
         Shutdown the host mesh and all of its processes. It will throw an exception
         if this host mesh is a *reference* rather than *owned*, which can happen
@@ -385,16 +393,14 @@ class HostMesh(MeshTrait):
             Future[None]: A future that completes when the host mesh has been shut down.
         """
 
-        async def task() -> None:
-            await self._flush_pending_spawns()
-            hy_mesh = await self._hy_host_mesh
-            await hy_mesh.shutdown(context().actor_instance._as_rust())
-            # Remove the inner host mesh to clean up associated memory.
-            self._inner_host_mesh = None
+        await self._drain_pending_spawns()
+        hy_mesh = await self._hy_host_mesh.task().spawn_handle()
+        await hy_mesh.shutdown(context().actor_instance._as_rust())
+        # Remove the inner host mesh to clean up associated memory.
+        self._inner_host_mesh = None
 
-        return Future._from_coro(task())
-
-    def stop(self) -> Future[None]:
+    @returns_future
+    async def stop(self) -> None:
         """
         Stop the host mesh, releasing all resources but keeping worker
         processes alive for reconnection. A new HostMesh can be created that
@@ -407,12 +413,9 @@ class HostMesh(MeshTrait):
             Future[None]: A future that completes when the host mesh has been stopped.
         """
 
-        async def task() -> None:
-            await self._flush_pending_spawns()
-            hy_mesh = await self._hy_host_mesh
-            await hy_mesh.stop(context().actor_instance._as_rust())
-
-        return Future._from_coro(task())
+        await self._drain_pending_spawns()
+        hy_mesh = await self._hy_host_mesh.task().spawn_handle()
+        await hy_mesh.stop(context().actor_instance._as_rust())
 
     async def __aenter__(self) -> "HostMesh":
         if self._inner_host_mesh is None:
