@@ -63,7 +63,8 @@
 //! - **HDL-7 (`as_asyncio` publish).** The observer waits borrow-first (via
 //!   `wait_ready`, never `changed()`-first). The result is published on the
 //!   loop thread through `complete_asyncio_future`, by the wake reader
-//!   (HDL-17) or by the fallback's `call_soon_threadsafe` callback (HDL-21).
+//!   (HDL-17) or by the fallback's `call_soon_threadsafe` callback (HDL-21),
+//!   or, for a Handle already complete, by `as_asyncio` itself (HDL-22).
 //!   It sets a result only on a non-cancelled future, swallowing
 //!   `InvalidStateError`; any `StopIteration` (including subclasses) is wrapped
 //!   in `RuntimeError` first, since `set_exception` rejects `StopIteration`
@@ -139,8 +140,9 @@
 //! - **HDL-16 (permanent Python identity).** `Handle` and `WouldBlockRuntime`
 //!   have the canonical module `monarch._rust_bindings.monarch_hyperactor.handle`.
 //!   The legacy `pytokio` module does not export `Handle`.
-//! - **HDL-17 (GIL-free completion wake).** On a loop that accepts
-//!   `add_reader`, the `as_asyncio` observer task holds a `Notifier` (a token,
+//! - **HDL-17 (GIL-free completion wake).** For a Handle still pending when
+//!   `as_asyncio` is called, on a loop that accepts `add_reader`, the observer
+//!   task holds a `Notifier` (a token,
 //!   an mpsc sender and an `Arc<Waker>`) and the `wait_ready` future. It
 //!   publishes by pushing the token and writing the loop's pipe, never reading
 //!   the value and taking no GIL; the loop thread reads the value from the
@@ -164,7 +166,10 @@
 //!   waiting task's only owner outside the task's own cycle; `__traverse__`
 //!   exposes each entry's future and `Handle` object to the garbage collector.
 //!   Closing a loop therefore releases the channel-owned graph (the channel,
-//!   its pipe, its entries, their futures and `Handle`s), and a loop dropped
+//!   its read end, its entries, their futures and `Handle`s). The write end
+//!   stays open until every `Notifier` is dropped, so a loop closed while an
+//!   await waits on a `Handle` that never completes keeps that descriptor
+//!   (HDL-20). A loop dropped
 //!   without being closed while an await on a pending `Handle` is registered
 //!   is still freed by the collector. Not freed: a loop dropped without being
 //!   closed while an undelivered entry's `Handle` value references it, and any
@@ -172,13 +177,22 @@
 //!   own `Handle`. Both run through `PyHandle`, which the garbage collector
 //!   does not traverse.
 //! - **HDL-20 (late wake is harmless).** A notify after its channel is gone is
-//!   dropped without error or panic: the send fails, or the write gets `EPIPE`
-//!   (Rust's runtime and CPython both ignore `SIGPIPE`). Every `Notifier` owns
-//!   the write end through its `Arc<Waker>`, so no write reaches a reused
-//!   descriptor.
-//! - **HDL-21 (fallback).** A loop whose `add_reader` raises
-//!   `NotImplementedError` or that cannot be weakly referenced uses the
-//!   `call_soon_threadsafe` path; HDL-7 applies there unchanged.
+//!   dropped without error or panic: the send fails, or the write gets `EPIPE`.
+//!   This requires `SIGPIPE` to be ignored, as Rust's runtime and CPython set
+//!   it by default; in a process that restores `SIG_DFL`, a completion that
+//!   races loop teardown can kill the process. Every `Notifier` owns the write
+//!   end through its `Arc<Waker>` until its `Handle` completes, so no write
+//!   reaches a reused descriptor.
+//! - **HDL-21 (fallback).** For a Handle still pending, a loop whose
+//!   `add_reader` raises `NotImplementedError` or that cannot be weakly
+//!   referenced uses the `call_soon_threadsafe` path; HDL-7 applies there
+//!   unchanged.
+//! - **HDL-22 (ready shortcut).** `as_asyncio()` on a Handle that already holds
+//!   its outcome, a value, a stored exception or producer loss (HDL-10),
+//!   returns a loop future already completed with it through
+//!   `complete_asyncio_future`, with no observer task and no wake-channel
+//!   registration. Awaiting it returns without giving the loop a turn, as for
+//!   any finished asyncio future.
 
 use std::error::Error;
 use std::future::Future;
@@ -830,19 +844,35 @@ impl PyHandle {
     /// be weakly referenced (HDL-21). Any other failure to install the channel
     /// or register the future is raised.
     ///
-    /// The observer borrows the current watch value first, so a core that
-    /// already holds its value (or one that completes before the observer
-    /// starts) resolves rather than hangs. The result is set on the loop
-    /// thread. A cancel can race that: a cancelled future is left alone and the
-    /// handle continues. If the loop has closed by then, the result is never
-    /// set, and nothing panics.
+    /// A Handle that already holds its outcome returns a future already
+    /// completed with it, and starts no observer (HDL-22). For a pending
+    /// Handle, the observer borrows the current watch value first, so a core
+    /// that completes before the observer starts resolves rather than hangs.
+    /// The result is set on the loop thread. A cancel can race that: a
+    /// cancelled future is left alone and the handle continues. If the loop has
+    /// closed by then, the result is never set, and nothing panics.
     ///
-    /// Each call spawns its own observer; cancelling the returned future does
-    /// not stop the observer, which exits when the handle resolves.
+    /// Each call on a pending Handle spawns its own observer; cancelling the
+    /// returned future does not stop the observer, which exits when the handle
+    /// resolves.
     fn as_asyncio<'py>(slf: PyRef<'_, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         // HDL-6: off a loop this yields the native RuntimeError, not WouldBlockRuntime.
         let event_loop = pyo3_async_runtimes::get_running_loop(py)?;
         let fut = event_loop.call_method0("create_future")?;
+
+        // HDL-22: `poll()` registers no waiter. A value that arrives after it
+        // is found by the observer's borrow-first wait below.
+        match slf.core.poll() {
+            Ok(Some(value)) => {
+                complete_asyncio_future(&fut, false, value)?;
+                return Ok(fut);
+            }
+            Err(err) => {
+                complete_asyncio_future(&fut, true, err.into_value(py).into_any())?;
+                return Ok(fut);
+            }
+            Ok(None) => {}
+        }
         let wait = slf.core.wait_ready();
 
         if let Some(channel) = LoopWake::for_loop(py, &event_loop)? {
@@ -1008,6 +1038,10 @@ pub fn register_python_bindings(handle_mod: &Bound<'_, PyModule>) -> PyResult<()
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+
     use pyo3::IntoPyObjectExt;
     use pyo3::exceptions::PyRuntimeError;
     use pyo3::exceptions::PyValueError;
@@ -1083,9 +1117,10 @@ def run_get_on_loop_strict(h):
 
 async def _cancel(h):
     f = h.as_asyncio()
-    f.cancel()
+    was_done = f.done()
+    accepted = f.cancel()
     await asyncio.sleep(0.05)
-    return (f.cancelled(), h.poll())
+    return (was_done, accepted, f.cancelled(), h.poll())
 
 def run_cancel(h):
     loop = asyncio.new_event_loop()
@@ -1122,6 +1157,56 @@ def run_two(h):
         return loop.run_until_complete(_two(h))
     finally:
         loop.close()
+
+class CountingLoop(asyncio.SelectorEventLoop):
+    # Counts only the public add_reader, which the wake channel uses; the
+    # loop's own self-pipe goes through _add_reader.
+    def __init__(self):
+        super().__init__()
+        self.add_reader_calls = 0
+
+    def add_reader(self, fd, callback, *args):
+        self.add_reader_calls += 1
+        return super().add_reader(fd, callback, *args)
+
+def observe_ready(h):
+    # (done when returned, the outcome or the exception, add_reader calls)
+    loop = CountingLoop()
+
+    async def observe():
+        fut = h.as_asyncio()
+        done = fut.done()
+        try:
+            outcome = await fut
+        except BaseException as e:
+            outcome = e
+        return (done, outcome, loop.add_reader_calls)
+
+    try:
+        return loop.run_until_complete(observe())
+    finally:
+        loop.close()
+
+def ready_await_order(h):
+    order = []
+
+    async def a():
+        order.append("a1")
+        await h
+        order.append("a2")
+
+    async def b():
+        order.append("b")
+
+    async def main():
+        await asyncio.gather(a(), b())
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+    return order
 "#;
         PyModule::from_code(py, code, c"handle_test_helper.py", c"handle_test_helper").unwrap()
     }
@@ -1395,8 +1480,8 @@ def run_two(h):
         });
     }
 
-    // await on a pre-resolved handle resolves on a real loop (borrow-first, no
-    // hang) and yields the value.
+    // await on a pre-resolved handle resolves on a real loop and yields the
+    // value.
     // Attests HDL-2, HDL-7.
     #[test]
     fn await_resolves_ok_on_loop() {
@@ -1417,17 +1502,26 @@ def run_two(h):
         assert_eq!(got, 42, "await should resolve to the value on a real loop");
     }
 
-    // await surfaces the stored error as a Python exception on a real loop.
+    // await surfaces an error sent while it waits as a Python exception on a
+    // real loop.
     // Attests HDL-2, HDL-7.
     #[test]
     fn await_resolves_err_on_loop() {
         ensure_python();
-        let (tx, rx) = watch::channel(None);
-        tx.send(Some(Err(PyValueError::new_err("boom")))).unwrap();
+        let (tx, handle) = pending_handle();
+        let waited = Arc::new(AtomicBool::new(false));
+        let waited_in_producer = Arc::clone(&waited);
+        get_tokio_runtime().spawn(async move {
+            // The Handle holds one receiver and `wait_ready()` clones a second,
+            // so the error is sent only once the observer is on the pending path.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            while tx.receiver_count() < 2 && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            waited_in_producer.store(tx.receiver_count() >= 2, Ordering::SeqCst);
+            let _ = tx.send(Some(Err(PyValueError::new_err("boom"))));
+        });
         let is_value_error = monarch_with_gil_blocking(GilSite::Test, |py| {
-            let handle = PyHandle {
-                core: HandleCore::new(rx, None, None),
-            };
             let h = Py::new(py, handle).unwrap();
             let helper = loop_helper(py);
             let err = helper
@@ -1437,6 +1531,10 @@ def run_two(h):
                 .unwrap_err();
             err.is_instance_of::<PyValueError>(py)
         });
+        assert!(
+            waited.load(Ordering::SeqCst),
+            "the error should be sent only after the observer waited"
+        );
         assert!(is_value_error, "await should raise the stored exception");
     }
 
@@ -1467,31 +1565,170 @@ def run_two(h):
     }
 
     // Cancelling an as_asyncio() future does not cancel the handle. Here the
-    // handle is pre-resolved: the cancelled future's completion callback no-ops
-    // and the value stays observable via poll(). The live-producer case -- one
-    // observer's cancel leaves the producer running and other observers still
-    // resolving -- is `cancel_asyncio_future_does_not_stop_producer_or_observers`.
-    // Attests HDL-3, HDL-7.
+    // handle is pre-resolved, so its observer is already done: cancel() is
+    // refused and the value stays observable via poll(). The live-producer
+    // case -- one observer's cancel leaves the producer running and other
+    // observers still resolving -- is
+    // `cancel_asyncio_future_does_not_stop_producer_or_observers`.
+    // Attests HDL-3, HDL-22.
     #[test]
     fn cancel_asyncio_future_does_not_cancel_handle() {
         ensure_python();
-        let (cancelled, handle_resolved) =
-            monarch_with_gil_blocking(GilSite::Test, |py| -> (bool, bool) {
+        let (was_done, accepted, cancelled, handle_resolved) =
+            monarch_with_gil_blocking(GilSite::Test, |py| -> (bool, bool, bool, bool) {
                 let value = 42i64.into_py_any(py).unwrap();
                 let handle = PyHandle::from_value(value).unwrap();
                 let h = Py::new(py, handle).unwrap();
                 let helper = loop_helper(py);
                 let res = helper.getattr("run_cancel").unwrap().call1((h,)).unwrap();
                 let tup = res.cast::<PyTuple>().unwrap();
-                let cancelled = tup.get_item(0).unwrap().extract::<bool>().unwrap();
-                let poll_val = tup.get_item(1).unwrap();
-                (cancelled, !poll_val.is_none())
+                let flag = |i| tup.get_item(i).unwrap().extract::<bool>().unwrap();
+                (
+                    flag(0),
+                    flag(1),
+                    flag(2),
+                    !tup.get_item(3).unwrap().is_none(),
+                )
             });
-        assert!(cancelled, "the asyncio future should be cancelled");
+        assert!(was_done, "a ready handle's observer should already be done");
+        assert!(!accepted, "cancel() on a done observer should return false");
+        assert!(!cancelled, "a done observer should not become cancelled");
         assert!(
             handle_resolved,
             "cancelling the future must not cancel the handle"
         );
+    }
+
+    // Run `observe_ready` on `h`: whether the observer was done when returned,
+    // its outcome (a value or an exception object), and the add_reader calls.
+    fn observe_ready(py: Python<'_>, h: Py<PyHandle>) -> (bool, Bound<'_, PyAny>, i64) {
+        let res = loop_helper(py)
+            .getattr("observe_ready")
+            .unwrap()
+            .call1((h,))
+            .unwrap();
+        let tup = res.cast::<PyTuple>().unwrap();
+        (
+            tup.get_item(0).unwrap().extract().unwrap(),
+            tup.get_item(1).unwrap(),
+            tup.get_item(2).unwrap().extract().unwrap(),
+        )
+    }
+
+    fn errored_handle(err: PyErr) -> PyHandle {
+        let (tx, rx) = watch::channel(None);
+        tx.send(Some(Err(err))).unwrap();
+        PyHandle {
+            core: HandleCore::new(rx, None, None),
+        }
+    }
+
+    // A ready value comes back in an already-done observer, and no wake channel
+    // is installed.
+    // Attests HDL-22.
+    #[test]
+    fn as_asyncio_ready_value_is_done_without_wake() {
+        ensure_python();
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            let handle = PyHandle::from_value(42i64.into_py_any(py).unwrap()).unwrap();
+            let (done, outcome, add_reader_calls) = observe_ready(py, Py::new(py, handle).unwrap());
+            assert!(done, "a ready handle's observer should already be done");
+            assert_eq!(outcome.extract::<i64>().unwrap(), 42);
+            assert_eq!(add_reader_calls, 0, "no wake channel should be installed");
+        });
+    }
+
+    // A ready error comes back in an already-done observer; a stored
+    // StopIteration is wrapped in RuntimeError as on the pending path.
+    // Attests HDL-7, HDL-22.
+    #[test]
+    fn as_asyncio_ready_error_is_done_without_wake() {
+        ensure_python();
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            let h = Py::new(py, errored_handle(PyValueError::new_err("boom"))).unwrap();
+            let (done, outcome, add_reader_calls) = observe_ready(py, h);
+            assert!(done, "a ready handle's observer should already be done");
+            assert!(outcome.is_instance_of::<PyValueError>());
+            assert_eq!(add_reader_calls, 0, "no wake channel should be installed");
+
+            let h = Py::new(py, errored_handle(PyStopIteration::new_err(()))).unwrap();
+            let (done, outcome, _) = observe_ready(py, h);
+            assert!(done);
+            assert!(
+                outcome.is_instance_of::<PyRuntimeError>()
+                    && !outcome.is_instance_of::<PyStopIteration>(),
+                "a stored StopIteration should surface as RuntimeError"
+            );
+        });
+    }
+
+    // A producer that ended without publishing is a ready outcome too.
+    // Attests HDL-10, HDL-22.
+    #[test]
+    fn as_asyncio_producer_ended_is_done_without_wake() {
+        ensure_python();
+        let (tx, handle) = pending_handle();
+        drop(tx);
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            let (done, outcome, add_reader_calls) = observe_ready(py, Py::new(py, handle).unwrap());
+            assert!(done, "a ready handle's observer should already be done");
+            assert_producer_ended_error(py, &PyErr::from_value(outcome));
+            assert_eq!(add_reader_calls, 0, "no wake channel should be installed");
+        });
+    }
+
+    // A producer that publishes and drops its sender between poll()'s empty
+    // read and its closed check: the observer gets what was published, not
+    // producer loss.
+    // Attests HDL-10, HDL-22.
+    #[test]
+    fn as_asyncio_reads_an_outcome_sent_just_before_close() {
+        ensure_python();
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            let outcomes = [
+                Ok(42i64.into_py_any(py).unwrap()),
+                Err(PyValueError::new_err("boom")),
+            ];
+            for outcome in outcomes {
+                let expect_value = outcome.is_ok();
+                let (tx, handle) = pending_handle();
+                POLL_BETWEEN_CHECKS.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        tx.send(Some(outcome)).unwrap();
+                        drop(tx);
+                    }));
+                });
+                let (done, got, _) = observe_ready(py, Py::new(py, handle).unwrap());
+                assert!(done, "the published outcome is ready");
+                if expect_value {
+                    assert_eq!(got.extract::<i64>().unwrap(), 42);
+                } else {
+                    assert!(
+                        got.is_instance_of::<PyValueError>(),
+                        "the stored exception should surface, not producer loss: {got}"
+                    );
+                }
+            }
+        });
+    }
+
+    // Awaiting a ready handle does not give the loop a turn: the awaiting task
+    // runs on before a task scheduled after it, so the order is a1, a2, b.
+    // Attests HDL-22.
+    #[test]
+    fn await_ready_handle_takes_no_loop_turn() {
+        ensure_python();
+        let order = monarch_with_gil_blocking(GilSite::Test, |py| -> Vec<String> {
+            let handle = PyHandle::from_value(1i64.into_py_any(py).unwrap()).unwrap();
+            loop_helper(py)
+                .getattr("ready_await_order")
+                .unwrap()
+                .call1((Py::new(py, handle).unwrap(),))
+                .unwrap()
+                .extract()
+                .unwrap()
+        });
+        assert_eq!(order, ["a1", "a2", "b"]);
     }
 
     // The live-producer companion to `cancel_asyncio_future_does_not_cancel_handle`:
@@ -1506,8 +1743,18 @@ def run_two(h):
         ensure_python();
         let value = monarch_with_gil_blocking(GilSite::Test, |py| 42i64.into_py_any(py).unwrap());
         let (tx, handle) = pending_handle();
+        let both_waited = Arc::new(AtomicBool::new(false));
+        let both_waited_in_producer = Arc::clone(&both_waited);
         get_tokio_runtime().spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            // Publish only once both observers wait: the Handle holds one
+            // receiver and each pending `as_asyncio()` clones another. A value
+            // published first would leave the first observer already done, and
+            // its cancel refused (HDL-22).
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            while tx.receiver_count() < 3 && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            both_waited_in_producer.store(tx.receiver_count() >= 3, Ordering::SeqCst);
             let _ = tx.send(Some(Ok(value)));
         });
         let (cancelled, awaited, polled) =
@@ -1526,6 +1773,10 @@ def run_two(h):
                     tup.get_item(2).unwrap().extract::<i64>().unwrap(),
                 )
             });
+        assert!(
+            both_waited.load(Ordering::SeqCst),
+            "the producer should publish only after both observers waited"
+        );
         assert!(cancelled, "the cancelled future should stay cancelled");
         assert_eq!(
             awaited, 42,
@@ -1537,14 +1788,27 @@ def run_two(h):
         );
     }
 
-    // Two as_asyncio() futures from one handle both resolve on a real loop.
+    // Two as_asyncio() futures waiting on one handle both resolve on a real
+    // loop.
     // Attests HDL-3, HDL-7.
     #[test]
     fn two_asyncio_observers_resolve_on_loop() {
         ensure_python();
+        let value = monarch_with_gil_blocking(GilSite::Test, |py| 8i64.into_py_any(py).unwrap());
+        let (tx, handle) = pending_handle();
+        let both_waited = Arc::new(AtomicBool::new(false));
+        let both_waited_in_producer = Arc::clone(&both_waited);
+        get_tokio_runtime().spawn(async move {
+            // The Handle holds one receiver and each pending `as_asyncio()`
+            // clones another.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            while tx.receiver_count() < 3 && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            both_waited_in_producer.store(tx.receiver_count() >= 3, Ordering::SeqCst);
+            let _ = tx.send(Some(Ok(value)));
+        });
         let (a, b) = monarch_with_gil_blocking(GilSite::Test, |py| -> (i64, i64) {
-            let value = 8i64.into_py_any(py).unwrap();
-            let handle = PyHandle::from_value(value).unwrap();
             let h = Py::new(py, handle).unwrap();
             let helper = loop_helper(py);
             let res = helper.getattr("run_two").unwrap().call1((h,)).unwrap();
@@ -1554,6 +1818,10 @@ def run_two(h):
                 tup.get_item(1).unwrap().extract::<i64>().unwrap(),
             )
         });
+        assert!(
+            both_waited.load(Ordering::SeqCst),
+            "the value should be sent only after both observers waited"
+        );
         assert_eq!((a, b), (8, 8), "both observers should resolve to the value");
     }
 
@@ -1852,15 +2120,28 @@ class RaisingFuture:
         });
     }
 
-    // A producer that drops its sender without sending surfaces through
-    // as_asyncio/await (wait_ready's RecvError -> set_exception) as a raised
-    // exception, not a hang -- the async mirror of dropped_producer_surfaces_error.
+    // A producer that drops its sender without sending, once the observer is
+    // waiting, surfaces through as_asyncio/await (wait_ready's RecvError ->
+    // set_exception) as a raised exception, not a hang -- the async mirror of
+    // dropped_producer_surfaces_error. The already-ended case is
+    // `as_asyncio_producer_ended_is_done_without_wake`.
     // Attests HDL-10.
     #[test]
     fn as_asyncio_dropped_producer_raises_on_loop() {
         ensure_python();
         let (tx, handle) = pending_handle();
-        drop(tx);
+        let observed = Arc::new(AtomicBool::new(false));
+        let gate = observed.clone();
+        get_tokio_runtime().spawn(async move {
+            // The Handle holds one receiver and `wait_ready()` clones a second,
+            // so the producer drops only once the observer is on the pending path.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            while tx.receiver_count() < 2 && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            gate.store(tx.receiver_count() >= 2, Ordering::SeqCst);
+            drop(tx);
+        });
         monarch_with_gil_blocking(GilSite::Test, |py| {
             let h = Py::new(py, handle).unwrap();
             let helper = loop_helper(py);
@@ -1871,6 +2152,10 @@ class RaisingFuture:
                 .unwrap_err();
             assert_producer_ended_error(py, &err);
         });
+        assert!(
+            observed.load(Ordering::SeqCst),
+            "the producer should drop only after the observer is waiting"
+        );
     }
 
     // A StopIteration producer error is wrapped in RuntimeError before
