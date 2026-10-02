@@ -657,14 +657,6 @@ class ProcMesh(MeshTrait):
             raise RuntimeError("`ProcMesh` has already been stopped")
         return self
 
-    async def _flush_pending_actor_spawns(self) -> None:
-        for mesh in self._pending_actor_spawns:
-            try:
-                await mesh.initialized._take_inner().spawn()
-            except Exception:
-                pass
-        self._pending_actor_spawns.clear()
-
     async def _drain_pending_actor_spawns(self) -> None:
         """Wait for every pending actor spawn, including any added meanwhile."""
         pending = self._pending_actor_spawns

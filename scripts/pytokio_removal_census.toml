@@ -350,12 +350,12 @@ pytokio_import = "monarch._rust_bindings.monarch_hyperactor.pytokio"
 doc_legacy_surface = "PythonTask|PyShared|pytokio"
 
 [totals]
-py_python_task_new = 20
+py_python_task_new = 18
 raw_python_task_new = 5
-from_coro = 12
+from_coro = 10
 rust_from_coro = 2
 from_coroutine = 7
-take_inner = 3
+take_inner = 2
 rust_take_inner = 2
 take_inner_retire = 2
 caller_free_primitive = 4
@@ -1195,8 +1195,9 @@ path = "fbcode/monarch/python/monarch/_src/actor/host_mesh.py"
 symbol = "HostMesh.shutdown[Future._from_coro(task())]"
 operation = "from_coro"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3b"
+transition_revision = "D122965431"
 public_operation = "HostMesh.shutdown()"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
@@ -1208,7 +1209,7 @@ eager_effect = "an eager replacement would begin draining and shutting down duri
 drop_behavior = "before observation shutdown never runs; after observation the retained producer completes despite observer cancellation"
 first_side_effect = "flushing pending spawns"
 unobserved_error = "an unobserved Future reports nothing; after observation, the successful result remains available to another observer. Source-grounded: Python pending-spawn and logging-flush failures are silently suppressed, while native drain and acknowledgement failures warn and return success. Tested consumed states differ: a second preconstructed shutdown drains and then raises before another native call, while shutdown after stop reports success and clears the Python field although the workers remain live"
-disposition = "require a binding-specific design"
+disposition = "preserve timing"
 semantic_class = "deferred_side_effect"
 oracle = [
   "fbcode//monarch/python/tests:test_host_mesh::test_preconstructed_shutdowns_drain_after_observer_cancellation",
@@ -1224,8 +1225,9 @@ path = "fbcode/monarch/python/monarch/_src/actor/host_mesh.py"
 symbol = "HostMesh.stop[Future._from_coro(task())]"
 operation = "from_coro"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3b"
+transition_revision = "D122965431"
 public_operation = "HostMesh.stop()"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
@@ -1237,7 +1239,7 @@ eager_effect = "an eager replacement would begin draining and stopping during th
 drop_behavior = "stop never runs before observation"
 first_side_effect = "flushing pending spawns"
 unobserved_error = "an unobserved Future reports nothing. Source-grounded: Python pending-spawn and logging-flush failures are silently suppressed, while native drain failures warn and return success. A repeated stop drains and reaches the binding again, then returns None; source inspection shows the empty cell prevents a second domain stop and lets an overlapping second stop return while the first domain stop is still running"
-disposition = "intentionally become eager"
+disposition = "preserve timing"
 semantic_class = "deferred_side_effect"
 oracle = [
   "fbcode//monarch/python/tests:test_host_mesh::test_shutdown_host_mesh",
@@ -1320,7 +1322,7 @@ operation = "from_coro"
 scope = "production"
 state = "migrated"
 transition = "6.3b"
-transition_revision = "self"
+transition_revision = "D122169853"
 public_operation = "ProcMesh.stop()"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
@@ -1862,7 +1864,7 @@ operation = "helper_symbol"
 scope = "production"
 state = "migrated"
 transition = "6.3b"
-transition_revision = "self"
+transition_revision = "D122169853"
 
 [[site]]
 id = "hs.proc_mesh.PyShared"
@@ -2535,8 +2537,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/host_mesh.rs"
 symbol = "PyHostMesh::shutdown"
 operation = "py_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3b"
+transition_revision = "D122965431"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from PyHostMesh::shutdown"
 consumer = "HostMesh.shutdown, after flushing pending spawns"
@@ -2546,7 +2549,7 @@ abandonment = "source-grounded for a direct private caller: dropping the raw tas
 eager_effect = "an eager replacement would take the SharedCell and start domain shutdown during the binding call"
 drop_behavior = "source-grounded for the direct binding: an undriven raw task performs no shutdown; the public wrapper's own unobserved Future never calls this binding"
 unobserved_error = "a Ref raises synchronously with its exact managed-only message. Source-grounded: a first Owned shutdown warns and returns success on native drain or acknowledgement failure; an empty-cell repeat logs and returns success without domain shutdown. The empty-cell outcome is a current defect to revisit when repeated teardown is corrected, not a target invariant"
-disposition = "require a binding-specific design"
+disposition = "intentionally become eager"
 semantic_class = "deferred_side_effect"
 oracle = [
   "fbcode//monarch/python/tests:test_host_mesh::test_preconstructed_shutdowns_drain_after_observer_cancellation",
@@ -2588,8 +2591,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/host_mesh.rs"
 symbol = "PyHostMesh::stop"
 operation = "py_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3b"
+transition_revision = "D122965431"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from PyHostMesh::stop"
 consumer = "HostMesh.stop, after flushing pending spawns"
@@ -2695,13 +2699,13 @@ state = "legacy"
 transition = "6.3b"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from LoggingMeshClient::flush"
-consumer = "LoggingManager._new_flush_task, reached by flush, flush_async and _flush_from_tokio"
-driver = "flush drives a Handle synchronously; flush_async is an asyncio-driven coroutine awaiting a Handle; _flush_from_tokio is advanced by the pytokio driver on Tokio and awaits a Shared. Adapter-level coverage proves that two manager calls request and drive distinct tasks; their mapping to distinct native operations is source-composed from _new_flush_task calling LoggingMeshClient.flush each time"
+consumer = "LoggingManager._new_flush_task, reached by flush and flush_async"
+driver = "flush drives a Handle synchronously; flush_async is an asyncio-driven coroutine awaiting a Handle. Adapter-level coverage proves that two manager calls request and drive distinct tasks; their mapping to distinct native operations is source-composed from _new_flush_task calling LoggingMeshClient.flush each time"
 start_point = "the binding call captures the client actor and optional forwarder mesh but leaves the task lazy. Once spawn or spawn_handle starts it, a no-forwarder task returns immediately; a forwarding task posts StartSyncFlush and runs the distributed barrier"
-abandonment = "two tested states. Before start, dropping a raw task performs no flush: against a completed baseline probe v, the next completed probe returns v + 1, which is only that probe's own increment. After start, the synthetic flush_async Handle test proves that cancelling its asyncio observer does not abort the controlled producer. Source-grounded composition: native spawn_handle and the Tokio spawn path both use non-abortable spawn_core(false), so their producers likewise continue after observer cancellation"
+abandonment = "two tested states. Before start, dropping a raw task performs no flush: against a completed baseline probe v, the next completed probe returns v + 1, which is only that probe's own increment. After start, the synthetic flush_async Handle test proves that cancelling its asyncio observer does not abort the controlled producer. Source-grounded composition: native spawn_handle uses non-abortable spawn_core(false), so its producer likewise continues after observer cancellation"
 eager_effect = "an eager conversion would begin the sync-flush barrier during the binding call; today the effect begins only at spawn or spawn_handle"
-drop_behavior = "dropping an undriven raw task is inert. The synthetic flush_async cancellation test cancels the only observer, releases the producer, and proves completion through an independent bounded event. Source-grounded: real native flush producers use the same non-abortable Handle and Shared scheduling policy"
-unobserved_error = "ordinary Exception is suppressed by all three logging-manager adapters. A sentinel BaseException escapes all three with its exact type and message. Cancelling the synthetic flush_async observer raises asyncio.CancelledError while its controlled producer continues; continuation of a real native flush and the Tokio spawn path is source-grounded through their shared non-abortable spawn_core(false) policy"
+drop_behavior = "dropping an undriven raw task is inert. The synthetic flush_async cancellation test cancels the only observer, releases the producer, and proves completion through an independent bounded event. Source-grounded: real native flush producers use the same non-abortable Handle scheduling policy"
+unobserved_error = "ordinary Exception is suppressed by both logging-manager adapters. A sentinel BaseException escapes both with its exact type and message. Cancelling the synthetic flush_async observer raises asyncio.CancelledError while its controlled producer continues; continuation of a real native flush is source-grounded through the non-abortable spawn_core(false) policy"
 disposition = "preserve timing"
 semantic_class = "deferred_side_effect"
 oracle = [
@@ -2709,15 +2713,12 @@ oracle = [
   "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::logging::tests::flush_behaviors",
   "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerTest::test_flush_handles_exception_gracefully",
   "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerTest::test_flush_propagates_base_exception",
-  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerTest::test_flush_from_tokio_awaits_shared_not_handle",
-  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerTest::test_flush_from_tokio_suppresses_ordinary_error",
   "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_awaits_handle_not_shared",
   "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_suppresses_ordinary_error",
   "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_propagates_base_exception",
-  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_from_tokio_propagates_base_exception",
   "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_cancellation_leaves_producer_reapable",
   "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_two_manager_flushes_create_two_operations",
-  "fbcode//monarch/python/tests:test_logging_initialization_characterization::test_flush_pending_spawns_does_not_await_logging_init",
+  "fbcode//monarch/python/tests:test_logging_initialization_characterization::test_drain_pending_spawns_does_not_await_logging_init",
   "fbcode//monarch/python/tests:test_host_mesh::test_preconstructed_shutdowns_drain_after_observer_cancellation",
   "fbcode//monarch/python/tests:test_python_actors::test_flush_async_drives_flush_on_asyncio_loop",
   "fbcode//monarch/python/tests:test_python_actors::test_multiple_ongoing_flushes_no_deadlock",
@@ -2741,7 +2742,7 @@ start_point = "proc-mesh validation happens during the binding call; a valid cal
 abandonment = "a direct binding caller can drop the raw task before drive, which creates no LogClientActor; the production LoggingManager.init path awaits it immediately"
 eager_effect = "an eager conversion would begin spawning the local log client and remote logging actors during the binding call; today construction performs no domain work"
 drop_behavior = "dropping an undriven raw task is inert, and a fresh task can still create exactly one local LogClientActor"
-unobserved_error = "source-grounded: LoggingManager.init does not catch a spawn failure; _proc_mesh retains it and a later observer receives it unchanged. If nobody observes _proc_mesh, _flush_pending_spawns does not await it, so host drain does not itself report the failure"
+unobserved_error = "source-grounded: LoggingManager.init does not catch a spawn failure; _proc_mesh retains it and a later observer receives it unchanged. If nobody observes _proc_mesh, _drain_pending_spawns does not await it, so host drain does not itself report the failure"
 disposition = "preserve timing"
 semantic_class = "deferred_side_effect"
 oracle = [
@@ -2816,7 +2817,7 @@ operation = "py_python_task_new"
 scope = "production"
 state = "migrated"
 transition = "6.3b"
-transition_revision = "self"
+transition_revision = "D122169853"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from PyProcMesh::stop_nonblocking"
 consumer = "ProcMesh.stop, after flushing pending actor spawns and logs"
@@ -3168,7 +3169,7 @@ operation = "pytokio_import"
 scope = "test"
 state = "legacy"
 transition = "6.8"
-members = ["PythonTask", "Shared"]
+members = ["PythonTask"]
 
 [[site]]
 id = "im.test_mailbox.module"
@@ -3842,8 +3843,9 @@ path = "fbcode/monarch/python/monarch/_src/actor/proc_mesh.py"
 symbol = "ProcMesh._flush_pending_actor_spawns[mesh.initialized._take_inner]"
 operation = "take_inner"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3b"
+transition_revision = "D122965431"
 
 [[site]]
 id = "ot.proc_mesh.ProcMesh.from_host_mesh.task[setup_actor.setup.call._take_inner]"

@@ -9,6 +9,7 @@
 from typing import Any, Callable, final
 
 from monarch._rust_bindings.monarch_hyperactor.context import Instance
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Point, Region
@@ -67,7 +68,7 @@ class HostMesh:
     def __reduce__(self) -> Any: ...
     # pyrefly: ignore [bad-override]
     def __eq__(self, other: "HostMesh") -> bool: ...
-    def shutdown(self, instance: Instance) -> PythonTask[None]:
+    def shutdown(self, instance: Instance) -> Handle[None]:
         """
         Shutdown the hosts in this mesh. This will throw an exception if this object
         is backed by a reference to a mesh rather than an owned mesh.
@@ -77,7 +78,7 @@ class HostMesh:
         """
         ...
 
-    def stop(self, instance: Instance) -> PythonTask[None]:
+    def stop(self, instance: Instance) -> Handle[None]:
         """
         Stop the hosts in this mesh, releasing all resources but keeping
         worker processes alive for reconnection. Throws if this object is

@@ -936,7 +936,7 @@ async def test_actor_spawn_then_immediate_shutdown() -> None:
         flush_started = False
         host_flush_called = False
         new_flush_task = logging_manager._new_flush_task
-        flush_from_tokio = logging_manager._flush_from_tokio
+        flush_async = logging_manager.flush_async
 
         def record_flush_start() -> PythonTask[None]:
             flush_task = new_flush_task()
@@ -948,10 +948,10 @@ async def test_actor_spawn_then_immediate_shutdown() -> None:
 
             return PythonTask.from_coroutine(task())
 
-        async def record_flush_from_tokio() -> None:
+        async def record_flush_async() -> None:
             nonlocal host_flush_called
             host_flush_called = True
-            await flush_from_tokio()
+            await flush_async()
 
         # Constructing the first TestActor on a proc imports this module, pytest
         # included, on the actor's event loop. A stop during that import queues
@@ -986,8 +986,8 @@ async def test_actor_spawn_then_immediate_shutdown() -> None:
             patch.object(logging_manager, "_new_flush_task", record_flush_start),
             patch.object(
                 logging_manager,
-                "_flush_from_tokio",
-                record_flush_from_tokio,
+                "flush_async",
+                record_flush_async,
             ),
         ):
             shutdown_result = await host.shutdown()
