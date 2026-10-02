@@ -40,6 +40,44 @@ def _as_python_task(s: str | Future[str]) -> "PythonTask[str]":
         return s._take_inner()
 
 
+# Worker-process fork invariants:
+#
+# `fork()` copies a process's Python objects, locks and file descriptors into
+# the child, but only the calling thread survives: actor event-loop threads and
+# Tokio workers do not. Before `os.fork()` returns in the child, CPython's child
+# prologue clears the vanished threads' states, which can run destructors, and
+# runs `os.register_at_fork(after_in_child=...)` hooks. These rules apply to a
+# process after it calls `start_worker_loop_forever`, `run_worker_loop_forever`
+# or `run_worker_loop_until_shutdown`, to procs started by native
+# `bootstrap_main()`, and to forks from actor code in any process. In a client
+# process the CF-* rules in `actor_mesh.py` also apply.
+#
+# WF-1 (process-state-is-pid-owned): state created by `prepare_worker_loop()`,
+#   native `bootstrap_main()` or a Monarch actor loop belongs to the PID that
+#   started it.
+# WF-2 (inherited-state-is-unusable): a child forked after WF-1 begins must not
+#   drive or finalize inherited Monarch process state. An unenforced caller
+#   obligation.
+# WF-3 (fork-site-hard-boundary): the child never returns or suspends into
+#   copied code: after `os.fork()` its branch runs to `os._exit()` or
+#   `os.exec*()`. Before that it may make ordinary calls that do not touch
+#   inherited state, including `asyncio.run()` on a fresh loop under asyncio's
+#   default event-loop policy, whose after-fork hook resets the copied loop
+#   state; a caller-installed policy is outside this. Importing a not-yet-loaded
+#   module or logging can reach inherited locks, hooks or Monarch handlers.
+#   `exec` closes only `CLOEXEC` descriptors, so an adopted worker listener can
+#   stay open in the new image. An unenforced caller obligation, witnessed by
+#   `test_worker_fork_contract.py`.
+# WF-4 (parent-stays-usable): on the WF-3 path, Monarch-owned objects released by
+#   the child prologue and Monarch's own child hooks leave the parent's actor-loop
+#   wakeups, executor, Tokio reactor, transports and worker service usable.
+#   Caller hooks that touch inherited state are outside this guarantee.
+#   Witnessed by `test_worker_fork_contract.py`.
+# WF-5 (no-recovery): nothing resets, reconstructs, takes over or cleans up
+#   inherited worker state, and normal interpreter exit in the child is
+#   unsupported.
+
+
 def _validate_worker_loop_args(
     *,
     private_key: PrivateKey,
@@ -125,6 +163,12 @@ def start_worker_loop_forever(
     We can defer implementing authentication for a bit, but for any open source release, anyone
     is going to worry about worker machines opening unencrypted ports and waiting for connections
     on a service that evals python code, so we should just build it in.
+
+    A child forked from this process after this call must not return or await
+    into the copied event loop; it must end in ``os._exit()`` or
+    ``os.exec*()``, and under asyncio's default event-loop policy may run a
+    fresh loop with ``asyncio.run()`` first (WF-3 in
+    ``monarch/_src/actor/bootstrap.py``).
     """
     _validate_worker_loop_args(private_key=private_key, ca=ca, address=address)
     return _start_worker_loop_forever(address)
@@ -139,7 +183,10 @@ def run_worker_loop_forever(
     """Run a worker server until host shutdown terminates this process.
 
     Address and security arguments have the same meaning as in
-    :func:`start_worker_loop_forever`.
+    :func:`start_worker_loop_forever`. A child forked from this process after
+    this call must not return or await into the copied event loop; it must end
+    in ``os._exit()`` or ``os.exec*()``, and under asyncio's default event-loop
+    policy may run a fresh loop with ``asyncio.run()`` first (WF-3).
     """
     _validate_worker_loop_args(private_key=private_key, ca=ca, address=address)
     _reject_blocking_worker_loop_in_tokio("run_worker_loop_forever")
@@ -156,7 +203,11 @@ def run_worker_loop_until_shutdown(
 
     This variant returns after the host drain protocol completes instead of
     terminating the process. Address and security arguments have the same
-    meaning as in :func:`run_worker_loop_forever`.
+    meaning as in :func:`run_worker_loop_forever`. A child forked from this
+    process after this call must not return or await into the copied event
+    loop; it must end in ``os._exit()`` or ``os.exec*()``, and under asyncio's
+    default event-loop policy may run a fresh loop with ``asyncio.run()`` first
+    (WF-3).
     """
     _validate_worker_loop_args(private_key=private_key, ca=ca, address=address)
     _reject_blocking_worker_loop_in_tokio("run_worker_loop_until_shutdown")

@@ -31,6 +31,7 @@ except ImportError:
 async def main() -> None:
     from monarch._rust_bindings.monarch_hyperactor.bootstrap import bootstrap_main
 
+    # Forks from this proc's actor code follow WF-1 to WF-5 in bootstrap.py.
     # This will return when the process is done, and we can exit this script.
     # That will run Py_FinalizeEx which has to be done in the main thread after
     # all other threads have exited.

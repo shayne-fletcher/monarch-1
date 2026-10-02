@@ -1789,6 +1789,12 @@ class Actor(MeshTrait):
     (for example with ``this_proc().spawn(...)``), after which their endpoints
     are invoked remotely through the messaging adverbs. Each actor processes its
     messages sequentially and participates in the supervision tree.
+
+    An endpoint that calls ``os.fork()`` must not let the child return or
+    await into the copied event loop; the child must end in ``os._exit()`` or
+    ``os.exec*()``, and under asyncio's default event-loop policy may run a
+    fresh loop with ``asyncio.run()`` first (WF-3 in
+    ``monarch/_src/actor/bootstrap.py``).
     """
 
     @functools.cached_property
