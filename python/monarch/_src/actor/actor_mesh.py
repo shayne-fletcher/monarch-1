@@ -86,6 +86,7 @@ from monarch._src.actor.endpoint import (
 from monarch._src.actor.future import Future
 from monarch._src.actor.mpsc import Receiver  # noqa: F401 - used in annotations
 from monarch._src.actor.python_extension_methods import rust_struct
+from monarch._src.actor.returns_future import returns_future
 from monarch._src.actor.shape import MeshTrait, NDSlice
 from monarch._src.actor.sync_state import fake_sync_state
 from monarch._src.actor.telemetry import METER, span_with_correlation_id
@@ -962,6 +963,12 @@ class Accumulator(Generic[P, R, A]):
         """
         Accumulate the result of the endpoint invocation.
 
+        The endpoint is invoked when this method is called; a failure to invoke
+        it raises here. The fold runs when the returned Future is first
+        observed: an ``await`` runs it on the awaiting loop, and ``.get()`` on
+        the calling thread, or on a short-lived helper thread when called
+        inside a running event loop, such as a synchronous endpoint's.
+
         Args:
             args: Arguments to pass to the endpoint.
             kwargs: Keyword arguments to pass to the endpoint.
@@ -969,15 +976,14 @@ class Accumulator(Generic[P, R, A]):
         Returns:
             Future that resolves to the accumulated value.
         """
-        gen: Iterator[Future[R]] = self._endpoint.stream(*args, **kwargs)
+        return self._fold(self._endpoint.stream(*args, **kwargs))
 
-        async def impl() -> A:
-            value = self._identity
-            for x in gen:
-                value = self._combine(value, await x._take_inner())
-            return value
-
-        return Future._from_coro(impl())
+    @returns_future
+    async def _fold(self, results: Iterator[Future[R]]) -> A:
+        value = self._identity
+        for result in results:
+            value = self._combine(value, await result)
+        return value
 
 
 @rust_struct("monarch_hyperactor::value_mesh::ValueMesh")

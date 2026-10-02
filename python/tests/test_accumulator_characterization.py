@@ -114,7 +114,8 @@ def test_accumulate_invokes_stream_before_any_observation():
     unobserved = accumulator.accumulate()
     # The private state check is intentional: the event assertions alone could
     # race a producer that started eagerly but has not advanced the iterator yet.
-    assert isinstance(unobserved._status, future_mod._Unawaited)
+    assert isinstance(unobserved._status, future_mod._Body)
+    assert unobserved._status.body.unstarted is not None
     assert events == [("stream", (), {})]
     combine.assert_not_called()
     del unobserved
@@ -128,6 +129,15 @@ def test_accumulate_invokes_stream_before_any_observation():
         ("next", 2),
     ]
     combine.assert_called_once_with(1, 2)
+
+
+def test_accumulate_stream_failure_raises_at_call():
+    """stream() runs at call time, so its failure raises from accumulate()
+    itself rather than from the returned Future."""
+    endpoint = unittest.mock.MagicMock()
+    endpoint.stream.side_effect = _StreamError("stream failed")
+    with pytest.raises(_StreamError):
+        Accumulator(endpoint, 0, operator.add).accumulate()
 
 
 @pytest.mark.timeout(10)
