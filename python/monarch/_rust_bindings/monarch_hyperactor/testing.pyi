@@ -51,3 +51,23 @@ def _make_handle_probe(outcome: str) -> _HandleProbe:
     ``Exception``) or ``"base_exception"``.
     """
     ...
+
+def _make_delayed_handle(delay: float) -> Handle[None]:
+    """Build a ``Handle`` that publishes after registering its first waiter.
+
+    The producer waits at least ``delay`` seconds after detecting ``get()``,
+    ``as_asyncio()``, or ``await``; ``poll()`` does not register a waiter.
+    Private benchmark support. Raises ``ValueError`` for a negative or non-finite
+    ``delay``.
+    """
+    ...
+
+def _delayed_handle_gate_stats() -> tuple[int, int]:
+    """Return the number of delayed Handles whose gate opened, and their total
+    gate time in nanoseconds, since the last call; then reset both.
+
+    Gate time runs from a producer's first poll until it detects its first
+    waiter. It includes any time other tasks ran between its checks, so it is
+    an upper bound on the gate's CPU.
+    """
+    ...
