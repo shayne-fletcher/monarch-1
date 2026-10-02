@@ -37,6 +37,7 @@ from monarch._rust_bindings.monarch_hyperactor.testing import (
 )
 from monarch._src.actor import future as future_mod
 from monarch._src.actor.future import Future
+from monarch._src.actor.returns_future import returns_future
 
 
 async def _value(v):
@@ -993,14 +994,27 @@ def _handle_future_pending():
     return future, drain
 
 
+@returns_future
+async def _body(outcome: str):
+    if outcome == "success":
+        return _PROBE_SUCCESS_VALUE
+    if outcome == "exception":
+        raise ValueError("probe failure")
+    if outcome == "base_exception":
+        raise KeyboardInterrupt("probe base failure")
+    raise AssertionError(f"no body observable for {outcome!r}")
+
+
 # Target already satisfied by both representations.
 PRESERVED_BY_BOTH = [
     pytest.param(_future_observable, id="current_future"),
     pytest.param(_handle_observable, id="raw_handle"),
     pytest.param(_handle_future_observable, id="handle_backed_future"),
+    pytest.param(_body, id="returns_future_body"),
 ]
 
-# Ready-observable rows that exercise the target Handle semantics.
+# Ready-observable rows that exercise the target Handle semantics. A body
+# Future keeps the facade's Tokio and await guards instead.
 TARGET_ONLY = [
     pytest.param(_handle_observable, id="raw_handle"),
     pytest.param(_handle_future_observable, id="handle_backed_future"),
