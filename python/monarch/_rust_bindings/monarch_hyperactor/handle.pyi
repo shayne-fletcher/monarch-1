@@ -73,7 +73,8 @@ class WouldBlockRuntime(RuntimeError):
 
     Raised by ``Handle.get()``, a fresh root-client bootstrap (``context()``
     with no actor context and no initialized client, or ``attach()``), and the
-    blocking worker-loop wrappers. Reusing an already-initialized client does
+    blocking worker-loop wrappers. A ``@returns_future`` Future's ``.get()``
+    also raises it where blocking would stall a running event loop. Reusing an already-initialized client does
     not block and so does not raise.
     """
 
