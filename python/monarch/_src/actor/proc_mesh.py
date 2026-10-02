@@ -61,6 +61,7 @@ from monarch._src.actor.code_sync import (
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
 from monarch._src.actor.logging import LoggingManager
+from monarch._src.actor.returns_future import returns_future
 from monarch._src.actor.shape import MeshTrait
 from monarch._src.actor.telemetry import log_with_tracing
 from monarch.tools.config.environment import CondaEnvironment
@@ -664,22 +665,37 @@ class ProcMesh(MeshTrait):
                 pass
         self._pending_actor_spawns.clear()
 
+    async def _drain_pending_actor_spawns(self) -> None:
+        """Wait for every pending actor spawn, including any added meanwhile."""
+        pending = self._pending_actor_spawns
+        while (mesh := next(iter(pending), None)) is not None:
+            try:
+                await mesh.initialized
+            except Exception:
+                pass
+            # Another drain may have removed it while this one waited. Removal
+            # matches by identity in one step, so it cannot drop a different
+            # spawn that was never waited for.
+            try:
+                pending.remove(mesh)
+            except ValueError:
+                pass
+
     def stop(self, reason: str = "stopped by client") -> Future[None]:
         """
         This will stop all processes (and actors) in the mesh and
         release any resources associated with the mesh.
         """
-
         instance = context().actor_instance._as_rust()
+        return self._stop(instance, reason)
 
-        async def _stop_nonblocking(instance: HyInstance) -> None:
-            await self._flush_pending_actor_spawns()
-            pm = await self._proc_mesh
-            await self._logging_manager._flush_from_tokio()
-            await pm.stop_nonblocking(instance, reason)
-            self._stopped = True
-
-        return Future._from_coro(_stop_nonblocking(instance))
+    @returns_future
+    async def _stop(self, instance: HyInstance, reason: str) -> None:
+        await self._drain_pending_actor_spawns()
+        pm = await self._proc_mesh.task().spawn_handle()
+        await self._logging_manager.flush_async()
+        await pm.stop_nonblocking(instance, reason)
+        self._stopped = True
 
     async def __aexit__(
         self, exc_type: object, exc_val: object, exc_tb: object

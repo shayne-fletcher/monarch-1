@@ -30,8 +30,8 @@ use crate::actor_mesh::PythonActorMesh;
 use crate::actor_mesh::PythonActorMeshImpl;
 use crate::actor_mesh::SupervisableActorMesh;
 use crate::context::PyInstance;
+use crate::handle::PyHandle;
 use crate::pickle::PendingMessage;
-use crate::pytokio::PyPythonTask;
 use crate::pytokio::PyShared;
 use crate::runtime::GilSite;
 use crate::runtime::get_tokio_runtime;
@@ -166,7 +166,7 @@ impl PyProcMesh {
         Ok(self.mesh_ref()?.region().into())
     }
 
-    fn stop_nonblocking(&self, instance: &PyInstance, reason: String) -> PyResult<PyPythonTask> {
+    fn stop_nonblocking(&self, instance: &PyInstance, reason: String) -> PyResult<PyHandle> {
         // Clone the necessary fields from self to avoid capturing self in the async block
         let (owned_inner, instance) = monarch_with_gil_blocking(GilSite::Stop, |_py| {
             let owned_inner = match self {
@@ -181,7 +181,7 @@ impl PyProcMesh {
             let instance = instance.clone();
             Ok((owned_inner, instance))
         })?;
-        PyPythonTask::new(async move {
+        Ok(PyHandle::spawn(async move {
             let mesh = owned_inner.0.take().await;
             match mesh {
                 Ok(mut mesh) => mesh
@@ -195,7 +195,7 @@ impl PyProcMesh {
                     Ok(())
                 }
             }
-        })
+        }))
     }
 
     fn sliced(&self, region: &PyRegion) -> PyResult<Self> {

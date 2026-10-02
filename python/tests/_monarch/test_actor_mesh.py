@@ -7,7 +7,17 @@
 # pyre-unsafe
 
 import pickle
-from typing import Any, Callable, cast, Coroutine, Iterable, List, Type, TYPE_CHECKING
+from typing import (
+    Any,
+    Callable,
+    cast,
+    Coroutine,
+    Iterable,
+    List,
+    Type,
+    TYPE_CHECKING,
+    TypeVar,
+)
 
 import pytest
 from monarch._rust_bindings.monarch_hyperactor.actor import (
@@ -17,6 +27,7 @@ from monarch._rust_bindings.monarch_hyperactor.actor import (
 )
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
 from monarch._rust_bindings.monarch_hyperactor.buffers import Buffer, FrozenBuffer
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 from monarch._rust_bindings.monarch_hyperactor.pickle import (
     PendingMessage,
     pickle as monarch_pickle,
@@ -66,9 +77,10 @@ def test_python_message_reunion_invariant() -> None:
     assert msg.decode() == "payload"
 
 
-def run_on_tokio(
-    fn: Callable[[], Coroutine[Any, Any, None]],
-) -> Callable[[], None]:
+T = TypeVar("T")
+
+
+def run_on_tokio(fn: Callable[[], Coroutine[Any, Any, T]]) -> Callable[[], T]:
     """
     Wrapper for function that use the internal tokio event loop
     APIs and need to run on that event loop.
@@ -134,7 +146,7 @@ class MyActor:
 @pytest.mark.timeout(30)
 async def test_bind_and_pickling() -> None:
     @run_on_tokio
-    async def run() -> None:
+    async def run() -> Handle[None]:
         proc_mesh_task = task()
         actor_mesh = spawn_actor_mesh(proc_mesh_task)
 
@@ -157,9 +169,11 @@ async def test_bind_and_pickling() -> None:
         pickle.loads(obj)
 
         instance = context().actor_instance._as_rust()
-        await proc_mesh.stop_nonblocking(instance, "test cleanup")
+        return proc_mesh.stop_nonblocking(instance, "test cleanup")
 
-    run()
+    # `run()` blocks while Tokio drives the inner coroutine, then returns the
+    # cleanup Handle; this `await` observes that Handle on asyncio.
+    await run()
 
 
 def spawn_actor_mesh(proc_mesh_task: Shared[ProcMesh]) -> PythonActorMesh:
@@ -239,16 +253,18 @@ async def verify_cast_to_call(
 @pytest.mark.timeout(30)
 async def test_cast_handle() -> None:
     @run_on_tokio
-    async def run() -> None:
+    async def run() -> Handle[None]:
         proc_mesh_task = task()
         actor_mesh = spawn_actor_mesh(proc_mesh_task)
         await verify_cast_to_call(actor_mesh, context().actor_instance, list(range(8)))
 
         proc_mesh = await proc_mesh_task
         instance = context().actor_instance._as_rust()
-        await proc_mesh.stop_nonblocking(instance, "test cleanup")
+        return proc_mesh.stop_nonblocking(instance, "test cleanup")
 
-    run()
+    # `run()` blocks while Tokio drives the inner coroutine, then returns the
+    # cleanup Handle; this `await` observes that Handle on asyncio.
+    await run()
 
 
 # TODO - re-enable after resolving T232206970
@@ -256,7 +272,7 @@ async def test_cast_handle() -> None:
 @pytest.mark.timeout(30)
 async def test_cast_ref() -> None:
     @run_on_tokio
-    async def run() -> None:
+    async def run() -> Handle[None]:
         proc_mesh_task = task()
         actor_mesh = spawn_actor_mesh(proc_mesh_task)
         proc_mesh = await proc_mesh_task
@@ -265,9 +281,11 @@ async def test_cast_ref() -> None:
             actor_mesh_ref, context().actor_instance, list(range(8))
         )
         instance = context().actor_instance._as_rust()
-        await proc_mesh.stop_nonblocking(instance, "test cleanup")
+        return proc_mesh.stop_nonblocking(instance, "test cleanup")
 
-    run()
+    # `run()` blocks while Tokio drives the inner coroutine, then returns the
+    # cleanup Handle; this `await` observes that Handle on asyncio.
+    await run()
 
 
 # TODO - re-enable after resolving T232206970
@@ -322,4 +340,5 @@ async def test_host_mesh() -> None:
                 sliced_am, context().actor_instance, list(range(6))
             )
 
+        # `run()` blocks while Tokio drives the inner coroutine.
         run()

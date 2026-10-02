@@ -350,9 +350,9 @@ pytokio_import = "monarch._rust_bindings.monarch_hyperactor.pytokio"
 doc_legacy_surface = "PythonTask|PyShared|pytokio"
 
 [totals]
-py_python_task_new = 21
+py_python_task_new = 20
 raw_python_task_new = 5
-from_coro = 13
+from_coro = 12
 rust_from_coro = 2
 from_coroutine = 7
 take_inner = 3
@@ -371,7 +371,7 @@ py_mesh_reserve = 2
 py_is_tokio_thread = 0
 pytokio_import = 30
 pytokio_module_ref = 15
-helper_symbol = 19
+helper_symbol = 18
 helper_definition = 1
 would_block_surface = 0
 binding_stub_symbol = 3
@@ -614,17 +614,15 @@ owns = [
   "fc.proc_mesh.ProcMesh.stop[Future._from_coro_stop_nonblockinginstance]",
   "hs.context.PyPythonTask",
   "hs.logging.AwaitPyExt",
-  "hs.logging.PyPythonTask",
   "hs.logging.ensure_python",
+  "hs.proc_mesh.PyPythonTask",
   "im.logging.module_2",
   "mr.context.file",
-  "mr.logging.file",
   "np.context.PyInstance.stop_and_wait",
   "np.host_mesh.PyHostMesh.shutdown",
   "np.host_mesh.PyHostMesh.stop",
   "np.host_mesh.shutdown_local_host_mesh",
   "np.logging.LoggingMeshClient.flush",
-  "np.logging.LoggingMeshClient.spawn",
   "np.proc_mesh.PyProcMesh.stop_nonblocking",
   "ot.proc_mesh.ProcMesh._flush_pending_actor_spawns[mesh.initialized._take_inner]"
 ]
@@ -649,9 +647,9 @@ owns = [
   "hs.actor_mesh.PyPythonTask",
   "hs.bootstrap.PyPythonTask",
   "hs.host_mesh.PyPythonTask",
+  "hs.logging.PyPythonTask",
   "hs.lib.PyShared",
   "hs.pickle.PyShared",
-  "hs.proc_mesh.PyPythonTask",
   "hs.proc_mesh.PyShared",
   "im.bootstrap.module_2",
   "im.host_mesh.module_2",
@@ -660,6 +658,7 @@ owns = [
   "mr.bootstrap.file",
   "mr.host_mesh.file",
   "mr.lib.file_3",
+  "mr.logging.file",
   "mr.pickle.file",
   "mr.proc_mesh.file",
   "ms.actor_mesh.AsyncActorMesh_as_ActorMeshProtocol.__reduce__",
@@ -689,6 +688,7 @@ owns = [
   "np.host_mesh.PyHostMesh.spawn_nonblocking",
   "np.host_mesh._spawn_admin",
   "np.host_mesh.bootstrap_host",
+  "np.logging.LoggingMeshClient.spawn",
   "ot.bootstrap._as_python_task[s._take_inner]",
   "ot.proc_mesh.ProcMesh.from_host_mesh.task[setup_actor.setup.call._take_inner]"
 ]
@@ -1318,8 +1318,9 @@ path = "fbcode/monarch/python/monarch/_src/actor/proc_mesh.py"
 symbol = "ProcMesh.stop[Future._from_coro(_stop_nonblocking(instance))]"
 operation = "from_coro"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3b"
+transition_revision = "self"
 public_operation = "ProcMesh.stop()"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
@@ -1331,7 +1332,7 @@ eager_effect = "an eager replacement would begin draining actors, flushing logs,
 drop_behavior = "before observation stop never runs; after observation the retained producer completes despite observer cancellation"
 first_side_effect = "flushing pending actor spawns"
 unobserved_error = "an unobserved Future reports nothing; after observation, the successful result remains available to another observer. Source-grounded: pending-actor and logging-flush failures are silently suppressed. A repeated stop reaches the binding and returns None; source inspection shows the empty cell prevents a second domain stop before the public wrapper sets _stopped True, so an overlapping second stop can mark the mesh stopped even if the first domain stop later fails"
-disposition = "intentionally become eager"
+disposition = "preserve timing"
 semantic_class = "deferred_side_effect"
 oracle = [
   "fbcode//monarch/python/tests:test_proc_mesh::test_proc_stop_is_lazy_and_survives_cancelled_observer",
@@ -1781,7 +1782,7 @@ symbol = "PyPythonTask"
 operation = "helper_symbol"
 scope = "production"
 state = "legacy"
-transition = "6.3b"
+transition = "6.3c"
 
 [[site]]
 id = "hs.logging.ensure_python"
@@ -1859,8 +1860,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/proc_mesh.rs"
 symbol = "PyPythonTask"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
-transition = "6.3c"
+state = "migrated"
+transition = "6.3b"
+transition_revision = "self"
 
 [[site]]
 id = "hs.proc_mesh.PyShared"
@@ -2730,7 +2732,7 @@ symbol = "LoggingMeshClient::spawn"
 operation = "py_python_task_new"
 scope = "production"
 state = "legacy"
-transition = "6.3b"
+transition = "6.3c"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from LoggingMeshClient::spawn"
 consumer = "LoggingManager.init, the sole in-tree caller, awaits the returned task directly"
@@ -2812,8 +2814,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/proc_mesh.rs"
 symbol = "PyProcMesh::stop_nonblocking"
 operation = "py_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3b"
+transition_revision = "self"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from PyProcMesh::stop_nonblocking"
 consumer = "ProcMesh.stop, after flushing pending actor spawns and logs"
@@ -3006,7 +3009,7 @@ operation = "pytokio_import"
 scope = "stub"
 state = "legacy"
 transition = "6.8"
-members = ["PythonTask", "Shared"]
+members = ["Shared"]
 
 [[site]]
 id = "im.supervision.module"
@@ -3468,7 +3471,7 @@ symbol = "<file>"
 operation = "pytokio_module_ref"
 scope = "production"
 state = "legacy"
-transition = "6.3b"
+transition = "6.3c"
 
 [[site]]
 id = "mr.mailbox.file"
