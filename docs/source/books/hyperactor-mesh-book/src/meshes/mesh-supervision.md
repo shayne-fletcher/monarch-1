@@ -42,7 +42,7 @@ This is similar to exception handling mechanisms: one can choose to handle excep
 
 ## Supervision Python API
 Actors can handle failures by providing an implementation of the `__supervise__` method.
-It may be declared with either `def` or `async def`:
+It may be declared with either `def` or `async def`, except that an actor whose endpoints are all `def` needs a `def` `__supervise__`:
 ```py
 class ManagerActor(Actor):
   def __init__(self, worker_procs: ProcMesh):

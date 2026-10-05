@@ -294,7 +294,8 @@ if False:
 # read a URL, perhaps it would work to just restart it. In these cases, we also offer a
 # different API. If an actor defines a `__supervise__` special method, then it will get
 # called to handle supervision events for meshes owned by the actor. It may be declared
-# with either `def` or `async def`; an `async def` override runs on the actor's asyncio
+# with either `def` or `async def`, except that an actor whose endpoints are all `def`
+# needs a `def` `__supervise__`; an `async def` override runs on the actor's asyncio
 # event loop and can `await` other endpoints or I/O.
 # If an error happens on an ActorMesh that is a reference, such as a slice, or
 # a mesh that is sent to another actor, then the recovery is done on the original

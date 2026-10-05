@@ -11,6 +11,7 @@ import abc
 import asyncio
 import collections
 import contextvars
+import enum
 import functools
 import importlib
 import inspect
@@ -1767,9 +1768,9 @@ def _doc_stub(fn: F) -> F:
     The base class declares ``__cleanup__`` and ``__supervise__`` so that
     ``help()`` and IDEs can surface the docstring, but subclasses that do
     not override them must be treated as if they provided no implementation.
-    Runtime code that detects user overrides (the sync/async endpoint check
-    in :class:`ActorMesh` and the dispatch in :class:`_Actor`) consults this
-    marker and ignores stub-marked methods.
+    Runtime code that detects user overrides (:func:`_actor_kind` and the
+    dispatch in :class:`_Actor`) consults this marker and ignores stub-marked
+    methods.
     """
     # pyre-ignore[16]: function attributes are dynamic
     fn._monarch_doc_stub = True
@@ -1779,6 +1780,73 @@ def _doc_stub(fn: F) -> F:
 def _is_user_override(method: Any) -> bool:
     """Return True if ``method`` is a real user override, not a doc stub."""
     return method is not None and not getattr(method, "_monarch_doc_stub", False)
+
+
+class ActorKind(enum.Enum):
+    """Whether an actor class defines a sync or an async actor (SA-5)."""
+
+    SYNC = "sync"
+    ASYNC = "async"
+
+
+# Sync-actor invariants (SA-*):
+#
+# SA-5 (kind before spawn): on the ProcMesh route, `_actor_kind` decides an
+#   actor class's kind before the native spawn, and rejects a class whose
+#   endpoints mix kinds or whose hooks don't match it: a sync actor's
+#   `__cleanup__` and `__supervise__` must be sync, and an async-endpoint
+#   actor's `__cleanup__` must be async.
+
+
+def _actor_kind(Class: type) -> ActorKind:
+    """The kind of actor ``Class`` defines: sync when it declares at least one
+    endpoint and every endpoint is a plain ``def``, otherwise async. Raise
+    ``ValueError`` if its endpoints or hooks don't match that kind (SA-5)."""
+    sync_endpoints: list[str] = []
+    async_endpoints: list[str] = []
+    for attr_name in dir(Class):
+        attr_value = getattr(Class, attr_name, None)
+        if isinstance(attr_value, EndpointProperty):
+            if inspect.iscoroutinefunction(attr_value._method):
+                async_endpoints.append(attr_name)
+            else:
+                sync_endpoints.append(attr_name)
+    cleanup = getattr(Class, "__cleanup__", None)
+    supervise = getattr(Class, "__supervise__", None)
+    # None means there is no override.
+    async_cleanup = (
+        inspect.iscoroutinefunction(cleanup) if _is_user_override(cleanup) else None
+    )
+    async_supervise = (
+        inspect.iscoroutinefunction(supervise) if _is_user_override(supervise) else None
+    )
+
+    if sync_endpoints and async_endpoints:
+        raise ValueError(
+            f"{Class} mixes both async and sync endpoints."
+            "Synchronous endpoints cannot be mixed with async endpoints because they can cause the asyncio loop to deadlock if they wait."
+            f"sync: {sync_endpoints} async: {async_endpoints}"
+        )
+    if sync_endpoints and async_cleanup:
+        raise ValueError(
+            f"{Class} has sync endpoints, but an async __cleanup__. Make sure __cleanup__ is also synchronous."
+            "Synchronous endpoints cannot be mixed with async endpoints because they can cause the asyncio loop to deadlock if they wait."
+            f"sync: {sync_endpoints}"
+        )
+    # Check for False explicitly because None means there is no override.
+    if async_endpoints and async_cleanup is False:
+        raise ValueError(
+            f"{Class} has async endpoints, but a synchronous __cleanup__. Make sure __cleanup__ is also async."
+            "Synchronous endpoints cannot be mixed with async endpoints because they can cause the asyncio loop to deadlock if they wait."
+            f"async: {async_endpoints}"
+        )
+    if sync_endpoints and async_supervise:
+        raise ValueError(
+            f"{Class} has sync endpoints, but an async __supervise__. "
+            "Make sure __supervise__ is also synchronous. "
+            f"sync: {sync_endpoints}"
+        )
+    return ActorKind.SYNC if sync_endpoints else ActorKind.ASYNC
 
 
 class Actor(MeshTrait):
@@ -1860,8 +1928,9 @@ class Actor(MeshTrait):
         If only some ranks fail, the mesh remains usable through slices that
         exclude the failed ranks.
 
-        Overrides may be declared with either ``def`` or ``async def``. An
-        ``async def`` override is awaited on the actor's asyncio event loop --
+        Overrides may be declared with either ``def`` or ``async def``, except
+        that an actor whose endpoints are all ``def`` needs a ``def`` override.
+        An ``async def`` override is awaited on the actor's asyncio event loop --
         the same loop that runs endpoint coroutines -- so it can ``await``
         other endpoints or I/O. A sync override runs under ``fake_sync_state``
         and cannot call ``asyncio.get_running_loop``. If the override raises,
@@ -1936,9 +2005,6 @@ class ActorMesh(MeshTrait, Generic[T]):
         self._shape = shape
         self._proc_mesh = proc_mesh
 
-        async_endpoints = []
-        sync_endpoints = []
-        async_cleanup = None
         for attr_name in dir(self._class):
             attr_value = getattr(self._class, attr_name, None)
             if isinstance(attr_value, EndpointProperty):
@@ -1966,32 +2032,7 @@ class ActorMesh(MeshTrait, Generic[T]):
                         attr_value._propagator,
                     ),
                 )
-                if inspect.iscoroutinefunction(attr_value._method):
-                    async_endpoints.append(attr_name)
-                else:
-                    sync_endpoints.append(attr_name)
-            if attr_name == "__cleanup__" and _is_user_override(attr_value):
-                async_cleanup = inspect.iscoroutinefunction(attr_value)
-
-        if sync_endpoints and async_endpoints:
-            raise ValueError(
-                f"{self._class} mixes both async and sync endpoints."
-                "Synchronous endpoints cannot be mixed with async endpoints because they can cause the asyncio loop to deadlock if they wait."
-                f"sync: {sync_endpoints} async: {async_endpoints}"
-            )
-        if sync_endpoints and async_cleanup:
-            raise ValueError(
-                f"{self._class} has sync endpoints, but an async __cleanup__. Make sure __cleanup__ is also synchronous."
-                "Synchronous endpoints cannot be mixed with async endpoints because they can cause the asyncio loop to deadlock if they wait."
-                f"sync: {sync_endpoints}"
-            )
-        # Check for False explicitly because None means there is no override.
-        if async_endpoints and async_cleanup is False:
-            raise ValueError(
-                f"{self._class} has async endpoints, but a synchronous __cleanup__. Make sure __cleanup__ is also async."
-                "Synchronous endpoints cannot be mixed with async endpoints because they can cause the asyncio loop to deadlock if they wait."
-                f"async: {async_endpoints}"
-            )
+        _actor_kind(self._class)
 
     def __getattr__(self, attr: str) -> NotAnEndpoint:
         if attr in dir(self._class):
