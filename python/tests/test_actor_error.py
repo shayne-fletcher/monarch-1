@@ -18,6 +18,7 @@ import sys
 import time
 from contextlib import contextmanager
 from typing import cast, Generator, IO, Optional
+from unittest.mock import patch
 
 import monarch.actor
 import pytest
@@ -28,7 +29,14 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     UndeliverableMessageEnvelope,
 )
 from monarch._rust_bindings.monarch_hyperactor.supervision import SupervisionError
-from monarch._src.actor.actor_mesh import ActorMesh, context, current_rank
+from monarch._src.actor import proc_mesh as proc_mesh_mod
+from monarch._src.actor.actor_mesh import (
+    _actor_kind,
+    ActorKind,
+    ActorMesh,
+    context,
+    current_rank,
+)
 from monarch._src.actor.host_mesh import this_host
 from monarch._src.actor.proc_mesh import ProcMesh
 from monarch.actor import (
@@ -153,14 +161,110 @@ class MixedEndpointActor(Actor):
 @isolate_in_subprocess
 async def test_actor_mixing_sync_and_async_endpoints_is_rejected_at_spawn() -> None:
     """An actor declaring both a sync (`def`) and an async (`async def`) endpoint
-    is rejected at spawn: `ActorMesh.__init__` raises `ValueError` synchronously,
-    before any message is dispatched. This pins the all-sync-or-all-async
-    invariant the runtime relies on; enforcement is a single check in
-    `ActorMesh.__init__` and nothing downstream re-checks. The check is
-    construction-time, so it is independent of dispatch mode."""
+    is rejected at spawn: `_actor_kind` raises `ValueError` synchronously,
+    before the native spawn. This pins the all-sync-or-all-async invariant the
+    runtime relies on (SA-5)."""
     proc = spawn_procs_on_this_host({"gpus": 1})
     with pytest.raises(ValueError, match="mixes both async and sync"):
         proc.spawn("mixed_actor", MixedEndpointActor)
+
+    await proc.stop()
+
+
+class SyncPingActor(Actor):
+    @endpoint
+    def ping(self) -> int:
+        return 1
+
+
+class SyncActorWithAsyncSupervise(Actor):
+    @endpoint
+    def ping(self) -> int:
+        return 1
+
+    # pyrefly: ignore[bad-override]: the mismatch with the sync base is the
+    # point; spawning this class must be rejected.
+    async def __supervise__(self, failure: MeshFailure) -> bool:
+        return True
+
+
+class SyncActorWithAsyncCleanup(Actor):
+    @endpoint
+    def ping(self) -> int:
+        return 1
+
+    async def __cleanup__(self, exc: Exception | None) -> None:
+        pass
+
+
+class AsyncActorWithSyncCleanup(Actor):
+    @endpoint
+    async def ping(self) -> int:
+        return 1
+
+    def __cleanup__(self, exc: Exception | None) -> None:
+        pass
+
+
+class AsyncActorWithSyncSupervise(Actor):
+    @endpoint
+    async def ping(self) -> int:
+        return 1
+
+    def __supervise__(self, failure: MeshFailure) -> bool:
+        return True
+
+
+# Shaped like `RootClientActor`: no endpoints and a sync `__supervise__`.
+class NoEndpointActorWithSyncSupervise(Actor):
+    def __supervise__(self, failure: MeshFailure) -> bool:
+        return True
+
+
+def test_actor_kind() -> None:
+    """SA-5: an actor is sync only when it has at least one endpoint and every
+    endpoint is a plain `def`; anything else is async."""
+    assert _actor_kind(SyncPingActor) is ActorKind.SYNC
+    assert _actor_kind(AsyncActorWithSyncSupervise) is ActorKind.ASYNC
+    assert _actor_kind(NoEndpointActorWithSyncSupervise) is ActorKind.ASYNC
+
+
+@pytest.mark.parametrize(
+    "actor_class,match",
+    [
+        (MixedEndpointActor, "mixes both async and sync"),
+        (SyncActorWithAsyncCleanup, "async __cleanup__"),
+        (AsyncActorWithSyncCleanup, "synchronous __cleanup__"),
+        (SyncActorWithAsyncSupervise, "async __supervise__"),
+    ],
+)
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+async def test_mismatched_actor_is_rejected_before_native_spawn(
+    actor_class: type[Actor], match: str
+) -> None:
+    """SA-5: a class whose endpoints or hooks don't match its kind is rejected
+    before the native spawn is attempted."""
+    proc = spawn_procs_on_this_host({"gpus": 1})
+    with patch.object(proc_mesh_mod, "HyProcMesh") as native:
+        with pytest.raises(ValueError, match=match):
+            proc.spawn("mismatched", actor_class)
+    native.spawn_async.assert_not_called()
+
+    await proc.stop()
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+async def test_async_actor_may_keep_a_sync_supervise() -> None:
+    """Only a sync actor must have a sync `__supervise__` (SA-5). An async
+    actor, or one with no endpoints such as `RootClientActor`, may keep a sync
+    one."""
+    proc = spawn_procs_on_this_host({"gpus": 1})
+    with_endpoint = proc.spawn("async_sync_supervise", AsyncActorWithSyncSupervise)
+    assert await with_endpoint.ping.call_one() == 1
+    no_endpoints = proc.spawn("no_endpoints", NoEndpointActorWithSyncSupervise)
+    await cast(ActorMesh, no_endpoints).initialized
 
     await proc.stop()
 

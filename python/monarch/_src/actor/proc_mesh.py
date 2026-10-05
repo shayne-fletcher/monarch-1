@@ -43,6 +43,7 @@ from monarch._rust_bindings.monarch_hyperactor.shape import Region, Shape, Slice
 from monarch._rust_bindings.monarch_hyperactor.supervision import MeshFailure
 from monarch._src.actor.actor_mesh import (
     _Actor,
+    _actor_kind,
     _create_endpoint_message,
     _Lazy,
     Actor,
@@ -537,6 +538,8 @@ class ProcMesh(MeshTrait):
             raise ValueError(
                 f"{Class} must subclass monarch.service.Actor to spawn it."
             )
+        # SA-5: a mismatched class is rejected before any native side effect.
+        _actor_kind(Class)
 
         instance = context().actor_instance
         # The default name used has a UUID appended to it that is not useful for debugging.
