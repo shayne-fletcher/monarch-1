@@ -1190,16 +1190,19 @@ class Port(Generic[R]):
 
     def send_message(self, message: PythonMessage) -> None: ...
 
-    async def resolve_and_send(self, result: object) -> None:
-        # This is Port.send with mesh-reference resolution inserted before the
-        # already-serialized Result message is posted.
+    def _pending_result(self, result: object) -> PendingMessage:
         state = pickle(
             result,
             allow_tensor_engine_references=False,
             allow_mesh_references=True,
         )
         kind = cast(PythonMessageKind, cast(Any, PythonMessageKind.Result)(self._rank))
-        message = PendingMessage(kind, state)
+        return PendingMessage(kind, state)
+
+    async def resolve_and_send(self, result: object) -> None:
+        # This is Port.send with mesh-reference resolution inserted before the
+        # already-serialized Result message is posted.
+        message = self._pending_result(result)
         resolved = message.try_resolve_now()
         if resolved is None:
             resolved = await message.resolve()
@@ -1565,87 +1568,13 @@ class _Actor:
         # and raise any exceptions to the caller.
 
         try:
-            _set_context(ctx)
-
-            DebugContext.set(DebugContext())
-
-            args, kwargs = PicklingState(
-                message, local_state, mesh_references
-            ).unpickle()
-
-            match method:
-                # pyrefly: ignore [invalid-pattern]
-                case MethodSpecifier.Init():
-                    ins = ctx.actor_instance
-                    (args,) = args
-                    init_args = cast(ActorInitArgs, args)
-                    Class = init_args.Class
-                    ins.proc_mesh = cast("ProcMesh", init_args.proc_mesh)
-                    ins._controller_controller = cast(
-                        "_ControllerController", init_args.controller_controller
-                    )
-                    ins.name = init_args.name
-                    ins.creator = init_args.creator
-                    args = init_args.args
-                    ins.rank = ctx.message_rank
-                    ins.class_name = f"{Class.__module__}.{Class.__qualname__}"
-                    try:
-                        self.instance = Class(*args, **kwargs)
-                        # Check if there's a tensor engine mock registered for this actor class.
-                        # If so, set _mock_tensor_engine_factory on the Instance for use by
-                        # Instance.spawn_tensor_engine().
-                        from monarch._src.actor.mock import get_tensor_engine_factory
-
-                        mock_factory = get_tensor_engine_factory(Class)
-                        if mock_factory is not None:
-                            ins._mock_tensor_engine_factory = (
-                                lambda proc_mesh: mock_factory(proc_mesh)
-                            )
-                        # PY-SYS-2: If Class._is_system_actor is true,
-                        # ins.set_system() must run during
-                        # MethodSpecifier::Init before first
-                        # introspection publish.
-                        if getattr(Class, "_is_system_actor", False):
-                            ins.set_system()
-                        self._maybe_exit_debugger()
-                    except Exception as e:
-                        self._saved_error = ActorError(
-                            e, f"Actor call {ins.name}.{method_name} failed."
-                        )
-                        raise
-                    response_port.send(None)
-                    return
-                # pyrefly: ignore [invalid-pattern]
-                case MethodSpecifier.ReturnsResponse():
-                    pass
-                # pyrefly: ignore [invalid-pattern]
-                case MethodSpecifier.ExplicitPort():
-                    args = (response_port, *args)
-                    response_port = DroppingPort()
-
-            if self.instance is None:
-                assert self._saved_error is not None
-                error_message = (
-                    f'Actor object is missing when executing method "{method_name}" on actor {ctx.actor_instance.actor_id}. '
-                    f"This is due to an earlier error: {self._saved_error}."
-                )
-                raise AssertionError(error_message)
-
-            if method_name not in self._method_cache:
-                the_method = getattr(self.instance, method_name)
-                should_instrument = False
-
-                if isinstance(the_method, EndpointProperty):
-                    should_instrument = the_method._instrument
-                    the_method = functools.partial(the_method._method, self.instance)
-
-                self._method_cache[method_name] = (
-                    the_method,
-                    should_instrument,
-                    inspect.iscoroutinefunction(the_method),
-                )
-
-            the_method, should_instrument, is_coro = self._method_cache[method_name]
+            prepared = self._prepare(
+                ctx, method, message, local_state, mesh_references, response_port
+            )
+            if prepared is None:
+                return
+            args, kwargs, response_port = prepared
+            the_method, should_instrument, is_coro = self._lookup(ctx, method_name)
 
             # Bracket the real user-method invocation so the actor reports it
             # as in-flight (PE-2: only the invocation, never Init/plumbing).
@@ -1678,31 +1607,149 @@ class _Actor:
             if response is not None:
                 await response
         except Exception as e:
-            log_endpoint_exception(e, method_name, ctx.actor_instance.actor_id)
-            self._post_mortem_debug(e.__traceback__)
-            response_port.exception(
+            self._report_exception(e, ctx, method_name, response_port)
+        except BaseException as e:
+            self._report_panic(e, ctx, method_name, panic_flag)
+            raise
+
+    def _prepare(
+        self,
+        ctx: Context,
+        method: MethodSpecifier,
+        message: FrozenBuffer,
+        local_state: List[Any],
+        mesh_references: List[Any],
+        response_port: "PortProtocol[Any]",
+    ) -> "Tuple[Tuple[Any, ...], Dict[str, Any], PortProtocol[Any]] | None":
+        """The steps before a message's body runs. Returns the body's arguments
+        and the port its result goes to, or None once an `Init` message has
+        constructed the actor and replied."""
+        _set_context(ctx)
+
+        DebugContext.set(DebugContext())
+
+        args, kwargs = PicklingState(message, local_state, mesh_references).unpickle()
+
+        match method:
+            # pyrefly: ignore [invalid-pattern]
+            case MethodSpecifier.Init():
+                ins = ctx.actor_instance
+                (args,) = args
+                init_args = cast(ActorInitArgs, args)
+                Class = init_args.Class
+                ins.proc_mesh = cast("ProcMesh", init_args.proc_mesh)
+                ins._controller_controller = cast(
+                    "_ControllerController", init_args.controller_controller
+                )
+                ins.name = init_args.name
+                ins.creator = init_args.creator
+                args = init_args.args
+                ins.rank = ctx.message_rank
+                ins.class_name = f"{Class.__module__}.{Class.__qualname__}"
+                try:
+                    self.instance = Class(*args, **kwargs)
+                    # Check if there's a tensor engine mock registered for this actor class.
+                    # If so, set _mock_tensor_engine_factory on the Instance for use by
+                    # Instance.spawn_tensor_engine().
+                    from monarch._src.actor.mock import get_tensor_engine_factory
+
+                    mock_factory = get_tensor_engine_factory(Class)
+                    if mock_factory is not None:
+                        ins._mock_tensor_engine_factory = (
+                            lambda proc_mesh: mock_factory(proc_mesh)
+                        )
+                    # PY-SYS-2: If Class._is_system_actor is true,
+                    # ins.set_system() must run during
+                    # MethodSpecifier::Init before first
+                    # introspection publish.
+                    if getattr(Class, "_is_system_actor", False):
+                        ins.set_system()
+                    self._maybe_exit_debugger()
+                except Exception as e:
+                    self._saved_error = ActorError(
+                        e, f"Actor call {ins.name}.{method.name} failed."
+                    )
+                    raise
+                response_port.send(None)
+                return None
+            # pyrefly: ignore [invalid-pattern]
+            case MethodSpecifier.ReturnsResponse():
+                pass
+            # pyrefly: ignore [invalid-pattern]
+            case MethodSpecifier.ExplicitPort():
+                args = (response_port, *args)
+                response_port = DroppingPort()
+
+        return args, kwargs, response_port
+
+    def _lookup(
+        self, ctx: Context, method_name: str
+    ) -> Tuple[Callable[..., Any], bool, bool]:
+        """The bound user method for `method_name`, whether to instrument it,
+        and whether it is a coroutine function."""
+        if self.instance is None:
+            assert self._saved_error is not None
+            error_message = (
+                f'Actor object is missing when executing method "{method_name}" on actor {ctx.actor_instance.actor_id}. '
+                f"This is due to an earlier error: {self._saved_error}."
+            )
+            raise AssertionError(error_message)
+
+        if method_name not in self._method_cache:
+            the_method = getattr(self.instance, method_name)
+            should_instrument = False
+
+            if isinstance(the_method, EndpointProperty):
+                should_instrument = the_method._instrument
+                the_method = functools.partial(the_method._method, self.instance)
+
+            self._method_cache[method_name] = (
+                the_method,
+                should_instrument,
+                inspect.iscoroutinefunction(the_method),
+            )
+
+        return self._method_cache[method_name]
+
+    def _report_exception(
+        self,
+        e: Exception,
+        ctx: Context,
+        method_name: str,
+        response_port: "PortProtocol[Any]",
+    ) -> None:
+        """Send an `Exception` from a message to its caller."""
+        log_endpoint_exception(e, method_name, ctx.actor_instance.actor_id)
+        self._post_mortem_debug(e.__traceback__)
+        response_port.exception(
+            ActorError(
+                e,
+                f"Actor call {ctx.actor_instance.name}.{method_name} failed.",
+            )
+        )
+
+    def _report_panic(
+        self,
+        e: BaseException,
+        ctx: Context,
+        method_name: str,
+        panic_flag: PanicFlag,
+    ) -> None:
+        """Signal a `BaseException` from a message to Rust; the caller re-raises it."""
+        self._post_mortem_debug(e.__traceback__)
+        # A BaseException can be thrown in the case of a Rust panic.
+        # In this case, we need a way to signal the panic to the Rust side.
+        # See [Panics in async endpoints]
+        try:
+            panic_flag.signal_panic(
                 ActorError(
                     e,
-                    f"Actor call {ctx.actor_instance.name}.{method_name} failed.",
+                    f"Actor call {ctx.actor_instance.name}.{method_name} failed with BaseException.",
                 )
             )
-            return
-        except BaseException as e:
-            self._post_mortem_debug(e.__traceback__)
-            # A BaseException can be thrown in the case of a Rust panic.
-            # In this case, we need a way to signal the panic to the Rust side.
-            # See [Panics in async endpoints]
-            try:
-                panic_flag.signal_panic(
-                    ActorError(
-                        e,
-                        f"Actor call {ctx.actor_instance.name}.{method_name} failed with BaseException.",
-                    )
-                )
-            except Exception:
-                # The channel might be closed if the Rust side has already detected the error
-                pass
-            raise
+        except Exception:
+            # The channel might be closed if the Rust side has already detected the error
+            pass
 
     def _maybe_exit_debugger(self, do_continue: bool = True) -> None:
         if (pdb_wrapper := DebugContext.get().pdb_wrapper) is not None:
@@ -1734,10 +1781,7 @@ class _Actor:
     ) -> bool:
         """Dispatch the user's ``_handle_undeliverable_message``, supporting
         sync and async user methods the same way as ``__supervise__``."""
-        _set_context(cx)
-        handle_undeliverable = getattr(
-            self.instance, "_handle_undeliverable_message", None
-        )
+        handle_undeliverable = self._user_handle_undeliverable(cx)
         if handle_undeliverable is None:
             return False
         if inspect.iscoroutinefunction(handle_undeliverable):
@@ -1745,14 +1789,15 @@ class _Actor:
         with fake_sync_state():
             return handle_undeliverable(message)
 
-    async def __supervise__(self, cx: Context, *args: Any, **kwargs: Any) -> object:
-        """Dispatch the user's ``__supervise__``.
+    def _user_handle_undeliverable(
+        self, cx: Context
+    ) -> Callable[[UndeliverableMessageEnvelope], Any] | None:
+        """The user's undeliverable-message callback, with its context set."""
+        _set_context(cx)
+        return getattr(self.instance, "_handle_undeliverable_message", None)
 
-        Mirrors ``__cleanup__``: both sync and async user methods are
-        supported. An ``async def`` user method is awaited on the actor's
-        asyncio event loop; a sync one runs under :func:`fake_sync_state` so
-        it cannot observe a running loop.
-        """
+    def _user_supervise(self, cx: Context) -> Callable[..., Any] | None:
+        """The user's ``__supervise__``, or None if it has no override."""
         _set_context(cx)
         instance = self.instance
         if instance is None:
@@ -1775,22 +1820,33 @@ class _Actor:
             raise AssertionError(error_message)
 
         supervise = getattr(instance, "__supervise__", None)
-        if not _is_user_override(supervise):
-            # If there is no __supervise__ override, the default is to return
-            # None. The supervision error is not handled here and will propagate
-            # to the next owner.
-            return None
+        # If there is no __supervise__ override, the default is to return
+        # None. The supervision error is not handled here and will propagate
+        # to the next owner.
+        return supervise if _is_user_override(supervise) else None
 
+    async def __supervise__(self, cx: Context, *args: Any, **kwargs: Any) -> object:
+        """Dispatch the user's ``__supervise__``.
+
+        Mirrors ``__cleanup__``: both sync and async user methods are
+        supported. An ``async def`` user method is awaited on the actor's
+        asyncio event loop; a sync one runs under :func:`fake_sync_state` so
+        it cannot observe a running loop.
+        """
+        supervise = self._user_supervise(cx)
+        if supervise is None:
+            return None
         if inspect.iscoroutinefunction(supervise):
             return await supervise(*args, **kwargs)
         else:
             with fake_sync_state():
-                # pyrefly: ignore [not-callable]
                 return supervise(*args, **kwargs)
 
-    async def __cleanup__(self, cx: Context, exc: str | Exception | None) -> None:
-        """Cleans up any resources owned by this Actor before stopping. Automatically
-        called even if there is an error"""
+    def _user_cleanup(
+        self, cx: Context, exc: str | Exception | None
+    ) -> Tuple[Callable[..., Any], Exception | None] | None:
+        """The user's ``__cleanup__`` and the exception to pass it, or None if
+        there is nothing to clean up."""
         _context.set(cx)
         instance = self.instance
         if instance is None:
@@ -1800,7 +1856,7 @@ class _Actor:
 
         # Forward a call to cleanup on this actor to the user-provided instance.
         cleanup = getattr(instance, "__cleanup__", None)
-        if not _is_user_override(cleanup):
+        if cleanup is None or not _is_user_override(cleanup):
             return None
 
         if isinstance(exc, str):
@@ -1809,12 +1865,19 @@ class _Actor:
             # The raw string is used for wider compatibility with other error
             # types for now.
             exc = Exception(exc)
+        return cleanup, exc
 
+    async def __cleanup__(self, cx: Context, exc: str | Exception | None) -> None:
+        """Cleans up any resources owned by this Actor before stopping. Automatically
+        called even if there is an error"""
+        found = self._user_cleanup(cx, exc)
+        if found is None:
+            return None
+        cleanup, exc = found
         if inspect.iscoroutinefunction(cleanup):
             return await cleanup(exc)
         else:
             with fake_sync_state():
-                # pyrefly: ignore [not-callable]
                 return cleanup(exc)
 
     def __repr__(self) -> str:
