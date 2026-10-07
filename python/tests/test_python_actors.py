@@ -1512,7 +1512,7 @@ async def test_things_survive_losing_python_reference() -> None:
 
 class IsInit(Actor):
     @endpoint
-    def is_cuda_initialized(self) -> bool:
+    def is_cuda_uninitialized(self) -> bool:
         cuda = ctypes.CDLL("libcuda.so.1")
         CUresult = ctypes.c_int
         cuDeviceGetCount = cuda.cuDeviceGetCount
@@ -1531,7 +1531,7 @@ def test_cuda_is_not_initialized_in_a_new_proc():
     except OSError:
         pytest.skip("cannot find cuda")
     proc = this_host().spawn_procs().spawn("is_init", IsInit)
-    assert not proc.is_cuda_initialized.call_one().get()
+    assert proc.is_cuda_uninitialized.call_one().get()
 
 
 class SpawningActorFromEndpointActor(Actor):
