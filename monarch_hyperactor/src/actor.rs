@@ -6,6 +6,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+mod async_actor;
+
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt::Debug;
@@ -71,6 +73,7 @@ use serde_multipart::Part;
 use typeuri::Named;
 
 use crate::buffers::FrozenBuffer;
+use crate::context::PyContext;
 use crate::context::PyInstance;
 // Preserve the crate-local conversion path used by host_mesh.
 pub(crate) use crate::handle::to_py_error;
@@ -82,7 +85,7 @@ use crate::mailbox::PythonUndeliverableMessageEnvelope;
 use crate::pickle::PicklingState;
 use crate::pickle::pickle_to_part;
 use crate::proc::PyActorAddr;
-use crate::pympsc;
+use crate::pympsc::Sender;
 use crate::runtime::GilSite;
 use crate::runtime::get_tokio_runtime;
 use crate::runtime::mark_actor_event_loop_thread;
@@ -1061,21 +1064,17 @@ mod execution_tracker_tests {
 pub struct PythonActor {
     /// The Python object that we delegate message handling to.
     actor: Py<PyAny>,
-    /// Stores a reference to the Python event loop to run Python coroutines on.
-    task_locals: pyo3_async_runtimes::TaskLocals,
+    /// The actor's event loop and the receivers its loop tasks consume.
+    dispatch: async_actor::dispatch::State,
     /// Instance object that we keep across handle calls so that we can store
     /// information from the Init (spawn rank, controller) and provide it to other calls.
     /// The `Arc` lets handlers share it without the GIL.
     instance: Option<Arc<Py<crate::context::PyInstance>>>,
-    /// Channel sender for enqueuing messages to Python.
-    dispatch_sender: pympsc::Sender,
-    /// Channel receiver, taken during Actor::init to start the message loop.
-    dispatch_receiver: Option<pympsc::PyReceiver>,
-    /// Channel sender for enqueuing supervision events and undeliverable
-    /// messages to `_callback_loop`.
-    callback_sender: pympsc::Sender,
-    /// Channel receiver, taken during Actor::init to start the callback loop.
-    callback_receiver: Option<pympsc::PyReceiver>,
+    /// Enqueues messages for the actor's Python dispatch path.
+    message_sender: Sender,
+    /// Enqueues supervision events and undeliverable messages for
+    /// `_callback_loop`.
+    control_sender: Sender,
     /// Number of enqueued callbacks whose verdict has not been reported yet.
     /// See [`CallbacksPending`].
     callbacks_pending: Arc<AtomicUsize>,
@@ -1091,6 +1090,13 @@ pub struct PythonActor {
     execution_tracker: Arc<ExecutionTracker>,
 }
 
+/// Convert a wake-pipe creation failure into the error type returned across
+/// the GIL-bound `PythonActor` constructor.
+fn serialize_channel_error(py: Python<'_>, error: nix::Error) -> SerializablePyErr {
+    let error = PyRuntimeError::new_err(error.to_string());
+    SerializablePyErr::from(py, &error)
+}
+
 impl PythonActor {
     pub(crate) fn new(
         actor_type: PickledPyObject,
@@ -1104,25 +1110,19 @@ impl PythonActor {
                 let class_type: &Bound<'_, PyType> = unpickled.cast()?;
                 let actor: Py<PyAny> = class_type.call0()?.into_py_any(py)?;
 
-                let task_locals = Python::detach(py, create_task_locals);
-
-                let channel = || {
-                    pympsc::channel().map_err(|e| {
-                        let py_err = PyRuntimeError::new_err(e.to_string());
-                        SerializablePyErr::from(py, &py_err)
-                    })
-                };
-                let (dispatch_sender, dispatch_receiver) = channel()?;
-                let (callback_sender, callback_receiver) = channel()?;
+                let async_actor::inbox::Inbox {
+                    message_sender,
+                    control_sender,
+                    receiver,
+                } = async_actor::inbox::new()
+                    .map_err(|error| serialize_channel_error(py, error))?;
 
                 Ok(Self {
                     actor,
-                    task_locals,
+                    dispatch: async_actor::dispatch::State::new(py, receiver),
                     instance: None,
-                    dispatch_sender,
-                    dispatch_receiver: Some(dispatch_receiver),
-                    callback_sender,
-                    callback_receiver: Some(callback_receiver),
+                    message_sender,
+                    control_sender,
                     callbacks_pending: Arc::new(AtomicUsize::new(0)),
                     construction_point: OnceLock::from(construction_point),
                     init_message,
@@ -1130,42 +1130,6 @@ impl PythonActor {
                 })
             },
         )?)
-    }
-
-    fn cancel_tasks_and_stop_python_loop(
-        py: Python<'_>,
-        task_locals: &pyo3_async_runtimes::TaskLocals,
-    ) -> PyResult<()> {
-        let asyncio = py.import("asyncio")?;
-        let event_loop = task_locals.event_loop(py);
-        let tasks = asyncio.call_method1("all_tasks", (&event_loop,))?;
-        let mut has_tasks = false;
-        for task in tasks.try_iter()? {
-            let task = task?;
-            let cancel = task.getattr("cancel")?;
-            event_loop.call_method1("call_soon_threadsafe", (cancel,))?;
-            has_tasks = true;
-        }
-        if has_tasks {
-            asyncio
-                .call_method1(
-                    "run_coroutine_threadsafe",
-                    (asyncio.call_method1("sleep", (0,))?, &event_loop),
-                )?
-                .call_method0("result")?;
-        }
-        let stop = event_loop.getattr("stop")?;
-        event_loop.call_method1("call_soon_threadsafe", (stop,))?;
-        Ok(())
-    }
-
-    fn cancel_pending_python_tasks_and_stop_loop(&self) -> anyhow::Result<()> {
-        let task_locals = &self.task_locals;
-        monarch_with_gil_blocking(GilSite::Stop, |py| -> anyhow::Result<()> {
-            Self::cancel_tasks_and_stop_python_loop(py, task_locals)
-                .map_err(|err| anyhow::Error::from(SerializablePyErr::from(py, &err)))?;
-            Ok(())
-        })
     }
 
     /// Get-or-create the actor's cached `PyInstance`, injecting a clone of
@@ -1459,51 +1423,17 @@ impl Actor for PythonActor {
             attrs
         });
 
-        let receiver = self
-            .dispatch_receiver
-            .take()
-            .expect("dispatch receiver already taken");
-        let callback_receiver = self
-            .callback_receiver
-            .take()
-            .expect("callback receiver already taken");
-
         monarch_with_gil(GilSite::DispatchInit, |py| {
             let self_instance = self.ensure_py_instance(py, this);
             let actor_mesh_mod = py.import("monarch._src.actor.actor_mesh")?;
 
-            let loops = [
-                (
-                    "message loop",
-                    actor_mesh_mod.call_method(
-                        "_dispatch_loop",
-                        (
-                            self.actor.clone_ref(py),
-                            receiver,
-                            self_instance.clone_ref(py),
-                            CallbacksPending(self.callbacks_pending.clone()),
-                        ),
-                        None,
-                    )?,
-                ),
-                (
-                    "callback loop",
-                    actor_mesh_mod.call_method(
-                        "_callback_loop",
-                        (self.actor.clone_ref(py), callback_receiver, self_instance),
-                        None,
-                    )?,
-                ),
-            ];
-            for (name, awaitable) in loops {
-                let future =
-                    pyo3_async_runtimes::into_future_with_locals(&self.task_locals, awaitable)?;
-                tokio::spawn(async move {
-                    if let Err(e) = future.await {
-                        tracing::error!("{} error: {}", name, e);
-                    }
-                });
-            }
+            self.dispatch.init(
+                py,
+                &actor_mesh_mod,
+                &self.actor,
+                &self_instance,
+                self.callbacks_pending.clone(),
+            )?;
             Ok::<_, anyhow::Error>(())
         })
         .await?;
@@ -1531,55 +1461,10 @@ impl Actor for PythonActor {
         // Turn the ActorError into a representation of the error. We may not
         // have an original exception object or traceback, so we just pass in
         // the message.
-        let err_as_str = err.map(|e| e.to_string());
-        let future = monarch_with_gil(GilSite::EndpointCleanup, |py| {
-            let py_cx = match &self.instance {
-                Some(instance) => crate::context::PyContext::new(&cx, instance.clone_ref(py)),
-                None => {
-                    let py_instance: crate::context::PyInstance = this.into();
-                    crate::context::PyContext::new(
-                        &cx,
-                        py_instance
-                            .into_py_any(py)?
-                            .cast_bound(py)
-                            .map_err(PyErr::from)?
-                            .clone()
-                            .unbind(),
-                    )
-                }
-            }
-            .into_bound_py_any(py)?;
-            let actor = self.actor.bind(py);
-            // Some tests don't use the Actor base class, so add this check
-            // to be defensive.
-            match actor.hasattr("__cleanup__") {
-                Ok(false) | Err(_) => {
-                    // No cleanup found, default to returning None
-                    return Ok(None);
-                }
-                _ => {}
-            }
-            let awaitable = actor
-                .call_method("__cleanup__", (&py_cx, err_as_str), None)
-                .map_err(|err| anyhow::Error::from(SerializablePyErr::from(py, &err)))?;
-            if awaitable.is_none() {
-                Ok(None)
-            } else {
-                pyo3_async_runtimes::into_future_with_locals(&self.task_locals, awaitable)
-                    .map(Some)
-                    .map_err(anyhow::Error::from)
-            }
-        })
-        .await;
-        let cleanup_result = match future {
-            Ok(Some(future)) => future.await.map(|_| ()).map_err(anyhow::Error::from),
-            Ok(None) => Ok(()),
-            Err(err) => Err(err),
-        };
-        let loop_shutdown_result = self.cancel_pending_python_tasks_and_stop_loop();
-        cleanup_result?;
-        loop_shutdown_result?;
-        Ok(())
+        let error = err.map(|e| e.to_string());
+        self.dispatch
+            .cleanup(&self.actor, self.instance.as_deref(), &cx, this, error)
+            .await
     }
 
     fn display_name(&self) -> Option<String> {
@@ -1643,7 +1528,7 @@ impl Actor for PythonActor {
             },
         };
 
-        self.callback_sender
+        self.control_sender
             .send(pending)
             .map_err(|_| anyhow::anyhow!("failed to send undeliverable message to queue"))?;
         Ok(())
@@ -1742,35 +1627,6 @@ impl RemoteSpawn for PythonActor {
     }
 }
 
-/// Create a new TaskLocals with its own asyncio event loop in a dedicated thread.
-fn create_task_locals() -> pyo3_async_runtimes::TaskLocals {
-    monarch_with_gil_blocking(GilSite::TaskLocals, |py| {
-        let asyncio = Python::import(py, "asyncio").unwrap();
-        let event_loop = asyncio.call_method0("new_event_loop").unwrap();
-        let task_locals = pyo3_async_runtimes::TaskLocals::new(event_loop.clone())
-            .copy_context(py)
-            .unwrap();
-
-        let kwargs = PyDict::new(py);
-        let target = event_loop.getattr("run_forever").unwrap();
-        kwargs.set_item("target", target).unwrap();
-        // Need to make this a daemon thread, otherwise shutdown will hang.
-        kwargs.set_item("daemon", true).unwrap();
-        kwargs
-            .set_item("name", "monarch-actor-event-loop")
-            .expect("thread name should be accepted");
-        let thread = py
-            .import("threading")
-            .unwrap()
-            .call_method("Thread", (), Some(&kwargs))
-            .unwrap();
-        mark_actor_event_loop_thread(&thread, &event_loop)
-            .expect("actor event loop should attach to its owning thread");
-        thread.call_method0("start").unwrap();
-        task_locals
-    })
-}
-
 #[async_trait]
 impl Handler<PythonMessage> for PythonActor {
     fn message_status_reporting() -> MessageStatusReporting {
@@ -1786,8 +1642,7 @@ impl Handler<PythonMessage> for PythonActor {
         cx: &Context<PythonActor>,
         message: PythonMessage,
     ) -> anyhow::Result<()> {
-        let sender = self.dispatch_sender.clone();
-        self.handle_queue(cx, sender, message).await
+        self.handle_queue(cx, message).await
     }
 }
 
@@ -1798,9 +1653,8 @@ impl PythonActor {
     /// Handle a message using queue dispatch.
     /// Resolves the message on the Rust side and enqueues it for Python to process.
     async fn handle_queue(
-        &mut self,
+        &self,
         cx: &Context<'_, PythonActor>,
-        sender: pympsc::Sender,
         message: PythonMessage,
     ) -> anyhow::Result<()> {
         let resolved = message.resolve_indirect_call(cx).await?;
@@ -1818,7 +1672,7 @@ impl PythonActor {
                 .get(hyperactor::mailbox::headers::TELEMETRY_MESSAGE_ID),
         };
 
-        sender
+        self.message_sender
             .send(pending)
             .map_err(|_| anyhow::anyhow!("failed to send message to queue"))?;
 
@@ -2143,7 +1997,7 @@ impl Handler<MeshFailure> for PythonActor {
             },
         };
 
-        self.callback_sender
+        self.control_sender
             .send(pending)
             .map_err(|_| anyhow::anyhow!("failed to send supervision event to queue"))?;
         Ok(())
