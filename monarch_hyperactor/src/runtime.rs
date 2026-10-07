@@ -42,8 +42,10 @@ use crate::config::TOKIO_WORKER_THREADS;
 /// it. `threading` already tracks every live thread, so this needs no second
 /// registry and takes no lock on the actor-spawn path.
 const ACTOR_EVENT_LOOP_ATTRIBUTE: &str = "_monarch_actor_event_loop";
-const ACTOR_EVENT_LOOP_POLL_INTERVAL: Duration = Duration::from_millis(1);
-const ACTOR_EVENT_LOOP_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+/// Attribute marking the `threading.Thread` that drives a sync actor.
+const ACTOR_DRIVER_ATTRIBUTE: &str = "_monarch_actor_driver";
+const ACTOR_THREAD_REAPER_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const ACTOR_THREAD_REAPER_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Global tokio runtime container.
 ///
@@ -124,6 +126,18 @@ pub(crate) fn mark_actor_event_loop_thread(
     thread.setattr(ACTOR_EVENT_LOOP_ATTRIBUTE, event_loop)
 }
 
+/// How many marked sync-actor driver threads are still alive.
+fn actor_driver_threads(py: Python<'_>) -> PyResult<usize> {
+    let threading = py.import("threading")?;
+    let mut count = 0;
+    for thread in threading.call_method0("enumerate")?.try_iter()? {
+        if thread?.hasattr(ACTOR_DRIVER_ATTRIBUTE)? {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 fn actor_event_loops(py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
     let threading = py.import("threading")?;
     let mut loops = Vec::new();
@@ -137,29 +151,35 @@ fn actor_event_loops(py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
     Ok(loops)
 }
 
-/// Stop every marked actor loop, polling until they exit or `timeout` elapses.
-/// Returns how many were still enumerable when the pass ended.
+/// Stop marked async actor loops and wait for all marked actor threads to exit.
 ///
-/// Scope: this covers loops enumerable *during* the pass. The first empty
-/// snapshot returns, so a loop created after that observation is missed.
-/// That residual is deliberate -- closing it would mean proving actor-loop
-/// creation had quiesced first, which is a process-wide gate this guard
-/// intentionally does not have. Actor-owned teardown is what will make late
-/// creation safe; this is only the interpreter-exit backstop.
+/// Each pass schedules `stop` on every async actor loop. Sync actor drivers
+/// receive no stop request here: the preceding Tokio shutdown closes their
+/// inbox senders, so this function only waits for those threads to return.
+/// Between passes it releases the GIL and sleeps, allowing both kinds of thread
+/// to finish. It returns zero when none remain, or the number still enumerable
+/// when `timeout` expires.
 ///
-/// Latency: the deadline is checked once per pass, after a full enumeration
-/// and one `call_soon_threadsafe` per loop, so the bound is `timeout` plus one
-/// pass rather than exactly `timeout`.
+/// This is a bounded interpreter-exit backstop, not a process-wide creation
+/// barrier. The first empty snapshot returns, so it does not cover an actor
+/// thread created after that observation; normal actor teardown owns that
+/// lifecycle.
 ///
-/// Every wait is bounded and there are no thread joins: the pass only sleeps.
-/// `Thread.join()` and `Thread.is_alive()` are both avoided because on CPython
-/// 3.14 `is_alive()` can enter an unbounded OS-thread join once
-/// `thread_is_exiting` is set.
-fn stop_and_wait_actor_event_loops(py: Python<'_>, timeout: Duration) -> PyResult<usize> {
+/// The deadline is checked after each complete pass, so the elapsed time may
+/// exceed `timeout` by one enumeration and one `call_soon_threadsafe` per async
+/// loop. The function deliberately polls instead of calling `Thread.join()` or
+/// `Thread.is_alive()`: on CPython 3.14, `is_alive()` may enter an unbounded OS
+/// thread join after `thread_is_exiting` is set.
+fn stop_actor_loops_and_wait_for_actor_threads(
+    py: Python<'_>,
+    timeout: Duration,
+) -> PyResult<usize> {
     let deadline = Instant::now() + timeout;
     loop {
         let loops = actor_event_loops(py)?;
-        if loops.is_empty() {
+        // Interpreter finalization is safe only after neither kind of Python
+        // actor thread can still acquire the GIL.
+        if loops.is_empty() && actor_driver_threads(py)? == 0 {
             return Ok(0);
         }
         for event_loop in &loops {
@@ -177,43 +197,45 @@ fn stop_and_wait_actor_event_loops(py: Python<'_>, timeout: Duration) -> PyResul
         if Instant::now() >= deadline {
             // Re-enumerate: threads may have exited while this pass issued its
             // stops, and the survivor count is what the caller reports.
-            return Ok(actor_event_loops(py)?.len());
+            return Ok(actor_event_loops(py)?.len() + actor_driver_threads(py)?);
         }
 
-        // Releasing the GIL is what lets the loop threads run the scheduled stop.
-        let sleep_for =
-            ACTOR_EVENT_LOOP_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now()));
+        // Releasing the GIL is what lets the loop threads run the scheduled stop,
+        // and the driver threads return.
+        let sleep_for = ACTOR_THREAD_REAPER_POLL_INTERVAL
+            .min(deadline.saturating_duration_since(Instant::now()));
         py.detach(move || thread::sleep(sleep_for));
     }
 }
 
-/// Reap actor event-loop threads before the interpreter finalizes.
+/// Reap async actor-loop and sync actor-driver threads before the interpreter
+/// finalizes.
 ///
 /// `Py_FinalizeEx` runs Python `atexit` handlers *before* it publishes the
-/// finalizing thread state, so while this runs every loop thread can still
-/// take the GIL, run the scheduled `stop`, return from `run_forever` and exit.
-/// After that point a surviving daemon thread that asks for the GIL is
-/// force-exited with `pthread_exit`, and that unwind through pyo3's
-/// `catch_unwind` aborts the process.
+/// finalizing thread state. While this handler runs, async loop threads can
+/// take the GIL to process their scheduled `stop`, and sync driver threads can
+/// take it to finish returning. After that point, CPython force-exits a
+/// surviving daemon thread that asks for the GIL with `pthread_exit`; unwinding
+/// that through pyo3's `catch_unwind` aborts the process.
 ///
-/// This is an interpreter-exit guard, not the lifecycle repair: actor cleanup
-/// still returns before its thread terminates, and the root client still
-/// publishes `Stopped` without running cleanup.
-fn shutdown_actor_event_loops(py: Python<'_>, timeout: Duration) {
-    let remaining = match stop_and_wait_actor_event_loops(py, timeout) {
+/// This is an interpreter-exit guard, not the lifecycle repair: an async
+/// actor's cleanup still returns before its loop thread terminates, and the
+/// root client still publishes `Stopped` without running cleanup.
+fn reap_actor_threads(py: Python<'_>, timeout: Duration) {
+    let remaining = match stop_actor_loops_and_wait_for_actor_threads(py, timeout) {
         Ok(remaining) => remaining,
         Err(err) => {
-            tracing::warn!(error = %err, "failed to stop actor event-loop threads at interpreter exit");
+            tracing::warn!(error = %err, "failed to reap actor threads at interpreter exit");
             return;
         }
     };
     if remaining > 0 {
-        // Only reachable if a callback on that loop never yields, which is a
-        // bug of its own. Naming it turns a bare SIGABRT into something
-        // diagnosable rather than hanging the exit path.
+        // An async callback that never yields or a sync driver that does not
+        // return can survive the deadline. Report it instead of hanging the
+        // interpreter-exit path.
         tracing::warn!(
             remaining,
-            "actor event-loop threads survived interpreter-exit shutdown"
+            "actor event-loop or driver threads survived interpreter-exit shutdown"
         );
     }
 }
@@ -246,10 +268,10 @@ pub fn shutdown_tokio_runtime(py: Python<'_>) {
         rt.shutdown_timeout(Duration::from_secs(1));
     });
 
-    // Reaping runs unconditionally. The field intervention that took this
-    // failure from 6/60 to 0/60 was an unconditional stop-and-join, and the
-    // bounded deadline caps the worst case.
-    shutdown_actor_event_loops(py, ACTOR_EVENT_LOOP_SHUTDOWN_TIMEOUT);
+    // Runtime shutdown may bypass normal actor cleanup, so always reap marked
+    // actor threads before Python begins finalization. The deadline bounds the
+    // interpreter-exit delay.
+    reap_actor_threads(py, ACTOR_THREAD_REAPER_TIMEOUT);
 }
 
 /// Stores the native thread ID of the main Python thread.
@@ -523,7 +545,7 @@ mod tests {
     // The reaper is process-wide over `threading.enumerate()`, so two of these
     // running concurrently would see each other's threads. A test-only static
     // is fine; the no-new-global-state rule is about production code.
-    static ACTOR_EVENT_LOOP_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static ACTOR_THREAD_REAPER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn start_marked_thread(
         py: Python<'_>,
@@ -588,8 +610,8 @@ mod tests {
     }
 
     #[test]
-    fn stop_and_wait_actor_event_loops_reaps_every_thread() {
-        let _guard = ACTOR_EVENT_LOOP_TEST_LOCK
+    fn stop_actor_loops_and_wait_for_actor_threads_reaps_every_thread() {
+        let _guard = ACTOR_THREAD_REAPER_TEST_LOCK
             .lock()
             .expect("actor event-loop tests should not poison their lock");
         pyo3::Python::initialize();
@@ -597,7 +619,7 @@ mod tests {
             let loops = [new_actor_event_loop(py), new_actor_event_loop(py)];
 
             assert_eq!(
-                stop_and_wait_actor_event_loops(py, Duration::from_secs(1))
+                stop_actor_loops_and_wait_for_actor_threads(py, Duration::from_secs(1))
                     .expect("actor event-loop shutdown should succeed"),
                 0,
                 "all marked actor event-loop threads should exit before the deadline"
@@ -617,8 +639,8 @@ mod tests {
     }
 
     #[test]
-    fn stop_and_wait_actor_event_loops_returns_at_deadline() {
-        let _guard = ACTOR_EVENT_LOOP_TEST_LOCK
+    fn stop_actor_loops_and_wait_for_actor_threads_returns_at_deadline() {
+        let _guard = ACTOR_THREAD_REAPER_TEST_LOCK
             .lock()
             .expect("actor event-loop tests should not poison their lock");
         pyo3::Python::initialize();
@@ -627,7 +649,7 @@ mod tests {
             let started = Instant::now();
 
             assert_eq!(
-                stop_and_wait_actor_event_loops(py, Duration::from_millis(10))
+                stop_actor_loops_and_wait_for_actor_threads(py, Duration::from_millis(10))
                     .expect("actor event-loop timeout should be observed"),
                 1,
                 "a wedged marked thread should survive the shutdown deadline"
@@ -642,7 +664,7 @@ mod tests {
                 .call_method0("set")
                 .expect("wedged thread should be released");
             assert_eq!(
-                stop_and_wait_actor_event_loops(py, Duration::from_secs(1))
+                stop_actor_loops_and_wait_for_actor_threads(py, Duration::from_secs(1))
                     .expect("released actor event-loop thread should be observed"),
                 0,
                 "released marked thread should exit"
@@ -654,13 +676,80 @@ mod tests {
         });
     }
 
+    /// A marked sync-actor driver thread blocked on `Event.wait()`, standing in
+    /// for a driver waiting on its inbox: it returns only when released.
+    fn new_marked_driver_thread(py: Python<'_>) -> Py<PyAny> {
+        let release = py
+            .import("threading")
+            .expect("threading should import")
+            .call_method0("Event")
+            .expect("release event should be created");
+        let kwargs = PyDict::new(py);
+        kwargs
+            .set_item(
+                "target",
+                release.getattr("wait").expect("event should have wait"),
+            )
+            .expect("thread target should be set");
+        kwargs
+            .set_item("daemon", true)
+            .expect("thread should be made a daemon");
+        let thread = py
+            .import("threading")
+            .expect("threading should import")
+            .call_method("Thread", (), Some(&kwargs))
+            .expect("thread should be created");
+        thread
+            .setattr(ACTOR_DRIVER_ATTRIBUTE, true)
+            .expect("driver thread should be marked");
+        thread.call_method0("start").expect("thread should start");
+        release.unbind()
+    }
+
+    // The pass schedules no `stop` for a driver: it waits for the driver to
+    // return, reports it as a survivor at the deadline, and sees it gone once
+    // it returns.
+    #[test]
+    fn stop_actor_loops_and_wait_for_actor_threads_waits_for_driver_threads() {
+        let _guard = ACTOR_THREAD_REAPER_TEST_LOCK
+            .lock()
+            .expect("actor event-loop tests should not poison their lock");
+        pyo3::Python::initialize();
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            let release = new_marked_driver_thread(py);
+
+            assert_eq!(
+                stop_actor_loops_and_wait_for_actor_threads(py, Duration::from_millis(10))
+                    .expect("driver-thread timeout should be observed"),
+                1,
+                "a driver that has not returned should survive the deadline"
+            );
+
+            release
+                .bind(py)
+                .call_method0("set")
+                .expect("driver thread should be released");
+            assert_eq!(
+                stop_actor_loops_and_wait_for_actor_threads(py, Duration::from_secs(1))
+                    .expect("released driver thread should be observed"),
+                0,
+                "a driver that returns should be waited for and gone"
+            );
+            assert_eq!(
+                actor_driver_threads(py).expect("driver threads should enumerate"),
+                0,
+                "the returned driver should leave threading.enumerate()"
+            );
+        });
+    }
+
     // The documented bound is `timeout + one pass`. Measure the one-pass term
     // with many loops so it is a behaviour rather than a claim, and so a
     // regression to per-thread timeouts (N * timeout) would be caught.
     #[test]
-    fn stop_and_wait_actor_event_loops_pass_cost_is_bounded_with_many_loops() {
+    fn stop_actor_loops_and_wait_for_actor_threads_pass_cost_is_bounded() {
         const LOOPS: usize = 32;
-        let _guard = ACTOR_EVENT_LOOP_TEST_LOCK
+        let _guard = ACTOR_THREAD_REAPER_TEST_LOCK
             .lock()
             .expect("actor event-loop tests should not poison their lock");
         pyo3::Python::initialize();
@@ -671,7 +760,7 @@ mod tests {
             let started = Instant::now();
 
             assert_eq!(
-                stop_and_wait_actor_event_loops(py, Duration::from_millis(50))
+                stop_actor_loops_and_wait_for_actor_threads(py, Duration::from_millis(50))
                     .expect("actor event-loop timeout should be observed"),
                 LOOPS,
                 "every wedged marked thread should survive the shutdown deadline"
@@ -690,7 +779,7 @@ mod tests {
                     .expect("wedged thread should be released");
             }
             assert_eq!(
-                stop_and_wait_actor_event_loops(py, Duration::from_secs(5))
+                stop_actor_loops_and_wait_for_actor_threads(py, Duration::from_secs(5))
                     .expect("released actor event-loop threads should be observed"),
                 0,
                 "released marked threads should exit"
