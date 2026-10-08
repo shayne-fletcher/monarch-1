@@ -100,7 +100,7 @@ class _RecordingPort:
     def __init__(self) -> None:
         self.sent_messages: list[object] = []
 
-    def send_message(self, message: object) -> None:
+    def _send_message(self, message: object) -> None:
         self.sent_messages.append(message)
 
 
@@ -109,7 +109,7 @@ def test_unawaited_port_resolve_and_send_starts_nothing() -> None:
     result = _PickleProbe()
     port = _RecordingPort()
 
-    coroutine = Port.resolve_and_send(cast(Port, port), result)
+    coroutine = Port._resolve_and_send(cast(Port, port), result)
     try:
         assert not result.was_reduced
         assert port.sent_messages == []

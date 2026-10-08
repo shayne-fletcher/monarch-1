@@ -1200,7 +1200,7 @@ class Port(Generic[R]):
         """
         ...
 
-    def send_message(self, message: PythonMessage) -> None: ...
+    def _send_message(self, message: PythonMessage) -> None: ...
 
     def _pending_result(self, result: object) -> PendingMessage:
         state = pickle(
@@ -1211,14 +1211,14 @@ class Port(Generic[R]):
         kind = cast(PythonMessageKind, cast(Any, PythonMessageKind.Result)(self._rank))
         return PendingMessage(kind, state)
 
-    async def resolve_and_send(self, result: object) -> None:
+    async def _resolve_and_send(self, result: object) -> None:
         # This is Port.send with mesh-reference resolution inserted before the
         # already-serialized Result message is posted.
         message = self._pending_result(result)
         resolved = message.try_resolve_now()
         if resolved is None:
             resolved = await message.resolve()
-        self.send_message(resolved)
+        self._send_message(resolved)
 
     def _resolve_and_send_blocking(self, result: object) -> None:
         """Resolve and send from a sync actor's driver, blocking until any
@@ -1227,7 +1227,7 @@ class Port(Generic[R]):
         resolved = message.try_resolve_now()
         if resolved is None:
             resolved = message.resolve().get()
-        self.send_message(resolved)
+        self._send_message(resolved)
 
     def exception(self, obj: Exception) -> None: ...
 
@@ -1727,7 +1727,7 @@ class _Actor:
             finally:
                 ctx.actor_instance._execution_finish(token)
 
-            response = response_port.resolve_and_send(result)
+            response = response_port._resolve_and_send(result)
             # LocalPort and DroppingPort complete synchronously; Port returns a
             # coroutine because mesh references may require async resolution.
             if response is not None:
