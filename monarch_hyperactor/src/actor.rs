@@ -2210,7 +2210,7 @@ impl LocalPort {
     }
     /// Async-actor reply entry point. A local value needs no mesh-reference
     /// resolution, so it can be sent immediately.
-    fn resolve_and_send(&mut self, obj: Py<PyAny>) -> PyResult<()> {
+    fn _resolve_and_send(&mut self, obj: Py<PyAny>) -> PyResult<()> {
         self.send(obj)
     }
     /// Sync-actor reply entry point. A local value needs no asynchronous work,
@@ -2245,7 +2245,7 @@ impl DroppingPort {
 
     /// Async-actor reply entry point. Dropping the value requires no reference
     /// resolution.
-    fn resolve_and_send(&self, obj: Py<PyAny>) -> PyResult<()> {
+    fn _resolve_and_send(&self, obj: Py<PyAny>) -> PyResult<()> {
         self.send(obj)
     }
 
@@ -2253,10 +2253,6 @@ impl DroppingPort {
     /// wait for, so the blocking path is also immediate.
     fn _resolve_and_send_blocking(&self, obj: Py<PyAny>) -> PyResult<()> {
         self.send(obj)
-    }
-
-    fn send_message(&self, _message: PythonMessage) -> PyResult<()> {
-        Ok(())
     }
 
     fn exception(&self, e: Bound<'_, PyAny>) -> PyResult<()> {
@@ -2343,7 +2339,7 @@ impl Port {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    fn send_message(&mut self, message: PythonMessage) -> PyResult<()> {
+    fn _send_message(&mut self, message: PythonMessage) -> PyResult<()> {
         self.port_ref
             .post_with_headers(&self.instance, self.reply_headers.clone(), message)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
@@ -2671,13 +2667,13 @@ mod tests {
 
         monarch_with_gil_blocking(GilSite::Test, |py| {
             let value = 41i64.into_py_any(py).unwrap();
-            port.resolve_and_send(value).unwrap()
+            port._resolve_and_send(value).unwrap()
         });
 
         let received = receiver
             .recv()
             .now_or_never()
-            .expect("the value must be posted before resolve_and_send returns")
+            .expect("the value must be posted before _resolve_and_send returns")
             .unwrap();
         monarch_with_gil_blocking(GilSite::Test, |py| {
             assert_eq!(
@@ -2699,7 +2695,7 @@ mod tests {
             let port = Py::new(py, port).unwrap();
             let returned = port
                 .bind(py)
-                .call_method1("resolve_and_send", (42,))
+                .call_method1("_resolve_and_send", (42,))
                 .unwrap();
             assert!(returned.is_none(), "direct completion must return None");
         });
@@ -2707,7 +2703,7 @@ mod tests {
         let received = receiver
             .recv()
             .now_or_never()
-            .expect("the value must be posted before resolve_and_send returns")
+            .expect("the value must be posted before _resolve_and_send returns")
             .unwrap();
         monarch_with_gil_blocking(GilSite::Test, |py| {
             assert_eq!(
@@ -2743,14 +2739,14 @@ mod tests {
             py.run(
                 c_str!(
                     r#"
-assert port.resolve_and_send(1) is None
+assert port._resolve_and_send(1) is None
 try:
-    port.resolve_and_send(2)
+    port._resolve_and_send(2)
 except BaseException as err:
     raised = type(err)
     message = str(err)
 else:
-    raise AssertionError("a second resolve_and_send must fail")
+    raise AssertionError("a second _resolve_and_send must fail")
 "#
                 ),
                 None,
@@ -2785,7 +2781,7 @@ else:
             for value in [7, 8, 9] {
                 let returned = port
                     .bind(py)
-                    .call_method1("resolve_and_send", (value,))
+                    .call_method1("_resolve_and_send", (value,))
                     .unwrap();
                 assert!(
                     returned.is_none(),
