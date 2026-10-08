@@ -21,6 +21,7 @@ from typing import (
 
 import pytest
 from monarch._rust_bindings.monarch_hyperactor.actor import (
+    ActorKind,
     MethodSpecifier,
     PythonMessage,
     PythonMessageKind,
@@ -192,6 +193,7 @@ def spawn_actor_mesh(proc_mesh_task: Shared[ProcMesh]) -> PythonActorMesh:
         "test",
         cast(Type["Actor"], MyActor),
         init_message,
+        ActorKind.ASYNC,
         False,  # emulated
     )
 

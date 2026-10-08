@@ -43,6 +43,7 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
 )
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorAddr
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
+from monarch._src.actor import actor_mesh
 from monarch._src.actor.actor_mesh import ActorMesh, Channel, context, Port
 from monarch._src.actor.future import Future
 from monarch._src.actor.host_mesh import _spawn_admin, HostMesh, this_host, this_proc
@@ -1393,10 +1394,22 @@ class UndeliverableMessageSender(Actor):
 class UndeliverableMessageSenderWithOverride(UndeliverableMessageSender):
     def __init__(self, receiver: UndeliverableMessageReceiver):
         self._receiver = receiver
+        self._actor_id = context().actor_instance.actor_id
+
+    @endpoint
+    def send_undeliverable(self) -> None:
+        _send_undeliverable()
+        # Clear this endpoint's context, so the callback sees this actor's
+        # context only if its own dispatch installs it; otherwise `context()`
+        # falls back to a root client.
+        actor_mesh._context.set(None)
 
     def _handle_undeliverable_message(
         self, message: UndeliverableMessageEnvelope
     ) -> bool:
+        # A sync actor runs the callback on its driver thread.
+        assert context().actor_instance.actor_id == self._actor_id
+        assert threading.current_thread().name == "monarch-actor-driver"
         self._receiver.receive_undeliverable.broadcast(
             str(message.sender()), str(message.dest()), message.error_msg()
         )

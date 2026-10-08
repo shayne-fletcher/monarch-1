@@ -208,7 +208,7 @@ class FileWriter(Actor):
 - Actors with sync endpoints require a sync `__cleanup__`
 - Actors with async endpoints require an async `__cleanup__`
 - An `async def` override is awaited on the actor's asyncio event loop, the same loop that runs endpoint coroutines, so it may `await` other endpoints or I/O
-- A sync override runs under `fake_sync_state` and cannot observe a running loop with `asyncio.get_running_loop`
+- In an actor whose endpoints are all `def`, the override runs on the actor's own thread, which has no event loop, after the message in progress; messages still queued behind it are discarded
 
 **Errors in `__cleanup__`:**
 - A raise is treated as a new supervision event chained to the one being handled, matching the `__exit__` convention for context managers
@@ -814,14 +814,17 @@ class ManagerActor(Actor):
 
 An `async def` override is awaited on the actor's asyncio event loop -- the same
 loop that runs endpoint coroutines -- so it may `await` other endpoints or I/O.
-A sync override runs under `fake_sync_state` and cannot observe a running loop
-with `asyncio.get_running_loop`. Both forms receive the same arguments and obey
-the same truthy/falsey handled/unhandled contract.
+A sync override cannot observe a running loop with `asyncio.get_running_loop`;
+in an actor whose endpoints are all `def`, it runs on the actor's own thread,
+which has no event loop, between messages. Both forms receive the same arguments
+and obey the same truthy/falsey handled/unhandled contract.
 
 `__supervise__` runs in its own task on the actor's event loop, one failure at a
-time, and the actor keeps handling messages while it is pending. Running it at
-any point, rather than after the current message, avoids deadlock: for example,
-an actor might be waiting for a result from a failed actor. This has
+time, and the actor keeps handling messages while it is pending. In an actor
+whose endpoints are all `def`, it runs on the actor's own thread instead, before
+the next queued message. In an async actor, running it at any point, rather
+than after the current message, avoids deadlock: for example, an actor might be
+waiting for a result from a failed actor. This has
 consequences for how handlers are written:
 
 - It may run at any `await` that suspends, in any async endpoint, even one
@@ -832,12 +835,16 @@ consequences for how handlers are written:
 - Sync code is never interrupted. A sync endpoint runs to completion before
   `__supervise__` starts, and a sync `__supervise__` runs between endpoints. An
   `async def` `__supervise__` interleaves with endpoints at its own `await`s.
-- Messages that arrive after a failure may be handled before `__supervise__`
-  runs, and the actor only fails once it returns a falsey value or raises.
+- In an async actor, messages that arrive after a failure may be handled before
+  `__supervise__` runs. In an actor whose endpoints are all `def`, only the
+  message in progress precedes it. Either way, the actor only fails once it
+  returns a falsey value or raises.
 - An `async def` `__supervise__` may await the actor's own endpoints. Blocking
-  calls in either form block endpoints too, since they share the event loop.
-- If the actor stops before `__supervise__` finishes, the pending call is
-  cancelled.
+  calls in either form block endpoints too, since they share the event loop, or
+  in an actor whose endpoints are all `def`, its thread.
+- If the actor stops before `__supervise__` finishes, an async actor's pending
+  call is cancelled. An actor whose endpoints are all `def` finishes a
+  `__supervise__` it has started before cleaning up, and drops one it has not.
 
 If `__supervise__` returns a truthy value, the failure will be considered handled
 and not delivered further up the chain. If it returns a falsey value (including None, if there is no return),

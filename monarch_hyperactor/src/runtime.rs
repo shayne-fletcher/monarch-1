@@ -126,6 +126,16 @@ pub(crate) fn mark_actor_event_loop_thread(
     thread.setattr(ACTOR_EVENT_LOOP_ATTRIBUTE, event_loop)
 }
 
+/// Mark a sync actor's driver thread so interpreter-exit shutdown waits for it
+/// to terminate.
+///
+/// The reaper does not signal this thread. The preceding Tokio shutdown closes
+/// its inbox senders, causing the driver to observe disconnection and return;
+/// the marker lets the reaper wait, with a deadline, for that exit.
+pub(crate) fn mark_actor_driver_thread(thread: &Bound<'_, PyAny>) -> PyResult<()> {
+    thread.setattr(ACTOR_DRIVER_ATTRIBUTE, true)
+}
+
 /// How many marked sync-actor driver threads are still alive.
 fn actor_driver_threads(py: Python<'_>) -> PyResult<usize> {
     let threading = py.import("threading")?;

@@ -107,7 +107,7 @@ class ActorLoopFinalizationTest(unittest.TestCase):
             f"expected SIGABRT, stderr:\n{completed.stderr}",
         )
         self.assertIn("FATAL: exception not rethrown", completed.stderr)
-        self.assert_survivors(completed, "unmitigated", 2)
+        self.assert_survivors(completed, "unmitigated", 1)
 
     # oss_skip: drives the Buck-provided `test_bin` resource.
     @pytest.mark.oss_skip
@@ -122,3 +122,9 @@ class ActorLoopFinalizationTest(unittest.TestCase):
         # The reaper ran and emptied the set. Exit status alone would also be 0
         # if no actor loop had ever been created.
         self.assert_survivors(completed, "fixed", 0)
+        # A sync actor's driver thread was live before exit and gone before
+        # finalization: the interpreter-exit reaper waited for it.
+        self.assertIn("fixed captured 1 actor drivers", completed.stderr)
+        self.assertIn(
+            "fixed observed 0 actor drivers after runtime shutdown", completed.stderr
+        )

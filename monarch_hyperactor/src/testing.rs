@@ -290,6 +290,7 @@ pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("_PROBE_SUCCESS_VALUE", PROBE_SUCCESS_VALUE)?;
     module.add_function(wrap_pyfunction!(_make_delayed_handle, module)?)?;
     module.add_function(wrap_pyfunction!(_delayed_handle_gate_stats, module)?)?;
+    crate::actor::register_testing_python_bindings(module)?;
     Ok(())
 }
 

@@ -8,7 +8,9 @@
 
 from typing import Any, final
 
+from monarch._rust_bindings.monarch_hyperactor.actor import SyncInbox
 from monarch._rust_bindings.monarch_hyperactor.handle import Handle
+from monarch._rust_bindings.monarch_hyperactor.pympsc import PyTestSender
 
 @final
 class TestStruct:
@@ -19,6 +21,9 @@ class TestStruct:
     def shared_method(self) -> str: ...
 
 def _make_test_struct(value: int) -> Any: ...
+def _sync_inbox_for_test() -> tuple[
+    PyTestSender[Any], PyTestSender[Any], SyncInbox
+]: ...
 
 # The value a successful probe publishes.
 _PROBE_SUCCESS_VALUE: int

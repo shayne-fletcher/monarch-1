@@ -9,7 +9,11 @@
 from typing import Any, final, Type, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from monarch._rust_bindings.monarch_hyperactor.actor import Actor, PythonMessage
+    from monarch._rust_bindings.monarch_hyperactor.actor import (
+        Actor,
+        ActorKind,
+        PythonMessage,
+    )
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
 from monarch._rust_bindings.monarch_hyperactor.context import Instance
 from monarch._rust_bindings.monarch_hyperactor.handle import Handle
@@ -26,6 +30,7 @@ class ProcMesh:
         mesh_base_name: str,
         actor: Type["Actor"],
         init_message: PendingMessage,
+        kind: ActorKind,
         emulated: bool,
         supervision_display_name: str | None = None,
     ) -> PythonActorMesh: ...

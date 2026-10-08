@@ -35,15 +35,19 @@ import resource
 import sys
 import threading
 import time
+from typing import Callable, TypeVar
 
 from monarch.python.tests import actor_loop_finalization_timeouts as timeouts
 
 
 _ACTOR_EVENT_LOOP_ATTRIBUTE = "_monarch_actor_event_loop"
+_ACTOR_DRIVER_ATTRIBUTE = "_monarch_actor_driver"
 
-# `context()` bootstraps the root client actor and the `controller_controller`
-# actor, and each `PythonActor` gets one asyncio loop on its own thread.
-_EXPECTED_ACTOR_LOOPS = 2
+# `context()` bootstraps the root client actor, an async actor with one asyncio
+# loop on its own thread, and the `controller_controller` actor, a sync actor
+# with one driver thread.
+_EXPECTED_ACTOR_LOOPS = 1
+_EXPECTED_ACTOR_DRIVERS = 1
 
 # Deadlines live in a side-effect-free module so the test can assert they nest
 # inside its own subprocess timeout without importing this one.
@@ -54,7 +58,10 @@ _MODEL_ARM_TIMEOUT_S = timeouts.MODEL_ARM_TIMEOUT_S
 _THREAD_EXIT_POLL_S = timeouts.THREAD_EXIT_POLL_S
 _FINALIZATION_SWITCH_INTERVAL_S = timeouts.FINALIZATION_SWITCH_INTERVAL_S
 
+T = TypeVar("T")
+
 _actor_loops: list[tuple[asyncio.AbstractEventLoop, threading.Thread]] = []
+_actor_drivers: list[threading.Thread] = []
 _model_mode = "fixed"
 
 
@@ -87,6 +94,16 @@ def _actor_event_loops() -> list[tuple[asyncio.AbstractEventLoop, threading.Thre
     return loops
 
 
+def _actor_driver_threads() -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if hasattr(t, _ACTOR_DRIVER_ATTRIBUTE)]
+
+
+def _live_drivers(drivers: list[threading.Thread]) -> list[threading.Thread]:
+    """Those still enumerable; not `is_alive()`, for the reason `_live` gives."""
+    running = set(map(id, threading.enumerate()))
+    return [thread for thread in drivers if id(thread) in running]
+
+
 def _live(
     actor_loops: list[tuple[asyncio.AbstractEventLoop, threading.Thread]],
 ) -> list[tuple[asyncio.AbstractEventLoop, threading.Thread]]:
@@ -99,22 +116,22 @@ def _live(
     return [(loop, thread) for loop, thread in actor_loops if id(thread) in running]
 
 
-def _wait_for_actor_event_loops(
-    expected: int,
-) -> list[tuple[asyncio.AbstractEventLoop, threading.Thread]]:
-    """Block until exactly `expected` actor loops have been steady for a settle window.
+def _wait_for_actor_threads(
+    find: Callable[[], list[T]], expected: int, what: str
+) -> list[T]:
+    """Block until exactly `expected` of `find()` have been steady for a settle window.
 
     `context()` returns before `controller_controller` finishes spawning, so an
-    immediate snapshot can miss its loop and the model would then arm the
-    finalization boundary while a loop it does not control is still arriving.
+    immediate snapshot can miss its thread and the model would then arm the
+    finalization boundary while a thread it does not control is still arriving.
     """
     deadline = time.monotonic() + _LOOP_DISCOVERY_TIMEOUT_S
     steady_since: float | None = None
     while True:
-        loops = _actor_event_loops()
+        loops = find()
         if len(loops) > expected:
             raise RuntimeError(
-                f"expected {expected} actor event-loop threads, observed {len(loops)}; "
+                f"expected {expected} {what} threads, observed {len(loops)}; "
                 "the model's topology assumption is stale"
             )
         if len(loops) == expected:
@@ -127,7 +144,7 @@ def _wait_for_actor_event_loops(
             steady_since = None
         if time.monotonic() >= deadline:
             raise RuntimeError(
-                f"expected {expected} actor event-loop threads, observed {len(loops)} "
+                f"expected {expected} {what} threads, observed {len(loops)} "
                 f"after {_LOOP_DISCOVERY_TIMEOUT_S}s"
             )
         time.sleep(_LOOP_DISCOVERY_POLL_S)
@@ -162,10 +179,14 @@ def _exercise_finalization_boundary() -> None:
     # assert on the same observable, and write it before anything can redirect
     # fd 2 (`closeStdPipesAtExit` points it at /dev/null during `exit()`).
     _note(f"{_model_mode} observed {len(alive)} actor loops after runtime shutdown")
+    drivers = _live_drivers(_actor_drivers)
+    _note(f"{_model_mode} observed {len(drivers)} actor drivers after runtime shutdown")
 
     if _model_mode == "fixed":
         if alive:
             _fail_model(f"reaper left {len(alive)} actor loops alive", 75)
+        if drivers:
+            _fail_model(f"reaper left {len(drivers)} actor drivers alive", 76)
         return
 
     if not alive:
@@ -226,8 +247,18 @@ def main() -> None:
     )
 
     context()
-    _actor_loops.extend(_wait_for_actor_event_loops(_EXPECTED_ACTOR_LOOPS))
+    _actor_loops.extend(
+        _wait_for_actor_threads(
+            _actor_event_loops, _EXPECTED_ACTOR_LOOPS, "actor event-loop"
+        )
+    )
     _note(f"{mode} captured {len(_actor_loops)} actor loops")
+    _actor_drivers.extend(
+        _wait_for_actor_threads(
+            _actor_driver_threads, _EXPECTED_ACTOR_DRIVERS, "actor driver"
+        )
+    )
+    _note(f"{mode} captured {len(_actor_drivers)} actor drivers")
 
     if mode == "unmitigated":
         for _loop, thread in _actor_loops:

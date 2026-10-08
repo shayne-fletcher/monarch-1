@@ -16,6 +16,7 @@ from typing import Any, Callable, cast, Coroutine, Iterable, Type, TYPE_CHECKING
 
 import numpy as np
 from monarch._rust_bindings.monarch_hyperactor.actor import (
+    ActorKind,
     MethodSpecifier,
     PythonMessageKind,
 )
@@ -155,6 +156,7 @@ async def test_actor_mesh() -> None:
         "test",
         cast(Type["Actor"], MyActor),
         init_message,
+        ActorKind.ASYNC,
         False,  # emulated
     )
 

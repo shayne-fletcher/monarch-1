@@ -25,6 +25,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::types::PyType;
 
+use crate::actor::ActorKind;
 use crate::actor::PythonActorParams;
 use crate::actor_mesh::PythonActorMesh;
 use crate::actor_mesh::PythonActorMeshImpl;
@@ -76,13 +77,14 @@ impl PyProcMesh {
 #[pymethods]
 impl PyProcMesh {
     #[staticmethod]
-    #[pyo3(signature = (proc_mesh, instance, mesh_base_name, actor, init_message, emulated, supervision_display_name = None))]
+    #[pyo3(signature = (proc_mesh, instance, mesh_base_name, actor, init_message, kind, emulated, supervision_display_name = None))]
     fn spawn_async(
         proc_mesh: &mut PyShared,
         instance: &PyInstance,
         mesh_base_name: String,
         actor: Py<PyType>,
         init_message: &mut PendingMessage,
+        kind: ActorKind,
         emulated: bool,
         supervision_display_name: Option<String>,
     ) -> PyResult<Py<PyAny>> {
@@ -101,7 +103,7 @@ impl PyProcMesh {
                     let pickled_type = PickledPyObject::pickle(actor.bind(py).as_any())?;
                     Ok((
                         slf.mesh_ref()?.clone(),
-                        PythonActorParams::new(pickled_type, Some(init_message)),
+                        PythonActorParams::new(pickled_type, Some(init_message), kind),
                     ))
                 })
                 .await?;

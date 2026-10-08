@@ -15,7 +15,11 @@ import collections
 import time
 
 from monarch.actor import Actor, concurrent_endpoint, endpoint, this_host
-from monarch.benches.noop_rpc_benchmark import benchmark_noop_rpc, NoopActor
+from monarch.benches.noop_rpc_benchmark import (
+    benchmark_noop_rpc,
+    NoopActor,
+    SyncNoopActor,
+)
 
 
 class BusyLoopActor(Actor):
@@ -72,7 +76,10 @@ def main() -> None:
     args = parser.parse_args()
     procs = this_host().spawn_procs(per_host={"procs": 1})
     try:
+        print("async endpoint:")
         benchmark_noop_rpc(procs.spawn("noop", NoopActor), args.iterations)
+        print("sync endpoint:")
+        benchmark_noop_rpc(procs.spawn("sync_noop", SyncNoopActor), args.iterations)
         asyncio.run(benchmark_burst(procs.spawn("busy", BusyLoopActor), args.burst))
     finally:
         procs.stop().get()

@@ -29,12 +29,12 @@
 //! byte into the pipe. The Python (read side) event registers the read fd into its
 //! asyncio event loop. Thus the pipe acts as a notification queue. When the fd becomes
 //! readable, the python event drains the pipe and then sets an `asyncio.Event` to notify
-//! any waiters.
+//! any waiters. [`pipe`] supplies the same pipe to a reader that is not an event loop,
+//! such as a sync actor's inbox, which waits on the read fd with `poll`.
 //!
-//! The reader side is always single threaded (it is bound to a specific event loop), and
-//! thus free of race conditions. This is because all read operations occur within a single
-//! asyncio event loop, which processes events sequentially on one thread, eliminating the
-//! possibility of concurrent access to the read side of the pipe.
+//! Each read side has a single reader thread, and is thus free of race conditions: an
+//! event's reads all occur within its asyncio event loop, which processes events
+//! sequentially on one thread, and a sync actor's inbox is read only by its driver.
 
 use std::os::fd::FromRawFd;
 use std::os::fd::IntoRawFd;
@@ -57,15 +57,19 @@ use pyo3::pyclass;
 use pyo3::types::PyModule;
 use pyo3::types::PyModuleMethods;
 
-/// Waker is is a handle to a [`PyEvent`].
+/// Write side of a non-blocking self-pipe used to notify its receiver.
 #[derive(Debug)]
 pub struct Waker {
+    /// Pipe descriptor written by [`Waker::wake`]. The corresponding read end
+    /// is owned by a [`PyEvent`] or a blocking Python receiver.
     write_fd: OwnedFd,
 }
 
 impl Waker {
-    /// Wake up any Python waiters. This sets the corresponding event, which
-    /// remains set until it is cleared by the Python event loop.
+    /// Notify the receiver by writing one byte to the pipe.
+    ///
+    /// A full pipe already represents a pending notification and therefore
+    /// counts as success. A closed read end returns `false`.
     pub fn wake(&self) -> Result<bool, nix::Error> {
         static DATA: [u8; 1] = *b"w";
 
@@ -138,7 +142,7 @@ pub fn event() -> Result<(Waker, PyEvent), nix::Error> {
 }
 
 /// Create a non-blocking pipe, returning its write end as a [`Waker`] and
-/// its read end for the caller to register with an event loop.
+/// its read end for the caller to wait on.
 pub(crate) fn pipe() -> Result<(Waker, OwnedFd), nix::Error> {
     let (read_fd, write_fd) = unistd::pipe()?;
 

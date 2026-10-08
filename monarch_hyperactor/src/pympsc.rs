@@ -8,6 +8,8 @@
 
 //! A mpsc channel that can is used to send messages from Rust to Python without acquiring
 //! the GIL on the sender side.
+//!
+//! [`channel`] pairs one queue with an asyncio-watched [`PyReceiver`].
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -39,10 +41,7 @@ pub fn channel() -> Result<(Sender, PyReceiver), nix::Error> {
     let (waker, event) = pywaker::event()?;
 
     Ok((
-        Sender {
-            tx,
-            waker: Arc::new(waker),
-        },
+        Sender::new(tx, Arc::new(waker)),
         PyReceiver {
             rx,
             event: PyCell::new(event),
@@ -80,7 +79,12 @@ impl std::error::Error for SendError {}
 /// the GIL on the sender side.
 #[derive(Clone)]
 pub struct Sender {
+    // Field order matters: fields drop in declaration order, so the final
+    // sender disconnects `tx` before its `waker` closes the pipe's write end,
+    // and the receiver woken by that EOF already sees the disconnect.
     tx: mpsc::Sender<Box<dyn IntoPyObjectBox>>,
+    /// Shared owner of the pipe's write end, used to wake the receiver after
+    /// enqueueing.
     waker: Arc<pywaker::Waker>,
 }
 
@@ -91,12 +95,23 @@ impl std::fmt::Debug for Sender {
 }
 
 impl Sender {
+    /// Pair a queue sender with the wake mechanism its receiver waits on.
+    /// Values are enqueued before waking.
+    pub(crate) fn new(
+        tx: mpsc::Sender<Box<dyn IntoPyObjectBox>>,
+        waker: Arc<pywaker::Waker>,
+    ) -> Self {
+        Self { tx, waker }
+    }
+
     /// Send a message to the channel. The object must be convertible to a Python object;
     /// conversion is deferred until the message is received in a Python context.
     pub fn send<T>(&self, msg: T) -> Result<(), SendError>
     where
         T: IntoPyObjectBox + Send + 'static,
     {
+        // Enqueue before waking so the receiver cannot consume the wake and
+        // then find the queue empty (`actor::sync_actor::inbox` SI-2).
         self.tx.send(Box::new(msg)).map_err(|_| SendError)?;
         let _ = self.waker.wake();
         Ok(())
@@ -135,18 +150,34 @@ impl PyReceiver {
     }
 }
 
-mod testing {
+pub(crate) mod testing {
+    use pyo3::PyErr;
+    use pyo3::exceptions::PyRuntimeError;
     use pyo3::pyfunction;
     use pyo3::types::PyAnyMethods;
 
     use super::*;
+
+    /// An item whose conversion into a Python object fails, standing in for a
+    /// queued message that cannot be converted on the receiving thread.
+    pub(crate) struct Unconvertible;
+
+    impl<'py> IntoPyObject<'py> for Unconvertible {
+        type Target = PyAny;
+        type Output = Bound<'py, PyAny>;
+        type Error = PyErr;
+
+        fn into_pyobject(self, _py: Python<'py>) -> PyResult<Self::Output> {
+            Err(PyRuntimeError::new_err("unconvertible test item"))
+        }
+    }
 
     // NOTE: We can't use a Python calss name that starts with "Test" since
     // during Python testing, Pytest will inspect anything that starts with
     // "Test" and check if its callable which in pyo3 >= 0.26 will raise
     // a TypeError.
     #[pyclass(module = "monarch._rust_bindings.monarch_hyperactor.pympsc")]
-    struct PyTestSender {
+    pub(crate) struct PyTestSender {
         sender: Arc<Mutex<Sender>>,
     }
 
@@ -156,15 +187,29 @@ mod testing {
             self.sender.lock().unwrap().send(obj).map_pyerr()?;
             Ok(())
         }
+
+        fn send_unconvertible(&self) -> PyResult<()> {
+            self.sender
+                .lock()
+                .expect("test sender lock should not be poisoned: sends do not panic")
+                .send(Unconvertible)
+                .map_pyerr()?;
+            Ok(())
+        }
+    }
+
+    impl PyTestSender {
+        pub(crate) fn new(sender: Sender) -> Self {
+            Self {
+                sender: Arc::new(Mutex::new(sender)),
+            }
+        }
     }
 
     #[pyfunction]
     fn channel_for_test(_py: Python<'_>) -> PyResult<(PyTestSender, PyReceiver)> {
         let (tx, rx) = channel().map_pyerr()?;
-        let tx = PyTestSender {
-            sender: Arc::new(Mutex::new(tx)),
-        };
-        Ok((tx, rx))
+        Ok((PyTestSender::new(tx), rx))
     }
 
     pub(super) fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {

@@ -188,6 +188,17 @@ class SyncActorWithAsyncSupervise(Actor):
         return True
 
 
+class SyncActorWithAsyncUndeliverable(Actor):
+    @endpoint
+    def ping(self) -> int:
+        return 1
+
+    async def _handle_undeliverable_message(
+        self, message: UndeliverableMessageEnvelope
+    ) -> bool:
+        return True
+
+
 class SyncActorWithAsyncCleanup(Actor):
     @endpoint
     def ping(self) -> int:
@@ -224,9 +235,9 @@ class NoEndpointActorWithSyncSupervise(Actor):
 def test_actor_kind() -> None:
     """SA-5: an actor is sync only when it has at least one endpoint and every
     endpoint is a plain `def`; anything else is async."""
-    assert _actor_kind(SyncPingActor) is ActorKind.SYNC
-    assert _actor_kind(AsyncActorWithSyncSupervise) is ActorKind.ASYNC
-    assert _actor_kind(NoEndpointActorWithSyncSupervise) is ActorKind.ASYNC
+    assert _actor_kind(SyncPingActor) == ActorKind.SYNC
+    assert _actor_kind(AsyncActorWithSyncSupervise) == ActorKind.ASYNC
+    assert _actor_kind(NoEndpointActorWithSyncSupervise) == ActorKind.ASYNC
 
 
 @pytest.mark.parametrize(
@@ -236,6 +247,7 @@ def test_actor_kind() -> None:
         (SyncActorWithAsyncCleanup, "async __cleanup__"),
         (AsyncActorWithSyncCleanup, "synchronous __cleanup__"),
         (SyncActorWithAsyncSupervise, "async __supervise__"),
+        (SyncActorWithAsyncUndeliverable, "async _handle_undeliverable_message"),
     ],
 )
 @pytest.mark.timeout(60)
@@ -518,16 +530,26 @@ class PanicActor(Actor):
         panicking_function()
 
 
+class PanicActorSync(Actor):
+    @endpoint
+    def cause_panic(self) -> None:
+        panicking_function()
+
+
 @pytest.mark.timeout(60)
+@pytest.mark.parametrize("actor_class", [PanicActor, PanicActorSync])
 @isolate_in_subprocess
-async def test_endpoint_panic_kills_actor() -> None:
+async def test_endpoint_panic_kills_actor(
+    actor_class: type[PanicActor] | type[PanicActorSync],
+) -> None:
     """A Rust panic in an endpoint surfaces in Python as a pyo3 `PanicException`
     (a `BaseException`, not an `Exception`), which kills the actor and arrives as
     a supervision fault. This is a different path from a plain `Exception`:
-    `_Actor.handle`'s `except BaseException` routes it through
-    `_QueuePanicFlag` and `_dispatch_loop`, never the response port. The fault
-    reason's exact text is racy (a known signal_panic-vs-Aborted format race),
-    so this pins death and delivery, not the message string."""
+    the `except BaseException` in `_Actor.handle` (or `handle_sync` for a sync
+    actor) routes it through `_QueuePanicFlag` and the dispatch loop, never the
+    response port. The fault reason's exact text is racy (a known
+    signal_panic-vs-Aborted format race), so this pins death and delivery, not
+    the message string."""
     faults = []
     faulted = asyncio.Event()
 
@@ -537,7 +559,7 @@ async def test_endpoint_panic_kills_actor() -> None:
 
     monarch.actor.unhandled_fault_hook = fault_hook
     proc = spawn_procs_on_this_host({"gpus": 1})
-    actor = proc.spawn("panic_actor", PanicActor)
+    actor = proc.spawn("panic_actor", actor_class)
 
     actor.cause_panic.broadcast()  # no reply port => the actor dies
     await asyncio.wait_for(faulted.wait(), timeout=15.0)
@@ -1704,7 +1726,7 @@ class BlockingSuperviseActor(ErrorActorWithSupervise):
 
 
 class BusySuperviseActor(Actor):
-    """Sync-only actor that records the order in which its endpoints and
+    """Sync actor that records the order in which its endpoints and
     `__supervise__` run."""
 
     def __init__(self, proc_mesh: ProcMesh) -> None:
@@ -1722,6 +1744,33 @@ class BusySuperviseActor(Actor):
 
     @endpoint
     def get_events(self) -> list[str]:
+        return self.events
+
+    def __supervise__(self, failure: MeshFailure) -> bool:
+        self.events.append("supervise")
+        return True
+
+
+class AsyncBusySuperviseActor(Actor):
+    """Async counterpart of `BusySuperviseActor`, whose `busy` blocks without
+    awaiting, so only `_dispatch_loop`'s `CallbacksPending` yield lets
+    `__supervise__` run between messages."""
+
+    def __init__(self, proc_mesh: ProcMesh) -> None:
+        self.mesh = proc_mesh.spawn("error_actor", SyncErrorActor)
+        self.events: list[str] = []
+
+    @endpoint
+    async def trigger_subworker_fail(self) -> None:
+        self.mesh.fail_with_supervision_error.broadcast()
+
+    @endpoint
+    async def busy(self, seconds: float) -> None:
+        time.sleep(seconds)
+        self.events.append("busy")
+
+    @endpoint
+    async def get_events(self) -> list[str]:
         return self.events
 
     def __supervise__(self, failure: MeshFailure) -> bool:
@@ -2018,13 +2067,20 @@ async def test_pending_supervise_cancelled_on_stop():
 
 
 @pytest.mark.timeout(60)
+@pytest.mark.parametrize(
+    "actor_cls", [BusySuperviseActor, AsyncBusySuperviseActor], ids=["sync", "async"]
+)
 @isolate_in_subprocess
-async def test_supervise_not_starved_by_sync_endpoints():
-    """A backlog of sync endpoints yields to `__supervise__` between messages
-    instead of delaying it until the backlog drains."""
+async def test_supervise_not_starved_by_sync_endpoints(
+    actor_cls: type[BusySuperviseActor] | type[AsyncBusySuperviseActor],
+):
+    """A backlog of endpoints that never yield lets `__supervise__` run between
+    messages instead of delaying it until the backlog drains: the sync driver
+    runs control first, and an async actor's `_dispatch_loop` yields while a
+    callback is pending."""
     pm = spawn_procs_on_this_host({"gpus": 1})
     second_mesh = spawn_procs_on_this_host({"gpus": 1})
-    supervisor = pm.spawn("supervisor", BusySuperviseActor, second_mesh)
+    supervisor = pm.spawn("supervisor", actor_cls, second_mesh)
 
     await supervisor.trigger_subworker_fail.call()
     num_busy = 200

@@ -477,7 +477,7 @@ impl Drop for HandleCore {
     name = "_HandleCompleter",
     module = "monarch._rust_bindings.monarch_hyperactor.handle"
 )]
-struct PyHandleCompleter {
+pub(crate) struct PyHandleCompleter {
     // `Some` from `_new_handle_pair()` until the first valid completion;
     // `None` thereafter.
     tx: Option<watch::Sender<Option<PyResult<Py<PyAny>>>>>,
@@ -536,6 +536,23 @@ fn _new_handle_pair() -> (PyHandle, PyHandleCompleter) {
         PyHandle::from_core(HandleCore::new(rx, None, None)),
         PyHandleCompleter { tx: Some(tx) },
     )
+}
+
+/// Create a pending Handle and its sole completer without acquiring the GIL.
+///
+/// This function returns ordinary Rust values and performs no Python
+/// allocation. A caller can retain the Handle for observation and move the
+/// completer with pending work to a Python-owned execution thread.
+/// Under the GIL, that thread allocates a private `_HandleCompleter` Python
+/// object around the Rust completer. Python settles it when the operation
+/// finishes; dropping it unresolved fails the Handle (HDL-10/HDL-11).
+///
+/// For example, sync actor cleanup carries the completer in
+/// `PendingSyncCleanup`; the driver includes it in `SyncCleanup` and settles it
+/// after running `__cleanup__`. Rust cleanup awaits the paired Handle; settling
+/// the completer wakes that future so cleanup can resume and join the driver.
+pub(crate) fn handle_pair() -> (PyHandle, PyHandleCompleter) {
+    _new_handle_pair()
 }
 
 impl PyHandle {

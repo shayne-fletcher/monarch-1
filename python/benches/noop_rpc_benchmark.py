@@ -19,8 +19,14 @@ class NoopActor(Actor):
         return None
 
 
+class SyncNoopActor(Actor):
+    @endpoint
+    def noop(self) -> None:
+        return None
+
+
 def benchmark_noop_rpc(
-    actor: NoopActor,
+    actor: NoopActor | SyncNoopActor,
     num_iterations: int,
     *,
     warmup_iterations: int = 20,

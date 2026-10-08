@@ -27,6 +27,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use pyo3::types::PyType;
 
+use crate::actor::ActorKind;
 use crate::actor::PythonActor;
 use crate::actor::PythonActorHandle;
 use crate::runtime::signal_safe_block_on;
@@ -247,6 +248,15 @@ impl PyProc {
         PyList::new(py, aborted_actors)
     }
 
+    /// Spawn a low-level Python dispatcher actor.
+    ///
+    /// `actor` implements the Rust-binding `Actor` protocol, whose entry point
+    /// is `async handle(...)`; it is not a user `monarch.actor.Actor` class with
+    /// decorated endpoints. This route carries no Init message or user class to
+    /// classify, so it always retains the async event-loop topology.
+    ///
+    /// User actors go through `ProcMesh.spawn`, which classifies their endpoint
+    /// methods before native spawn and passes the resulting [`ActorKind`].
     #[pyo3(signature = (actor, name=None))]
     fn spawn<'py>(
         &self,
@@ -257,13 +267,17 @@ impl PyProc {
         let proc = self.inner.clone();
         let pickled_type = PickledPyObject::pickle(actor.as_any())?;
         crate::runtime::future_into_py(py, async move {
-            let actor = PythonActor::new(pickled_type, None, None)?;
+            // The low-level Actor protocol has one async `handle` entry point
+            // and no user endpoint class to classify.
+            let actor = PythonActor::new(pickled_type, None, None, ActorKind::Async)?;
             Ok(PythonActorHandle {
                 inner: proc.spawn_with_label(name.as_deref().unwrap_or("anon"), actor),
             })
         })
     }
 
+    /// Blocking form of [`Self::spawn`], with the same low-level async-dispatch
+    /// contract.
     #[pyo3(signature = (actor, name=None))]
     fn spawn_blocking<'py>(
         &self,
@@ -275,7 +289,9 @@ impl PyProc {
         let pickled_type = PickledPyObject::pickle(actor.as_any())?;
         Ok(PythonActorHandle {
             inner: signal_safe_block_on(py, async move {
-                let actor = PythonActor::new(pickled_type, None, None)?;
+                // The low-level Actor protocol has one async `handle` entry
+                // point and no user endpoint class to classify.
+                let actor = PythonActor::new(pickled_type, None, None, ActorKind::Async)?;
                 Ok(proc.spawn_with_label(name.as_deref().unwrap_or("anon"), actor))
             })
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?

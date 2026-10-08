@@ -11,7 +11,6 @@ import abc
 import asyncio
 import collections
 import contextvars
-import enum
 import functools
 import importlib
 import inspect
@@ -47,11 +46,14 @@ from typing import (
 )
 
 from monarch._rust_bindings.monarch_hyperactor.actor import (
+    ActorKind,
     DroppingPort,
     MethodSpecifier,
     PythonMessage,
     PythonMessageKind,
     QueuedSupervision,
+    QueuedUndeliverable,
+    SyncCleanup,
 )
 from monarch._rust_bindings.monarch_hyperactor.buffers import FrozenBuffer
 from monarch._rust_bindings.monarch_hyperactor.channel import BindSpec, ChannelTransport
@@ -102,7 +104,7 @@ if TYPE_CHECKING:
         PanicFlag,
         PortProtocol,
         QueuedMessage,
-        QueuedUndeliverable,
+        SyncInbox,
     )
     from monarch._rust_bindings.monarch_hyperactor.actor_mesh import ActorMeshProtocol
     from monarch._rust_bindings.monarch_hyperactor.mailbox import PortReceiverBase
@@ -277,7 +279,8 @@ class Instance(abc.ABC):
     def _execution_finish(self, token: int) -> None:
         """
         End the handler invocation started by `_execution_start`. A no-op
-        for the 0 sentinel. Called from `_Actor.handle`'s `finally`.
+        for the 0 sentinel. Called from the `finally` of `_Actor.handle` and
+        `_Actor.handle_sync`.
         """
         ...
 
@@ -911,7 +914,9 @@ def as_endpoint(
     Use this to call a plain method of a spawned actor through the messaging
     adverbs when the method was not decorated with ``@endpoint``, for example
     ``as_endpoint(actor.method).call(...)``. The options match those of
-    ``endpoint``.
+    ``endpoint``. On an actor whose endpoints are all ``def``, the method must
+    be a plain ``def`` as well: the actor has no event loop, so an ``async def``
+    method fails with ``TypeError``.
 
     Args:
         not_an_endpoint: An unannotated method of a spawned actor.
@@ -967,11 +972,18 @@ class Accumulator(Generic[P, R, A]):
         """
         Accumulate the result of the endpoint invocation.
 
-        The endpoint is invoked when this method is called; a failure to invoke
-        it raises here. The fold runs when the returned Future is first
-        observed: an ``await`` runs it on the awaiting loop, and ``.get()`` on
-        the calling thread, or on a short-lived helper thread when called
-        inside a running event loop, such as a synchronous endpoint's.
+        The endpoint invocation starts when this method is called; a failure to
+        start it raises here. The fold remains lazy and begins when the returned
+        Future is first observed.
+
+        An ``await`` runs the fold on the awaiting loop. ``.get()`` runs it on
+        a private loop on the calling thread. This keeps a sync actor's endpoint
+        and nested Monarch Future work on its driver thread, without creating a
+        helper thread. Inside an ``@returns_future`` body, nested Futures must
+        instead be awaited; calling ``.get()`` raises ``WouldBlockRuntime``.
+        Other code that calls ``.get()`` from a thread already running an event
+        loop warns and falls back to a short-lived helper thread, while still
+        blocking the caller's loop.
 
         Args:
             args: Arguments to pass to the endpoint.
@@ -1208,6 +1220,15 @@ class Port(Generic[R]):
             resolved = await message.resolve()
         self.send_message(resolved)
 
+    def _resolve_and_send_blocking(self, result: object) -> None:
+        """Resolve and send from a sync actor's driver, blocking until any
+        pending mesh-reference resolution completes."""
+        message = self._pending_result(result)
+        resolved = message.try_resolve_now()
+        if resolved is None:
+            resolved = message.resolve().get()
+        self.send_message(resolved)
+
     def exception(self, obj: Exception) -> None: ...
 
     def __reduce__(self) -> Tuple[Any, Tuple[Any, ...]]:
@@ -1344,13 +1365,6 @@ class RankedPortReceiver(PortReceiver[Tuple[int, R]]):
 singleton_shape = Shape([], NDSlice(offset=0, sizes=[], strides=[]))
 
 
-# Currently the synchronous function of actors are run on a python thread that has an active event loop.
-# Technically it is unsafe for them to block at all because they will block the loop of other
-# calls, so all calls to .get() should be failing.
-# But in the meantime, to implement get() by reusing async functions,
-#  we need to signal to the consumer of the PythonTask object that the thread really isn't in an async context.
-# We do this by blanking out the running event loop during the call to the synchronous actor function.
-
 MESSAGES_HANDLED: Counter = METER.create_counter("py_mesages_handled")
 
 
@@ -1434,9 +1448,9 @@ async def _dispatch_loop(
                 streak = 0
             msg = await receiver.recv()
             streak += 1
-            # `recv` doesn't yield when a message is already queued, and sync
-            # endpoints never yield, so a backlog would starve
-            # `_callback_loop` without this.
+            # `recv` doesn't yield when a message is already queued, and an
+            # endpoint that never awaits doesn't either, so a backlog would
+            # starve `_callback_loop` without this.
             if callbacks_pending:
                 await asyncio.sleep(0)
             await _handle_queued_message(actor, msg)
@@ -1459,10 +1473,10 @@ async def _callback_loop(
     time, as a task beside ``_dispatch_loop`` on the actor's event loop.
     Called from Rust Actor::init.
 
-    This lets these callbacks run at any await point of an async endpoint, or
-    between sync endpoints, without blocking the Rust actor from handling
-    messages. The verdict is reported back to the Rust actor, which acts on it
-    if the callback did not handle the event.
+    This lets these callbacks run at any await point of an endpoint, or between
+    endpoints, without blocking the Rust actor from handling messages. The
+    verdict is reported back to the Rust actor, which acts on it if the
+    callback did not handle the event.
     """
     while True:
         try:
@@ -1514,14 +1528,123 @@ async def _handle_queued_message(actor: Any, msg: "QueuedMessage") -> None:
             msg.response_port,
             msg.correlation_id,
         )
-        # If a panic was signaled, re-raise it after handle() has cleaned up.
-        if panic_flag.panic_exception is not None:
-            raise panic_flag.panic_exception
     except BaseException:
         msg._report_failed()
         raise
-    else:
-        msg._report_complete()
+    _finish_queued_message(msg, panic_flag)
+
+
+def _finish_queued_message(msg: "QueuedMessage", panic_flag: _QueuePanicFlag) -> None:
+    """Report a message whose handler returned: failed, re-raising the panic it
+    signalled, or complete."""
+    if panic_flag.panic_exception is not None:
+        msg._report_failed()
+        raise panic_flag.panic_exception
+    msg._report_complete()
+
+
+# Sync-actor invariants (SA-*):
+#
+# SA-1 (no loop): Monarch creates no persistent event loop for a sync actor,
+#   and enters its `__init__`, endpoints, `__supervise__` and `__cleanup__` with
+#   no running loop. A nested `.get()` may run the driver thread's private loop
+#   for its duration.
+# SA-2 (one thread): a sync actor's user code runs on its driver thread, one
+#   item at a time.
+# SA-3 (control first): a queued control item runs before the next queued
+#   message; enforced by SI-1. The driver claims a callback when it dequeues it
+#   and then reads `SyncInbox.stopping()` as false; SI-6 drops a callback it has
+#   not claimed when cleanup sets the flag, without reporting a verdict.
+# SA-4 (stop order): while the inbox remains usable, stop runs `__cleanup__`
+#   on the driver after any active item and before queued messages, which are
+#   discarded. Rust `Actor::cleanup` joins the driver exactly once before
+#   returning, with the GIL released while it waits, unless hyperactor's
+#   cleanup timeout cancels `Actor::cleanup`; the driver then runs the queued
+#   `__cleanup__` after its active item and exits unjoined. If
+#   `SyncInbox.next()` fails, the driver kills the actor, reporting the
+#   failure, and ends; cleanup joins it and returns a driver-exited or
+#   producer-lost error without running `__cleanup__`.
+# SA-5 (kind before spawn): on the ProcMesh route, `_actor_kind` decides an
+#   actor class's kind before the native spawn, and rejects a class whose
+#   endpoints mix kinds or whose hooks don't match it: a sync actor's
+#   `__cleanup__`, `__supervise__`, and `_handle_undeliverable_message` must be
+#   sync, and an async-endpoint actor's `__cleanup__` must be async. The
+#   root-client and low-level routes state `ActorKind.ASYNC`.
+
+
+# HOT PATH: Be mindful of performance when making changes here.
+# To test how performance is affected by a change, run the RPC benchmarks in
+# `monarch/python/benches/`.
+def _sync_dispatch_loop(
+    actor: "_Actor",
+    inbox: "SyncInbox",
+    self_instance: "Instance",
+) -> None:
+    """
+    Message loop of a sync actor's driver thread, which Rust `Actor::init`
+    starts (SA-1, SA-2).
+
+    Runs control items before messages (SA-3) and returns after running
+    `__cleanup__` (SA-4), or once the inbox closes. After an exception escapes
+    a message's handling, or a callback raises a `BaseException` that is not an
+    `Exception`, it kills the actor and serves only control items until cleanup.
+    A failure to receive kills the actor and ends the loop (SA-4).
+    """
+    failed = False
+    while True:
+        try:
+            item = inbox.next()
+        # Return rather than re-raise: a retained traceback would keep this
+        # frame, and with it the inbox, alive, so cleanup would wait on a queue
+        # nobody reads. `kill` carries the diagnostic.
+        except BaseException as e:  # noqa: B036
+            self_instance.kill("".join(TracebackException.from_exception(e).format()))
+            return
+        if item is None:
+            return
+        if isinstance(item, SyncCleanup):
+            actor._run_cleanup(item)
+            return
+        try:
+            if isinstance(item, (QueuedSupervision, QueuedUndeliverable)):
+                # SA-3: reading the flag claims the item; an unclaimed item
+                # is dropped, which reports no verdict.
+                if not inbox.stopping():
+                    if isinstance(item, QueuedSupervision):
+                        actor._run_supervise(item)
+                    else:
+                        actor._run_undeliverable(item)
+            elif not failed:
+                _handle_queued_message_sync(actor, item)
+            else:
+                # Received after the actor was killed: never handled.
+                item._report_failed()
+        except BaseException as e:  # noqa: B036 - kill, then drain until cleanup
+            self_instance.kill("".join(TracebackException.from_exception(e).format()))
+            failed = True
+
+
+# HOT PATH: Be mindful of performance when making changes here.
+# To test how performance is affected by a change, run the RPC benchmarks in
+# `monarch/python/benches/`.
+def _handle_queued_message_sync(actor: "_Actor", msg: "QueuedMessage") -> None:
+    """Handle a single queued message on a sync actor's driver thread."""
+    panic_flag = _QueuePanicFlag()
+    try:
+        actor.handle_sync(
+            msg.context,
+            msg.method,
+            msg.bytes,
+            panic_flag,
+            msg.local_state,
+            msg.refs,
+            msg.response_port,
+            msg.correlation_id,
+        )
+    except BaseException:
+        msg._report_failed()
+        raise
+    _finish_queued_message(msg, panic_flag)
 
 
 class _Actor:
@@ -1559,6 +1682,7 @@ class _Actor:
         response_port: "PortProtocol[Any]",
         correlation_id: int | None = None,
     ) -> None:
+        """Handle a message for an async actor, on its event loop."""
         MESSAGES_HANDLED.add(1)
 
         # Initialize method_name before try block so it's always defined
@@ -1591,6 +1715,8 @@ class _Actor:
                         result = await the_method(*args, **kwargs)
                     self._maybe_exit_debugger()
                 else:
+                    # A plain method called through `as_endpoint`; an async
+                    # actor's own endpoints are all coroutines.
                     with fake_sync_state():
                         if should_instrument:
                             with span_with_correlation_id(method_name, correlation_id):
@@ -1606,6 +1732,60 @@ class _Actor:
             # coroutine because mesh references may require async resolution.
             if response is not None:
                 await response
+        except Exception as e:
+            self._report_exception(e, ctx, method_name, response_port)
+        except BaseException as e:
+            self._report_panic(e, ctx, method_name, panic_flag)
+            raise
+
+    # HOT PATH: Be mindful of performance when making changes here.
+    # To test how performance is affected by a change, run the RPC benchmarks in
+    # `monarch/python/benches/`.
+    def handle_sync(
+        self,
+        ctx: Context,
+        method: MethodSpecifier,
+        message: FrozenBuffer,
+        panic_flag: PanicFlag,
+        local_state: List[Any],
+        mesh_references: List[Any],
+        response_port: "PortProtocol[Any]",
+        correlation_id: int | None = None,
+    ) -> None:
+        """Handle a message for a sync actor, on its driver thread. Differs from
+        `handle` in calling the body and sending the reply inline, and in
+        rejecting a coroutine method, which has no event loop to run on."""
+        MESSAGES_HANDLED.add(1)
+        method_name = method.name
+        try:
+            prepared = self._prepare(
+                ctx, method, message, local_state, mesh_references, response_port
+            )
+            if prepared is None:
+                return
+            args, kwargs, response_port = prepared
+            the_method, should_instrument, is_coro = self._lookup(ctx, method_name)
+            if is_coro:
+                # Only `as_endpoint` can reach one: a sync actor's own
+                # endpoints are all plain `def`.
+                raise TypeError(
+                    f"{ctx.actor_instance.name}.{method_name} is an async def method, "
+                    "but its actor's endpoints are all def, so it has no event "
+                    "loop to run on"
+                )
+
+            token = ctx.actor_instance._execution_start(method_name)
+            try:
+                if should_instrument:
+                    with span_with_correlation_id(method_name, correlation_id):
+                        result = the_method(*args, **kwargs)
+                else:
+                    result = the_method(*args, **kwargs)
+                self._maybe_exit_debugger()
+            finally:
+                ctx.actor_instance._execution_finish(token)
+
+            response_port._resolve_and_send_blocking(result)
         except Exception as e:
             self._report_exception(e, ctx, method_name, response_port)
         except BaseException as e:
@@ -1796,6 +1976,17 @@ class _Actor:
         _set_context(cx)
         return getattr(self.instance, "_handle_undeliverable_message", None)
 
+    def _run_undeliverable(self, item: QueuedUndeliverable) -> None:
+        """Run a sync actor's undeliverable-message callback on its driver and
+        report the verdict on ``item``."""
+        try:
+            callback = self._user_handle_undeliverable(item.context)
+            handled = callback is not None and bool(callback(item.envelope))
+        except Exception as e:
+            item._raised(e)
+        else:
+            item._handled(handled)
+
     def _user_supervise(self, cx: Context) -> Callable[..., Any] | None:
         """The user's ``__supervise__``, or None if it has no override."""
         _set_context(cx)
@@ -1826,7 +2017,7 @@ class _Actor:
         return supervise if _is_user_override(supervise) else None
 
     async def __supervise__(self, cx: Context, *args: Any, **kwargs: Any) -> object:
-        """Dispatch the user's ``__supervise__``.
+        """Dispatch an async actor's ``__supervise__``.
 
         Mirrors ``__cleanup__``: both sync and async user methods are
         supported. An ``async def`` user method is awaited on the actor's
@@ -1841,6 +2032,18 @@ class _Actor:
         else:
             with fake_sync_state():
                 return supervise(*args, **kwargs)
+
+    def _run_supervise(self, item: QueuedSupervision) -> None:
+        """Run a sync actor's ``__supervise__`` on its driver thread and report
+        the verdict on ``item``. A `BaseException` that is not an `Exception`
+        propagates to the driver, which kills the actor."""
+        try:
+            supervise = self._user_supervise(item.context)
+            handled = supervise is not None and bool(supervise(item.failure))
+        except Exception as e:
+            item._raised(e)
+        else:
+            item._handled(handled)
 
     def _user_cleanup(
         self, cx: Context, exc: str | Exception | None
@@ -1868,8 +2071,8 @@ class _Actor:
         return cleanup, exc
 
     async def __cleanup__(self, cx: Context, exc: str | Exception | None) -> None:
-        """Cleans up any resources owned by this Actor before stopping. Automatically
-        called even if there is an error"""
+        """Cleans up any resources owned by an async Actor before stopping.
+        Automatically called even if there is an error"""
         found = self._user_cleanup(cx, exc)
         if found is None:
             return None
@@ -1879,6 +2082,20 @@ class _Actor:
         else:
             with fake_sync_state():
                 return cleanup(exc)
+
+    def _run_cleanup(self, item: SyncCleanup) -> None:
+        """Run a sync actor's ``__cleanup__`` on its driver thread, and complete
+        ``item`` with its outcome."""
+        try:
+            found = self._user_cleanup(item.context, item.error)
+            if found is not None:
+                cleanup, exc = found
+                cleanup(exc)
+        # Rust waits on the item's Handle, so every outcome must settle it.
+        except BaseException as e:  # noqa: B036
+            item.completer.set_exception(e)
+        else:
+            item.completer.set_result(None)
 
     def __repr__(self) -> str:
         return f"_Actor(instance={self.instance!r})"
@@ -1907,22 +2124,6 @@ def _is_user_override(method: Any) -> bool:
     return method is not None and not getattr(method, "_monarch_doc_stub", False)
 
 
-class ActorKind(enum.Enum):
-    """Whether an actor class defines a sync or an async actor (SA-5)."""
-
-    SYNC = "sync"
-    ASYNC = "async"
-
-
-# Sync-actor invariants (SA-*):
-#
-# SA-5 (kind before spawn): on the ProcMesh route, `_actor_kind` decides an
-#   actor class's kind before the native spawn, and rejects a class whose
-#   endpoints mix kinds or whose hooks don't match it: a sync actor's
-#   `__cleanup__` and `__supervise__` must be sync, and an async-endpoint
-#   actor's `__cleanup__` must be async.
-
-
 def _actor_kind(Class: type) -> ActorKind:
     """The kind of actor ``Class`` defines: sync when it declares at least one
     endpoint and every endpoint is a plain ``def``, otherwise async. Raise
@@ -1938,6 +2139,7 @@ def _actor_kind(Class: type) -> ActorKind:
                 sync_endpoints.append(attr_name)
     cleanup = getattr(Class, "__cleanup__", None)
     supervise = getattr(Class, "__supervise__", None)
+    handle_undeliverable = getattr(Class, "_handle_undeliverable_message", None)
     # None means there is no override.
     async_cleanup = (
         inspect.iscoroutinefunction(cleanup) if _is_user_override(cleanup) else None
@@ -1945,6 +2147,7 @@ def _actor_kind(Class: type) -> ActorKind:
     async_supervise = (
         inspect.iscoroutinefunction(supervise) if _is_user_override(supervise) else None
     )
+    async_handle_undeliverable = inspect.iscoroutinefunction(handle_undeliverable)
 
     if sync_endpoints and async_endpoints:
         raise ValueError(
@@ -1969,6 +2172,13 @@ def _actor_kind(Class: type) -> ActorKind:
         raise ValueError(
             f"{Class} has sync endpoints, but an async __supervise__. "
             "Make sure __supervise__ is also synchronous. "
+            f"sync: {sync_endpoints}"
+        )
+    if sync_endpoints and async_handle_undeliverable:
+        raise ValueError(
+            f"{Class} has sync endpoints, but an async "
+            "_handle_undeliverable_message. Make sure "
+            "_handle_undeliverable_message is also synchronous. "
             f"sync: {sync_endpoints}"
         )
     return ActorKind.SYNC if sync_endpoints else ActorKind.ASYNC
@@ -2034,10 +2244,11 @@ class Actor(MeshTrait):
         undeliverable message was not handled. Returning True indicates that the message
         was handled in some way and does not need to be escalated as an error.
 
-        This may be sync or async. It runs on the actor's event loop, one
-        callback at a time alongside ``__supervise__``, interleaved with
-        endpoints at await points or between sync endpoints. A pending call
-        is cancelled if the actor stops."""
+        This may be sync or async for an async actor; a sync actor requires a
+        sync override. It runs one callback at a time alongside
+        ``__supervise__``. A pending async-actor call is cancelled if the actor
+        stops; a sync actor finishes a callback it has started and drops one it
+        has not."""
         # Return False to indicate that the undeliverable message was not handled.
         return False
 
@@ -2062,23 +2273,26 @@ class Actor(MeshTrait):
         that an actor whose endpoints are all ``def`` needs a ``def`` override.
         An ``async def`` override is awaited on the actor's asyncio event loop --
         the same loop that runs endpoint coroutines -- so it can ``await``
-        other endpoints or I/O. A sync override runs under ``fake_sync_state``
-        and cannot call ``asyncio.get_running_loop``. If the override raises,
-        the exception is treated as a new supervision event chained to the
-        one being handled, matching the ``__exit__`` convention of context
-        managers.
+        other endpoints or I/O. A sync override cannot call
+        ``asyncio.get_running_loop``: an actor whose endpoints are all ``def``
+        runs it on its own thread, which has no event loop, between messages.
+        If the override raises, the exception is treated as a new supervision
+        event chained to the one being handled, matching the ``__exit__``
+        convention of context managers.
 
-        Failures are supervised one at a time, in a task on the actor's event
-        loop. That task may run at any ``await`` that suspends, whether in an
-        endpoint (concurrent or not) or in a task the actor started, so state
-        this method changes may differ after any such ``await``. Sync code is
-        never interrupted: a sync endpoint runs to completion first, and a sync
-        override runs between endpoints. The actor keeps handling messages
-        while this is pending, so messages that arrive after the failure may be
-        handled before this runs. An ``async def`` override may await the
+        Failures are supervised one at a time. In an async actor this runs in a
+        task on the actor's event loop, which may run at any ``await`` that
+        suspends, whether in an endpoint (concurrent or not) or in a task the
+        actor started, so state this method changes may differ after any such
+        ``await``; the actor keeps handling messages while this is pending, so
+        messages that arrive after the failure may be handled before it runs.
+        In an actor whose endpoints are all ``def``, it runs on the actor's own
+        thread after the message in progress and before any queued message.
+        Sync code is never interrupted. An ``async def`` override may await the
         actor's own endpoints. The actor only fails once this returns a falsey
-        value or raises. If the actor stops first, a pending call is
-        cancelled.
+        value or raises. If the actor stops first, an async actor's pending
+        call is cancelled; an actor whose endpoints are all ``def`` finishes a
+        call it has started before cleaning up, and drops one it has not.
 
         This method is documentation-only on ``Actor``; subclasses provide the
         real implementation.
@@ -2092,7 +2306,9 @@ class Actor(MeshTrait):
         ``exc`` is ``None`` on a normal stop and carries the exception on an
         error stop. It is *not* called on fatal failures such as OOMs, panics,
         or signals like ``SIGSEGV``. If it exceeds ``HYPERACTOR_CLEANUP_TIMEOUT``,
-        it is cancelled and the actor is placed in an error state.
+        the actor is placed in an error state without waiting for it: an async
+        override is cancelled, while a sync one in an actor whose endpoints are
+        all ``def`` still runs to completion on the actor's thread.
 
         By the time this runs, every mesh this actor owns has already been
         stopped recursively, and each owned actor's ``__cleanup__`` has already
@@ -2109,10 +2325,11 @@ class Actor(MeshTrait):
         require a sync ``__cleanup__``; actors with async endpoints require an
         async ``__cleanup__``. An ``async def`` override is awaited on the
         actor's asyncio event loop -- the same loop that runs endpoint
-        coroutines -- so it can ``await`` other endpoints or I/O. A sync
-        override runs under ``fake_sync_state`` and cannot call
-        ``asyncio.get_running_loop``. If the override raises, the exception
-        becomes a supervision event and will notify the owner.
+        coroutines -- so it can ``await`` other endpoints or I/O. In an actor
+        whose endpoints are all ``def``, the override runs on the actor's own
+        thread, which has no event loop, after the message in progress;
+        messages still queued behind it are discarded. If the override raises,
+        the exception becomes a supervision event and will notify the owner.
 
         This method is documentation-only on ``Actor``; subclasses provide the
         real implementation.
