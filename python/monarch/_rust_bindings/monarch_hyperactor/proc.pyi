@@ -185,12 +185,23 @@ class Proc:
         """Destroy the Proc."""
         ...
 
-    async def spawn(self, actor: Type[Actor]) -> PythonActorHandle:
-        """
-        Spawn a new actor.
+    async def spawn(
+        self, actor: Type[Actor], name: str | None = None
+    ) -> PythonActorHandle:
+        """Spawn a low-level Python dispatcher actor.
 
-        Arguments:
-        - `actor_name`: Name of the actor.
-        - `actor`: The type of the actor, which
+        ``actor`` implements the Rust-binding ``Actor`` protocol, whose entry
+        point is ``async handle(...)``. It is not a user ``monarch.actor.Actor``
+        class with decorated endpoints. This route has no Init message or user
+        class to classify, so it always uses the async event-loop topology.
+
+        User actors go through ``ProcMesh.spawn``, which classifies their
+        endpoints before native spawn.
         """
+        ...
+
+    def spawn_blocking(
+        self, actor: Type[Actor], name: str | None = None
+    ) -> PythonActorHandle:
+        """Blocking form of ``spawn`` with the same low-level contract."""
         ...

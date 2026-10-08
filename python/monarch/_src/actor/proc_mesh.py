@@ -539,7 +539,7 @@ class ProcMesh(MeshTrait):
                 f"{Class} must subclass monarch.service.Actor to spawn it."
             )
         # SA-5: a mismatched class is rejected before any native side effect.
-        _actor_kind(Class)
+        kind = _actor_kind(Class)
 
         instance = context().actor_instance
         # The default name used has a UUID appended to it that is not useful for debugging.
@@ -573,6 +573,7 @@ class ProcMesh(MeshTrait):
             name,
             _Actor,
             init_message,
+            kind,
             emulated=False,
             supervision_display_name=supervision_display_name,
         )

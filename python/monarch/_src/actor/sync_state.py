@@ -28,6 +28,6 @@ def fake_sync_state() -> Generator[None, None, None]:
 
 
 def in_fake_sync_state() -> bool:
-    """Whether this thread is inside a loop that `fake_sync_state()` hides, as a
-    synchronous endpoint is."""
+    """Whether this thread is inside a loop that `fake_sync_state()` hides, as an
+    async actor's sync `__supervise__` or `__cleanup__` is."""
     return getattr(_depth, "value", 0) > 0

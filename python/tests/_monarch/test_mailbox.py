@@ -21,6 +21,7 @@ from typing import (
 )
 
 from monarch._rust_bindings.monarch_hyperactor.actor import (
+    ActorKind,
     MethodSpecifier,
     PythonMessage,
     PythonMessageKind,
@@ -229,6 +230,7 @@ async def test_reducer() -> Handle[None]:
         "test",
         cast(Type["Actor"], MyActor),
         init_message,
+        ActorKind.ASYNC,
         False,  # emulated
     )
 

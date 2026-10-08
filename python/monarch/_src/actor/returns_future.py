@@ -17,8 +17,9 @@ The body runs where it is first observed:
   loop until it finishes, as ``asyncio.run`` does; this creates no OS threads.
 
 ``.get()`` made while the calling thread is already inside a running event
-loop, as in a synchronous endpoint, runs the body on a short-lived helper
-thread instead of running a second loop inside it (RF-7).
+loop runs the body on a short-lived helper thread instead of running a second
+loop inside it (RF-7). A synchronous endpoint's thread has no event loop, so
+its ``.get()`` takes the first path.
 
 Calling the function does not start the body (RF-1, RF-2). Side effects
 intended to occur when the API is called, such as submitting or broadcasting
@@ -90,8 +91,10 @@ Invariants. Enforcement sites and tests cite them, and
   calling thread is running, raise ``WouldBlockRuntime`` instead, unless that
   body has already settled. An interrupt that lands while the helper thread is
   starting fails the Future with ``CancelledError`` and is re-raised at once;
-  the body may run on to completion on the helper. This bridges synchronous
-  endpoints, which still run on their actor's loop. Enforced by
+  the body may run on to completion on the helper. This serves code that
+  blocks inside a running loop, such as an async actor's sync hooks under
+  ``fake_sync_state()``; a synchronous endpoint's thread has no loop. Enforced
+  by
   ``_BodyCell.get`` and ``_BodyCell._drive_on_helper``.
 - **RF-8 (forked children).** A Future inherited through ``fork()`` is not
   supported in the child. The child makes its own loop and keeps every loop it

@@ -123,6 +123,36 @@ class Uninit(PythonMessageKind):
     pass
 
 @final
+class ActorKind:
+    """Whether an actor is sync (it declares at least one endpoint, and every
+    endpoint is a plain ``def``) or async."""
+
+    SYNC: "ActorKind"
+    ASYNC: "ActorKind"
+
+@final
+class SyncInbox:
+    """Blocking control-priority inbox used by a sync actor's driver."""
+
+    def next(self) -> Any | None:
+        """Return one queued item, or ``None`` once control is closed and drained."""
+        ...
+    def stopping(self) -> bool:
+        """Whether actor cleanup has begun."""
+        ...
+
+@final
+class SyncCleanup:
+    """A ``__cleanup__`` call for a sync actor's driver thread; its last item."""
+
+    @property
+    def context(self) -> Any: ...
+    @property
+    def error(self) -> str | None: ...
+    @property
+    def completer(self) -> Any: ...
+
+@final
 class DroppingPort:
     """
     Used in place of a real port when the message has no response port.
@@ -132,6 +162,7 @@ class DroppingPort:
     def __init__(self) -> None: ...
     def send(self, obj: Any) -> None: ...
     def resolve_and_send(self, obj: Any) -> None: ...
+    def _resolve_and_send_blocking(self, obj: Any) -> None: ...
     def exception(self, obj: BaseException) -> None: ...
     @property
     def return_undeliverable(self) -> bool: ...
@@ -209,6 +240,10 @@ class PortProtocol(Generic[R], Protocol):
     # LocalPort and DroppingPort complete synchronously; Port returns an
     # awaitable because mesh references may require async resolution.
     def resolve_and_send(self, obj: R) -> Awaitable[None] | None: ...
+    # Send the reply and return only after any mesh-reference resolution
+    # completes. Sync actor drivers use this because they have no actor event
+    # loop to await on.
+    def _resolve_and_send_blocking(self, obj: R) -> None: ...
     def exception(self, obj: Any) -> None: ...
 
 class Actor(Protocol):

@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
 //! End-to-end coverage for Python actor construction from an inherited
 //! [`ActorEnvironment`].
 
@@ -9,6 +17,7 @@ use hyperactor::actor::remote::Remote;
 use hyperactor::id::Label;
 use hyperactor::id::Uid;
 use hyperactor_mesh::casting::CAST_POINT;
+use monarch_hyperactor::actor::ActorKind;
 use monarch_hyperactor::actor::MethodSpecifier;
 use monarch_hyperactor::actor::PythonActor;
 use monarch_hyperactor::actor::PythonMessage;
@@ -26,7 +35,7 @@ use serde::Serialize;
 struct PythonActorParamsWire {
     actor_type: PickledPyObject,
     init_message: Option<PythonMessage>,
-    mesh_base_name: Option<String>,
+    kind: ActorKind,
 }
 
 #[tokio::test]
@@ -94,7 +103,7 @@ class GspawnUidInitActor:
     let params = PythonActorParamsWire {
         actor_type: pickled_type,
         init_message: Some(init_message),
-        mesh_base_name: None,
+        kind: ActorKind::Async,
     };
     let actor_type = Remote::global()
         .name_of::<PythonActor>()

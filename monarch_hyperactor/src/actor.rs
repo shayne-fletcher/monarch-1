@@ -7,6 +7,7 @@
  */
 
 mod async_actor;
+mod sync_actor;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -15,6 +16,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering as AtomicOrdering;
@@ -75,6 +77,8 @@ use typeuri::Named;
 use crate::buffers::FrozenBuffer;
 use crate::context::PyContext;
 use crate::context::PyInstance;
+use crate::handle::PyHandleCompleter;
+use crate::handle::handle_pair;
 // Preserve the crate-local conversion path used by host_mesh.
 pub(crate) use crate::handle::to_py_error;
 use crate::local_state_broker::BrokerId;
@@ -88,10 +92,31 @@ use crate::proc::PyActorAddr;
 use crate::pympsc::Sender;
 use crate::runtime::GilSite;
 use crate::runtime::get_tokio_runtime;
+use crate::runtime::mark_actor_driver_thread;
 use crate::runtime::mark_actor_event_loop_thread;
 use crate::runtime::monarch_with_gil;
 use crate::runtime::monarch_with_gil_blocking;
 use crate::supervision::PyMeshFailure;
+
+/// Whether a Python actor is sync (it declares at least one endpoint, and every
+/// endpoint is a plain `def`) or async. Python's `_actor_kind` decides it for a
+/// class spawned on a ProcMesh; every other construction route states it
+/// (SA-5, defined in `monarch._src.actor.actor_mesh`).
+#[pyclass(
+    eq,
+    eq_int,
+    frozen,
+    module = "monarch._rust_bindings.monarch_hyperactor.actor"
+)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ActorKind {
+    /// An actor with at least one endpoint, all declared with `def`.
+    #[pyo3(name = "SYNC")]
+    Sync,
+    /// Any other actor, including one with no endpoints.
+    #[pyo3(name = "ASYNC")]
+    Async,
+}
 
 #[pyclass(module = "monarch._rust_bindings.monarch_hyperactor.actor")]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -482,9 +507,8 @@ impl PendingLocalState {
     }
 }
 
-/// A resolved message bound for the Python dispatch loop. It holds no Python
-/// objects that need the GIL to create: `pympsc::PyReceiver` converts it into
-/// a [`QueuedMessage`] on the actor's event loop thread. Taking the GIL on the
+/// A resolved message queued without taking the GIL. The actor's Python
+/// execution thread converts it into a [`QueuedMessage`]. Taking the GIL on the
 /// Tokio worker instead can leave the runtime's I/O driver unpolled while
 /// another thread holds the GIL, stalling unrelated Rust tasks in the proc
 /// (https://github.com/meta-pytorch/monarch/issues/4938).
@@ -1064,16 +1088,16 @@ mod execution_tracker_tests {
 pub struct PythonActor {
     /// The Python object that we delegate message handling to.
     actor: Py<PyAny>,
-    /// The actor's event loop and the receivers its loop tasks consume.
-    dispatch: async_actor::dispatch::State,
+    /// The event-loop or driver state selected by the actor's kind.
+    dispatch: Dispatch,
     /// Instance object that we keep across handle calls so that we can store
     /// information from the Init (spawn rank, controller) and provide it to other calls.
     /// The `Arc` lets handlers share it without the GIL.
     instance: Option<Arc<Py<crate::context::PyInstance>>>,
     /// Enqueues messages for the actor's Python dispatch path.
     message_sender: Sender,
-    /// Enqueues supervision events and undeliverable messages for
-    /// `_callback_loop`.
+    /// Enqueues callbacks for `_callback_loop` or the sync driver's control
+    /// plane, and cleanup for the sync driver.
     control_sender: Sender,
     /// Number of enqueued callbacks whose verdict has not been reported yet.
     /// See [`CallbacksPending`].
@@ -1090,6 +1114,31 @@ pub struct PythonActor {
     execution_tracker: Arc<ExecutionTracker>,
 }
 
+/// Kind-specific state for running and stopping a [`PythonActor`].
+#[derive(Debug)]
+enum Dispatch {
+    /// Event-loop-backed execution state.
+    Async(async_actor::dispatch::State),
+    /// Blocking-driver execution state.
+    Sync(sync_actor::dispatch::State),
+}
+
+/// Named result of selecting an actor's dispatch topology in
+/// [`PythonActor::new`].
+///
+/// Both [`ActorKind`] branches produce the two common senders plus their
+/// kind-specific [`Dispatch`] state. Named fields keep the same-typed message
+/// and control senders distinct before all three values move into
+/// [`PythonActor`].
+struct DispatchParts {
+    /// Sends endpoint messages to the actor's Python dispatch path.
+    message_sender: Sender,
+    /// Sends callback work and, for a sync actor, its cleanup request.
+    control_sender: Sender,
+    /// Owns the receivers and the kind-specific loop or driver lifecycle state.
+    dispatch: Dispatch,
+}
+
 /// Convert a wake-pipe creation failure into the error type returned across
 /// the GIL-bound `PythonActor` constructor.
 fn serialize_channel_error(py: Python<'_>, error: nix::Error) -> SerializablePyErr {
@@ -1097,11 +1146,45 @@ fn serialize_channel_error(py: Python<'_>, error: nix::Error) -> SerializablePyE
     SerializablePyErr::from(py, &error)
 }
 
+impl DispatchParts {
+    /// Construct the channels and lifecycle state selected by `kind`.
+    fn try_new(py: Python<'_>, kind: ActorKind) -> Result<Self, SerializablePyErr> {
+        match kind {
+            ActorKind::Async => {
+                let async_actor::inbox::Inbox {
+                    message_sender,
+                    control_sender,
+                    receiver,
+                } = async_actor::inbox::new()
+                    .map_err(|error| serialize_channel_error(py, error))?;
+                Ok(Self {
+                    message_sender,
+                    control_sender,
+                    dispatch: Dispatch::Async(async_actor::dispatch::State::new(py, receiver)),
+                })
+            }
+            ActorKind::Sync => {
+                let sync_actor::inbox::Inbox {
+                    message_sender,
+                    control_sender,
+                    receiver,
+                } = sync_actor::inbox::new().map_err(|error| serialize_channel_error(py, error))?;
+                Ok(Self {
+                    message_sender,
+                    control_sender,
+                    dispatch: Dispatch::Sync(sync_actor::dispatch::State::new(receiver)),
+                })
+            }
+        }
+    }
+}
+
 impl PythonActor {
     pub(crate) fn new(
         actor_type: PickledPyObject,
         init_message: Option<PythonMessage>,
         construction_point: Option<Point>,
+        kind: ActorKind,
     ) -> Result<Self, anyhow::Error> {
         Ok(monarch_with_gil_blocking(
             GilSite::ActorConstruct,
@@ -1110,16 +1193,15 @@ impl PythonActor {
                 let class_type: &Bound<'_, PyType> = unpickled.cast()?;
                 let actor: Py<PyAny> = class_type.call0()?.into_py_any(py)?;
 
-                let async_actor::inbox::Inbox {
+                let DispatchParts {
                     message_sender,
                     control_sender,
-                    receiver,
-                } = async_actor::inbox::new()
-                    .map_err(|error| serialize_channel_error(py, error))?;
+                    dispatch,
+                } = DispatchParts::try_new(py, kind)?;
 
                 Ok(Self {
                     actor,
-                    dispatch: async_actor::dispatch::State::new(py, receiver),
+                    dispatch,
                     instance: None,
                     message_sender,
                     control_sender,
@@ -1214,6 +1296,7 @@ impl PythonActor {
             actor_type,
             Some(init_message),
             Some(extent!().point_of_rank(0).unwrap()),
+            ActorKind::Async,
         )
         .expect("create client PythonActor");
 
@@ -1427,13 +1510,18 @@ impl Actor for PythonActor {
             let self_instance = self.ensure_py_instance(py, this);
             let actor_mesh_mod = py.import("monarch._src.actor.actor_mesh")?;
 
-            self.dispatch.init(
-                py,
-                &actor_mesh_mod,
-                &self.actor,
-                &self_instance,
-                self.callbacks_pending.clone(),
-            )?;
+            match &mut self.dispatch {
+                Dispatch::Async(state) => state.init(
+                    py,
+                    &actor_mesh_mod,
+                    &self.actor,
+                    &self_instance,
+                    self.callbacks_pending.clone(),
+                )?,
+                Dispatch::Sync(state) => {
+                    state.init(py, &actor_mesh_mod, &self.actor, &self_instance)?
+                }
+            }
             Ok::<_, anyhow::Error>(())
         })
         .await?;
@@ -1462,9 +1550,17 @@ impl Actor for PythonActor {
         // have an original exception object or traceback, so we just pass in
         // the message.
         let error = err.map(|e| e.to_string());
-        self.dispatch
-            .cleanup(&self.actor, self.instance.as_deref(), &cx, this, error)
-            .await
+        let actor = &self.actor;
+        let instance = self.instance.clone();
+        let control_sender = &self.control_sender;
+        match &mut self.dispatch {
+            Dispatch::Async(state) => {
+                state
+                    .cleanup(actor, instance.as_deref(), &cx, this, error)
+                    .await
+            }
+            Dispatch::Sync(state) => state.cleanup(control_sender, instance, &cx, error).await,
+        }
     }
 
     fn display_name(&self) -> Option<String> {
@@ -1600,13 +1696,19 @@ pub struct PythonActorParams {
     actor_type: PickledPyObject,
     // Python message to process as part of the actor initialization.
     init_message: Option<PythonMessage>,
+    kind: ActorKind,
 }
 
 impl PythonActorParams {
-    pub(crate) fn new(actor_type: PickledPyObject, init_message: Option<PythonMessage>) -> Self {
+    pub(crate) fn new(
+        actor_type: PickledPyObject,
+        init_message: Option<PythonMessage>,
+        kind: ActorKind,
+    ) -> Self {
         Self {
             actor_type,
             init_message,
+            kind,
         }
     }
 }
@@ -1619,11 +1721,12 @@ impl RemoteSpawn for PythonActor {
         PythonActorParams {
             actor_type,
             init_message,
+            kind,
         }: PythonActorParams,
         environment: &ActorEnvironment,
     ) -> Result<Self, anyhow::Error> {
         let construction_point = environment.get(CAST_POINT);
-        Self::new(actor_type, init_message, construction_point)
+        Self::new(actor_type, init_message, construction_point, kind)
     }
 }
 
@@ -1680,10 +1783,12 @@ impl PythonActor {
     }
 }
 
-/// A supervision event enqueued for `_callback_loop`, which runs
-/// `__supervise__` and reports the verdict with `_handled` or `_raised`.
-/// Dropping it without reporting (e.g. because the loop was cancelled when
-/// the actor stopped) produces no verdict.
+/// A supervision event enqueued for `_callback_loop`, or for a sync actor's
+/// driver, which runs `__supervise__` and reports the verdict with `_handled`
+/// or `_raised`.
+/// Dropping it without reporting (for example because an async loop was
+/// cancelled, sync cleanup won the claim, or the inbox was dropped) produces no
+/// verdict.
 #[pyclass(module = "monarch._rust_bindings.monarch_hyperactor.actor")]
 pub struct QueuedSupervision {
     #[pyo3(get)]
@@ -1745,8 +1850,8 @@ impl QueuedSupervision {
     }
 }
 
-/// A [`QueuedSupervision`] that the actor's event loop thread builds, so
-/// that the Tokio worker never takes the GIL (see [`PendingMessage`]).
+/// Converted into [`QueuedSupervision`] on the actor's Python execution thread,
+/// so the Tokio worker never takes the GIL (see [`PendingMessage`]).
 struct PendingSupervision {
     instance: Arc<Py<PyInstance>>,
     rank: Point,
@@ -1805,7 +1910,7 @@ pub struct CallbacksPending(Arc<AtomicUsize>);
 
 #[pymethods]
 impl CallbacksPending {
-    /// A count with no supervision pending.
+    /// A count with no callbacks pending.
     #[new]
     fn new() -> Self {
         Self(Arc::new(AtomicUsize::new(0)))
@@ -1816,9 +1921,11 @@ impl CallbacksPending {
     }
 }
 
-/// An undeliverable message enqueued for `_callback_loop`, which runs
-/// `_handle_undeliverable_message` and reports the verdict with `_handled` or
-/// `_raised`. Dropping it without reporting produces no verdict.
+/// An undeliverable message enqueued for `_callback_loop`, or for a sync
+/// actor's driver, which runs `_handle_undeliverable_message` and reports the
+/// verdict with `_handled` or `_raised`. Dropping it without reporting (for
+/// example because an async loop was cancelled, sync cleanup won the claim, or
+/// the inbox was dropped) produces no verdict.
 #[pyclass(module = "monarch._rust_bindings.monarch_hyperactor.actor")]
 pub struct QueuedUndeliverable {
     #[pyo3(get)]
@@ -1880,8 +1987,8 @@ impl QueuedUndeliverable {
     }
 }
 
-/// A [`QueuedUndeliverable`] that the actor's event loop thread builds, so
-/// that the Tokio worker never takes the GIL (see [`PendingMessage`]).
+/// Converted into [`QueuedUndeliverable`] on the actor's Python execution
+/// thread, so the Tokio worker never takes the GIL (see [`PendingMessage`]).
 struct PendingUndeliverable {
     instance: Arc<Py<PyInstance>>,
     rank: Point,
@@ -2101,7 +2208,14 @@ impl LocalPort {
         port.post(self.instance.deref(), Ok(obj));
         Ok(())
     }
+    /// Async-actor reply entry point. A local value needs no mesh-reference
+    /// resolution, so it can be sent immediately.
     fn resolve_and_send(&mut self, obj: Py<PyAny>) -> PyResult<()> {
+        self.send(obj)
+    }
+    /// Sync-actor reply entry point. A local value needs no asynchronous work,
+    /// so the blocking path is the same immediate send.
+    fn _resolve_and_send_blocking(&mut self, obj: Py<PyAny>) -> PyResult<()> {
         self.send(obj)
     }
     fn exception(&mut self, e: Py<PyAny>) -> PyResult<()> {
@@ -2129,7 +2243,15 @@ impl DroppingPort {
         Ok(())
     }
 
+    /// Async-actor reply entry point. Dropping the value requires no reference
+    /// resolution.
     fn resolve_and_send(&self, obj: Py<PyAny>) -> PyResult<()> {
+        self.send(obj)
+    }
+
+    /// Sync-actor reply entry point. Dropping the value requires no work to
+    /// wait for, so the blocking path is also immediate.
+    fn _resolve_and_send_blocking(&self, obj: Py<PyAny>) -> PyResult<()> {
         self.send(obj)
     }
 
@@ -2271,7 +2393,15 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     hyperactor_mod.add_class::<QueuedUndeliverable>()?;
     hyperactor_mod.add_class::<DroppingPort>()?;
     hyperactor_mod.add_class::<Port>()?;
+    hyperactor_mod.add_class::<ActorKind>()?;
+    sync_actor::dispatch::register_python_bindings(hyperactor_mod)?;
+    sync_actor::inbox::register_python_bindings(hyperactor_mod)?;
     Ok(())
+}
+
+/// Register actor-specific Python test seams in the shared testing module.
+pub(crate) fn register_testing_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    sync_actor::inbox::register_testing_python_bindings(module)
 }
 
 #[cfg(test)]
