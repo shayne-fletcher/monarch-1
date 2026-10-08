@@ -575,6 +575,9 @@ def _init_client_context(via: Optional[str] = None) -> Context:
     return ctx
 
 
+# TODO(T292126430): `_client_context._lock` is not reentrant. A signal handler
+# that calls `shutdown_context()` or `context()` while the main thread holds it,
+# for example during client bootstrap, deadlocks.
 _client_context: _Lazy[Context] = _Lazy(_init_client_context)
 _client_attach_to: Optional[str] = None
 
