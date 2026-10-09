@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 from isolate_in_subprocess import isolate_in_subprocess
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._src.actor.logging import LoggingManager
 from monarch._src.job.process import ProcessJob
@@ -62,7 +63,7 @@ def test_drain_pending_spawns_does_not_await_logging_init() -> None:
                 flush_without_client: list[bool] = []
                 native_flush_constructions = 0
                 flush_async = proc_mesh._logging_manager.flush_async
-                new_flush_task = proc_mesh._logging_manager._new_flush_task
+                new_flush_handle = proc_mesh._logging_manager._new_flush_handle
 
                 async def record_flush_async() -> None:
                     flush_without_client.append(
@@ -70,10 +71,10 @@ def test_drain_pending_spawns_does_not_await_logging_init() -> None:
                     )
                     await flush_async()
 
-                def record_new_flush_task() -> PythonTask[None]:
+                def record_new_flush_handle() -> Handle[None]:
                     nonlocal native_flush_constructions
                     native_flush_constructions += 1
-                    return new_flush_task()
+                    return new_flush_handle()
 
                 with (
                     patch.object(
@@ -83,8 +84,8 @@ def test_drain_pending_spawns_does_not_await_logging_init() -> None:
                     ),
                     patch.object(
                         proc_mesh._logging_manager,
-                        "_new_flush_task",
-                        record_new_flush_task,
+                        "_new_flush_handle",
+                        record_new_flush_handle,
                     ),
                 ):
                     asyncio.run(

@@ -12,9 +12,9 @@ import threading
 import warnings
 from typing import Optional, TextIO, Tuple
 
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 from monarch._rust_bindings.monarch_hyperactor.logging import LoggingMeshClient
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._src.actor.actor_mesh import context
 from monarch._src.actor.ipython_check import is_ipython
 
@@ -180,20 +180,20 @@ class LoggingManager:
         self.register_flusher_if_in_ipython()
         self.enable_fd_capture_if_in_ipython()
 
-    def _new_flush_task(self) -> PythonTask[None]:
-        """Return an unscheduled Rust logging-flush future wrapped as a PythonTask."""
+    def _new_flush_handle(self) -> Handle[None]:
+        """Start a Rust logging flush and return its Handle."""
         assert self._logging_mesh_client is not None
         return self._logging_mesh_client.flush(context().actor_instance._as_rust())
 
     def flush(self) -> None:
         assert self._logging_mesh_client is not None
         try:
-            # Schedule the Rust future and wait through a Handle for up to 3 seconds.
-            self._new_flush_task().spawn_handle().get(timeout=3)
+            # Wait for the running flush for up to 3 seconds.
+            self._new_flush_handle().get(timeout=3)
         except Exception:
-            # TODO: A harmless exception happens to come through due to coroutine
-            # accessing shared resources via logging_mesh_client. Flush works fine
-            # but shared resource management under loggingMeshClient needs to be investigated
+            # Best effort: this runs after each IPython cell, so a barrier that
+            # fails or takes longer than three seconds must not reach the user.
+            # A timed-out flush keeps running in the background.
             pass
 
     async def flush_async(self) -> None:
@@ -201,7 +201,7 @@ class LoggingManager:
         if self._logging_mesh_client is None:
             return
         try:
-            # Schedule the Rust future and await its Handle on the asyncio loop.
-            await self._new_flush_task().spawn_handle()
+            # Start the flush and await its Handle on the asyncio loop.
+            await self._new_flush_handle()
         except Exception:
             pass

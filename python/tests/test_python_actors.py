@@ -1120,18 +1120,14 @@ async def test_multiple_ongoing_flushes_no_deadlock() -> None:
 
         log_mesh = pm._logging_manager._logging_mesh_client
         assert log_mesh is not None
-        futures = []
+        handles = []
         for _ in range(5):
-            # FIXME: the order of futures doesn't necessarily mean the order of flushes due to the async nature.
+            # FIXME: the order of handles doesn't necessarily mean the order of flushes due to the async nature.
             await asyncio.sleep(0.1)
-            futures.append(
-                Future._from_coro(
-                    log_mesh.flush(context().actor_instance._as_rust()).spawn().task()
-                )
-            )
+            handles.append(log_mesh.flush(context().actor_instance._as_rust()))
 
         # The last flush should not block
-        await futures[-1]
+        await handles[-1]
         await pm.stop()
 
 

@@ -44,6 +44,7 @@ use serde::Serialize;
 use typeuri::Named;
 
 use crate::context::PyInstance;
+use crate::handle::PyHandle;
 use crate::proc::PyActorAddr;
 use crate::proc_mesh::PyProcMesh;
 use crate::pytokio::PyPythonTask;
@@ -437,14 +438,18 @@ impl LoggingMeshClient {
         Ok(())
     }
 
-    /// Force a sync flush of remote stdout/stderr back to the client,
-    /// and wait for completion.
+    /// Start a sync flush of remote stdout/stderr back to the client
+    /// and return a `Handle` that completes when the flush has
+    /// finished.
+    ///
+    /// The flush starts before this returns. Dropping the `Handle`
+    /// does not cancel it.
     ///
     /// If log forwarding was disabled at startup (so we never spawned
     /// any `LogForwardActor`s), this becomes a no-op success: there's
     /// nothing to flush from remote procs in that mode, and we don't
     /// try to manufacture it dynamically.
-    fn flush(&self, instance: &PyInstance) -> PyResult<PyPythonTask> {
+    fn flush(&self, instance: &PyInstance) -> PyResult<PyHandle> {
         let forwarder_mesh_opt = self
             .forwarder_mesh
             .as_ref()
@@ -452,8 +457,8 @@ impl LoggingMeshClient {
         let client_actor = self.client_actor.clone();
         let instance = instance.clone();
 
-        PyPythonTask::new(async move {
-            // If there's no forwarer mesh (forwarding disabled by
+        Ok(PyHandle::spawn(async move {
+            // If there's no forwarder mesh (forwarding disabled by
             // config), we just succeed immediately.
             let Some(forwarder_mesh) = forwarder_mesh_opt else {
                 return Ok(());
@@ -462,7 +467,7 @@ impl LoggingMeshClient {
             Self::flush_internal(instance.deref(), client_actor, forwarder_mesh)
                 .await
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
-        })
+        }))
     }
 }
 
@@ -597,8 +602,7 @@ mod tests {
 
     use super::*;
     use crate::actor::PythonActor;
-    use crate::pytokio::AwaitPyExt;
-    use crate::pytokio::ensure_python;
+    use crate::runtime::ensure_python;
 
     const TEST_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -638,15 +642,6 @@ mod tests {
                 .map_err(|error| pyo3::exceptions::PyTypeError::new_err(error.to_string()))
         })
         .await?)
-    }
-
-    /// Drive a unit-returning Python task without a panic-bearing conversion.
-    async fn drive_unit_task(mut task: PyPythonTask, operation: &str) -> Result<()> {
-        let future = task.take_task()?;
-        timeout(TEST_DEADLINE, future)
-            .await
-            .map_err(|_| anyhow::anyhow!("{operation} exceeded {TEST_DEADLINE:?}"))??;
-        Ok(())
     }
 
     fn log_client_ordinal(label: &str) -> Result<usize> {
@@ -698,6 +693,52 @@ mod tests {
         Ok(version)
     }
 
+    /// How long a probe waits for its completion before treating the attempt
+    /// as inconclusive.
+    const PROBE_REPLY_BOUND: Duration = Duration::from_secs(1);
+
+    /// Start one sync-flush probe and return its version and whether it
+    /// completed.
+    ///
+    /// The version receive runs until `deadline` and must succeed: the client
+    /// has incremented its version for this probe, so the caller must count it.
+    /// A later `StartSyncFlush` can replace this probe's reply port, so the
+    /// completion wait is bounded by `PROBE_REPLY_BOUND` and its timeout is
+    /// reported as `false`, not as an error.
+    async fn sync_flush_probe(
+        instance: &Instance<PythonActor>,
+        client_actor: &ActorHandle<LogClientActor>,
+        deadline: tokio::time::Instant,
+    ) -> Result<(u64, bool)> {
+        let (reply_tx, reply_rx) = instance.open_once_port::<()>();
+        let (version_tx, version_rx) = instance.open_once_port::<u64>();
+
+        client_actor.try_post(
+            instance,
+            LogClientMessage::StartSyncFlush {
+                expected_procs: 1,
+                reply: reply_tx.bind(),
+                version: version_tx.bind(),
+            },
+        )?;
+        let version = tokio::time::timeout_at(deadline, version_rx.recv())
+            .await
+            .map_err(|_| anyhow::anyhow!("sync-flush probe version exceeded the deadline"))??;
+
+        client_actor.try_post(
+            instance,
+            LogMessage::Flush {
+                sync_version: Some(version),
+            },
+        )?;
+        let completed = matches!(
+            timeout(PROBE_REPLY_BOUND, reply_rx.recv()).await,
+            Ok(Ok(()))
+        );
+
+        Ok((version, completed))
+    }
+
     /// Bring up the actor topology exercised by the logging-client tests.
     async fn logging_test_world()
     -> Result<(Proc, Instance<PythonActor>, HostMeshShutdownGuard, ProcMesh)> {
@@ -734,8 +775,7 @@ mod tests {
             let client_task = LoggingMeshClient::spawn(&py_instance, &py_proc_mesh)
                 .expect("spawn PyPythonTask (forwarding disabled)");
 
-            let client_py: Py<LoggingMeshClient> = client_task
-                .await_py()
+            let client_py: Py<LoggingMeshClient> = drive_logging_client(client_task)
                 .await
                 .expect("spawn failed (forwarding disabled)");
 
@@ -758,8 +798,7 @@ mod tests {
             let client_task = LoggingMeshClient::spawn(&py_instance, &py_proc_mesh)
                 .expect("spawn PyPythonTask (forwarding enabled)");
 
-            let client_py: Py<LoggingMeshClient> = client_task
-                .await_py()
+            let client_py: Py<LoggingMeshClient> = drive_logging_client(client_task)
                 .await
                 .expect("spawn failed (forwarding enabled)");
 
@@ -863,8 +902,7 @@ mod tests {
             let client_task = LoggingMeshClient::spawn(&py_instance, &py_proc_mesh)
                 .expect("spawn PyPythonTask (forwarding disabled)");
 
-            let client_py: Py<LoggingMeshClient> = client_task
-                .await_py()
+            let client_py: Py<LoggingMeshClient> = drive_logging_client(client_task)
                 .await
                 .expect("spawn failed (forwarding disabled)");
 
@@ -923,8 +961,7 @@ mod tests {
             let client_task = LoggingMeshClient::spawn(&py_instance, &py_proc_mesh)
                 .expect("spawn PyPythonTask (forwarding enabled)");
 
-            let client_py: Py<LoggingMeshClient> = client_task
-                .await_py()
+            let client_py: Py<LoggingMeshClient> = drive_logging_client(client_task)
                 .await
                 .expect("spawn failed (forwarding enabled)");
 
@@ -982,25 +1019,23 @@ mod tests {
             let client_task = LoggingMeshClient::spawn(&py_instance, &py_proc_mesh)
                 .expect("spawn PyPythonTask (forwarding disabled)");
 
-            let client_py: Py<LoggingMeshClient> = client_task
-                .await_py()
+            let client_py: Py<LoggingMeshClient> = drive_logging_client(client_task)
                 .await
                 .expect("spawn failed (forwarding disabled)");
 
-            // Call flush() and bring the PyPythonTask back out.
-            let flush_task = monarch_with_gil(GilSite::Test, |py| {
+            // flush() returns a Handle for an already-running flush.
+            let flush_handle = monarch_with_gil(GilSite::Test, |py| {
                 let client_ref = client_py.borrow(py);
                 client_ref
                     .flush(&py_instance)
-                    .expect("flush() PyPythonTask (forwarding disabled)")
+                    .expect("flush() Handle (forwarding disabled)")
             })
             .await;
 
-            // Await the returned PyPythonTask's future outside the
-            // GIL.
-            flush_task
-                .await_unit()
+            // Observe the Handle's completion outside the GIL.
+            timeout(TEST_DEADLINE, flush_handle.wait_completion())
                 .await
+                .expect("flush exceeded the deadline (forwarding disabled)")
                 .expect("flush failed (forwarding disabled)");
 
             drop(client_py); // See "NOTE ON LIFECYCLE / CLEANUP"
@@ -1013,26 +1048,23 @@ mod tests {
             let client_task = LoggingMeshClient::spawn(&py_instance, &py_proc_mesh)
                 .expect("spawn PyPythonTask (forwarding enabled)");
 
-            let client_py: Py<LoggingMeshClient> = client_task
-                .await_py()
+            let client_py: Py<LoggingMeshClient> = drive_logging_client(client_task)
                 .await
                 .expect("spawn failed (forwarding enabled)");
 
-            // Call flush() to exercise the barrier path, and pull the
-            // PyPythonTask out.
-            let flush_task = monarch_with_gil(GilSite::Test, |py| {
+            // Call flush() to exercise the barrier path.
+            let flush_handle = monarch_with_gil(GilSite::Test, |py| {
                 client_py
                     .borrow(py)
                     .flush(&py_instance)
-                    .expect("flush() PyPythonTask (forwarding enabled)")
+                    .expect("flush() Handle (forwarding enabled)")
             })
             .await;
 
-            // Await the returned PyPythonTask's future outside the
-            // GIL.
-            flush_task
-                .await_unit()
+            // Observe the Handle's completion outside the GIL.
+            timeout(TEST_DEADLINE, flush_handle.wait_completion())
                 .await
+                .expect("flush exceeded the deadline (forwarding enabled)")
                 .expect("flush failed (forwarding enabled)");
 
             drop(client_py); // See note "NOTE ON LIFECYCLE / CLEANUP"
@@ -1041,12 +1073,17 @@ mod tests {
         host_mesh.shutdown(&instance).await.expect("host shutdown");
     }
 
-    /// A raw flush is inert until driven. Each version probe increments the value
-    /// itself, so `+1` after discard means zero production flushes and `+3` after
-    /// the driven control means exactly one production flush across three probes.
+    /// A flush whose only Handle is dropped still enters the native barrier.
+    ///
+    /// Every probe's `StartSyncFlush` increments the client's version. After a
+    /// completed baseline probe at `baseline`, a completed probe at `baseline +
+    /// probes` means the dropped flush has not started yet, and `baseline +
+    /// probes + 1` means it has started exactly once. Its start may land before,
+    /// between or after probes, so the loop accepts any order. A probe whose
+    /// completion times out was replaced by a later start and is only counted.
     #[cfg_attr(not(target_os = "linux"), ignore = "linux-only")]
     #[tokio::test]
-    async fn discarded_flush_task_does_not_advance_sync_flush_version() -> Result<()> {
+    async fn dropped_flush_handle_enters_the_sync_flush_barrier() -> Result<()> {
         let (_, instance, host_mesh, proc_mesh) = timeout(TEST_DEADLINE, logging_test_world())
             .await
             .map_err(|_| anyhow::anyhow!("test world setup exceeded {TEST_DEADLINE:?}"))??;
@@ -1054,6 +1091,8 @@ mod tests {
         let test_result = async {
             let py_instance = PyInstance::from(&instance);
             let py_proc_mesh = PyProcMesh::new_owned(proc_mesh);
+            // Held for the whole test, so no other test's logging operation can
+            // reach this client.
             let lock = hyperactor_config::global::lock();
             let _guard = lock.override_key(MESH_ENABLE_LOG_FORWARDING, true);
 
@@ -1075,29 +1114,34 @@ mod tests {
 
             let baseline = completed_sync_flush_probe(&instance, &client_actor).await?;
 
-            let discarded = monarch_with_gil(GilSite::Test, |py| {
+            let dropped = monarch_with_gil(GilSite::Test, |py| {
                 client_py.borrow(py).flush(&py_instance)
             })
             .await?;
-            drop(discarded);
+            drop(dropped);
 
-            let after_discard = completed_sync_flush_probe(&instance, &client_actor).await?;
-            anyhow::ensure!(
-                after_discard == baseline + 1,
-                "a discarded raw flush must add no real flush increment: baseline probe {baseline}, next probe {after_discard}"
-            );
-
-            let control = monarch_with_gil(GilSite::Test, |py| {
-                client_py.borrow(py).flush(&py_instance)
-            })
-            .await?;
-            drive_unit_task(control, "logging flush").await?;
-
-            let after_control = completed_sync_flush_probe(&instance, &client_actor).await?;
-            anyhow::ensure!(
-                after_control == baseline + 3,
-                "one driven flush between completed probes must add one real flush increment: baseline probe {baseline}, final probe {after_control}"
-            );
+            let deadline = tokio::time::Instant::now() + TEST_DEADLINE;
+            let mut probes = 0u64;
+            loop {
+                anyhow::ensure!(
+                    tokio::time::Instant::now() < deadline,
+                    "the dropped flush never reached the barrier: baseline probe {baseline}, {probes} probes"
+                );
+                let (version, completed) =
+                    sync_flush_probe(&instance, &client_actor, deadline).await?;
+                probes += 1;
+                if !completed {
+                    continue;
+                }
+                if version == baseline + probes {
+                    continue;
+                }
+                anyhow::ensure!(
+                    version == baseline + probes + 1,
+                    "expected exactly one real flush: baseline probe {baseline}, {probes} probes, completed probe {version}"
+                );
+                break;
+            }
 
             drop(client_py);
             Ok(())
