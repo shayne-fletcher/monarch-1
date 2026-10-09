@@ -350,7 +350,7 @@ pytokio_import = "monarch._rust_bindings.monarch_hyperactor.pytokio"
 doc_legacy_surface = "PythonTask|PyShared|pytokio"
 
 [totals]
-py_python_task_new = 18
+py_python_task_new = 17
 raw_python_task_new = 5
 from_coro = 10
 rust_from_coro = 2
@@ -369,9 +369,9 @@ shared_reconstruction = 2
 reserve_binding = 1
 py_mesh_reserve = 2
 py_is_tokio_thread = 0
-pytokio_import = 30
+pytokio_import = 28
 pytokio_module_ref = 15
-helper_symbol = 18
+helper_symbol = 16
 helper_definition = 1
 would_block_surface = 0
 binding_stub_symbol = 3
@@ -1772,8 +1772,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/logging.rs"
 symbol = "AwaitPyExt"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3b"
+transition_revision = "self"
 
 [[site]]
 id = "hs.logging.PyPythonTask"
@@ -1794,8 +1795,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/logging.rs"
 symbol = "ensure_python"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3b"
+transition_revision = "self"
 
 [[site]]
 id = "hs.mailbox.PyPythonTask"
@@ -2695,35 +2697,35 @@ path = "fbcode/monarch/monarch_hyperactor/src/logging.rs"
 symbol = "LoggingMeshClient::flush"
 operation = "py_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3b"
+transition_revision = "self"
 constructor = "PyPythonTask"
-return_surface = "PyPythonTask returned from LoggingMeshClient::flush"
-consumer = "LoggingManager._new_flush_task, reached by flush and flush_async"
-driver = "flush drives a Handle synchronously; flush_async is an asyncio-driven coroutine awaiting a Handle. Adapter-level coverage proves that two manager calls request and drive distinct tasks; their mapping to distinct native operations is source-composed from _new_flush_task calling LoggingMeshClient.flush each time"
-start_point = "the binding call captures the client actor and optional forwarder mesh but leaves the task lazy. Once spawn or spawn_handle starts it, a no-forwarder task returns immediately; a forwarding task posts StartSyncFlush and runs the distributed barrier"
-abandonment = "two tested states. Before start, dropping a raw task performs no flush: against a completed baseline probe v, the next completed probe returns v + 1, which is only that probe's own increment. After start, the synthetic flush_async Handle test proves that cancelling its asyncio observer does not abort the controlled producer. Source-grounded composition: native spawn_handle uses non-abortable spawn_core(false), so its producer likewise continues after observer cancellation"
-eager_effect = "an eager conversion would begin the sync-flush barrier during the binding call; today the effect begins only at spawn or spawn_handle"
-drop_behavior = "dropping an undriven raw task is inert. The synthetic flush_async cancellation test cancels the only observer, releases the producer, and proves completion through an independent bounded event. Source-grounded: real native flush producers use the same non-abortable Handle scheduling policy"
-unobserved_error = "ordinary Exception is suppressed by both logging-manager adapters. A sentinel BaseException escapes both with its exact type and message. Cancelling the synthetic flush_async observer raises asyncio.CancelledError while its controlled producer continues; continuation of a real native flush is source-grounded through the non-abortable spawn_core(false) policy"
-disposition = "preserve timing"
+return_surface = "Handle[None] returned from LoggingMeshClient::flush"
+consumer = "LoggingManager._new_flush_handle, reached by flush and flush_async"
+driver = "flush waits on the Handle synchronously for up to three seconds; flush_async awaits it on the current asyncio loop. Adapter-level coverage proves that two manager calls request and observe distinct Handles; their mapping to distinct native operations is source-composed from _new_flush_handle calling LoggingMeshClient.flush each time"
+start_point = "the binding call spawns the producer with PyHandle::spawn before returning the Handle. A no-forwarder producer completes immediately; a forwarding producer posts StartSyncFlush and runs the distributed barrier"
+abandonment = "dropping the only Handle does not cancel the producer: the dropped-Handle witness proves that a flush whose Handle was dropped immediately still reaches the barrier, by counting completed version probes until one reports exactly baseline + probes + 1. The synthetic flush_async cancellation test proves that cancelling the asyncio observer leaves the controlled producer running"
+eager_effect = "the sync-flush barrier begins during the binding call; the public adapters already started the task immediately, so their timing is unchanged"
+drop_behavior = "PyHandle::spawn produces a Handle with abort_on_drop: None (HDL-4, HDL-13), so dropping every observer leaves the native flush running"
+unobserved_error = "ordinary Exception is suppressed by both logging-manager adapters. A sentinel BaseException escapes both with its exact type and message. Cancelling the synthetic flush_async observer raises asyncio.CancelledError while its controlled producer continues"
+disposition = "intentionally become eager"
 semantic_class = "deferred_side_effect"
 oracle = [
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::logging::tests::discarded_flush_task_does_not_advance_sync_flush_version",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::logging::tests::dropped_flush_handle_enters_the_sync_flush_barrier",
   "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::logging::tests::flush_behaviors",
   "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerTest::test_flush_handles_exception_gracefully",
   "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerTest::test_flush_propagates_base_exception",
-  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_awaits_handle_not_shared",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_awaits_the_handle",
   "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_suppresses_ordinary_error",
   "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_propagates_base_exception",
-  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_cancellation_leaves_producer_reapable",
+  "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_flush_async_cancellation_leaves_producer_running",
   "fbcode//monarch/python/tests/_monarch:test_logging::LoggingManagerAsyncTest::test_two_manager_flushes_create_two_operations",
   "fbcode//monarch/python/tests:test_logging_initialization_characterization::test_drain_pending_spawns_does_not_await_logging_init",
   "fbcode//monarch/python/tests:test_host_mesh::test_preconstructed_shutdowns_drain_after_observer_cancellation",
   "fbcode//monarch/python/tests:test_python_actors::test_flush_async_drives_flush_on_asyncio_loop",
   "fbcode//monarch/python/tests:test_python_actors::test_multiple_ongoing_flushes_no_deadlock",
 ]
-
 [[site]]
 id = "np.logging.LoggingMeshClient.spawn"
 category = "native_producer"
@@ -3094,8 +3096,9 @@ path = "fbcode/monarch/python/monarch/_src/actor/logging.py"
 symbol = "<module>"
 operation = "pytokio_import"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3b"
+transition_revision = "self"
 members = ["PythonTask"]
 
 [[site]]
@@ -3167,8 +3170,9 @@ path = "fbcode/monarch/python/tests/_monarch/test_logging.py"
 symbol = "<module>"
 operation = "pytokio_import"
 scope = "test"
-state = "legacy"
+state = "migrated"
 transition = "6.8"
+transition_revision = "self"
 members = ["PythonTask"]
 
 [[site]]
