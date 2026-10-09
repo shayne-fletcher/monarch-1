@@ -115,21 +115,6 @@ impl PyInstance {
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Stop the actor and return a future that resolves when it reaches
-    /// a terminal status (stopped or failed). This ensures all pending
-    /// messages are drained and connections are flushed before returning.
-    #[pyo3(signature = (reason = None))]
-    fn stop_and_wait(&self, reason: Option<&str>) -> PyResult<crate::pytokio::PyPythonTask> {
-        let reason = reason.unwrap_or("shutdown").to_string();
-        let instance = self.inner.clone_for_py();
-        crate::pytokio::PyPythonTask::new(async move {
-            let flush_timeout =
-                hyperactor_config::global::get(hyperactor::config::FORWARDER_FLUSH_TIMEOUT);
-            stop_instance_and_wait(&instance, reason, flush_timeout).await;
-            Ok(())
-        })
-    }
-
     /// Mark this actor as system/infrastructure.
     ///
     /// **PY-SYS-2:** Python actors use the `_is_system_actor = True`
@@ -179,6 +164,10 @@ impl PyInstance {
 }
 
 /// Stop an actor, wait for terminal status, and flush its proc's gateway.
+///
+/// The flush needs the proc's transports to still be serving, so host
+/// shutdown calls this for the root client after child drain and before
+/// transport teardown.
 pub(crate) async fn stop_instance_and_wait(
     instance: &Instance<PythonActor>,
     reason: String,

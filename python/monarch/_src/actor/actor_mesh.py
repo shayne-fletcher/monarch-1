@@ -15,6 +15,7 @@ import functools
 import importlib
 import inspect
 import logging
+import math
 import sys
 import threading
 import warnings
@@ -481,11 +482,11 @@ class _Lazy(Generic[T]):
 #
 # CF-1 (no-client-shutdown-is-inert): if this process has no client,
 #   `shutdown_context()` does nothing: it returns a finished Future, creates
-#   no client and leaves `_shutdown_done` false so a later client still shuts
+#   no client and leaves `_shutdown_claimed` false so a later client still shuts
 #   down. It first takes `_client_context._lock`, so a bootstrap in progress on
 #   another thread finishes before it decides; if that bootstrap produced a
 #   client, shutdown proceeds normally. Enforced by `shutdown_context()`;
-#   witnessed by the two tests in `test_shutdown_without_client.py` (the
+#   witnessed by the three tests in `test_shutdown_without_client.py` (the
 #   produced-client case is untested).
 # CF-2 (client-state-is-process-local): once client bootstrap has begun, the
 #   client context, host, proc and actor meshes and references, and Monarch
@@ -629,66 +630,100 @@ def attach(addr: str) -> None:
         _client_attach_to = addr
 
 
-_shutdown_done = False
+# True once a caller claims shutdown of this process's Monarch client.
+# This prevents repeat shutdowns; it does not mean shutdown has finished.
+_shutdown_claimed = False
 
 
 def shutdown_context(host_timeout: float | None = None) -> "Future[None]":
-    """Shutdown global actor context resources.
+    """Shut down this Python process's Monarch client.
 
-    Idempotent: subsequent calls return an immediately-resolved future.
-    This is safe to call both explicitly and from atexit. If no client
-    context exists, this returns an immediately-resolved future and does not
-    create one.
+    Call this from the user's Python controller program when it has finished
+    using Monarch, not to stop one actor or mesh. Monarch also calls it
+    automatically at normal Python interpreter exit. Once shut down, the
+    client cannot be restarted in the same process. This does not exit the
+    controller program.
+
+    Monarch creates one root client actor for the user's Python controller
+    process. The controller's meshes share that root client; it is not created
+    once per host or worker. The root client runs on a local Monarch host.
+    That host may also have user procs created through
+    ``this_host().spawn_procs(...)``. This shuts down those procs, then stops
+    the root client, attempts its final flush and closes the transports.
+    It does not send a shutdown request to each host in an arbitrary HostMesh.
+
+    This uses the process's initialized client, not the current actor returned
+    by ``context()``. There is no controller-only caller check. A worker with
+    no initialized client gets an already-completed future without creating
+    a client or stopping its current actor. If a worker separately initializes
+    its own client, this operation applies to that client. A no-client call
+    does not prevent a client created later from being shut down.
+
+    With an initialized client, the first call starts shutdown before it
+    returns. Keep that returned future and call ``.get()`` or await it if you
+    need to wait for completion. Dropping it does not cancel native shutdown.
+    Later calls return already-completed futures, even while the first
+    shutdown is still running; calling again is not a way to wait for it.
 
     Args:
-        host_timeout: Seconds the local host may spend draining children and
-            flushing its gateway. Defaults to the host's own default (10s).
+        host_timeout: Timeout in seconds passed to the local host's user-proc
+            shutdown. The host and root client's final gateway flushes are
+            also capped by this value. Defaults to 10 seconds. This is not an
+            overall time limit on waiting for shutdown to finish. A supplied
+            timeout must be finite, non-negative and less than 2**64 seconds;
+            an invalid timeout does not claim shutdown.
 
     Returns:
-        Future[None]: A future that completes when shutdown is
-                      finished. Call with .get() to wait for
-                      completion.
+        Future[None]: Reports completion for the call that starts shutdown.
+            Already complete if no client exists or shutdown was already
+            claimed. Final flushes are best-effort; completion does not
+            guarantee that every message was delivered.
     """
+    global _shutdown_claimed
     from monarch._src.actor.future import Future
 
-    if _shutdown_done:
+    # Shutdown has already been claimed. Return immediately without starting
+    # another shutdown or waiting for the first to finish.
+    if _shutdown_claimed:
         return Future._resolved(None)
 
-    c: Context | None = _context.get()
-    if c is None:
-        # Taking the lock waits out a bootstrap in progress on another thread,
-        # whose client must still be shut down.
-        with _client_context._lock:
-            if _client_context._val is None:
-                # CF-1: a PythonTask would bootstrap a client just to shut it down.
-                # Leave _shutdown_done false so that a client created later is
-                # still shut down.
-                return Future._resolved(None)
-
-    async def _shutdown_sequence() -> None:
-        global _shutdown_done
-        if _shutdown_done:
-            return
-        _shutdown_done = True
-
-        try:
-            from monarch._rust_bindings.monarch_hyperactor.host_mesh import (
-                shutdown_local_host_mesh,
+    # Wait for any other thread creating the client to finish before checking
+    # whether a client exists. The same lock ensures that only one caller
+    # starts shutdown.
+    with _client_context._lock:
+        if _client_context._val is None:
+            # CF-1: No client exists yet. Leave the flag false so a client
+            # created later can still be shut down.
+            return Future._resolved(None)
+        # Another caller may have claimed shutdown while we waited for the lock.
+        if _shutdown_claimed:
+            # Return immediately rather than wait for that shutdown to finish.
+            return Future._resolved(None)
+        # Reject invalid input before taking responsibility for shutdown. The
+        # native binding uses a Duration with u64 seconds and rejects these
+        # values before starting work; a rejected call must not prevent a later
+        # valid call from shutting down the client.
+        if host_timeout is not None and (
+            not math.isfinite(host_timeout) or host_timeout < 0 or host_timeout >= 2**64
+        ):
+            raise ValueError(
+                "host_timeout must be finite, non-negative and less than 2**64 seconds"
             )
+        # This caller takes responsibility for starting shutdown. The flag
+        # records that decision, not completion; the native shutdown starts
+        # below, after we release the lock.
+        _shutdown_claimed = True
 
-            # With a local host, Rust stops and flushes the root client after
-            # child drain but before transport teardown. Repeating that here
-            # would flush after teardown; Python owns only the no-host fallback.
-            await shutdown_local_host_mesh(host_timeout)
-        except RuntimeError:
-            # A client created without a local host still needs to be stopped.
-            if c is not None:
-                instance = c.actor_instance._as_rust()
-                await instance.stop_and_wait("shutdown")
-        if c is not None:
-            _context.set(None)
+    # Only the call starting shutdown needs this binding. Calls with no client,
+    # or with shutdown already claimed, return above without importing it.
+    from monarch._rust_bindings.monarch_hyperactor.host_mesh import (
+        shutdown_local_host_mesh,
+    )
 
-    return Future._from_coro(_shutdown_sequence())
+    # This native call shuts down the host's user procs, e.g. those created by
+    # this_host().spawn_procs(...). It then stops the root client and attempts
+    # its final flush before closing the transports.
+    return Future._from_handle(shutdown_local_host_mesh(host_timeout))
 
 
 def context() -> Context:
@@ -699,6 +734,9 @@ def context() -> Context:
     returns the root client context. Raises ``WouldBlockRuntime`` rather than
     attempting fresh root-client bootstrap from inside a Tokio runtime; an
     already-initialized client can still be reused there.
+
+    ``shutdown_context()`` always targets the process's client; it does not
+    use this function to select an actor to stop.
     """
     c = _context.get()
     if c is None:

@@ -681,7 +681,7 @@ fn py_host_mesh_from_bytes(bytes: &Bound<'_, PyBytes>) -> PyResult<PyHostMesh> {
 
 #[pyfunction]
 #[pyo3(signature = (timeout_secs=None))]
-fn shutdown_local_host_mesh(timeout_secs: Option<f64>) -> PyResult<PyPythonTask> {
+fn shutdown_local_host_mesh(timeout_secs: Option<f64>) -> PyResult<PyHandle> {
     let timeout = timeout_secs
         .map(Duration::try_from_secs_f64)
         .transpose()
@@ -692,7 +692,7 @@ fn shutdown_local_host_mesh(timeout_secs: Option<f64>) -> PyResult<PyPythonTask>
         .ok_or_else(|| PyRuntimeError::new_err("No local host mesh to shutdown"))?
         .clone();
 
-    PyPythonTask::new(async move {
+    Ok(PyHandle::spawn(async move {
         // Create a temporary instance to send the shutdown message
         let temp_proc = hyperactor::Proc::isolated();
         let instance = temp_proc.client("shutdown_requester");
@@ -747,8 +747,9 @@ fn shutdown_local_host_mesh(timeout_secs: Option<f64>) -> PyResult<PyPythonTask>
             stop_instance_and_wait(root, "shutdown".to_string(), flush_timeout).await;
         }
 
-        Ok(())
-    })
+        // Python `None`, not unit: PyO3 converts `()` to an empty tuple.
+        Ok(None::<()>)
+    }))
 }
 
 /// Opaque capability token for `ActorRef<MeshAdminAgent>` across the

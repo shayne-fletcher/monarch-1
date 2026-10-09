@@ -149,9 +149,12 @@ def bootstrap_host(
     """
     ...
 
-def shutdown_local_host_mesh(timeout_secs: float | None = None) -> PythonTask[None]:
+def shutdown_local_host_mesh(timeout_secs: float | None = None) -> Handle[None]:
     """
     Shutdown the local host mesh created by bootstrap_host().
+
+    The shutdown starts before this returns; the Handle reports when it
+    finishes, and dropping the Handle does not cancel it.
 
     Sends ShutdownHost message to the local host mesh agent with:
     - timeout: ``timeout_secs`` (default 10 seconds) grace period before

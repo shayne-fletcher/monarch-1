@@ -392,7 +392,9 @@ impl HandleCore {
     /// can observe the same final value. The current value is checked before
     /// awaiting `changed()`, so a core that already holds its value resolves
     /// immediately.
-    pub(crate) fn wait_future(&self) -> impl Future<Output = PyResult<Py<PyAny>>> + Send + 'static {
+    pub(crate) fn wait_future(
+        &self,
+    ) -> impl Future<Output = PyResult<Py<PyAny>>> + Send + 'static + use<> {
         // Reuse wait_ready's HDL-1 wait loop (single source of truth), then clone
         // the value out under the GIL.
         let ready = self.wait_ready();
@@ -422,8 +424,10 @@ impl HandleCore {
     /// on the loop thread instead (HDL-17).
     pub(crate) fn wait_ready(
         &self,
-    ) -> impl Future<Output = PyResult<watch::Receiver<Option<PyResult<Py<PyAny>>>>>> + Send + 'static
-    {
+    ) -> impl Future<Output = PyResult<watch::Receiver<Option<PyResult<Py<PyAny>>>>>>
+    + Send
+    + 'static
+    + use<> {
         // HDL-9: the returned future owns a cloned receiver (Send + 'static,
         // borrowing nothing from &self), so a caller can drop its PyRef / release
         // the GIL before awaiting and can spawn this future.
@@ -581,7 +585,9 @@ impl PyHandle {
     /// The returned future owns a cloned watch receiver, so it borrows nothing
     /// from `self`, survives the `PyHandle` being dropped, and can coexist with
     /// any number of other observers.
-    pub fn wait_future(&self) -> impl Future<Output = PyResult<Py<PyAny>>> + Send + 'static {
+    pub fn wait_future(
+        &self,
+    ) -> impl Future<Output = PyResult<Py<PyAny>>> + Send + 'static + use<> {
         self.core.wait_future()
     }
 
@@ -635,7 +641,7 @@ impl PyHandle {
     /// (a discriminant-only read, HDL-3); only the error path clones the stored
     /// `PyErr`. This is the readiness surface for callers that need only the
     /// success/error discriminant, not the value.
-    pub fn wait_completion(&self) -> impl Future<Output = PyResult<()>> + Send + 'static {
+    pub fn wait_completion(&self) -> impl Future<Output = PyResult<()>> + Send + 'static + use<> {
         let ready = self.core.wait_ready();
         async move {
             let rx = ready.await?;
