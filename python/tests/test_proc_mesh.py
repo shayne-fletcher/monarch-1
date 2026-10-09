@@ -151,7 +151,7 @@ class _LoggingManagerProbe:
         if client is None:
             return
         try:
-            await client.flush(context().actor_instance._as_rust()).spawn_handle()
+            await client.flush(context().actor_instance._as_rust())
         except Exception:
             pass
 
@@ -935,18 +935,14 @@ async def test_actor_spawn_then_immediate_shutdown() -> None:
 
         flush_started = False
         host_flush_called = False
-        new_flush_task = logging_manager._new_flush_task
+        new_flush_handle = logging_manager._new_flush_handle
         flush_async = logging_manager.flush_async
 
-        def record_flush_start() -> PythonTask[None]:
-            flush_task = new_flush_task()
-
-            async def task() -> None:
-                nonlocal flush_started
-                flush_started = True
-                await flush_task
-
-            return PythonTask.from_coroutine(task())
+        def record_flush_start() -> Handle[None]:
+            # The returned Handle's flush is already running.
+            nonlocal flush_started
+            flush_started = True
+            return new_flush_handle()
 
         async def record_flush_async() -> None:
             nonlocal host_flush_called
@@ -983,7 +979,7 @@ async def test_actor_spawn_then_immediate_shutdown() -> None:
         )
 
         with (
-            patch.object(logging_manager, "_new_flush_task", record_flush_start),
+            patch.object(logging_manager, "_new_flush_handle", record_flush_start),
             patch.object(
                 logging_manager,
                 "flush_async",

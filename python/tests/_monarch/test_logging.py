@@ -14,8 +14,8 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import call, Mock, patch
 
 import pytest
+from monarch._rust_bindings.monarch_hyperactor.handle import _new_handle_pair, Handle
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._src.actor.logging import flush_all_proc_mesh_logs, LoggingManager
 
 
@@ -40,23 +40,18 @@ class _FlushBaseException(BaseException):
 _FLUSH_BASE_EXCEPTION_MESSAGE = "test flush base exception"
 
 
-def _failing_python_task(error: BaseException) -> PythonTask[None]:
-    async def fail() -> None:
-        raise error
+def _failed_handle(error: BaseException) -> Handle[None]:
+    """A Handle already settled with `error`."""
+    handle, completer = _new_handle_pair()
+    completer.set_exception(error)
+    return handle
 
-    return PythonTask.from_coroutine(fail())
 
-
-class _RecordingTask:
-    """Expose the real Handle returned when a synthetic task is started."""
-
-    def __init__(self, task: PythonTask[None]) -> None:
-        self._task = task
-        self.handle: Any | None = None
-
-    def spawn_handle(self) -> Any:
-        self.handle = self._task.spawn_handle()
-        return self.handle
+def _completed_handle() -> Handle[None]:
+    """A Handle already settled with `None`."""
+    handle, completer = _new_handle_pair()
+    completer.set_result(None)
+    return handle
 
 
 class LoggingManagerTest(TestCase):
@@ -169,25 +164,22 @@ class LoggingManagerTest(TestCase):
 
     @patch("monarch._src.actor.logging.context")
     def test_flush_calls_mesh_client_flush(self, mock_context: Mock) -> None:
-        # Setup: mock context, client, task, and handle
+        # Setup: mock context, client, and the Handle the client returns
         mock_instance = Mock()
         mock_context.return_value.actor_instance._as_rust.return_value = mock_instance
         mock_client = Mock()
-        mock_task = Mock()
         mock_handle = Mock()
-        mock_client.flush.return_value = mock_task
-        mock_task.spawn_handle.return_value = mock_handle
+        mock_client.flush.return_value = mock_handle
         self.logging_manager._logging_mesh_client = mock_client
 
         # Execute: flush logs
         result = self.logging_manager.flush()
 
-        # Assert: the native task was observed through a Handle with the timeout.
+        # Assert: the returned Handle was observed directly with the timeout.
         self.assertIsNone(result)
         mock_client.flush.assert_called_once_with(mock_instance)
-        mock_task.spawn_handle.assert_called_once_with()
-        mock_task.spawn.assert_not_called()
         mock_handle.get.assert_called_once_with(timeout=3)
+        mock_handle.spawn_handle.assert_not_called()
 
     @patch("monarch._src.actor.logging.context")
     def test_flush_handles_exception_gracefully(self, mock_context: Mock) -> None:
@@ -195,10 +187,8 @@ class LoggingManagerTest(TestCase):
         mock_instance = Mock()
         mock_context.return_value.actor_instance._as_rust.return_value = mock_instance
         mock_client = Mock()
-        mock_task = Mock()
         mock_handle = Mock()
-        mock_client.flush.return_value = mock_task
-        mock_task.spawn_handle.return_value = mock_handle
+        mock_client.flush.return_value = mock_handle
         mock_handle.get.side_effect = Exception("Test exception")
         self.logging_manager._logging_mesh_client = mock_client
 
@@ -208,30 +198,31 @@ class LoggingManagerTest(TestCase):
         # Assert: the operation was started and the observer error was suppressed.
         self.assertIsNone(result)
         mock_client.flush.assert_called_once_with(mock_instance)
-        mock_task.spawn_handle.assert_called_once_with()
         mock_handle.get.assert_called_once_with(timeout=3)
 
     def test_flush_propagates_base_exception(self) -> None:
-        with patch.object(self.logging_manager, "_new_flush_task") as no_client_task:
+        with patch.object(
+            self.logging_manager, "_new_flush_handle"
+        ) as no_client_handle:
             with self.assertRaises(AssertionError) as no_client_error:
                 self.logging_manager.flush()
         self.assertIs(type(no_client_error.exception), AssertionError)
-        no_client_task.assert_not_called()
+        no_client_handle.assert_not_called()
 
         self.logging_manager._logging_mesh_client = Mock()
         with patch.object(
             self.logging_manager,
-            "_new_flush_task",
-            return_value=_failing_python_task(
+            "_new_flush_handle",
+            return_value=_failed_handle(
                 _FlushBaseException(_FLUSH_BASE_EXCEPTION_MESSAGE)
             ),
-        ) as mock_new_flush_task:
+        ) as mock_new_flush_handle:
             with self.assertRaises(_FlushBaseException) as raised:
                 self.logging_manager.flush()
 
         self.assertIs(type(raised.exception), _FlushBaseException)
         self.assertEqual(str(raised.exception), _FLUSH_BASE_EXCEPTION_MESSAGE)
-        mock_new_flush_task.assert_called_once_with()
+        mock_new_flush_handle.assert_called_once_with()
 
 
 class FlushAllProcMeshLogsTest(TestCase):
@@ -268,142 +259,126 @@ class LoggingManagerAsyncTest(IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.logging_manager = LoggingManager()
 
-    async def test_flush_async_awaits_handle_not_shared(self) -> None:
+    async def test_flush_async_awaits_the_handle(self) -> None:
         ready = asyncio.get_running_loop().create_future()
         ready.set_result(None)
         handle = _AwaitTracker(ready)
-        mock_task = Mock()
-        mock_task.spawn_handle.return_value = handle
         self.logging_manager._logging_mesh_client = Mock()
 
         with patch.object(
-            self.logging_manager, "_new_flush_task", return_value=mock_task
-        ) as mock_new_flush_task:
+            self.logging_manager, "_new_flush_handle", return_value=handle
+        ) as mock_new_flush_handle:
             result = await self.logging_manager.flush_async()
 
         self.assertIsNone(result)
-        mock_new_flush_task.assert_called_once_with()
-        mock_task.spawn_handle.assert_called_once_with()
-        mock_task.spawn.assert_not_called()
+        mock_new_flush_handle.assert_called_once_with()
         self.assertTrue(handle.awaited)
         self.assertFalse(handle.get_called)
 
     async def test_flush_async_suppresses_ordinary_error(self) -> None:
-        entered: list[str] = []
-
-        async def fail() -> None:
-            entered.append("ordinary error")
-            raise RuntimeError("test flush error")
-
         self.logging_manager._logging_mesh_client = Mock()
         with patch.object(
             self.logging_manager,
-            "_new_flush_task",
-            return_value=PythonTask.from_coroutine(fail()),
-        ) as mock_new_flush_task:
+            "_new_flush_handle",
+            return_value=_failed_handle(RuntimeError("test flush error")),
+        ) as mock_new_flush_handle:
             result = await asyncio.wait_for(
                 self.logging_manager.flush_async(), timeout=10
             )
 
         self.assertIsNone(result)
-        self.assertEqual(entered, ["ordinary error"])
-        mock_new_flush_task.assert_called_once_with()
+        mock_new_flush_handle.assert_called_once_with()
 
     async def test_flush_async_propagates_base_exception(self) -> None:
-        with patch.object(self.logging_manager, "_new_flush_task") as no_client_task:
+        with patch.object(
+            self.logging_manager, "_new_flush_handle"
+        ) as no_client_handle:
             result = await asyncio.wait_for(
                 self.logging_manager.flush_async(), timeout=10
             )
         self.assertIsNone(result)
-        no_client_task.assert_not_called()
+        no_client_handle.assert_not_called()
 
         self.logging_manager._logging_mesh_client = Mock()
         with patch.object(
             self.logging_manager,
-            "_new_flush_task",
-            return_value=_failing_python_task(
+            "_new_flush_handle",
+            return_value=_failed_handle(
                 _FlushBaseException(_FLUSH_BASE_EXCEPTION_MESSAGE)
             ),
-        ) as mock_new_flush_task:
+        ) as mock_new_flush_handle:
             with self.assertRaises(_FlushBaseException) as raised:
                 await asyncio.wait_for(self.logging_manager.flush_async(), timeout=10)
 
         self.assertIs(type(raised.exception), _FlushBaseException)
         self.assertEqual(str(raised.exception), _FLUSH_BASE_EXCEPTION_MESSAGE)
-        mock_new_flush_task.assert_called_once_with()
+        mock_new_flush_handle.assert_called_once_with()
 
-    async def test_flush_async_cancellation_leaves_producer_reapable(self) -> None:
-        entered = threading.Event()
+    async def test_flush_async_cancellation_leaves_producer_running(self) -> None:
+        # Adapter-level seam: a controlled Handle, not a native flush. An
+        # independent thread settles it only after the asyncio observer has
+        # been cancelled, as the native producer would keep running.
+        handle, completer = _new_handle_pair()
+        requested = asyncio.Event()
         release = threading.Event()
         completed = threading.Event()
 
-        async def gated_flush() -> None:
-            entered.set()
-            released = await PythonTask.spawn_blocking(lambda: release.wait(timeout=10))
-            if not released:
-                raise TimeoutError("flush release was not published")
-            completed.set()
+        def request() -> Handle[None]:
+            requested.set()
+            return handle
 
-        # Adapter-level seam: this is a controlled PythonTask, not a native
-        # LoggingMeshClient flush. The production method uses the same
-        # non-abortable Handle observation path. Keep no second Handle here:
-        # cancelling flush_async must drop its only observer before release.
-        controlled = PythonTask.from_coroutine(gated_flush())
+        def produce() -> None:
+            if release.wait(timeout=10):
+                completer.set_result(None)
+                completed.set()
+
+        producer = threading.Thread(target=produce, name="controlled-flush")
+        producer.start()
         observer: asyncio.Task[None] | None = None
         completed_after_cancel = False
         self.logging_manager._logging_mesh_client = Mock()
         try:
             with patch.object(
-                self.logging_manager,
-                "_new_flush_task",
-                return_value=controlled,
+                self.logging_manager, "_new_flush_handle", side_effect=request
             ):
                 observer = asyncio.create_task(self.logging_manager.flush_async())
-                reached = await asyncio.wait_for(
-                    asyncio.to_thread(entered.wait, 10), timeout=10
-                )
-                self.assertTrue(reached, "the controlled flush did not start")
+                # Once requested, flush_async is suspended awaiting the Handle.
+                await asyncio.wait_for(requested.wait(), timeout=10)
 
                 self.assertTrue(observer.cancel())
                 with self.assertRaises(asyncio.CancelledError):
                     await observer
         finally:
             release.set()
-            try:
-                completed_after_cancel = await asyncio.wait_for(
-                    asyncio.to_thread(completed.wait, 5), timeout=10
-                )
-            finally:
-                if observer is not None:
-                    if not observer.done():
-                        observer.cancel()
-                    try:
-                        await observer
-                    except asyncio.CancelledError:
-                        pass
+            completed_after_cancel = await asyncio.wait_for(
+                asyncio.to_thread(completed.wait, 5), timeout=10
+            )
+            producer.join(timeout=5)
+            if observer is not None and not observer.done():
+                observer.cancel()
+                try:
+                    await observer
+                except asyncio.CancelledError:
+                    pass
 
         self.assertTrue(
             completed_after_cancel,
-            "cancelling the observer must not cancel the started producer",
+            "cancelling the observer must not stop the producer",
         )
 
     async def test_two_manager_flushes_create_two_operations(self) -> None:
-        entries = [0, 0]
+        # Adapter-level seam: the native client supplies distinct controlled
+        # Handles, while the real manager helper must request and observe each
+        # one independently. Native sync-flush barriers are covered natively.
+        handles: list[Handle[None]] = []
 
-        # Adapter-level seam: the native client supplies distinct synthetic
-        # producers, while the real manager helper must request, start, and
-        # observe each one independently. This does not claim to exercise two
-        # native sync-flush barriers; those effects are covered natively.
-        def controlled_task(index: int) -> _RecordingTask:
-            async def enter() -> None:
-                entries[index] += 1
+        def controlled_handle(*_: object) -> Handle[None]:
+            handle = _completed_handle()
+            handles.append(handle)
+            return handle
 
-            return _RecordingTask(PythonTask.from_coroutine(enter()))
-
-        first = controlled_task(0)
-        second = controlled_task(1)
         mock_client = Mock()
-        mock_client.flush.side_effect = [first, second]
+        mock_client.flush.side_effect = controlled_handle
         mock_instance = Mock()
         self.logging_manager._logging_mesh_client = mock_client
         with patch("monarch._src.actor.logging.context") as mock_context:
@@ -419,10 +394,8 @@ class LoggingManagerAsyncTest(IsolatedAsyncioTestCase):
 
         self.assertIsNone(first_result)
         self.assertIsNone(second_result)
-        self.assertEqual(entries, [1, 1])
-        self.assertIsNotNone(first.handle)
-        self.assertIsNotNone(second.handle)
-        self.assertIsNot(first.handle, second.handle)
+        self.assertEqual(len(handles), 2)
+        self.assertIsNot(handles[0], handles[1])
         self.assertEqual(
             mock_client.flush.call_args_list,
             [call(mock_instance), call(mock_instance)],

@@ -8,6 +8,7 @@
 
 from typing import final, TYPE_CHECKING
 
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorAddr
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
@@ -31,7 +32,7 @@ class LoggingMeshClient:
         aggregate_window_sec: int | None,
         level: int,
     ) -> None: ...
-    def flush(self, instance: Instance) -> PythonTask[None]: ...
+    def flush(self, instance: Instance) -> Handle[None]: ...
 
 def log_endpoint_exception(
     e: Exception, endpoint: str, actor_id: ActorAddr
