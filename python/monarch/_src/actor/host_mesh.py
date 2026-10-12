@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
-
 import os
 from typing import Any, Awaitable, Callable, Dict, Literal, Optional, Tuple
 
@@ -124,7 +122,9 @@ class HostMesh(MeshTrait):
                 returns a BootstrapCommand for each coordinate. The callable
                 receives a ``Point`` (combined coordinate across host and
                 per_host dimensions). This allows full customization of the
-                bootstrap command per coordinate.
+                bootstrap command per coordinate. The callable runs once per
+                rank, in rank order, on the calling thread before spawning
+                begins; its errors raise from this call.
         """
         if not per_host:
             per_host = {}
@@ -171,23 +171,25 @@ class HostMesh(MeshTrait):
         if self._inner_host_mesh is None:
             raise RuntimeError("HostMesh has already been shut down")
 
-        per_rank_bootstrap: Callable[[Point], BootstrapCommand] | None = None
-
-        if bootstrap_command is not None:
-            if isinstance(bootstrap_command, BootstrapCommand):
-                # Uniform BootstrapCommand - convert to callable
-                def make_uniform_bootstrap(
-                    cmd: BootstrapCommand,
-                ) -> Callable[[Point], BootstrapCommand]:
-                    def bootstrap_callable(point: Point) -> BootstrapCommand:
-                        return cmd
-
-                    return bootstrap_callable
-
-                per_rank_bootstrap = make_uniform_bootstrap(bootstrap_command)
-            else:
-                # Callable that returns BootstrapCommand
-                per_rank_bootstrap = bootstrap_command
+        extent = Extent(
+            self._labels + tuple(per_host.labels),
+            self.region.slice().sizes + list(per_host.sizes),
+        )
+        per_rank_bootstrap: BootstrapCommand | list[BootstrapCommand] | None
+        if bootstrap_command is None or isinstance(bootstrap_command, BootstrapCommand):
+            per_rank_bootstrap = bootstrap_command
+        else:
+            # Evaluate the callable here, on the caller's thread, so native
+            # spawn receives finished commands and never calls back into
+            # Python. Ranks follow the combined extent that host spawn uses.
+            per_rank_bootstrap = [
+                bootstrap_command(Point(rank, extent))
+                for rank in range(extent.nelements)
+            ]
+            if not all(isinstance(cmd, BootstrapCommand) for cmd in per_rank_bootstrap):
+                raise TypeError(
+                    "per-rank bootstrap callable must return BootstrapCommand"
+                )
 
         async def task() -> HyProcMesh:
             hy_host_mesh = await self._hy_host_mesh
@@ -205,10 +207,7 @@ class HostMesh(MeshTrait):
         pm = ProcMesh.from_host_mesh(
             self,
             spawn_shared,
-            Extent(
-                self._labels + tuple(per_host.labels),
-                self.region.slice().sizes + list(per_host.sizes),
-            ).region,
+            extent.region,
             setup,
             _attach_controller_controller,
         )
