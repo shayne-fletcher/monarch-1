@@ -527,6 +527,24 @@ pub(crate) fn handle_pair() -> (PyHandle, PyHandleCompleter) {
 }
 
 impl PyHandle {
+    /// Return an owned Rust Handle observing the same completion as this one.
+    ///
+    /// Pending mesh serialization uses this to retain an observer after the
+    /// binding call returns, when its borrow of the original Handle has ended.
+    ///
+    /// Clone the channel receiver and, if present, the reference to the Python
+    /// traceback object. Cloning that Python reference requires the GIL.
+    /// No Python Handle object is allocated and no producer is started.
+    pub(crate) fn clone_ref(&self, py: Python<'_>) -> Self {
+        Self::from_core(HandleCore::new(
+            self.core.rx.clone(),
+            self.core
+                .traceback
+                .as_ref()
+                .map(|trace| trace.clone_ref(py)),
+        ))
+    }
+
     /// Wrap an already-built `HandleCore` in a `PyHandle`.
     ///
     /// Native producers build the core and hand back an observe-only `Handle`
@@ -658,6 +676,43 @@ where
 {
     ready.await?;
     operation().await
+}
+
+/// Return a new Handle that reports `result`'s value after all prerequisites
+/// succeed. Proc initialization uses this to wait for logging and setup before
+/// making the proc mesh available.
+///
+/// Await the Handles in `ready` in list order. If one fails, observing the
+/// returned Handle raises that error without waiting for later prerequisites
+/// or `result`. Otherwise, report `result`'s value or error.
+///
+/// The input operations may already be running: this orders observation, not
+/// their start. The new waiting task starts immediately; dropping its Handle
+/// does not cancel it or the input operations.
+#[pyfunction]
+fn _after(ready: Vec<PyRef<'_, PyHandle>>, result: &PyHandle) -> PyHandle {
+    // Capture owned observer futures so the task retains no Python borrows.
+    // Prerequisites need only succeed; their values are not read.
+    let ready: Vec<_> = ready
+        .iter()
+        .map(|handle| handle.wait_completion())
+        .collect();
+    // Retain an observer of the value to return after the prerequisites succeed.
+    let result = result.wait_future();
+    // Run the waits on Tokio. `after_ready` observes `result` only if this
+    // prerequisite future completes successfully.
+    PyHandle::spawn(after_ready(
+        async move {
+            for completion in ready {
+                // An error ends this future here and becomes the new Handle's
+                // error, even if `result` has already failed differently.
+                completion.await?;
+            }
+            Ok(())
+        },
+        // Give `after_ready` the result observer when it reaches that step.
+        move || result,
+    ))
 }
 
 #[cfg(test)]
@@ -1020,6 +1075,7 @@ pub fn register_python_bindings(handle_mod: &Bound<'_, PyModule>) -> PyResult<()
     handle_mod.add_class::<PyHandle>()?;
     handle_mod.add_class::<PyHandleCompleter>()?;
     handle_mod.add_function(wrap_pyfunction!(_new_handle_pair, handle_mod)?)?;
+    handle_mod.add_function(wrap_pyfunction!(_after, handle_mod)?)?;
     let would_block = handle_mod.py().get_type::<WouldBlockRuntime>();
     would_block.setattr(
         "__module__",
