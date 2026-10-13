@@ -25,7 +25,8 @@
 //! Assumed of the shared core and producer (not enforced here):
 //! - **HDL-1 (single terminal completion).** The watch value goes `None` ->
 //!   `Some(_)` exactly once and is never reset (`Some` -> `Some`, `Some` ->
-//!   `None`). Relied on by [`HandleCore::wait_future`] (wait loop + `expect`),
+//!   `None`). Relied on by [`HandleCore::wait_ready`] (wait loop),
+//!   [`HandleCore::wait_future`] and `get()` (`expect` after that wait),
 //!   [`HandleCore::poll`] (re-borrow across the GIL), and
 //!   [`PyHandle::wait_completion`] (discriminant check then GIL re-borrow). Held
 //!   by convention: every producer sends once, always `Some(_)` (including the
@@ -87,7 +88,8 @@
 //!   from `&self`), which is what lets `get()` `drop(slf)` + release the GIL
 //!   before blocking and lets `as_asyncio` `spawn` the observer. `as_asyncio`'s
 //!   fallback observer clones the value under the one GIL acquisition it makes
-//!   to schedule; its wake observer never reads the value (HDL-17). Enforced
+//!   to schedule; its wake observer never reads the value (HDL-17). `get()`
+//!   reads only after its calling thread has reacquired the GIL. Enforced
 //!   partly by the compiler (`Send` bounds, the borrow checker on `drop(slf)`)
 //!   and partly by construction; exercised by the multi-observer/blocking
 //!   tests.
@@ -405,9 +407,10 @@ impl HandleCore {
     /// Yields the cloned receiver positioned at the completed value, or a
     /// `RuntimeError` if every producer dropped its sender without sending. Unlike
     /// `wait_future`, which clones the value out under its own GIL acquisition,
-    /// the caller decides where the value is read: `as_asyncio`'s fallback
-    /// clones it under the GIL it takes to schedule, and its wake path reads it
-    /// on the loop thread instead (HDL-17).
+    /// the caller decides where the value is read. `get()` reads it after its
+    /// calling thread reacquires the GIL. `as_asyncio`'s fallback clones it under
+    /// the GIL it takes to schedule, and its wake path reads it on the loop
+    /// thread instead (HDL-17).
     pub(crate) fn wait_ready(
         &self,
     ) -> impl Future<Output = PyResult<watch::Receiver<Option<PyResult<Py<PyAny>>>>>>
@@ -753,6 +756,8 @@ impl PyHandle {
     /// `get()` is non-cancelling. On timeout it raises `TimeoutError`, leaving
     /// the producer and every observer untouched, so a later
     /// `poll()`/`get()`/`await` still observes completion.
+    /// A pending wait releases the GIL; once it finishes, the calling thread
+    /// reacquires the GIL and reads the stored value or error itself.
     #[pyo3(signature = (timeout = None))]
     fn get(slf: PyRef<'_, Self>, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<PyAny>> {
         // HDL-6: among the observers, get() is the sole WouldBlockRuntime
@@ -796,7 +801,7 @@ impl PyHandle {
             return Ok(value);
         }
 
-        let wait = slf.core.wait_future();
+        let wait = slf.core.wait_ready();
         // HDL-9: drop the PyRef before releasing the GIL in `signal_safe_block_on`
         // (which blocks with the GIL released), so a concurrent mutable borrow of
         // this handle does not throw during the blocking window.
@@ -805,13 +810,25 @@ impl PyHandle {
         // HDL-12: the timeout drops only the local `wait` future, leaving the
         // producer and the watch channel untouched, so a timed-out get() stays
         // observable (non-cancelling).
-        match duration {
+        let rx = match duration {
             Some(duration) => signal_safe_block_on(py, async move {
                 tokio::time::timeout(duration, wait)
                     .await
                     .map_err(|_| PyTimeoutError::new_err(()))?
             })?,
             None => signal_safe_block_on(py, wait)?,
+        }?;
+
+        // The wait has finished and this thread holds the GIL again.
+        // Only now take the channel's read lock (HDL-9). Clone the stored
+        // value or error without removing it, so other observers can read it (HDL-3).
+        match rx
+            .borrow()
+            .as_ref()
+            .expect("HDL-1: value is Some after wait_ready")
+        {
+            Ok(value) => Ok(value.clone_ref(py)),
+            Err(error) => Err(error.clone_ref(py)),
         }
     }
 
@@ -1034,6 +1051,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
+    use std::thread;
 
     use pyo3::IntoPyObjectExt;
     use pyo3::exceptions::PyRuntimeError;
@@ -1910,9 +1928,8 @@ def ready_await_order(h):
         });
     }
 
-    // A producer that drops its sender without sending surfaces a Python error
-    // through wait_future (RecvError) rather than hanging; this path also backs
-    // get()/PyShared.
+    // A producer already gone when poll() or get() is called surfaces a Python
+    // error through the ready check rather than being mistaken for pending work.
     // Attests HDL-10.
     #[test]
     fn dropped_producer_surfaces_error() {
@@ -1925,6 +1942,35 @@ def ready_await_order(h):
             assert_producer_ended_error(py, &poll_err);
             let err = PyHandle::get(r.borrow(py), py, None).unwrap_err();
             assert_producer_ended_error(py, &err);
+        });
+    }
+
+    // HDL-10: losing the producer after get() enters its pending branch raises
+    // the producer-lifecycle error, not TimeoutError or a watch-channel error.
+    #[test]
+    fn get_pending_surfaces_dropped_producer() {
+        ensure_python();
+        let (producer, result) = monarch_with_gil_blocking(GilSite::Test, |py| {
+            let (tx, handle) = pending_handle();
+            let handle = Py::new(py, handle).unwrap();
+            assert!(handle.borrow(py).poll().unwrap().is_none());
+            // Load asyncio before starting the producer: importing it can
+            // release the GIL, but the ready check must run while we hold it.
+            assert!(pyo3_async_runtimes::get_running_loop(py).is_err());
+
+            // This thread cannot drop the sender until get() releases the GIL.
+            // The sender therefore stays connected through get()'s ready check,
+            // forcing the pending branch without a scheduling sleep.
+            let producer = thread::spawn(move || {
+                monarch_with_gil_blocking(GilSite::Test, |_py| drop(tx));
+            });
+            let result = PyHandle::get(handle.borrow(py), py, Some(5.0));
+            (producer, result)
+        });
+        producer.join().expect("producer thread should finish");
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            let error = result.expect_err("get() should report the dropped producer");
+            assert_producer_ended_error(py, &error);
         });
     }
 
