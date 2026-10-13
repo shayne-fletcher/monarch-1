@@ -43,6 +43,7 @@ use hyperactor_mesh::shared_cell::SharedCell;
 use hyperactor_mesh::transport::default_bind_spec;
 use hyperactor_telemetry::hash_to_u64;
 use ndslice::View;
+use ndslice::view::Extent;
 use ndslice::view::RankedSliceable;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyException;
@@ -61,9 +62,8 @@ use crate::proc_mesh::PyProcMesh;
 use crate::pytokio::PyPythonTask;
 use crate::runtime::GilSite;
 use crate::runtime::monarch_with_gil;
-use crate::runtime::monarch_with_gil_blocking;
+use crate::runtime::signal_safe_block_on;
 use crate::shape::PyExtent;
-use crate::shape::PyPoint;
 use crate::shape::PyRegion;
 
 /// The command used to start a proc.
@@ -168,6 +168,15 @@ impl PyBootstrapCommand {
     }
 }
 
+/// A uniform launch command or a list of commands, one per proc.
+#[derive(FromPyObject)]
+enum BootstrapCommands {
+    /// Use the same command for every proc in this spawn.
+    Uniform(PyBootstrapCommand),
+    /// Commands in rank order over the combined host and per-host extent.
+    PerRank(Vec<PyBootstrapCommand>),
+}
+
 impl PyBootstrapCommand {
     pub fn to_rust(&self) -> BootstrapCommand {
         BootstrapCommand {
@@ -222,6 +231,8 @@ impl PyHostMesh {
 
 #[pymethods]
 impl PyHostMesh {
+    /// Return a task that spawns procs using commands already computed by Python.
+    /// Proc creation begins when the task is driven, not when this binding returns.
     #[pyo3(signature = (instance, name, per_host, proc_bind = None, per_rank_bootstrap = None))]
     fn spawn_nonblocking(
         &self,
@@ -230,33 +241,33 @@ impl PyHostMesh {
         name: String,
         per_host: &PyExtent,
         proc_bind: Option<Vec<HashMap<String, String>>>,
-        per_rank_bootstrap: Option<Py<PyAny>>,
+        per_rank_bootstrap: Option<BootstrapCommands>,
     ) -> PyResult<PyPythonTask> {
         let host_mesh = self.mesh_ref()?.clone();
+        let per_host: Extent = per_host.clone().into();
         let per_rank_bootstrap: Option<Box<PerRankBootstrapFn>> = per_rank_bootstrap
-            .map(|callable| -> PyResult<Box<PerRankBootstrapFn>> {
-                Ok(Box::new(move |point| {
-                    monarch_with_gil_blocking(GilSite::Bootstrap, |py| {
-                        let result =
-                            callable
-                                .bind(py)
-                                .call1((PyPoint::from(point),))
-                                .map_err(|e| {
-                                    anyhow::anyhow!("per-rank bootstrap callable raised: {}", e)
-                                })?;
-                        let cmd: PyBootstrapCommand = result.extract().map_err(|e| {
-                            anyhow::anyhow!(
-                                "per-rank bootstrap callable did not return BootstrapCommand: {}",
-                                e
-                            )
-                        })?;
-                        Ok(cmd.to_rust())
-                    })
-                }))
+            .map(|commands| -> PyResult<Box<PerRankBootstrapFn>> {
+                match commands {
+                    BootstrapCommands::Uniform(command) => {
+                        let command = command.to_rust();
+                        Ok(Box::new(move |_| Ok(command.clone())))
+                    }
+                    BootstrapCommands::PerRank(commands) => {
+                        let num_procs = host_mesh.region().num_ranks() * per_host.num_ranks();
+                        if commands.len() != num_procs {
+                            return Err(PyValueError::new_err(format!(
+                                "per_rank_bootstrap length ({}) must equal proc count ({num_procs})",
+                                commands.len(),
+                            )));
+                        }
+                        let commands: Vec<_> = commands.iter().map(PyBootstrapCommand::to_rust).collect();
+                        // Host spawn supplies ranks in this combined extent.
+                        Ok(Box::new(move |point| Ok(commands[point.rank()].clone())))
+                    }
+                }
             })
             .transpose()?;
         let instance = instance.clone();
-        let per_host = per_host.clone().into();
         let proc_bind = proc_bind.map(|v| v.into_iter().map(ProcBind::from).collect());
         let mesh_impl = async move {
             let proc_mesh = host_mesh
@@ -444,13 +455,16 @@ static HOST_SHUTDOWN_HANDLE: OnceLock<
 /// hosts.
 ///
 /// This should be called only once, at process initialization.
+/// It waits for initialization with the GIL released and returns the tuple
+/// directly; a Python signal can interrupt the wait.
 #[pyfunction]
 #[pyo3(signature = (bootstrap_cmd, via=None, bind_addr=None))]
 fn bootstrap_host(
+    py: Python<'_>,
     bootstrap_cmd: Option<PyBootstrapCommand>,
     via: Option<&str>,
     bind_addr: Option<&str>,
-) -> PyResult<PyPythonTask> {
+) -> PyResult<(PyHostMesh, PyProcMesh, PyInstance)> {
     let bootstrap_cmd = match bootstrap_cmd {
         Some(cmd) => cmd.to_rust(),
         None => BootstrapCommand::current().map_err(|e| PyException::new_err(e.to_string()))?,
@@ -469,7 +483,7 @@ fn bootstrap_host(
         .transpose()?
         .unwrap_or_else(|| default_bind_spec().binding_addr());
 
-    PyPythonTask::new(async move {
+    signal_safe_block_on(py, async move {
         // Pass the via address into `host` so the gateway's `serve_via`
         // attach runs *after* the host's own frontend serve but *before*
         // any proc or actor ref is minted. That ordering makes the via
@@ -648,7 +662,7 @@ fn bootstrap_host(
             PyProcMesh::new_ref(proc_mesh),
             PyInstance::from(instance),
         ))
-    })
+    })?
 }
 
 /// The Python-bootstrapped client root: the root client instance plus the

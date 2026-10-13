@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
-
 import asyncio
 import json
 import os
@@ -1388,6 +1386,69 @@ def test_spawn_procs_bootstrap_command_inherits_and_removes_env() -> None:
 
 @pytest.mark.timeout(60)
 @isolate_in_subprocess
+def test_spawn_procs_bootstrap_command_without_inherited_env() -> None:
+    sentinel = "MONARCH_BOOTSTRAP_HOST_ONLY"
+    os.environ[sentinel] = "host"
+    os.environ.pop("MONARCH_BOOTSTRAP_RANK", None)
+    base = default_bootstrap_cmd()
+    # Keep the bootstrap's launch environment, but omit the host-only variable.
+    # The entrypoint override must win over the controller's own environment.
+    env: dict[str, str | None] = {
+        key: value for key, value in os.environ.items() if key != sentinel
+    }
+    env.update(base.env)
+    env["MONARCH_BOOTSTRAP_EXPLICIT"] = "command"
+    cmd = base.with_env(env)
+    cmd.inherit_env = False
+    host = this_host()
+
+    def per_rank(point: Point) -> BootstrapCommand:
+        return cmd.with_env({"MONARCH_BOOTSTRAP_RANK": str(point.rank)})
+
+    for command in (cmd, per_rank):
+        pm = host.spawn_procs(per_host={"procs": 2}, bootstrap_command=command)
+        try:
+            am = pm.spawn("env_probe", EnvVarActor)
+            assert list(am.get_env.call(sentinel).get(timeout=20).values()) == [
+                None,
+                None,
+            ]
+            assert list(
+                am.get_env.call("MONARCH_BOOTSTRAP_EXPLICIT").get(timeout=20).values()
+            ) == ["command", "command"]
+            ranks = list(
+                am.get_env.call("MONARCH_BOOTSTRAP_RANK").get(timeout=20).values()
+            )
+            if callable(command):
+                assert set(ranks) == {"0", "1"}
+            else:
+                assert ranks == [None, None]
+        finally:
+            pm.stop().get(timeout=10)
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+def test_spawn_procs_reports_bootstrap_callable_errors_at_call() -> None:
+    host = this_host()
+    error = RuntimeError("bootstrap command failed")
+
+    def raising_command(point: Point) -> BootstrapCommand:
+        raise error
+
+    with pytest.raises(RuntimeError, match="bootstrap command failed") as raised:
+        host.spawn_procs(per_host={"procs": 2}, bootstrap_command=raising_command)
+    assert raised.value is error
+
+    def wrong_type(point: Point) -> Any:
+        return "/bin/true"
+
+    with pytest.raises(TypeError, match="must return BootstrapCommand"):
+        host.spawn_procs(per_host={"procs": 2}, bootstrap_command=wrong_type)
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
 def test_spawn_procs_bootstrap_command_uses_remote_host_environment() -> None:
     """Procs inherit their own host's environment, not the controller's."""
     os.environ["MONARCH_ENV_SHARED"] = "controller"
@@ -1471,12 +1532,17 @@ def test_spawn_procs_with_bootstrap_command_callable() -> None:
     from monarch._src.actor.host_mesh import default_bootstrap_cmd
 
     hm = this_host()
+    caller_thread = threading.get_ident()
+    visited: list[int] = []
 
     def per_rank_bootstrap(point: Point) -> BootstrapCommand:
+        assert threading.get_ident() == caller_thread
+        visited.append(point.rank)
         base = default_bootstrap_cmd()
         return base.with_env({"CUDA_VISIBLE_DEVICES": str(point["gpus"])})
 
     pm = hm.spawn_procs(per_host={"gpus": 2}, bootstrap_command=per_rank_bootstrap)
+    assert visited == [0, 1], "commands must be computed before spawn_procs returns"
     am = pm.spawn("cuda_per_rank", CudaVisibleDevicesActor)
     observed = sorted(am.get_cuda_visible_devices.call().get().values())
     assert observed == ["0", "1"]
