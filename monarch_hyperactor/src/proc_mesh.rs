@@ -79,6 +79,7 @@ impl PyProcMesh {
     #[staticmethod]
     #[pyo3(signature = (proc_mesh, instance, mesh_base_name, actor, init_message, kind, emulated, supervision_display_name = None))]
     fn spawn_async(
+        py: Python<'_>,
         proc_mesh: &mut PyShared,
         instance: &PyInstance,
         mesh_base_name: String,
@@ -88,6 +89,8 @@ impl PyProcMesh {
         emulated: bool,
         supervision_display_name: Option<String>,
     ) -> PyResult<Py<PyAny>> {
+        // Pickling may run Python code; do it on the calling Python thread.
+        let pickled_type = PickledPyObject::pickle(actor.bind(py).as_any())?;
         let init_message = init_message.take()?;
         let task = proc_mesh.task()?.take_task()?;
         let instance = instance.clone();
@@ -96,17 +99,13 @@ impl PyProcMesh {
 
             let init_message = init_message.resolve().await?;
 
-            let (proc_mesh, params) =
-                monarch_with_gil(GilSite::ActorConstruct, |py| -> PyResult<_> {
-                    let slf: Bound<PyProcMesh> = proc_mesh.extract(py)?;
-                    let slf = slf.borrow();
-                    let pickled_type = PickledPyObject::pickle(actor.bind(py).as_any())?;
-                    Ok((
-                        slf.mesh_ref()?.clone(),
-                        PythonActorParams::new(pickled_type, Some(init_message), kind),
-                    ))
-                })
-                .await?;
+            let proc_mesh = monarch_with_gil(GilSite::ActorConstruct, |py| -> PyResult<_> {
+                let slf: Bound<PyProcMesh> = proc_mesh.extract(py)?;
+                let slf = slf.borrow();
+                Ok(slf.mesh_ref()?.clone())
+            })
+            .await?;
+            let params = PythonActorParams::new(pickled_type, Some(init_message), kind);
 
             let mesh_name = ActorMeshId::instance(Label::strip(&mesh_base_name));
             let actor_mesh = proc_mesh
