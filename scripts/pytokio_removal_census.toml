@@ -350,7 +350,7 @@ pytokio_import = "monarch._rust_bindings.monarch_hyperactor.pytokio"
 doc_legacy_surface = "PythonTask|PyShared|pytokio"
 
 [totals]
-py_python_task_new = 6
+py_python_task_new = 5
 raw_python_task_new = 5
 from_coro = 5
 rust_from_coro = 2
@@ -360,18 +360,18 @@ rust_take_inner = 3
 take_inner_retire = 2
 caller_free_primitive = 4
 shared_from_value = 4
-spawn_abortable = 1
+spawn_abortable = 0
 mesh_storage_spawn = 5
 bootstrap_storage_spawn = 1
 mesh_reserve_fill = 10
 mesh_state_resolve = 1
-shared_reconstruction = 2
+shared_reconstruction = 1
 reserve_binding = 1
 py_mesh_reserve = 2
 py_is_tokio_thread = 0
 pytokio_import = 26
-pytokio_module_ref = 15
-helper_symbol = 16
+pytokio_module_ref = 14
+helper_symbol = 15
 helper_definition = 1
 would_block_surface = 0
 binding_stub_symbol = 3
@@ -1665,8 +1665,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/actor_mesh.rs"
 symbol = "PyPythonTask"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3c"
+transition_revision = "self"
 
 [[site]]
 id = "hs.actor_mesh.ensure_python"
@@ -2238,6 +2239,10 @@ oracle = [
 ]
 
 [[site]]
+# Replacement: a reserved actor fill polls the mesh's Rust creation future
+# inline; dropping the resolve drops that clone. Bare pickle waits through the
+# existing signal-safe helper before reducing the resolved mesh, and refuses
+# on Tokio. The behavior fields below describe the retired producer.
 id = "np.actor_mesh.AsyncActorMesh_as_ActorMeshProtocol.__reduce__"
 category = "native_producer"
 language = "rust"
@@ -2245,8 +2250,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/actor_mesh.rs"
 symbol = "<AsyncActorMesh as ActorMeshProtocol>::__reduce__"
 operation = "py_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3c"
+transition_revision = "self"
 constructor = "PyPythonTask"
 return_surface = "PyPythonTask returned from <AsyncActorMesh as ActorMeshProtocol>::__reduce__"
 consumer = "under active Monarch pickling, reserve_mesh_reference_if_active takes the observer into the out-of-band refs table and the reducer becomes pop_mesh_reference; under ordinary bare pickle no slot is reserved, the reducer is Shared.block_on over the observer, and pickle then blocks in reduce_shared until initialization resolves"
@@ -2256,13 +2262,17 @@ abandonment = "possible; the pickler may drop the reduction observer before it r
 eager_effect = "mixed, and the two cases differ. For a root the observer only watches already-running queue-driven work. For an otherwise idle slice, spawn_abortable is what begins the retained derived-region computation, which no queue item would otherwise start"
 drop_behavior = "aborts the transient waiter only. It cancels neither a root's initialization, which its own queued item drives independently, nor a slice's retained derived Shared, which stays re-observable. Evidence boundary: the in-crate tests prove abandonment does not cancel an already-enqueued equivalent initializer, since they enqueue that item themselves in order to retain and join the driver; that production new_queue supplies it is source-grounded rather than pinned"
 unobserved_error = "send_result logs an unobserved error"
-disposition = "require a binding-specific design"
+disposition = "replace with the bridge future directly"
 semantic_class = "abortable_observer"
 oracle = [
   "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::actor_mesh::tests::pending_bare_actor_mesh_pickle_waits_for_release",
   "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::actor_mesh::tests::dropped_root_observers_do_not_cancel_initialization",
   "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::actor_mesh::tests::dropped_slice_observers_leave_the_slice_reobservable",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::actor_mesh::tests::pending_bare_actor_mesh_pickle_refuses_on_tokio_before_polling",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::actor_mesh::tests::reserved_actor_fills_are_polled_concurrently_and_keep_their_slots",
   "fbcode//monarch/python/tests:test_deferred_pickle_characterization::test_pending_mesh_sent_as_endpoint_argument_resolves_on_receiver",
+  "fbcode//monarch/python/tests:test_deferred_pickle_characterization::test_pending_mesh_returned_from_endpoint_resolves_on_caller",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::pickle::tests::resolve_fills_nonadjacent_slots_in_place_without_touching_the_payload",
 ]
 
 [[site]]
@@ -3442,8 +3452,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/actor_mesh.rs"
 symbol = "<file>"
 operation = "pytokio_module_ref"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3c"
+transition_revision = "self"
 
 [[site]]
 id = "mr.bootstrap.file"
@@ -3848,8 +3859,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/actor_mesh.rs"
 symbol = "block_on"
 operation = "shared_reconstruction"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3c"
+transition_revision = "self"
 
 [[site]]
 id = "ms.pickle.from_value"
@@ -3870,8 +3882,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/actor_mesh.rs"
 symbol = "<AsyncActorMesh as ActorMeshProtocol>::__reduce__"
 operation = "spawn_abortable"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.3c"
+transition_revision = "self"
 
 [[site]]
 id = "ot.actor_mesh.Accumulator.accumulate.impl[x._take_inner]"
