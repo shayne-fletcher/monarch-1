@@ -8,7 +8,7 @@
 
 //! Private test-support bindings.
 //!
-//! Three unrelated pieces live here:
+//! Private fixtures live here:
 //!
 //! 1. `TestStruct`, a minimal PyO3 struct for testing `@rust_struct` mixin
 //!    patching. The `#[pyclass]` module is set to the Python file that defines
@@ -17,6 +17,8 @@
 //!    for the `Future`/`Handle` contract suite.
 //! 3. `_make_delayed_handle`, a `Handle` that publishes after registering its
 //!    first waiter, for the `returns_future` overhead benchmark.
+//! 4. `_handle_receiver_count`, a probe for proving that a pending `get()`
+//!    has registered its local wait before a test requests an interrupt.
 //!
 //! Everything here is private support: nothing is re-exported from `monarch`
 //! and no production Python imports it.
@@ -36,6 +38,7 @@ use tokio::sync::watch;
 
 use crate::handle::HandleCore;
 use crate::handle::PyHandle;
+use crate::handle::PyHandleCompleter;
 use crate::handle::send_result;
 use crate::runtime::get_tokio_runtime;
 use crate::runtime::signal_safe_block_on;
@@ -43,6 +46,15 @@ use crate::runtime::signal_safe_block_on;
 /// The value a successful probe publishes. Fixed, because the probe accepts no
 /// caller-supplied producer or value.
 pub(crate) const PROBE_SUCCESS_VALUE: i64 = 4242;
+
+/// Count a paired Handle's live result receivers without adding an observer.
+/// A fresh pair has one. A pending `get()` clones a second before releasing
+/// the GIL; a Python helper thread can then observe that the native call is
+/// active. Completion consumes the sender, after which this returns zero.
+#[pyfunction]
+fn _handle_receiver_count(completer: &PyHandleCompleter) -> usize {
+    completer.receiver_count_for_test()
+}
 
 /// The closed set of terminal outcomes the probe can produce.
 ///
@@ -287,6 +299,7 @@ pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_make_test_struct, module)?)?;
     module.add_class::<PyHandleProbe>()?;
     module.add_function(wrap_pyfunction!(_make_handle_probe, module)?)?;
+    module.add_function(wrap_pyfunction!(_handle_receiver_count, module)?)?;
     module.add("_PROBE_SUCCESS_VALUE", PROBE_SUCCESS_VALUE)?;
     module.add_function(wrap_pyfunction!(_make_delayed_handle, module)?)?;
     module.add_function(wrap_pyfunction!(_delayed_handle_gate_stats, module)?)?;

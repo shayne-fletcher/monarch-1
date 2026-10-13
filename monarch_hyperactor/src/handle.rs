@@ -226,7 +226,7 @@ use crate::runtime::get_tokio_runtime;
 use crate::runtime::is_in_tokio_runtime;
 use crate::runtime::monarch_with_gil;
 use crate::runtime::monarch_with_gil_blocking;
-use crate::runtime::signal_safe_block_on;
+use crate::runtime::signal_safe_block_on_inline;
 
 // Held so the completion callback can catch and swallow it: publishing a result
 // onto an asyncio.Future that's already settled (the awaiter cancelled it, or it
@@ -461,6 +461,12 @@ pub(crate) struct PyHandleCompleter {
 }
 
 impl PyHandleCompleter {
+    /// Count live result receivers for the private pending-`get()` test probe.
+    /// The paired Handle owns one; a blocking wait owns an additional clone.
+    pub(crate) fn receiver_count_for_test(&self) -> usize {
+        self.tx.as_ref().map_or(0, watch::Sender::receiver_count)
+    }
+
     /// Publish the terminal result exactly once.
     fn complete(&mut self, result: PyResult<Py<PyAny>>) -> PyResult<()> {
         let tx = self
@@ -815,7 +821,7 @@ impl PyHandle {
         }
 
         let wait = slf.core.wait_ready();
-        // HDL-9: drop the PyRef before releasing the GIL in `signal_safe_block_on`
+        // HDL-9: drop the PyRef before releasing the GIL in `signal_safe_block_on_inline`
         // (which blocks with the GIL released), so a concurrent mutable borrow of
         // this handle does not throw during the blocking window.
         drop(slf);
@@ -824,12 +830,12 @@ impl PyHandle {
         // producer and the watch channel untouched, so a timed-out get() stays
         // observable (non-cancelling).
         let rx = match duration {
-            Some(duration) => signal_safe_block_on(py, async move {
+            Some(duration) => signal_safe_block_on_inline(py, async move {
                 tokio::time::timeout(duration, wait)
                     .await
                     .map_err(|_| PyTimeoutError::new_err(()))?
             })?,
-            None => signal_safe_block_on(py, wait)?,
+            None => signal_safe_block_on_inline(py, wait)?,
         }?;
 
         // The wait has finished and this thread holds the GIL again.
