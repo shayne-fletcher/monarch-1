@@ -118,17 +118,20 @@
 //!   every observer untouched, so a later `poll()`/`get()`/`await` still observes
 //!   completion.
 //! - **HDL-13 (direct Rust producer).** A Rust caller can eagerly produce a
-//!   `Handle` from a `Send + 'static` future via [`PyHandle::spawn`], without a
-//!   `PyPythonTask`: it spawns one producer that converts the terminal value to
-//!   `Py<PyAny>` under `monarch_with_gil` and publishes it once through the shared
-//!   `send_result` helper (same one-shot core and unobserved-error policy as
-//!   pytokio's producers, HDL-1/HDL-2). Dropping the result receiver does not
-//!   cancel the producer (HDL-4).
+//!   `Handle` from a `Send + 'static` future without a `PyPythonTask`.
+//!   [`PyHandle::spawn`] wraps the future with conversion of a successful Rust
+//!   value to `Py<PyAny>` under `monarch_with_gil` and delegates to
+//!   [`PyHandle::spawn_pyobject`]. The latter starts one producer and publishes
+//!   its Python value or error once through
+//!   `send_result`, without a result-conversion GIL acquisition (same one-shot
+//!   core and unobserved-error policy as pytokio's producers, HDL-1/HDL-2).
+//!   Dropping the result receiver does not cancel the producer (HDL-4).
 //!   [`PyHandle::wait_completion`] is the matching observer: it projects the
 //!   terminal value to `PyResult<()>`, touching neither the GIL nor the Python
 //!   value on the ready-success fast path (a discriminant-only read, HDL-3) and
 //!   cloning the `PyErr` under the HDL-9 borrow order only on the error path. Both
-//!   are `pub` Rust-only methods outside `#[pymethods]` (HDL-11).
+//!   constructors and this observer are `pub` Rust-only methods outside
+//!   `#[pymethods]` (HDL-11).
 //! - **HDL-14 (Rust value observation is owned and non-consuming).**
 //!   [`PyHandle::wait_future`] returns a `Send + 'static` future over a cloned
 //!   watch receiver. The waiter borrows nothing from the `PyHandle`, survives
@@ -265,7 +268,7 @@ fn format_traceback(py: Python<'_>, traceback: &Py<PyAny>) -> PyResult<String> {
 
 /// Publish a completed background-task result to the shared watch channel.
 ///
-/// Shared by `PyPythonTask` spawns, the direct [`PyHandle::spawn`] producer
+/// Shared by `PyPythonTask` spawns, the direct [`PyHandle::spawn_pyobject`] producer
 /// (HDL-13), and the private Python completion pair (HDL-11). If the receiver
 /// has already been dropped, `watch::Sender::send` returns the unsent value as
 /// `SendError`: no consumer can ever observe it. An unobserved error is logged
@@ -570,29 +573,39 @@ impl PyHandle {
     ///
     /// The producer spawns immediately on the shared Tokio runtime; the returned
     /// `Handle` observes already-running work rather than starting it lazily on
-    /// first observation. On completion the terminal `PyResult<T>` is converted
-    /// to `Py<PyAny>` under `monarch_with_gil` and published exactly once through
-    /// the shared `send_result` helper (HDL-1/HDL-2). The core keeps no producer
-    /// task handle, so dropping the `Handle` never cancels the producer
-    /// (HDL-4). Rust-only and outside `#[pymethods]`, so Python still cannot mint
-    /// a core (HDL-11).
+    /// first observation. A successful value is converted to `Py<PyAny>` under
+    /// `monarch_with_gil`; a producer or conversion error is stored unchanged.
+    /// [`Self::spawn_pyobject`] starts the task and publishes its result
+    /// (HDL-1/HDL-2). Dropping the `Handle` never cancels the producer (HDL-4).
+    /// Rust-only and outside `#[pymethods]` (HDL-11).
     pub fn spawn<F, T>(fut: F) -> Self
     where
         F: Future<Output = PyResult<T>> + Send + 'static,
         T: for<'py> IntoPyObject<'py> + Send,
     {
+        Self::spawn_pyobject(async move {
+            let value = fut.await?;
+            monarch_with_gil(GilSite::Convert, |py| value.into_py_any(py)).await
+        })
+    }
+
+    /// Start a Rust future whose result is already a Python object, and return
+    /// a Handle for its result (HDL-13).
+    ///
+    /// The future runs as one task on the shared Tokio runtime. Its Python value
+    /// or error is stored without conversion or a result-conversion GIL
+    /// acquisition. `send_result` still takes the GIL to log an error if every
+    /// observer has gone. Dropping the Handle does not cancel the task (HDL-4).
+    /// Rust-only and outside `#[pymethods]` (HDL-11).
+    pub fn spawn_pyobject<F>(fut: F) -> Self
+    where
+        F: Future<Output = PyResult<Py<PyAny>>> + Send + 'static,
+    {
         let (tx, rx) = watch::channel(None);
         get_tokio_runtime().spawn(async move {
-            // Convert the terminal value to a Python object under the GIL, the
-            // same shape as `PyPythonTask` producers.
-            let result = async {
-                let value = fut.await?;
-                monarch_with_gil(GilSite::Convert, |py| value.into_py_any(py)).await
-            }
-            .await;
             // HDL-1/HDL-2/HDL-13: publish exactly once via the shared helper; a
             // direct Rust producer carries no creation traceback.
-            send_result(tx, result, None);
+            send_result(tx, fut.await, None);
         });
         // HDL-4: a `Handle`'s core never aborts its producer on drop.
         PyHandle::from_core(HandleCore::new(rx, None))
