@@ -4,12 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
-
 from typing import Any, final
 
 from monarch._rust_bindings.monarch_hyperactor.actor import SyncInbox
-from monarch._rust_bindings.monarch_hyperactor.handle import Handle
+from monarch._rust_bindings.monarch_hyperactor.handle import _HandleCompleter, Handle
 from monarch._rust_bindings.monarch_hyperactor.pympsc import PyTestSender
 
 @final
@@ -28,6 +26,13 @@ def _sync_inbox_for_test() -> tuple[
 # The value a successful probe publishes.
 _PROBE_SUCCESS_VALUE: int
 
+def _handle_receiver_count(completer: _HandleCompleter[Any]) -> int:
+    """Count live receivers without registering one; private pending-get probe.
+
+    A fresh pair has one receiver. A pending ``get()`` registers another before
+    releasing the GIL. Completion consumes the sender, then this returns zero.
+    """
+    ...
 @final
 class _HandleProbe:
     """Closed control object over one Rust-produced ``Handle``.

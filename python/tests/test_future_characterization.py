@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
-
 """Characterization oracle for ``Future`` and its permanent ``Handle`` carrier.
 
 Pins the behavior of ``monarch._src.actor.future.Future`` -- its internal
@@ -16,9 +14,12 @@ warning, and the ``_take_inner()`` accessor with its ``_Taken`` terminal state
 carrier, so that any change to that behavior is caught here and made explicit.
 """
 
+import _thread
 import asyncio
 import importlib
 import sys
+import threading
+import time
 import warnings
 from typing import Any, Callable, cast, NamedTuple
 
@@ -32,6 +33,7 @@ from monarch._rust_bindings.monarch_hyperactor.handle import (
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
 from monarch._rust_bindings.monarch_hyperactor.testing import (
+    _handle_receiver_count,
     _make_handle_probe,
     _PROBE_SUCCESS_VALUE,
 )
@@ -644,6 +646,60 @@ def test_handle_completion_pair_resolves_once_and_replays_value():
     assert handle.get() == 42
     with pytest.raises(RuntimeError, match="already been completed"):
         completer.set_result(7)
+    assert handle.get() == 42
+
+
+def test_pending_handle_get_interrupts_without_consuming_completion() -> None:
+    """Ctrl-C interrupts a main-thread native wait, not the paired producer."""
+    assert threading.current_thread() is threading.main_thread()
+    handle, completer = _new_handle_pair()
+    assert _handle_receiver_count(completer) == 1
+    entered = threading.Event()
+    stopped = threading.Event()
+    fallback_used = threading.Event()
+    interrupt_lock = threading.Lock()
+
+    def interrupt_pending_get() -> None:
+        try:
+            deadline = time.monotonic() + 5
+            while _handle_receiver_count(completer) < 2:
+                if stopped.wait(0.001) or time.monotonic() >= deadline:
+                    return
+            # Only get() can have cloned this pair's receiver. This thread
+            # holds the GIL now, so get() has also released it: the native
+            # pending call is active, not just about to start on a Python line.
+            with interrupt_lock:
+                if stopped.is_set():
+                    return
+                entered.set()
+                _thread.interrupt_main()
+            stopped.wait(5)
+        finally:
+            if not stopped.is_set():
+                # Bound a broken signal wait. Mark this BEFORE completion:
+                # a queued interrupt delivered on return to Python must not
+                # make pytest.raises falsely pass after the fallback unblocks.
+                fallback_used.set()
+                completer.set_result(42)
+
+    helper = threading.Thread(target=interrupt_pending_get, daemon=True)
+    helper.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            handle.get()
+    finally:
+        # Cancel under the same lock as the request, so the helper cannot send
+        # a delayed interrupt after cleanup begins, even if get() failed early.
+        with interrupt_lock:
+            stopped.set()
+        helper.join(timeout=6)
+    assert not helper.is_alive(), "the interrupt helper must finish inside the test"
+    assert entered.is_set(), "the interrupt must follow entry into the native wait"
+    assert not fallback_used.is_set(), "get() must respond before fallback completion"
+    assert _handle_receiver_count(completer) == 1, "the interrupted wait must be gone"
+
+    completer.set_result(42)
+    assert handle.get() == 42
     assert handle.get() == 42
 
 

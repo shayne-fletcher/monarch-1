@@ -384,15 +384,7 @@ where
             runtime.block_on(async {
                 tokio::select! {
                     result = handle => result.map_err(|e| PyRuntimeError::new_err(format!("JoinErr: {:?}", e))),
-                    signal = async {
-                        let sleep_for = std::time::Duration::from_millis(100);
-                        loop {
-                            // Acquiring the GIL in a loop is sad, hopefully once
-                            // every 100ms is fine.
-                            monarch_with_gil_blocking(GilSite::AwaitDrive, |py| py.check_signals())?;
-                            tokio::time::sleep(sleep_for).await;
-                        }
-                    } => signal
+                    signal = check_python_signals() => signal
                 }
             })
         } else {
@@ -402,6 +394,53 @@ where
             Ok(runtime.block_on(future))
         }
     })
+}
+
+/// Wait directly for an operation that is already running elsewhere.
+/// `Handle.get()` supplies a future that only waits for its result channel;
+/// the calling thread polls that waiter with the GIL released.
+///
+/// On Python's main thread, `signal_safe_block_on` would start a Tokio task
+/// to wait on the caller's behalf. This instead polls the waiter directly,
+/// alongside signal checks so Ctrl-C interrupts the wait.
+///
+/// Ctrl-C drops the supplied future. For `Handle.get()`, that removes only
+/// this waiter: the producer continues and its result remains observable.
+/// Do not substitute this for `signal_safe_block_on` when unfinished work
+/// must keep running after the caller is interrupted.
+pub(crate) fn signal_safe_block_on_inline<F>(py: Python<'_>, future: F) -> PyResult<F::Output>
+where
+    F: Future + Send,
+    F::Output: Send,
+{
+    let runtime = get_tokio_runtime();
+    py.detach(|| {
+        if is_main_thread() {
+            runtime.block_on(async {
+                // Poll the waiter and signal checks on this thread. If a
+                // signal handler raises, select! drops the waiter, not the
+                // independent producer that will supply its result.
+                tokio::select! {
+                    result = future => Ok(result),
+                    signal = check_python_signals() => signal,
+                }
+            })
+        } else {
+            // Python runs signal handlers only on its main thread. Here,
+            // wait directly while leaving the GIL available to other threads.
+            Ok(runtime.block_on(future))
+        }
+    })
+}
+
+/// Check for Python signals now and every 100 ms until a handler raises.
+/// Both blocking helpers poll this on Python's main thread, the only thread
+/// where `check_signals()` runs Python's signal handlers.
+async fn check_python_signals<T>() -> PyResult<T> {
+    loop {
+        monarch_with_gil_blocking(GilSite::AwaitDrive, |py| py.check_signals())?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// A test function that sleeps indefinitely in a loop.
