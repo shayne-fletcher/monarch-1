@@ -830,10 +830,11 @@ def test_alias_bootstrap() -> None:
 @pytest.mark.timeout(60)
 @isolate_in_subprocess
 def test_attach_to_workers_accepts_future_addresses() -> None:
-    """`attach_to_workers` accepts ``Future[str]`` worker addresses, exercising
-    the ``_as_python_task`` -> ``Future._take_inner()`` path: the Future's
-    underlying task is surrendered to Rust, driven there to yield the address,
-    and the attach proceeds exactly as for plain ``str`` workers."""
+    """`attach_to_workers` accepts ``Future[str]`` worker addresses.
+
+    It gets a Handle from each Future and passes those Handles to Rust, which
+    waits for the addresses before attaching, just as for plain string addresses.
+    """
     from monarch._src.actor.future import Future
 
     async def _resolve(addr: str) -> str:
@@ -863,7 +864,7 @@ def test_attach_to_workers_accepts_future_addresses() -> None:
             env=env,
         )
         procs.append(proc)
-        # Wrap the address in a Future[str] so attach goes through _take_inner.
+        # Pass a Future rather than a string to exercise address resolution.
         fut: Future[str] = Future._from_coro(_resolve(proc_addr))
         workers.append(fut)
 
