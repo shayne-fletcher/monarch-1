@@ -235,14 +235,6 @@ impl PythonTask {
         }
     }
 
-    /// Construct a `PythonTask`, capturing a creation-site traceback
-    /// if enabled by `ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK`.
-    pub(crate) fn new(
-        fut: impl Future<Output = PyResult<Py<PyAny>>> + Send + 'static,
-    ) -> PyResult<Self> {
-        Ok(Self::new_with_traceback(fut, current_traceback()?))
-    }
-
     /// Return the optional captured creation-site traceback (if
     /// enabled).
     fn traceback(&self) -> &Option<Py<PyAny>> {

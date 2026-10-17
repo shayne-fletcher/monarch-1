@@ -4,19 +4,29 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Measure noop calls and stream observations on the main thread and inside sync
-actors, and burst admission into an actor whose event loop is busy."""
+"""Measure noop calls, stream observations and channel receives on the main thread
+and inside sync actors, plus burst admission into an actor whose event loop is busy."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import collections
+import concurrent.futures
 import statistics
+import threading
 import time
 from collections.abc import Callable
 
-from monarch.actor import Accumulator, Actor, concurrent_endpoint, endpoint, this_host
+from monarch.actor import (
+    Accumulator,
+    Actor,
+    Channel,
+    concurrent_endpoint,
+    endpoint,
+    Port,
+    this_host,
+)
 from monarch.benches.noop_rpc_benchmark import (
     benchmark_noop_rpc,
     NoopActor,
@@ -57,7 +67,7 @@ class BusyLoopActor(Actor):
 
 
 class SyncCaller(Actor):
-    """Measure noop replies waited for on a sync actor's driver thread."""
+    """Measure endpoint replies, stream items and channel receives on a sync driver."""
 
     @endpoint
     def measure(self, peer: SyncNoopActor, iterations: int) -> None:
@@ -66,6 +76,104 @@ class SyncCaller(Actor):
     @endpoint
     def measure_stream(self, peer: SyncNoopActor, iterations: int) -> None:
         benchmark_stream(peer, iterations)
+
+    @endpoint
+    def measure_receive(self, iterations: int) -> None:
+        benchmark_receive_loopback(iterations)
+
+    @endpoint
+    def prepare_receive(self) -> Port[int]:
+        sender, self._input_receiver = Channel[int].open()
+        return sender
+
+    @endpoint
+    def receive_and_reply(self, reply: Port[int], count: int) -> None:
+        """Receive each request through a channel and send it to the caller's channel."""
+        for _ in range(count):
+            reply.send(self._input_receiver.recv().get())
+
+
+def report_receive_latencies(latencies_ms: list[float]) -> None:
+    """Report channel receive timings in the same units as the RPC controls."""
+    percentiles = statistics.quantiles(latencies_ms, n=100, method="inclusive")
+    print("warmup iterations: 20")
+    print(f"measured iterations: {len(latencies_ms)}")
+    print(f"p50 receive latency: {percentiles[49]:.3f} ms")
+    print(f"p99 receive latency: {percentiles[98]:.3f} ms")
+
+
+def benchmark_receive(operation: Callable[[], int], iterations: int) -> None:
+    """Time send-and-receive operations, checking every delivered value."""
+    if iterations < 2:
+        raise ValueError("iterations must be at least 2")
+    for _ in range(20):
+        assert operation() == 7
+    latencies_ms = []
+    for _ in range(iterations):
+        start = time.perf_counter()
+        assert operation() == 7
+        latencies_ms.append((time.perf_counter() - start) * 1000)
+    report_receive_latencies(latencies_ms)
+
+
+def benchmark_receive_loopback(iterations: int, timeout: float | None = None) -> None:
+    """Send to this actor's own channel, then wait for its receive Future."""
+    sender, receiver = Channel[int].open()
+
+    def receive() -> int:
+        sender.send(7)
+        return receiver.recv().get(timeout=timeout)
+
+    benchmark_receive(receive, iterations)
+
+
+async def benchmark_receive_asyncio(iterations: int) -> None:
+    """Measure loopback receives observed by await on one asyncio loop."""
+    if iterations < 2:
+        raise ValueError("iterations must be at least 2")
+    sender, receiver = Channel[int].open()
+    latencies_ms = []
+    for index in range(20 + iterations):
+        start = time.perf_counter()
+        sender.send(7)
+        assert await receiver.recv() == 7
+        if index >= 20:
+            latencies_ms.append((time.perf_counter() - start) * 1000)
+    report_receive_latencies(latencies_ms)
+
+
+def benchmark_receive_plain_thread(iterations: int) -> None:
+    """Run the whole loopback case on one plain Python thread, not a Tokio thread."""
+    completion: concurrent.futures.Future[None] = concurrent.futures.Future()
+
+    def measure() -> None:
+        try:
+            benchmark_receive_loopback(iterations)
+        except Exception as error:
+            completion.set_exception(error)
+        else:
+            completion.set_result(None)
+
+    thread = threading.Thread(target=measure, daemon=True)
+    thread.start()
+    thread.join(timeout=120)
+    if thread.is_alive():
+        raise TimeoutError("plain-thread receive benchmark did not finish in 120s")
+    completion.result(timeout=0)
+
+
+def benchmark_receive_ping_pong(caller: SyncCaller, iterations: int) -> None:
+    """Round-trip channel messages between the controller and a sync actor's proc."""
+    requests = caller.prepare_receive.call_one().get()
+    replies, receiver = Channel[int].open()
+    completion = caller.receive_and_reply.call_one(replies, 20 + iterations)
+
+    def receive() -> int:
+        requests.send(7)
+        return receiver.recv().get(timeout=10)
+
+    benchmark_receive(receive, iterations)
+    completion.get(timeout=10)
 
 
 def benchmark_observation(operation: Callable[[], None], iterations: int) -> None:
@@ -144,6 +252,18 @@ def main() -> None:
         caller.measure_stream.call_one(sync_noop, args.iterations).get()
         print("main-thread Accumulator stream await:")
         benchmark_accumulator(sync_noop, args.iterations)
+        print("main-thread channel receive get:")
+        benchmark_receive_loopback(args.iterations)
+        print("main-thread channel receive timed get:")
+        benchmark_receive_loopback(args.iterations, timeout=5)
+        print("asyncio channel receive await:")
+        asyncio.run(benchmark_receive_asyncio(args.iterations))
+        print("plain-thread channel receive get:")
+        benchmark_receive_plain_thread(args.iterations)
+        print("sync-actor channel receive get:")
+        caller.measure_receive.call_one(args.iterations).get()
+        print("cross-proc channel receive ping-pong:")
+        benchmark_receive_ping_pong(caller, args.iterations)
         asyncio.run(benchmark_burst(procs.spawn("busy", BusyLoopActor), args.burst))
     finally:
         procs.stop().get()
