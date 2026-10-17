@@ -347,7 +347,7 @@ from_coro = 1
 rust_from_coro = 2
 from_coroutine = 1
 take_inner = 0
-rust_take_inner = 3
+rust_take_inner = 0
 take_inner_retire = 2
 caller_free_primitive = 4
 shared_from_value = 0
@@ -357,8 +357,8 @@ bootstrap_storage_spawn = 0
 shared_reconstruction = 0
 py_is_tokio_thread = 0
 pytokio_import = 12
-pytokio_module_ref = 8
-helper_symbol = 9
+pytokio_module_ref = 5
+helper_symbol = 6
 helper_definition = 1
 would_block_surface = 0
 binding_stub_symbol = 2
@@ -1598,8 +1598,9 @@ path = "fbcode/monarch/monarch_distributed_telemetry/src/query_engine.rs"
 symbol = "PyPythonTask"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4c"
+transition_revision = "self"
 
 [[site]]
 id = "hs.lib.register_python_bindings"
@@ -1620,8 +1621,9 @@ path = "fbcode/monarch/monarch_extension/src/readonly_fuse.rs"
 symbol = "PyPythonTask"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4c"
+transition_revision = "self"
 
 [[site]]
 id = "hs.readonly_nfs.PyPythonTask"
@@ -1631,8 +1633,9 @@ path = "fbcode/monarch/monarch_extension/src/readonly_nfs.rs"
 symbol = "PyPythonTask"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4c"
+transition_revision = "self"
 
 [[site]]
 id = "hs.actor.PyPythonTask"
@@ -3440,8 +3443,9 @@ path = "fbcode/monarch/monarch_distributed_telemetry/src/query_engine.rs"
 symbol = "<file>"
 operation = "pytokio_module_ref"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4c"
+transition_revision = "self"
 
 [[site]]
 id = "mr.lib.file"
@@ -3462,8 +3466,9 @@ path = "fbcode/monarch/monarch_extension/src/readonly_fuse.rs"
 symbol = "<file>"
 operation = "pytokio_module_ref"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4c"
+transition_revision = "self"
 
 [[site]]
 id = "mr.readonly_nfs.file"
@@ -3473,8 +3478,9 @@ path = "fbcode/monarch/monarch_extension/src/readonly_nfs.rs"
 symbol = "<file>"
 operation = "pytokio_module_ref"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4c"
+transition_revision = "self"
 
 [[site]]
 id = "mr.actor.file"
@@ -3730,11 +3736,11 @@ constructor = "raw PythonTask"
 return_surface = "raw PythonTask immediately wrapped by call_one or choose"
 consumer = "the public Future built by make_future for call_one and choose"
 driver = "awaited by the caller through Future.get or as_asyncio"
-start_point = "the caller has already submitted the request; value_collector moves the sole response receiver into a task, while receive and conversion wait for the public observer"
+start_point = "the caller has already submitted the request; value_collector wraps an already-built future that owns the sole response receiver, while receive and conversion wait for the public observer"
 abandonment = "possible after successful construction; dropping the public Future drops the task and its sole response receiver"
 eager_effect = "an eager replacement would begin reply collection immediately; it would not resubmit the request"
 drop_behavior = "the response receiver closes, any queued reply is discarded, and later posts are undeliverable"
-unobserved_error = "PythonTask::new can fail after taking ownership of the receiver, closing it with no task; after successful construction, receive, conversion and supervision failures surface only when driven"
+unobserved_error = "PythonTask::new can fail after taking ownership of the collector future, dropping it and closing its receiver with no task; after successful construction, receive, conversion and supervision failures surface only when driven"
 disposition = "preserve timing"
 semantic_class = "already_started_lazy_observer"
 oracle = [
@@ -3833,8 +3839,9 @@ path = "fbcode/monarch/monarch_distributed_telemetry/src/query_engine.rs"
 symbol = "<DistributedExec as ExecutionPlan>::execute"
 operation = "rust_take_inner"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4c"
+transition_revision = "self"
 
 [[site]]
 id = "ot.readonly_fuse.take_actor_future"
@@ -3844,8 +3851,9 @@ path = "fbcode/monarch/monarch_extension/src/readonly_fuse.rs"
 symbol = "take_actor_future"
 operation = "rust_take_inner"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4c"
+transition_revision = "self"
 
 [[site]]
 id = "ot.readonly_nfs.NfsServer.call"
@@ -3855,8 +3863,9 @@ path = "fbcode/monarch/monarch_extension/src/readonly_nfs.rs"
 symbol = "NfsServer::call"
 operation = "rust_take_inner"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.4c"
+transition_revision = "self"
 
 [[site]]
 id = "ms.host_mesh.HostMesh._from_initialized_hy_host_mesh[Shared.from_valuehy_host_mesh]"
