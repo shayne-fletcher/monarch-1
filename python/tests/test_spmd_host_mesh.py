@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
-
 import os
 import shutil
 import signal
@@ -22,12 +20,31 @@ from monarch._src.spmd.host_mesh import _IN_PAR, _spawn_worker_process, _worker_
 from monarch.job.spmd import StoreJob
 
 
+def _is_zombie(pid: int) -> bool:
+    """Return whether a process has exited but has not yet been reaped.
+
+    In an RE sandbox, orphaned processes can remain in this state. Their PIDs
+    still exist, so os.kill(pid, 0) alone cannot tell whether they have exited.
+    """
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            # The process state follows the parenthesized command name, which
+            # can itself contain spaces or parentheses.
+            return f.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except OSError:
+        return False
+
+
 def _pid_alive(pid: int) -> bool:
+    """Return whether a process still exists and has not exited.
+
+    An unreaped process has exited even though its PID still exists.
+    """
     try:
         os.kill(pid, 0)
     except OSError:
         return False
-    return True
+    return not _is_zombie(pid)
 
 
 def _wait_for(

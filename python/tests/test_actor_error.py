@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
-
 import asyncio
 import ctypes
 import datetime
@@ -813,13 +811,31 @@ async def test_exception_after_wait_unmonitored():
 """
 
 
-def is_process_running(pid: int) -> bool:
-    """Check if a process with the given PID is still running."""
+def _is_zombie(pid: int) -> bool:
+    """Return whether a process has exited but has not yet been reaped.
+
+    In an RE sandbox, orphaned processes can remain in this state. Their PIDs
+    still exist, so os.kill(pid, 0) alone cannot tell whether they have exited.
+    """
     try:
-        os.kill(pid, 0)  # Signal 0 doesn't kill, just checks if process exists
-        return True
+        with open(f"/proc/{pid}/stat") as f:
+            # The process state follows the parenthesized command name, which
+            # can itself contain spaces or parentheses.
+            return f.read().rsplit(")", 1)[1].split()[0] == "Z"
     except OSError:
         return False
+
+
+def is_process_running(pid: int) -> bool:
+    """Return whether a process still exists and has not exited.
+
+    An unreaped process has exited even though its PID still exists.
+    """
+    try:
+        os.kill(pid, 0)  # Signal 0 doesn't kill, just checks if process exists
+    except OSError:
+        return False
+    return not _is_zombie(pid)
 
 
 # oss_skip: importlib not pulling resource correctly in git CI, needs to be revisited
