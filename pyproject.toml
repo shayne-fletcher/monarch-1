@@ -184,6 +184,7 @@ packages = {find = {where = ["python"]}}
 "monarch.monarch_dashboard" = ["frontend/build/**/*"]
 "monarch.tools" = ["SKILL.md"]
 
+# python/tests/pytest-buck.ini copies these settings; keep the two in sync.
 [tool.pytest.ini_options]
 markers = [
     "oss_skip: marks tests to skip in OSS CI",
