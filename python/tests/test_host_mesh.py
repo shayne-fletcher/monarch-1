@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import http.client
 import json
 import os
 import pathlib
@@ -19,6 +20,7 @@ import tempfile
 import textwrap
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import warnings
@@ -1758,7 +1760,31 @@ def test_client_attach_addr_this_host_and_this_proc() -> None:
         assert result == "ping"
 
 
+class _LoopbackHTTPSConnection(http.client.HTTPSConnection):
+    """Connect locally and verify the certificate against the URL's hostname."""
+
+    # Set by HTTPSConnection, with the CA and client credentials supplied below.
+    _context: ssl.SSLContext
+
+    def connect(self) -> None:
+        # The test binds the admin server to [::], which includes ::1. self.host
+        # stays the URL's hostname, so TLS checks SNI and the certificate against it.
+        sock = socket.create_connection(("::1", self.port), timeout=self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _LoopbackHTTPSHandler(urllib.request.HTTPSHandler):
+    """Use loopback for this test's HTTPS requests without disabling TLS checks."""
+
+    # Set by HTTPSHandler and passed unchanged to each HTTPS connection.
+    _context: ssl.SSLContext
+
+    def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(_LoopbackHTTPSConnection, req, context=self._context)
+
+
 def _admin_get(base: str, ref: str) -> Dict[str, Any]:
+    """Read admin JSON; HTTPS uses loopback and verifies the URL's hostname."""
     ca = "/var/facebook/rootcanal/ca.pem"
     ctx = ssl.create_default_context(cafile=ca if os.path.exists(ca) else None)
     if base.startswith("https"):
@@ -1766,7 +1792,7 @@ def _admin_get(base: str, ref: str) -> Dict[str, Any]:
         if os.path.exists(cert):
             ctx.load_cert_chain(cert, cert)
     opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ctx)
+        urllib.request.ProxyHandler({}), _LoopbackHTTPSHandler(context=ctx)
     )
     url = f"{base}/v1/{urllib.parse.quote(ref, safe='')}"
     with opener.open(url, timeout=10) as resp:
@@ -1792,6 +1818,17 @@ def test_admin_lists_attached_worker_host() -> None:
 
         root = _admin_get(base, "root")
         assert root["properties"]["Root"]["num_hosts"] == 2, root["children"]
+
+        if base.startswith("https://"):
+            # Loopback reaches the server, but the client must still reject its
+            # certificate for a hostname it doesn't cover.
+            parsed = urllib.parse.urlsplit(base)
+            wrong_host = parsed._replace(
+                netloc=f"wrong-admin-host.invalid:{parsed.port}"
+            ).geturl()
+            with pytest.raises(urllib.error.URLError) as error:
+                _admin_get(wrong_host, "root")
+            assert isinstance(error.value.reason, ssl.SSLCertVerificationError)
 
         owners = []
         for host_ref in root["children"]:
