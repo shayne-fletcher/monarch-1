@@ -479,12 +479,26 @@ impl PicklingState {
 }
 
 impl PicklingState {
-    /// [`unpickle`](Self::unpickle) with `instance` installed as the receiver.
+    /// Decode an endpoint reply for the actor that made the call.
     ///
-    /// Rust-only and deliberately unexposed to Python: the guard must not
-    /// outlive the synchronous decode. Every caller is the body of a
-    /// `monarch_with_gil_blocking` closure, so the guard never spans an
-    /// `await` and the thread-local cannot leak to another task.
+    /// Reply collectors in `endpoint.rs` build this state from the reply's
+    /// serialized payload and mesh references, then call this method under the
+    /// GIL. `instance` is the calling actor, captured when it sent the request;
+    /// that actor is now receiving the reply.
+    ///
+    /// A reply may contain a `Port`. Rebuilding it must use the calling actor's
+    /// instance, because later sends through that Port come from this actor.
+    /// Decoding runs on a Tokio worker, not the actor's Python thread, so looking
+    /// up `context()` there could create a new client instead. The guard makes
+    /// the calling actor's instance available to Port reconstruction during
+    /// decoding, then restores the previous receiver, including on error.
+    ///
+    /// This consumes the stored payload and references and returns the decoded
+    /// Python object or a decoding error. The state remains consumed if decoding
+    /// fails; it cannot be retried. The collector interprets the object as a
+    /// return value or a remote exception according to the reply's message kind.
+    /// Callers hold the GIL throughout decoding; the guard is removed before
+    /// this method returns and never remains installed across an `await`.
     pub(crate) fn unpickle_with_receiver(
         &mut self,
         py: Python<'_>,

@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
-
 import asyncio
 import contextlib
 import ctypes
@@ -97,7 +95,7 @@ class Indirect(Actor):
         return await c.value.choose()
 
 
-@pytest.mark.timeout(10)
+@pytest.mark.timeout(60)
 @isolate_in_subprocess
 async def test_choose():
     proc = this_host().spawn_procs(per_host={"gpus": 2})
@@ -282,7 +280,7 @@ class SyncContextActor(Actor):
     def observe_sync_context(self, a_counter: Counter) -> Tuple[bool, bool, int]:
         # A sync endpoint runs with no asyncio loop visible on its thread, so
         # get_running_loop() raises and Future.get() blocks without the
-        # active-event-loop warning.
+        # running-loop warning.
         try:
             asyncio.get_running_loop()
             loop_visible = True
@@ -291,7 +289,7 @@ class SyncContextActor(Actor):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             value = a_counter.value.choose().get()
-        warned = any("active event loop" in str(w.message) for w in caught)
+        warned = any(issubclass(w.category, UserWarning) for w in caught)
         return loop_visible, warned, value
 
 

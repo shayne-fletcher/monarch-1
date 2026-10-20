@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
-
 import time
 from typing import List, Tuple, TypeVar
 
@@ -49,7 +47,7 @@ class PortOwner(Actor):
         """A reply carrying both a ``Port`` and a mesh reference.
 
         The mesh drives ``collect_valuemesh`` down its *eager* ref-reuniting
-        branch, a different decode site from ``value_collector``.
+        branch, a different decode site from ``value_collector_future``.
         """
         send, self._recv = Channel[int].open()
         extra = self._extra
@@ -159,7 +157,7 @@ def _await_observed_sender(caller: AsyncCaller | SyncCaller) -> Tuple[str, str]:
     """Poll for the bounced envelope.
 
     Collected through a second endpoint rather than inside ``send_doomed`` so a
-    *sync* caller does not block its own actor loop waiting for the return.
+    *sync* caller does not occupy its driver thread waiting for the return.
     """
     for _ in range(200):
         observed, actor_id = caller.collect_identity.call_one().get()
@@ -174,7 +172,7 @@ def test_port_returned_to_async_actor_does_not_bootstrap_client() -> None:
     """A Port returned by one remote actor to another must be reconstructed
     with the *caller actor's* instance, not by bootstrapping a client.
 
-    The reply is decoded by a ``PythonTask::new`` collector on a Tokio worker
+    The reply is decoded by a Handle's reply collector on a Tokio worker
     with no Monarch context, so the collector installs the caller instance as
     the decode receiver and ``_reconstruct_port`` never reaches the
     client-bootstrap branch of ``context()``.
@@ -192,11 +190,11 @@ def test_port_returned_to_async_actor_does_not_bootstrap_client() -> None:
 
 @pytest.mark.timeout(120)
 def test_port_returned_to_sync_actor_does_not_bootstrap_client() -> None:
-    """The sync-caller control.
+    """Worker-side reply decoding must retain the sync caller's instance.
 
-    ``Future.get()`` drives the collector via ``block_on`` on the calling
-    thread, where the actor context *is* set. If this ever fails too, the
-    defect is not reply-decode context propagation and the analysis is wrong.
+    ``Future.get()`` waits on the actor's driver thread, but the Handle's
+    collector decodes the reply on Tokio. The decoder must install the caller
+    instance so reconstructing the Port does not bootstrap a client there.
     """
     pm, owner, caller = _spawn_owner_and_caller(SyncCaller)
     try:
