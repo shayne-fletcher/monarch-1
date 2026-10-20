@@ -39,19 +39,21 @@ from monarch._rust_bindings.monarch_hyperactor.testing import (
 from monarch._src.actor import future as future_mod
 from monarch._src.actor.future import Future
 from monarch._src.actor.returns_future import returns_future
+from monarch.actor import Channel
 
 
-async def _value(v):
-    return v
+def _received_value(value):
+    """A lazy channel receive of one supplied value."""
+    sender, receiver = Channel[Any].open()
+    sender.send(value)
+    return receiver.recv()
 
 
-async def _raise(exc: BaseException):
-    raise exc
-
-
-async def _sleep_then(seconds: float, v):
-    await PythonTask.sleep(seconds)
-    return v
+def _received_error(error: BaseException):
+    """A lazy receive that raises a sent exception when observed."""
+    sender, receiver = Channel[Any].open()
+    sender.exception(cast(Any, error))
+    return receiver.recv()
 
 
 async def _await_once(fut: Future):
@@ -59,29 +61,15 @@ async def _await_once(fut: Future):
 
 
 def _future_pending() -> "tuple[Any, Callable[[], None]]":
-    """A facade observable that stays pending until it is drained.
-
-    Deliberately not a long timed sleep. A ``PythonTask.sleep(3600)`` cannot
-    race a short-timeout assertion, but it outlives the test: the runtime still
-    owns it at interpreter exit, and outstanding tasks are a documented source
-    of SIGABRT there. A gate the test controls has neither problem -- the task
-    cannot finish early, so the timeout assertion is race-free, and ``drain``
-    ends it before the test returns.
-    """
-    gate = {"released": False}
-
-    async def hold():
-        while not gate["released"]:
-            await PythonTask.sleep(0.005)
-        return _PROBE_SUCCESS_VALUE
-
-    fut: Future[int] = Future._from_coro(hold())
+    """A receive held pending until the test sends its value in drain()."""
+    sender, receiver = Channel[int].open()
+    future = receiver.recv()
 
     def drain() -> None:
-        gate["released"] = True
-        fut.get()  # block until the task has actually finished
+        sender.send(_PROBE_SUCCESS_VALUE)
+        future.get(timeout=5)
 
-    return fut, drain
+    return future, drain
 
 
 def _run_in_tokio(coro):
@@ -101,10 +89,10 @@ def _run_in_tokio(coro):
 # ---------------------------------------------------------------------------
 # States and transitions
 #
-# A fresh Future is _Unawaited; the first access drives the underlying task
-# exactly once. Sync get() caches into _Complete/_Exception; as_asyncio() and
+# A receive Future is _Unawaited; first observation takes its message and
+# unpickles it. Sync get() caches into _Complete/_Exception; as_asyncio() and
 # the asyncio __await__ shim spawn a Handle and move to the observe-only
-# _Handle. A Tokio-thread await is rejected without starting the task or
+# _Handle. A Tokio-thread await is rejected without taking the message or
 # changing its state. These pin that lifecycle and its idempotency.
 # ---------------------------------------------------------------------------
 
@@ -174,59 +162,26 @@ def test_from_handle_rejects_non_handle_values():
         Future._from_handle(cast("Any", object()))
 
 
-def test_as_handle_spawns_an_unawaited_task_once(monkeypatch):
-    spawn_calls = 0
-    original_spawn_handle = PythonTask.spawn_handle
+def test_as_handle_starts_a_receive_once():
+    """Repeated conversion shares one Handle rather than taking another reply."""
+    sender, receiver = Channel[int].open()
+    fut = receiver.recv()
+    first = fut._as_handle()
+    second = fut._as_handle()
+    assert first is second
 
-    def counted_spawn_handle(task):
-        nonlocal spawn_calls
-        spawn_calls += 1
-        return original_spawn_handle(task)
-
-    monkeypatch.setattr(PythonTask, "spawn_handle", counted_spawn_handle)
-
-    gate = {"released": False}
-    runs = {"started": 0, "completed": 0}
-
-    async def controlled():
-        runs["started"] += 1
-        while not gate["released"]:
-            await PythonTask.sleep(0.005)
-        runs["completed"] += 1
-        return 7
-
-    fut: Future[int] = Future._from_coro(controlled())
-    first = None
-    try:
-        first = fut._as_handle()
-        second = fut._as_handle()
-        assert spawn_calls == 1
-        assert first is second
-
-        gate["released"] = True
-        assert first.get() == 7
-        assert fut.get() == 7
-        assert runs == {"started": 1, "completed": 1}
-    finally:
-        original_error = sys.exc_info()[1]
-        gate["released"] = True
-        try:
-            observer = first if first is not None else fut
-            observer.get(timeout=2)
-        except Exception as cleanup_error:
-            if original_error is None:
-                raise
-            # BaseException.add_note() is unavailable on the Python 3.10 OSS
-            # test lane. The original failure still takes precedence there.
-            if hasattr(original_error, "add_note"):
-                original_error.add_note(f"cleanup also failed: {cleanup_error!r}")
+    sender.send(7)
+    assert first.get(timeout=5) == 7
+    assert fut.get(timeout=5) == 7
+    sender.send(8)
+    assert receiver.recv().get(timeout=5) == 8
 
 
 def test_as_handle_rejects_terminal_states_without_mutation():
-    complete: Future[int] = Future._from_coro(_value(1))
+    complete: Future[int] = _received_value(1)
     assert complete.get() == 1
 
-    failed: Future[int] = Future._from_coro(_raise(ValueError("boom")))
+    failed: Future[int] = _received_error(ValueError("boom"))
     with pytest.raises(ValueError, match="boom"):
         failed.get()
 
@@ -238,12 +193,11 @@ def test_as_handle_rejects_terminal_states_without_mutation():
 
 
 def test_get_success_transitions_to_complete_and_is_idempotent():
-    """First sync get() drives the task, transitions _Unawaited -> _Complete,
-    and returns the value; a second get() returns the cached value without
-    re-running the coroutine. The coroutine must run exactly once, so
-    resolve-and-cache is the contract being pinned."""
-    fut: Future[int] = Future._from_coro(_value(42))
+    """An untimed get() takes one message and caches its value; repeated get()
+    returns that cached value without taking another message."""
+    fut: Future[int] = _received_value(42)
     assert fut.get() == 42
+    assert isinstance(fut._status, future_mod._Complete)
     assert fut.get() == 42
 
 
@@ -255,7 +209,7 @@ def test_get_exception_transitions_to_exception_and_reraises_stored():
     the constructed ValueError) because the exception crosses the Rust/pyo3
     boundary -- the contract is that _Exception caches one object and re-raises
     it."""
-    fut: Future[int] = Future._from_coro(_raise(ValueError("boom")))
+    fut: Future[int] = _received_error(ValueError("boom"))
     with pytest.raises(ValueError, match="boom") as first:
         fut.get()
     with pytest.raises(ValueError, match="boom") as second:
@@ -280,18 +234,20 @@ def test_get_timeout_is_non_poisoning_and_reobservable():
     """get(timeout=...) that times out routes through a Handle and does NOT
     poison the Future: it transitions to _Handle, and a later get() (no timeout)
     still resolves the same task (the timeout is non-cancelling)."""
-    fut: Future[int] = Future._from_coro(_sleep_then(0.2, 11))
+    sender, receiver = Channel[int].open()
+    fut = receiver.recv()
     with pytest.raises(TimeoutError):
-        fut.get(timeout=0.01)  # too short: task still running
+        fut.get(timeout=0.01)
     assert isinstance(fut._status, future_mod._Handle)
-    assert fut.get() == 11  # later get() still observes completion
+    sender.send(11)
+    assert fut.get(timeout=5) == 11
 
 
 def test_get_timeout_success_returns_and_transitions_to_handle():
     """get(timeout=...) whose task finishes within the timeout returns the value
     and transitions to the observe-only _Handle (not _Complete): the timed get
     routes through a Handle, so a later no-timeout get() re-observes the result."""
-    fut: Future[int] = Future._from_coro(_sleep_then(0.01, 7))
+    fut: Future[int] = _received_value(7)
     assert fut.get(timeout=5) == 7
     assert isinstance(fut._status, future_mod._Handle)
     assert fut.get() == 7
@@ -301,39 +257,28 @@ async def test_await_asyncio_transitions_to_handle_and_is_reobservable():
     """Awaiting under an asyncio loop bridges through as_asyncio(), transitions
     _Unawaited -> the observe-only _Handle, and yields the value; re-awaiting
     observes the same Handle (a fresh loop-local future each time)."""
-    fut: Future[int] = Future._from_coro(_value(7))
+    fut: Future[int] = _received_value(7)
     assert await fut == 7  # _Unawaited -> _Handle
     assert isinstance(fut._status, future_mod._Handle)
     assert await fut == 7  # re-observe the same Handle
 
 
-def test_nested_future_await_raises_without_consuming_inner_future():
-    """An outer Future drives its coroutine on Tokio, where awaiting an inner
-    Future is rejected without starting or consuming the inner task. A later
-    valid observer can still drive the inner task exactly once."""
-    started = []
+def test_tokio_await_raises_without_consuming_receive():
+    """Tokio refuses a lazy receive before it can take its queued message."""
+    fut = _received_value(9)
 
-    async def value():
-        started.append("started")
-        return 9
-
-    fut: Future[int] = Future._from_coro(value())
-
-    async def driver():
+    async def attempt():
         assert _is_in_tokio_runtime()
         with pytest.raises(RuntimeError) as caught:
             await fut
         return str(caught.value)
 
-    outer: Future[str] = Future._from_coro(driver())
-    assert outer.get() == (
+    assert _run_in_tokio(attempt()) == (
         "Future cannot be awaited on a Tokio thread; observe it from an "
         "asyncio loop or synchronous context."
     )
-    assert started == []
     assert isinstance(fut._status, future_mod._Unawaited)
     assert fut.get() == 9
-    assert started == ["started"]
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +293,7 @@ def test_get_after_asyncio_await_returns():
     """get() after an asyncio await (_Handle) now returns the value instead of
     raising -- observation is non-consuming, so the sync get() observes the same
     Handle."""
-    fut: Future[int] = Future._from_coro(_value(1))
+    fut: Future[int] = _received_value(1)
     asyncio.run(_await_once(fut))  # -> _Handle
     assert fut.get() == 1
 
@@ -357,7 +302,7 @@ def test_get_after_asyncio_await_error_reraises():
     """Failure mirror of the previous: get() on a _Handle whose live producer
     FAILED re-raises the stored exception through handle.get(). Drives the live
     spawn_handle producer (not a pre-resolved get())."""
-    fut: Future[int] = Future._from_coro(_raise(ValueError("boom")))
+    fut: Future[int] = _received_error(ValueError("boom"))
 
     async def bridge():
         # Drive _Unawaited -> _Handle via the live producer; swallow the failure
@@ -375,7 +320,7 @@ def test_await_asyncio_after_get_returns():
     """await under asyncio after a sync get() resolved it (_Complete) now returns
     the value -- as_asyncio() hands back a settled loop future instead of
     raising."""
-    fut: Future[int] = Future._from_coro(_value(1))
+    fut: Future[int] = _received_value(1)
     assert fut.get() == 1  # -> _Complete
 
     async def attempt():
@@ -389,8 +334,8 @@ def test_await_asyncio_after_get_exception_reraises_stored():
     get() (_Exception) hands back a settled failed loop future that re-raises the
     *same* stored exception object."""
     boom = ValueError("boom")
-    fut: Future[int] = Future._from_coro(_raise(boom))
-    with pytest.raises(ValueError, match="boom"):
+    fut: Future[int] = _received_error(boom)
+    with pytest.raises(ValueError, match="boom") as first:
         fut.get()  # -> _Exception
 
     async def attempt():
@@ -398,15 +343,15 @@ def test_await_asyncio_after_get_exception_reraises_stored():
             await fut
         return caught.value
 
-    assert asyncio.run(attempt()) is boom
+    assert asyncio.run(attempt()) is first.value
 
 
 def test_await_asyncio_live_handle_error_propagates():
-    """A failing coroutine driven LIVE through the Handle producer (spawn_handle
+    """A failing receive driven through the Handle producer (spawn_handle
     via as_asyncio, from _Unawaited -- not pre-resolved) surfaces the exception
     through the bridged asyncio future: exercises send_result(Err) -> observer ->
     set_exception, which the pre-resolved settled-future path does not."""
-    fut: Future[int] = Future._from_coro(_raise(ValueError("boom")))
+    fut: Future[int] = _received_error(ValueError("boom"))
 
     async def attempt():
         with pytest.raises(ValueError, match="boom"):
@@ -418,7 +363,7 @@ def test_await_asyncio_live_handle_error_propagates():
 def test_await_tokio_on_handle_bridged_raises():
     """Convert on asyncio (_Handle), then await on a tokio thread: Handle's
     await path reports asyncio's native no-running-loop error."""
-    fut: Future[int] = Future._from_coro(_value(1))
+    fut: Future[int] = _received_value(1)
     asyncio.run(_await_once(fut))  # -> _Handle
 
     async def attempt():
@@ -433,7 +378,7 @@ def test_await_tokio_after_get_raises_synchronous_future():
     """await on a tokio thread after a sync get() resolved it (_Complete): the
     tokio branch refuses with the 'already converted into a synchronous future'
     guard."""
-    fut: Future[int] = Future._from_coro(_value(1))
+    fut: Future[int] = _received_value(1)
     assert fut.get() == 1  # -> _Complete
 
     async def attempt():
@@ -447,7 +392,7 @@ def test_await_tokio_after_get_exception_raises_synchronous_future():
     """Failure mirror of test_await_tokio_after_get_raises_synchronous_future:
     await on a tokio thread after a failed sync get() (_Exception) hits the same
     'synchronous future' guard as _Complete."""
-    fut: Future[int] = Future._from_coro(_raise(ValueError("boom")))
+    fut: Future[int] = _received_error(ValueError("boom"))
     with pytest.raises(ValueError, match="boom"):
         fut.get()  # -> _Exception
 
@@ -462,7 +407,7 @@ def test_await_with_no_event_loop_raises_and_is_non_consuming():
     """await with neither an asyncio loop nor a tokio runtime active: there is no
     driver, so __await__ refuses outright -- and refusing consumes nothing, so
     the Future stays _Unawaited and a later get() still drives it."""
-    fut: Future[int] = Future._from_coro(_value(1))
+    fut: Future[int] = _received_value(1)
     with pytest.raises(ValueError, match="no active event loop"):
         fut.__await__()
     assert isinstance(fut._status, future_mod._Unawaited)
@@ -487,7 +432,7 @@ def test_get_in_asyncio_loop_warns_and_still_returns(monkeypatch):
     monkeypatch.setattr(future_mod, "log_with_tracing", lambda *a, **k: calls.append(k))
 
     async def runner():
-        fut: Future[int] = Future._from_coro(_value(5))
+        fut: Future[int] = _received_value(5)
         with pytest.warns(UserWarning, match="active event loop") as record:
             value = fut.get()
         # the asyncio-context advice is as_asyncio()/await (both valid on a loop)
@@ -512,7 +457,7 @@ def test_get_in_tokio_thread_raises_would_block_and_is_non_consuming(monkeypatch
     monkeypatch.setattr(
         future_mod.warnings, "warn", lambda msg, *a, **k: warned.append(str(msg))
     )
-    fut: Future[int] = Future._from_coro(_value(5))
+    fut: Future[int] = _received_value(5)
 
     async def attempt():
         assert _is_in_tokio_runtime()
@@ -544,7 +489,7 @@ def test_get_timeout_in_tokio_thread_raises_would_block_and_is_non_consuming(
     monkeypatch.setattr(
         future_mod.warnings, "warn", lambda msg, *a, **k: warned.append(str(msg))
     )
-    fut: Future[int] = Future._from_coro(_value(5))
+    fut: Future[int] = _received_value(5)
 
     async def attempt():
         assert _is_in_tokio_runtime()
@@ -567,7 +512,7 @@ def test_get_invalid_timeout_does_not_spawn_or_mutate():
     BEFORE spawning a Handle, so a bad argument never starts work or flips state:
     the Future stays _Unawaited and a later valid get() still drives it."""
     for bad in (float("nan"), -1.0, float("inf")):
-        fut: Future[int] = Future._from_coro(_value(8))
+        fut: Future[int] = _received_value(8)
         with pytest.raises(ValueError, match="invalid timeout"):
             fut.get(timeout=bad)
         assert isinstance(fut._status, future_mod._Unawaited)
@@ -583,7 +528,7 @@ def test_get_on_handle_in_asyncio_loop_warns_and_forwards_once(monkeypatch):
     monkeypatch.setattr(future_mod, "log_with_tracing", lambda *a, **k: calls.append(k))
 
     async def runner():
-        fut: Future[int] = Future._from_coro(_value(5))
+        fut: Future[int] = _received_value(5)
         fut.as_asyncio()  # -> _Handle
         with pytest.warns(UserWarning) as caught:
             value = fut.get()
@@ -605,9 +550,9 @@ def test_get_in_loop_on_cached_state_traces_without_warning(monkeypatch):
     calls = []
     monkeypatch.setattr(future_mod, "log_with_tracing", lambda *a, **k: calls.append(k))
 
-    done: Future[int] = Future._from_coro(_value(5))
+    done: Future[int] = _received_value(5)
     assert done.get() == 5  # off loop -> _Complete
-    failed: Future[int] = Future._from_coro(_raise(ValueError("boom")))
+    failed: Future[int] = _received_error(ValueError("boom"))
     with pytest.raises(ValueError, match="boom"):
         failed.get()  # off loop -> _Exception
     calls.clear()
@@ -778,7 +723,7 @@ def test_handle_completion_pair_types_are_not_directly_constructible():
 def test_as_asyncio_off_loop_raises_and_is_non_consuming():
     """Off a running loop, as_asyncio() raises RuntimeError WITHOUT spawning: the
     Future stays _Unawaited, so a later get() still drives the task."""
-    fut: Future[int] = Future._from_coro(_value(3))
+    fut: Future[int] = _received_value(3)
     with pytest.raises(RuntimeError):
         fut.as_asyncio()
     assert isinstance(fut._status, future_mod._Unawaited)
@@ -789,7 +734,7 @@ async def test_as_asyncio_twice_same_loop_both_resolve():
     """Two as_asyncio() futures from one Future on the same loop both resolve to
     the value (ordinary multi-observer case); the Future is _Handle after the
     first."""
-    fut: Future[int] = Future._from_coro(_value(4))
+    fut: Future[int] = _received_value(4)
     f1 = fut.as_asyncio()
     assert isinstance(fut._status, future_mod._Handle)
     f2 = fut.as_asyncio()
@@ -800,7 +745,7 @@ async def test_as_asyncio_twice_same_loop_both_resolve():
 async def test_as_asyncio_cancel_one_then_await_again_resolves():
     """Cancelling one as_asyncio() observer does not poison the Future: a later
     await still resolves (each observer is a fresh loop-local future)."""
-    fut: Future[int] = Future._from_coro(_value(5))
+    fut: Future[int] = _received_value(5)
     f1 = fut.as_asyncio()
     f1.cancel()
     assert await fut == 5
@@ -809,7 +754,7 @@ async def test_as_asyncio_cancel_one_then_await_again_resolves():
 def test_as_asyncio_across_two_loops_both_resolve():
     """The same Future observed from two different event loops resolves in each
     (each as_asyncio() binds a fresh future to the current loop)."""
-    fut: Future[int] = Future._from_coro(_value(6))
+    fut: Future[int] = _received_value(6)
 
     async def observe():
         return await fut
@@ -822,10 +767,9 @@ async def test_as_asyncio_on_cached_stop_iteration_wraps_in_runtime_error():
     """as_asyncio() on a cached _Exception must wrap a StopIteration in
     RuntimeError before set_exception: asyncio.Future.set_exception rejects
     StopIteration (PEP 479) with TypeError, which would otherwise brick the
-    returned future. Mirrors the Handle observer path (HDL-7). A StopIteration
-    can't reach _Exception via from_coroutine (it becomes a normal return), so
-    the cached state is set directly."""
-    fut: Future[int] = Future._from_coro(_value(1))
+    returned future. Mirrors the Handle observer path (HDL-7).
+    The cached state is set directly to exercise that observer path."""
+    fut: Future[int] = Future._resolved(1)
     fut._status = future_mod._Exception(StopIteration("done"))
     settled = fut.as_asyncio()
     with pytest.raises(RuntimeError, match="StopIteration"):
@@ -835,23 +779,17 @@ async def test_as_asyncio_on_cached_stop_iteration_wraps_in_runtime_error():
 # ---------------------------------------------------------------------------
 # Future/Handle contract matrix
 #
-# Three proof layers, kept structurally apart on purpose:
-#
-#   * incumbent Future oracle -- what the public facade does today;
-#   * direct Handle oracle    -- what the underlying Handle does, observed
-#                                through a real Rust-produced Handle rather
-#                                than through the facade;
-#   * Handle-backed facade    -- how a Future built directly on a Handle
-#                                behaves through Future._from_handle().
+# The matrix covers raw Handles, Handle-backed Futures and returns_future
+# bodies. Separate receive tests above exercise _Unawaited, _Complete and
+# _Exception, which have different observation rules from Handles.
 #
 # Every target assertion lives in an ``_assert_*`` helper that takes a
 # *factory*, never a hard-coded constructor, and each row is driven by one of
 # four registries below. The Handle-backed Future entries run those assertions
 # against the facade without changing the assertion bodies.
 #
-# Assertions that pin an incumbent divergence are deliberately NOT
-# factory-driven: they describe behavior that is going away, and there is
-# nothing to activate.
+# Assertions about cached Futures stay separate from Handle factory rows:
+# these cache states remain in use after an untimed receive.get().
 #
 # Registry per row (every one of the 15 has a seam):
 #
@@ -866,14 +804,11 @@ async def test_as_asyncio_on_cached_stop_iteration_wraps_in_runtime_error():
 #   FACADE_FACTORIES   -- facade-only surfaces, no Handle primitive
 #     fm.get_tracing_event, fm.result_alias, fm.exception_accessor
 #
-# Incumbent-divergence companions (not factory-driven, no activation):
+# Cached receive cases, separate from the Handle factory rows:
 #   fm.ready_get_on_tokio_refuses, fm.invalid_timeout_on_ready,
 #   fm.terminal_baseexception_reobservable
 #
-# fm.cancelled_observer and fm.ready_as_asyncio_settlement also have an
-# unparametrized current-side test, but both are *preserve* rows: both
-# representations behave identically, so each such test is a second oracle for
-# the same behavior, not a divergence.
+# fm.ready_as_asyncio_settlement also covers a cached receive separately.
 #
 # The permanent Handle-side oracle for fm.tokio_await lives in handle.rs, so
 # that contract does not depend on a PythonTask-driven helper.
@@ -902,24 +837,8 @@ def _ready_handle(outcome: str):
 # -- observable factories ----------------------------------------------------
 
 
-def _future_observable(outcome: str):
-    """An incumbent-facade observable matching the probe's outcomes."""
-    if outcome == "success":
-        return Future._from_coro(_value(_PROBE_SUCCESS_VALUE))
-    if outcome == "exception":
-        return Future._from_coro(_raise(ValueError("probe failure")))
-    if outcome == "base_exception":
-        return Future._from_coro(_raise(KeyboardInterrupt("probe base failure")))
-    raise AssertionError(f"no incumbent observable for {outcome!r}")
-
-
 class _Facade(NamedTuple):
-    """A facade representation: terminal-state observables plus a pending one.
-
-    Two callables rather than one because a *pending* observable needs a
-    control to end it, and a terminal one does not. A Handle-backed entry
-    supplies its own pair; no assertion body changes.
-    """
+    """Future factories for ready outcomes and a controlled pending result."""
 
     observable: "Callable[[str], Any]"
     pending: "Callable[[], tuple[Any, Callable[[], None]]]"
@@ -980,7 +899,6 @@ async def _body(outcome: str):
 
 # Target already satisfied by both representations.
 PRESERVED_BY_BOTH = [
-    pytest.param(_future_observable, id="current_future"),
     pytest.param(_handle_observable, id="raw_handle"),
     pytest.param(_handle_future_observable, id="handle_backed_future"),
     pytest.param(_body, id="returns_future_body"),
@@ -999,10 +917,8 @@ GATED_TARGETS = [
     pytest.param(_handle_future_gated, id="handle_backed_future"),
 ]
 
-# Facade-only surfaces: result()/exception()/tracing have no Handle primitive,
-# so the seam starts with the incumbent Future and gains the Handle-backed one.
+# Facade-only surfaces: result()/exception()/tracing have no Handle primitive.
 FACADE_FACTORIES = [
-    pytest.param(_Facade(_future_observable, _future_pending), id="current_future"),
     pytest.param(
         _Facade(_handle_future_observable, _handle_future_pending),
         id="handle_backed_future",
@@ -1199,10 +1115,9 @@ def _assert_exception_accessor(facade):
 def _assert_get_emits_one_tracing_event(facade, monkeypatch):
     """Exactly one tracing event per in-loop get(), in both driver contexts.
 
-    Deliberately does not pin the refusal *message*: the incumbent facade and a
-    Handle-backed one word it differently, and the row is about the trace, not
-    the text. It does pin the exception type and rule out the bootstrap guard,
-    so the tokio half cannot pass without the observer actually refusing.
+    The refusal message is checked elsewhere. This helper checks the trace,
+    the exception type and that the observer refuses, rather than the
+    root-client bootstrap guard.
     """
     from monarch._src.actor.actor_mesh import _client_context, context
 
@@ -1280,18 +1195,6 @@ async def test_fm_cancelled_observer_survives_cancellation(make_gated):
     await _assert_cancelled_observer(make_gated)
 
 
-async def test_fm_cancelled_observer_current_survives_cancellation():
-    """Incumbent facade: a cancellation, when it takes, is real, and a later
-    await still resolves. The body can finish before ``as_asyncio()`` checks
-    its Handle, which then returns an already-done observer that cannot be
-    cancelled; the deterministic witness is ``_assert_cancelled_observer``."""
-    fut: Future[int] = Future._from_coro(_value(5))
-    first = fut.as_asyncio()
-    if first.cancel():
-        assert first.cancelled()
-    assert await fut == 5
-
-
 # -- fm.ready_get_on_loop_warns ----------------------------------------------
 
 
@@ -1307,12 +1210,11 @@ async def test_fm_ready_get_on_loop_warns_when_ready(make_observable):
 
 
 def test_fm_ready_get_on_tokio_refuses_current_cached_returns_and_reraises():
-    """Incumbent divergence: a *cached* Future read on a Tokio thread is not
-    refused -- the in_tokio guard only covers _Unawaited, so _Complete returns
-    and _Exception re-raises."""
-    done: Future[int] = Future._from_coro(_value(5))
+    """A cached receive can be read on Tokio without blocking: _Complete
+    returns its value and _Exception re-raises its stored error."""
+    done: Future[int] = _received_value(5)
     assert done.get() == 5  # -> _Complete, off loop
-    failed: Future[int] = Future._from_coro(_raise(ValueError("boom")))
+    failed: Future[int] = _received_error(ValueError("boom"))
     with pytest.raises(ValueError, match="boom"):
         failed.get()  # -> _Exception, off loop
 
@@ -1355,11 +1257,11 @@ def test_fm_ready_get_on_tokio_refuses_when_ready(make_observable, message):
 
 
 def test_fm_invalid_timeout_on_ready_current_bypasses_validation():
-    """Incumbent divergence: a cached Future ignores the timeout argument
+    """A cached receive ignores the timeout argument
     entirely, so an invalid value is silently accepted. Contrast
     test_get_invalid_timeout_does_not_spawn_or_mutate, which validates only
     because the Future is still _Unawaited."""
-    fut: Future[int] = Future._from_coro(_value(8))
+    fut: Future[int] = _received_value(8)
     assert fut.get() == 8  # -> _Complete
     for bad in (float("nan"), -1.0, float("inf")):
         assert fut.get(timeout=bad) == 8  # no ValueError
@@ -1376,9 +1278,9 @@ def test_fm_invalid_timeout_on_ready_validates_first(make_observable):
 
 
 async def test_fm_ready_as_asyncio_settlement_current_is_done_synchronously():
-    """Incumbent facade: a cached Future hands back an already-done loop
+    """A cached receive hands back an already-done loop
     future -- ``.done()`` is True before the loop runs."""
-    fut: Future[int] = Future._from_coro(_value(9))
+    fut: Future[int] = _received_value(9)
     await asyncio.to_thread(fut.get)  # resolve off the loop -> _Complete
     settled = fut.as_asyncio()
     assert settled.done()
@@ -1398,12 +1300,12 @@ async def test_fm_ready_as_asyncio_settlement_is_done_synchronously(make_observa
 # -- fm.terminal_baseexception_reobservable ----------------------------------
 
 
-def test_fm_terminal_baseexception_current_poisons_the_future():
-    """Incumbent divergence: a terminal BaseException escapes get() without
+def test_fm_terminal_baseexception_leaves_receive_taken():
+    """A terminal BaseException escapes an untimed get() without
     being cached (only ``except Exception`` stores into _Exception), so the
-    one-shot task is consumed while the Future still looks _Unawaited and a
+    receive is taken while the Future still looks _Unawaited and a
     second observation no longer yields the original error."""
-    fut: Future[int] = Future._from_coro(_raise(KeyboardInterrupt("stop")))
+    fut: Future[int] = _received_error(KeyboardInterrupt("stop"))
     with pytest.raises(KeyboardInterrupt):
         fut.get()
     assert isinstance(fut._status, future_mod._Unawaited)  # never cached
@@ -1411,7 +1313,7 @@ def test_fm_terminal_baseexception_current_poisons_the_future():
         fut.get()
     assert not isinstance(second.value, KeyboardInterrupt)
     assert isinstance(second.value, ValueError)
-    assert "PythonTask already consumed" in str(second.value)
+    assert "this receive was already taken" in str(second.value)
 
 
 @pytest.mark.parametrize("make_observable", TARGET_ONLY)
@@ -1426,9 +1328,8 @@ def test_fm_terminal_baseexception_remains_reobservable(make_observable):
 
 @pytest.mark.parametrize("make_observable", PRESERVED_BY_BOTH)
 def test_fm_off_loop_as_asyncio_refuses_and_is_non_consuming(make_observable):
-    """Off a running loop, as_asyncio() raises RuntimeError and consumes
-    nothing. The two representations differ only in the message, which this row
-    deliberately does not pin."""
+    """Off a running loop, each observable refuses as_asyncio() without
+    consuming its result. This test checks the error type, not its message."""
     _assert_off_loop_as_asyncio_refuses(make_observable)
 
 
@@ -1438,7 +1339,7 @@ def test_fm_off_loop_as_asyncio_refuses_and_is_non_consuming(make_observable):
 @pytest.mark.parametrize("make_observable", TARGET_ONLY)
 def test_fm_off_loop_await_raises_native(make_observable):
     """Target behavior: __await__() off a loop raises asyncio's native
-    RuntimeError without consuming the observable, where the incumbent Future
+    RuntimeError without consuming the observable. A lazy receive Future instead
     raises ValueError (test_await_with_no_event_loop_raises_and_is_non_consuming)."""
     _assert_off_loop_await_raises_native(make_observable)
 

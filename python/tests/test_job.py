@@ -30,11 +30,17 @@ import monarch._src.job.job_components as jc
 import monarch._src.job.job_sidecar as js
 import monarch._src.job.mount_config as mc
 import pytest
-from monarch._rust_bindings.monarch_hyperactor.handle import Handle, WouldBlockRuntime
+from monarch._rust_bindings.monarch_hyperactor.handle import (
+    _new_handle_pair,
+    Handle,
+    WouldBlockRuntime,
+)
 from monarch._rust_bindings.monarch_hyperactor.proc import ProcId, Uid
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
 from monarch._rust_bindings.monarch_hyperactor.testing import _make_handle_probe
+from monarch._src.actor.future import _ready_handle
+from monarch._src.actor.returns_future import returns_future
 from monarch._src.gather_mount.gather_mount import _CLOSE_TIMEOUT_S, GatherMount
 
 # Import directly from _src since job module isn't properly exposed
@@ -2656,20 +2662,21 @@ def test_mast_job_get_runner_is_lazy():
 def _exec_env():
     """Mock host_mesh -> procs -> bash_actors for driving exec_command.
 
-    procs.stop() returns a real Future whose coroutine flips
+    procs.stop() returns a returns_future body that flips
     markers["stop_driven"] only when it is actually awaited/driven, so a test can
     prove the finally ran to completion rather than merely that stop() was called.
     Each test configures the endpoint calls (bash_actors.run / run_python).
     """
     markers = {"stop_driven": False}
 
+    @returns_future
     async def _stop_impl() -> None:
         markers["stop_driven"] = True
 
     bash_actors = MagicMock()
     procs = MagicMock()
     procs.spawn.return_value = bash_actors
-    procs.stop.return_value = Future._from_coro(_stop_impl())
+    procs.stop.return_value = _stop_impl()
     host_mesh = MagicMock()
     host_mesh.spawn_procs.return_value = procs
     return host_mesh, procs, bash_actors, markers
@@ -2678,10 +2685,7 @@ def _exec_env():
 def _results_future(pairs):
     """A real Future resolving to pairs, an iterable of (rank_key, result)."""
 
-    async def _impl():
-        return pairs
-
-    return Future._from_coro(_impl())
+    return Future._from_handle(_ready_handle(pairs))
 
 
 def test_exec_command_returns_max_returncode():
@@ -3198,15 +3202,21 @@ def test_exec_command_reobserved_asyncio_shares_one_run():
     """Repeated asyncio observation shares the running command producer."""
     gate = {"entries": 0, "released": False, "completed": False}
 
-    async def gated_results():
+    handle, completer = _new_handle_pair()
+
+    def gated_results(*_args, **_kwargs):
         gate["entries"] += 1
-        while not gate["released"]:
-            await PythonTask.sleep(0.005)
+        return Future._from_handle(handle)
+
+    def release_results():
+        gate["released"] = True
+        if gate["completed"]:
+            return
         gate["completed"] = True
-        return [("rank0", {"returncode": 5, "stdout": "", "stderr": ""})]
+        completer.set_result([("rank0", {"returncode": 5, "stdout": "", "stderr": ""})])
 
     host_mesh, procs, bash_actors, markers = _exec_env()
-    bash_actors.run.call.return_value = Future._from_coro(gated_results())
+    bash_actors.run.call.side_effect = gated_results
     result = exec_command(host_mesh, ["exit", "5"])
 
     async def observe_twice():
@@ -3220,14 +3230,14 @@ def test_exec_command_reobserved_asyncio_shares_one_run():
         await asyncio.wait_for(wait_for_entry(), timeout=2)
         assert not first.done()
         assert not second.done()
-        gate["released"] = True
+        release_results()
         return await asyncio.wait_for(asyncio.gather(first, second), timeout=2)
 
     try:
         observed = asyncio.run(observe_twice())
     finally:
         original_error = sys.exc_info()[1]
-        gate["released"] = True
+        release_results()
         try:
             drained = result.get(timeout=2)
         except BaseException as cleanup_error:
@@ -3312,11 +3322,11 @@ def test_exec_command_drives_cleanup_on_base_exception():
 
     command_error = _CommandAbort("command aborted")
 
-    async def fail_command():
-        raise command_error
+    handle, completer = _new_handle_pair()
+    completer.set_exception(command_error)
 
     host_mesh, procs, bash_actors, markers = _exec_env()
-    bash_actors.run.call.return_value = Future._from_coro(fail_command())
+    bash_actors.run.call.return_value = Future._from_handle(handle)
 
     result = exec_command(host_mesh, ["echo", "hi"])
     for _ in range(2):
@@ -3342,9 +3352,10 @@ def test_exec_command_cleanup_failure_supersedes_command_failure():
     cleanup_error = _CleanupError("cleanup failed")
     cleanup_calls = 0
 
-    async def fail_command():
-        raise command_error
+    handle, completer = _new_handle_pair()
+    completer.set_exception(command_error)
 
+    @returns_future
     async def fail_cleanup():
         nonlocal cleanup_calls
         cleanup_calls += 1
@@ -3355,8 +3366,8 @@ def test_exec_command_cleanup_failure_supersedes_command_failure():
     procs.spawn.return_value = bash_actors
     host_mesh = MagicMock()
     host_mesh.spawn_procs.return_value = procs
-    bash_actors.run.call.return_value = Future._from_coro(fail_command())
-    procs.stop.return_value = Future._from_coro(fail_cleanup())
+    bash_actors.run.call.return_value = Future._from_handle(handle)
+    procs.stop.return_value = fail_cleanup()
     result = exec_command(host_mesh, ["echo", "hi"])
 
     for _ in range(2):
@@ -3381,26 +3392,33 @@ def test_exec_command_observer_cancellation_still_cleans_up():
         "cleanup_completions": 0,
     }
 
-    async def gated_command():
-        state["command_entries"] += 1
-        while not state["command_released"]:
-            await PythonTask.sleep(0.005)
-        state["command_completions"] += 1
-        return [("rank0", {"returncode": 6, "stdout": "", "stderr": ""})]
+    handle, completer = _new_handle_pair()
 
+    def gated_command(*_args, **_kwargs):
+        state["command_entries"] += 1
+        return Future._from_handle(handle)
+
+    def release_command():
+        state["command_released"] = True
+        if state["command_completions"]:
+            return
+        state["command_completions"] += 1
+        completer.set_result([("rank0", {"returncode": 6, "stdout": "", "stderr": ""})])
+
+    @returns_future
     async def gated_cleanup():
         state["cleanup_entries"] += 1
         while not state["cleanup_released"]:
-            await PythonTask.sleep(0.005)
+            await asyncio.sleep(0.005)
         state["cleanup_completions"] += 1
 
     bash_actors = MagicMock()
     procs = MagicMock()
     procs.spawn.return_value = bash_actors
-    procs.stop.return_value = Future._from_coro(gated_cleanup())
+    procs.stop.return_value = gated_cleanup()
     host_mesh = MagicMock()
     host_mesh.spawn_procs.return_value = procs
-    bash_actors.run.call.return_value = Future._from_coro(gated_command())
+    bash_actors.run.call.side_effect = gated_command
     result = exec_command(host_mesh, ["exit", "6"])
 
     async def cancel_after_start():
@@ -3415,7 +3433,7 @@ def test_exec_command_observer_cancellation_still_cleans_up():
         assert state["command_completions"] == 0
         assert observer.cancel()
         assert observer.cancelled()
-        state["command_released"] = True
+        release_command()
 
         retained_observer = result.as_asyncio()
 
@@ -3441,7 +3459,7 @@ def test_exec_command_observer_cancellation_still_cleans_up():
         observed = asyncio.run(cancel_after_start())
     finally:
         original_error = sys.exc_info()[1]
-        state["command_released"] = True
+        release_command()
         state["cleanup_released"] = True
         try:
             drained = result.get(timeout=2)
