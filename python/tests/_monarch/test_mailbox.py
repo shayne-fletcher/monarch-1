@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import asyncio
 import pickle
 from typing import (
     Any,
@@ -94,12 +95,7 @@ class Accumulator(Generic[S, U]):
     @property
     def initial_state(self) -> PythonMessage:
         return PythonMessage(
-            # pyrefly: ignore [bad-argument-type]
-            PythonMessageKind.CallMethod(
-                # pyrefly: ignore [bad-argument-count]
-                MethodSpecifier.ReturnsResponse(" @Accumulator.initial_state"),
-                None,
-            ),
+            cast(Any, PythonMessageKind.Result)(None),
             _to_frozen_buffer(pickle.dumps(self._initial_state)),
             [],
         )
@@ -146,9 +142,7 @@ async def test_accumulator() -> None:
         )
 
     async def recv_message() -> str:
-        messge = await receiver.recv_task().with_timeout(seconds=5).spawn_handle()
-        value = messge.decode()
-        return cast(str, value)
+        return cast(str, await asyncio.wait_for(receiver.recv(False).spawn_handle(), 5))
 
     post_message(1)
     # Receive the first message
@@ -236,8 +230,7 @@ async def test_reducer() -> None:
         ins._as_rust(),
     )
 
-    m = await receiver.recv_task().with_timeout(seconds=5).spawn_handle()
-    value = m.decode()
+    value = await asyncio.wait_for(receiver.recv(False).spawn_handle(), 5)
     assert "[reduced](start+msg0)" in value
 
     #  Note: occasionally test would hang without this stop

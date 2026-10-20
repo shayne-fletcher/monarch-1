@@ -125,6 +125,8 @@ class Future(Generic[R]):
             "constructed directly."
         )
 
+    # No production callers remain; only legacy characterization tests use this.
+    # The upcoming Future cleanup will delete it and update those tests.
     @classmethod
     def _from_coro(cls, coro: "Coroutine[Any, Any, R] | PythonTask[R]") -> "Future[R]":
         future = cast("Future[R]", object.__new__(cls))
@@ -135,8 +137,8 @@ class Future(Generic[R]):
 
     @classmethod
     def _from_pending(cls, reply: "PendingReply[R]") -> "Future[R]":
-        """Hold a stream item's collector without starting it. Transitional
-        until T292850732 lets ordinary Handles hold undecoded replies."""
+        """Hold a stream item's collector or a port receive without starting it.
+        Transitional until T292850732 lets ordinary Handles hold undecoded replies."""
         future = cast("Future[R]", object.__new__(cls))
         future._status = _Unawaited(reply)
         return future
