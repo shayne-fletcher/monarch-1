@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
-
 import asyncio
 import logging
 import math
@@ -35,6 +33,7 @@ from monarch._src.actor.telemetry import log_with_tracing
 # for annotations, so importing it only during type checking avoids a circular
 # runtime import.
 if TYPE_CHECKING:
+    from monarch._rust_bindings.monarch_hyperactor.endpoint import PendingReply
     from monarch._src.actor.returns_future import _BodyCell
 
 R = TypeVar("R")
@@ -82,7 +81,7 @@ async def _aincomplete(impl: Any, self: Any) -> Any:
 
 
 class _Unawaited(NamedTuple):
-    coro: PythonTask[Any]
+    coro: "PythonTask[Any] | PendingReply[Any]"
 
 
 class _Complete(NamedTuple):
@@ -132,6 +131,14 @@ class Future(Generic[R]):
         future._status = _Unawaited(
             coro if isinstance(coro, PythonTask) else PythonTask.from_coroutine(coro)
         )
+        return future
+
+    @classmethod
+    def _from_pending(cls, reply: "PendingReply[R]") -> "Future[R]":
+        """Hold a stream item's collector without starting it. Transitional
+        until T292850732 lets ordinary Handles hold undecoded replies."""
+        future = cast("Future[R]", object.__new__(cls))
+        future._status = _Unawaited(reply)
         return future
 
     @classmethod
@@ -274,6 +281,9 @@ class Future(Generic[R]):
                 if in_asyncio:
                     warnings.warn(_GET_ON_LOOP_WARNING, UserWarning, stacklevel=2)
                 try:
+                    # No Handle holds the result during this untimed wait, so
+                    # a concurrent observer gets the consumed-item error
+                    # (T292877484). An interrupted call discards its result.
                     v = coro.block_on()
                     self._status = _Complete(v)
                     return cast("R", v)
