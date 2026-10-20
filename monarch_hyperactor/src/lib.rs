@@ -34,7 +34,6 @@ pub mod proc_launcher;
 pub mod proc_mesh;
 pub mod py_cell;
 pub mod pympsc;
-pub mod pytokio;
 pub mod pywaker;
 pub mod runtime;
 pub mod selection;
@@ -42,6 +41,7 @@ pub mod shape;
 pub mod supervision;
 pub mod telemetry;
 pub mod testing;
+pub mod traceback;
 pub mod value_mesh;
 
 // Register types from dependent crates that don't have wirevalue as a dependency

@@ -48,10 +48,10 @@ use crate::context::PyInstance;
 use crate::endpoint::PyPendingReply;
 use crate::pickle::PicklingState;
 use crate::proc::PyActorAddr;
-use crate::pytokio::current_traceback;
 use crate::runtime::GilSite;
 use crate::runtime::monarch_with_gil;
 use crate::runtime::monarch_with_gil_blocking;
+use crate::traceback::current_traceback;
 
 #[derive(Clone, Debug)]
 #[pyclass(
@@ -852,8 +852,8 @@ mod tests {
     use crate::actor::PythonActor;
     use crate::context::PyContext;
     use crate::handle::PyHandle;
-    use crate::pytokio::ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK;
     use crate::runtime::ensure_python;
+    use crate::traceback::ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK;
 
     const WAIT: Duration = Duration::from_secs(30);
 

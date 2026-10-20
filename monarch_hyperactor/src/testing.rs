@@ -19,6 +19,8 @@
 //!    first waiter, for the `returns_future` overhead benchmark.
 //! 4. `_handle_receiver_count`, a probe for proving that a pending `get()`
 //!    has registered its local wait before a test requests an interrupt.
+//! 5. `_call_in_tokio_context`, a synchronous probe call with the runtime-entered
+//!    state that makes nested blocking unsafe, without a coroutine driver.
 //!
 //! Everything here is private support: nothing is re-exported from `monarch`
 //! and no production Python imports it.
@@ -92,10 +94,10 @@ impl ProbeOutcome {
 
 /// A closed control object over one Rust-produced `Handle`.
 ///
-/// The handle comes from the real [`PyHandle::spawn`] path (HDL-13), never from
-/// `PythonTask.spawn_handle()`, so the contract suite observes a genuine direct
-/// Rust producer. The producer parks on a release gate, so a test decides
-/// exactly when the terminal state becomes observable without sleeping.
+/// The handle comes from the real [`PyHandle::spawn`] path (HDL-13), so the
+/// contract suite observes a direct Rust producer. The producer parks on a
+/// release gate, so a test decides exactly when the terminal state becomes
+/// observable without sleeping.
 ///
 /// Two limits are load-bearing, not stylistic:
 ///
@@ -294,6 +296,17 @@ fn _make_test_struct(value: i64) -> PyTestStruct {
     PyTestStruct { value }
 }
 
+/// Call a synchronous test probe with Tokio's runtime-entered state set.
+///
+/// `block_on` polls this future on the calling thread: it starts no task and
+/// drives no Python coroutine. The probe must not wait for work that needs the
+/// GIL, since it keeps the GIL throughout the call. Tokio restores the previous
+/// runtime context when the probe returns or raises a Python exception.
+#[pyfunction]
+fn _call_in_tokio_context(f: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    get_tokio_runtime().block_on(async { f.call0().map(Bound::unbind) })
+}
+
 pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyTestStruct>()?;
     module.add_function(wrap_pyfunction!(_make_test_struct, module)?)?;
@@ -303,16 +316,40 @@ pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("_PROBE_SUCCESS_VALUE", PROBE_SUCCESS_VALUE)?;
     module.add_function(wrap_pyfunction!(_make_delayed_handle, module)?)?;
     module.add_function(wrap_pyfunction!(_delayed_handle_gate_stats, module)?)?;
+    module.add_function(wrap_pyfunction!(_call_in_tokio_context, module)?)?;
     crate::actor::register_testing_python_bindings(module)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use pyo3::types::PyCFunction;
+
     use super::*;
     use crate::runtime::GilSite;
     use crate::runtime::ensure_python;
     use crate::runtime::monarch_with_gil_blocking;
+
+    #[test]
+    fn tokio_context_probe_enters_the_nested_blocking_guard() {
+        ensure_python();
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            assert!(!crate::runtime::is_in_tokio_runtime());
+            let probe = PyCFunction::new_closure(py, None, None, |_args, _kwargs| {
+                assert!(crate::runtime::is_in_tokio_runtime());
+                // Merely entering a Tokio Handle would allow this nested wait.
+                // The helper must establish the runtime-entered guard too.
+                assert!(
+                    std::panic::catch_unwind(|| get_tokio_runtime().block_on(async {})).is_err(),
+                    "nested block_on should be rejected inside the probe"
+                );
+                Ok::<(), PyErr>(())
+            })
+            .expect("the synchronous probe should construct");
+            _call_in_tokio_context(probe.as_any()).expect("the probe should return");
+            assert!(!crate::runtime::is_in_tokio_runtime());
+        });
+    }
 
     const DELAYS: [Duration; 2] = [Duration::ZERO, Duration::from_millis(10)];
 

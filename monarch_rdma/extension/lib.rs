@@ -14,8 +14,7 @@
 //! the owner's `RMO-*` state machine:
 //!
 //! - **RMB-1** (one readiness surface): the method eagerly returns exactly one
-//!   observe-only `Handle[None]`; it creates no `PythonTask`, `Shared`, or other
-//!   readiness signal.
+//!   observe-only `Handle[None]`; it creates no other readiness signal.
 //! - **RMB-2** (explicit mesh): the exact `Handle[ProcMesh]` argument is retained
 //!   and resolved; the Handle keepalive is released immediately after resolution,
 //!   then the resolved mesh is downcast to `PyProcMesh` and cloned to a

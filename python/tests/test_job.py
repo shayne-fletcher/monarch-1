@@ -36,9 +36,11 @@ from monarch._rust_bindings.monarch_hyperactor.handle import (
     WouldBlockRuntime,
 )
 from monarch._rust_bindings.monarch_hyperactor.proc import ProcId, Uid
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
-from monarch._rust_bindings.monarch_hyperactor.testing import _make_handle_probe
+from monarch._rust_bindings.monarch_hyperactor.testing import (
+    _call_in_tokio_context,
+    _make_handle_probe,
+)
 from monarch._src.actor.future import _ready_handle
 from monarch._src.actor.returns_future import returns_future
 from monarch._src.gather_mount.gather_mount import _CLOSE_TIMEOUT_S, GatherMount
@@ -3029,7 +3031,7 @@ def test_exec_command_invalid_observation_does_not_cancel():
         with pytest.raises(RuntimeError, match="requires a running asyncio"):
             result.as_asyncio()
         with pytest.raises(WouldBlockRuntime):
-            PythonTask.spawn_blocking(result.get).block_on()
+            _call_in_tokio_context(result.get)
     finally:
         release_command.set()
 
