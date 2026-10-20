@@ -96,10 +96,6 @@ class _Handle(NamedTuple):
     handle: Handle[Any]
 
 
-class _Taken(NamedTuple):
-    pass
-
-
 class _Body(NamedTuple):
     """The body of a ``@returns_future`` function, run on the loop of its first
     observer (see ``monarch._src.actor.returns_future``)."""
@@ -107,7 +103,7 @@ class _Body(NamedTuple):
     body: "_BodyCell"
 
 
-_Status = _Unawaited | _Complete | _Exception | _Handle | _Taken | _Body
+_Status = _Unawaited | _Complete | _Exception | _Handle | _Body
 
 
 class Future(Generic[R]):
@@ -165,22 +161,6 @@ class Future(Generic[R]):
         future._status = _Body(body)
         return future
 
-    def _take_inner(self) -> "PythonTask[R]":
-        """Take the underlying one-shot ``PythonTask`` from this Future.
-
-        Awaiting the task drives its Rust future inline as part of the caller.
-        Calling ``spawn()`` and awaiting its ``Shared`` observes a separately
-        running producer that is not aborted when the observer is dropped. Only
-        valid on a Future that has not yet been awaited or resolved; the Future is
-        spent afterward (a second take, or any get()/await, raises).
-        """
-        match self._status:
-            case _Unawaited(coro=coro):
-                self._status = _Taken()
-                return cast("PythonTask[R]", coro)
-            case _:
-                raise ValueError("Future has already been awaited or resolved.")
-
     def _as_handle(self) -> "Handle[R]":
         match self._status:
             case _Unawaited(coro=coro):
@@ -189,7 +169,7 @@ class Future(Generic[R]):
                 return cast("Handle[R]", handle)
             case _Handle(handle=handle):
                 return cast("Handle[R]", handle)
-            case _Complete() | _Exception() | _Taken():
+            case _Complete() | _Exception():
                 raise ValueError("Future does not have a Handle in its current state.")
             case _Body():
                 # RF-6: waiting on the Handle of a body nobody has started
@@ -304,8 +284,6 @@ class Future(Generic[R]):
                 return cast("R", value)
             case _Exception(exe=exe):
                 raise exe
-            case _Taken():
-                raise ValueError("Future was consumed.")
             case _Body(body=body):
                 # Refuse before binding, leaving the body unstarted.
                 if in_tokio:
@@ -330,8 +308,6 @@ class Future(Generic[R]):
                         "Future cannot be awaited on a Tokio thread; observe it "
                         "from an asyncio loop or synchronous context."
                     )
-                case _Taken():
-                    raise ValueError("Future was consumed.")
                 case _:
                     raise ValueError(
                         "already converted into a synchronous future, use 'get' to get the value."
@@ -374,8 +350,6 @@ class Future(Generic[R]):
                     else exe
                 )
                 return cast("asyncio.Future[R]", failed)
-            case _Taken():
-                raise ValueError("Future was consumed.")
             case _Body(body=body):
                 return cast("asyncio.Future[R]", body.as_asyncio(loop))
             case _:
