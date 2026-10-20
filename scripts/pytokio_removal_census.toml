@@ -342,8 +342,8 @@ doc_legacy_surface = "PythonTask|PyShared|pytokio"
 
 [totals]
 py_python_task_new = 0
-raw_python_task_new = 2
-from_coro = 1
+raw_python_task_new = 0
+from_coro = 0
 rust_from_coro = 0
 from_coroutine = 1
 take_inner = 0
@@ -356,7 +356,7 @@ mesh_storage_spawn = 0
 bootstrap_storage_spawn = 0
 shared_reconstruction = 0
 py_is_tokio_thread = 0
-pytokio_import = 11
+pytokio_import = 10
 pytokio_module_ref = 5
 helper_symbol = 6
 helper_definition = 1
@@ -734,7 +734,7 @@ owns = [
   "fc.actor_mesh.PortReceiver.recv[Future._from_coroself._recv]",
   "hs.mailbox.PyPythonTask",
   "hs.mailbox.PythonTask",
-  "mr.mailbox.file",
+  "im.mailbox.module",
   "np.mailbox.PythonOncePortReceiver.recv_task",
   "np.mailbox.PythonPortReceiver.recv_task"
 ]
@@ -773,13 +773,14 @@ owns = [
   "hs.attrs.unawaited_pytokio_traceback",
   "hs.endpoint.ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK",
   "hs.endpoint.current_traceback",
+  "hs.mailbox.current_traceback",
+  "hs.mailbox.ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK",
   "hs.lib.register_python_bindings",
   "im.bootstrap.module",
   "im.context.module",
   "im.endpoint.module",
   "im.host_mesh.module",
   "im.logging.module",
-  "im.mailbox.module",
   "im.pickle.module",
   "im.proc_mesh.module",
   "im.supervision.module",
@@ -801,7 +802,8 @@ owns = [
   "mr.attrs.file",
   "mr.endpoint.file",
   "mr.lib.file",
-  "mr.lib.file_2"
+  "mr.lib.file_2",
+  "mr.mailbox.file"
 ]
 
 [[transition]]
@@ -1070,25 +1072,29 @@ path = "fbcode/monarch/python/monarch/_src/actor/actor_mesh.py"
 symbol = "PortReceiver.recv[Future._from_coro(self._recv())]"
 operation = "from_coro"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.5b"
+transition_revision = "self"
 public_operation = "PortReceiver.recv()"
 caller_contexts = "sync and asyncio"
 return_surface = "Future[T]"
 consumer = "user code"
-driver = "awaited or blocked on by the caller"
-start_point = "Future._from_coro synchronously captures the Monarch context and may bootstrap or fail before returning; the coroutine body and native recv_task call begin only when the Future is driven"
-abandonment = "after successful construction, dropping an unobserved Future cannot undo context capture but calls neither native receiver and claims no message"
-eager_effect = "an eager replacement would enter _recv and call the native recv_task binding during recv(); current construction only captures context"
-drop_behavior = "no message is consumed; a later regular or once receive gets the pending message"
-first_side_effect = "source-grounded: construction-time context capture and possible client bootstrap; tested: recv_task is the first receive effect and waits for observation"
-unobserved_error = "a synchronous context or task-construction failure raises before any Future exists; a never-driven Future enters no receive and produces no receive or decode error; driven errors surface to the observer"
-disposition = "require a binding-specific design"
+driver = "the first observer: untimed get drives the native receive through signal_safe_block_on; await, as_asyncio and timed get spawn it as a Handle that stops once unobserved"
+start_point = "recv captures the Monarch context and creation traceback; the native receive starts only when the Future is first observed"
+abandonment = "an unobserved Future runs nothing; a spawned receive stops cooperatively once every native observer is gone, and a racing message can still be taken"
+eager_effect = "none: receiving and decoding wait for first observation, as before"
+drop_behavior = "dropping an unobserved Future claims nothing; a spawned receive releases its receiver after processing loss of every native observer; an asyncio cancellation leaves its internal native waiter alive until completion"
+first_side_effect = "context capture may bootstrap or fail before returning; the first receive effect, including claiming a once port, happens on first observation"
+unobserved_error = "construction errors raise synchronously; a never-observed receive produces no error; receive and decode errors surface to the observer"
+disposition = "preserve timing"
 semantic_class = "deferred_receive_claim"
 oracle = [
   "fbcode//monarch/python/tests:test_receive_ownership_characterization::test_recv_futures_observed_in_reverse_receive_in_observation_order",
   "fbcode//monarch/python/tests:test_receive_ownership_characterization::test_discarded_regular_recv_claims_nothing",
   "fbcode//monarch/python/tests:test_receive_ownership_characterization::test_discarded_once_recv_at_public_boundary_claims_nothing",
+  "fbcode//monarch/python/tests:test_receive_ownership_characterization::test_timed_out_recv_keeps_its_receive",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::mailbox::tests::port_recv_waits_for_observation",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::mailbox::tests::spawned_receive_stops_when_unobserved"
 ]
 
 [[site]]
@@ -1861,8 +1867,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/mailbox.rs"
 symbol = "PyPythonTask"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.5b"
+transition_revision = "self"
 
 [[site]]
 id = "hs.mailbox.PythonTask"
@@ -1872,8 +1879,31 @@ path = "fbcode/monarch/monarch_hyperactor/src/mailbox.rs"
 symbol = "PythonTask"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.5b"
+transition_revision = "self"
+
+[[site]]
+id = "hs.mailbox.current_traceback"
+category = "helper_residue"
+language = "rust"
+path = "fbcode/monarch/monarch_hyperactor/src/mailbox.rs"
+symbol = "current_traceback"
+operation = "helper_symbol"
+scope = "production"
+state = "legacy"
+transition = "6.8"
+
+[[site]]
+id = "hs.mailbox.ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK"
+category = "helper_residue"
+language = "rust"
+path = "fbcode/monarch/monarch_hyperactor/src/mailbox.rs"
+symbol = "ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK"
+operation = "helper_symbol"
+scope = "test"
+state = "legacy"
+transition = "6.8"
 
 [[site]]
 id = "hs.pickle.PyPythonTask"
@@ -3080,8 +3110,9 @@ path = "fbcode/monarch/python/monarch/_rust_bindings/monarch_hyperactor/mailbox.
 symbol = "<module>"
 operation = "pytokio_import"
 scope = "stub"
-state = "legacy"
-transition = "6.8"
+state = "migrated"
+transition = "6.5b"
+transition_revision = "self"
 members = ["PythonTask"]
 
 [[site]]
@@ -3624,7 +3655,7 @@ symbol = "<file>"
 operation = "pytokio_module_ref"
 scope = "production"
 state = "legacy"
-transition = "6.5b"
+transition = "6.8"
 
 [[site]]
 id = "mr.pickle.file"
@@ -3786,21 +3817,23 @@ path = "fbcode/monarch/monarch_hyperactor/src/mailbox.rs"
 symbol = "PythonOncePortReceiver::recv_task"
 operation = "raw_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.5b"
-constructor = "raw PythonTask"
-return_surface = "raw PythonTask returned from PythonOncePortReceiver::recv_task"
-consumer = "PortReceiver._recv for a once port"
-driver = "awaited by the PortReceiver.recv coroutine"
-start_point = "the once receiver is taken synchronously at construction; only the await is deferred"
-abandonment = "possible, and the receiver is already consumed"
-eager_effect = "an eager replacement would begin awaiting the receiver during recv_task; current construction only takes ownership"
-drop_behavior = "the reply is lost; the receiver cannot be reused"
-unobserved_error = "PythonTask::new can fail after the synchronous take, leaving the receiver consumed with no task; after successful construction, receive and conversion failures occur only when driven and surface to the observer"
-disposition = "require a binding-specific design"
-semantic_class = "sync_partial_effect_lazy_tail"
+transition_revision = "self"
+constructor = "PyPendingReply::for_port_receive"
+return_surface = "unstarted PendingReply for a decoded payload or error"
+consumer = "PortReceiver.recv for a once port"
+driver = "the first observer: a stop-when-unobserved Handle, or untimed get through signal_safe_block_on"
+start_point = "context and traceback capture at recv; the once receiver is claimed when the item is first observed"
+abandonment = "an unobserved item claims nothing; a spawned receive stops cooperatively once unobserved, releasing the once receiver and its port"
+eager_effect = "none: the claim waits for first observation, as before"
+drop_behavior = "dropping an unobserved item leaves the once receiver claimable; stopping a spawned receive releases the once receiver and unregisters its port"
+unobserved_error = "construction errors raise at recv; a receive observed after the claim fails with OncePort is already used; receive and decode errors surface to the observer"
+disposition = "preserve timing"
+semantic_class = "deferred_receive_claim"
 oracle = [
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::mailbox::tests::once_recv_task_consumes_receiver_at_construction",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::mailbox::tests::once_recv_claims_on_first_observation",
+  "fbcode//monarch/python/tests:test_receive_ownership_characterization::test_discarded_once_recv_at_public_boundary_claims_nothing"
 ]
 
 [[site]]
@@ -3811,21 +3844,23 @@ path = "fbcode/monarch/monarch_hyperactor/src/mailbox.rs"
 symbol = "PythonPortReceiver::recv_task"
 operation = "raw_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.5b"
-constructor = "raw PythonTask"
-return_surface = "raw PythonTask returned from PythonPortReceiver::recv_task"
-consumer = "PortReceiver._recv, which decodes the message"
-driver = "awaited by the PortReceiver.recv coroutine"
-start_point = "lazy; the receiver Arc is cloned but the lock and recv happen only when driven"
-abandonment = "possible; discarding the task claims nothing"
-eager_effect = "an eager replacement would lock the receiver and begin recv during recv_task; current construction only clones the Arc"
-drop_behavior = "no message is consumed; the next observer gets it"
-unobserved_error = "PythonTask::new can fail after cloning the Arc, but dropping that clone leaves the receiver reusable; after successful construction, receive and conversion failures occur only when driven and surface to the observer"
-disposition = "require a binding-specific design"
+transition_revision = "self"
+constructor = "PyPendingReply::for_port_receive"
+return_surface = "unstarted PendingReply for a decoded payload or error"
+consumer = "PortReceiver.recv"
+driver = "the first observer: a stop-when-unobserved Handle, or untimed get through signal_safe_block_on"
+start_point = "recv captures context and traceback and clones the native receiver; the lock and receive wait for first observation"
+abandonment = "an unobserved item claims nothing; a spawned receive stops cooperatively once unobserved, and a racing message can still be taken"
+eager_effect = "none: receiving and decoding wait for first observation, as before"
+drop_behavior = "dropping an unobserved item leaves the next message queued; a spawned receive releases its receiver after processing loss of every native observer"
+unobserved_error = "construction errors raise at recv; receive and decode errors surface to the observer"
+disposition = "preserve timing"
 semantic_class = "deferred_receive_claim"
 oracle = [
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::mailbox::tests::port_recv_task_claims_only_when_driven",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::mailbox::tests::port_recv_waits_for_observation",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::mailbox::tests::spawned_receive_stops_when_unobserved"
 ]
 
 [[site]]
