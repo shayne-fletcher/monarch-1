@@ -32,8 +32,8 @@ the risky send-side pending path ran instead of resolving inline.
 ``test_pending_proc_mesh_bare_pickle_round_trips_to_a_working_mesh`` does
 establish its precondition, asserting ``poll() is None`` before pickling, so it
 pins a real pending-before-pickle round trip. It does not show that
-``reduce_shared`` took its blocking branch: the producer is already spawned and
-can resolve between the assertion and the reducer.
+``ProcMesh.__reduce_ex__`` took its blocking ``get()`` branch: the producer is
+already spawned and can resolve between the assertion and the reducer.
 
 ActorMesh bare-pickle coverage is split across two tests.
 ``actor_mesh::tests::pending_bare_actor_mesh_pickle_waits_for_release`` gates
@@ -274,15 +274,16 @@ def test_resolved_proc_mesh_survives_bare_pickle_outside_monarch() -> None:
 def test_pending_proc_mesh_bare_pickle_round_trips_to_a_working_mesh() -> None:
     """A proc mesh pending at pickle time bare-pickles to a working mesh.
 
-    This reduces through the generic `reduce_shared`. `poll()` is exposed here,
-    so unlike a bare actor mesh the pending precondition is established rather
-    than raced: `poll() is None` immediately before `dumps`. It does not follow
-    that `reduce_shared` took its blocking branch -- the producer is already
+    Outside a message this reduces through `ProcMesh.__reduce_ex__`'s
+    `poll()`-then-`get()` fallback. `poll()` is exposed here, so unlike a bare
+    actor mesh the pending precondition is established rather than raced:
+    `poll() is None` immediately before `dumps`. It does not follow that the
+    reducer took its blocking `get()` branch -- the producer is already
     spawned, so it may resolve between that assertion and the reducer's own
     `poll()`, and the ready fast path is then taken. What is pinned is the
     round-trip outcome from a pending start. The blocking branch itself is
     pinned deterministically by
-    `actor_mesh::tests::pending_bare_actor_mesh_pickle_waits_for_release`."""
+    `test_proc_mesh.py::test_raw_proc_mesh_pickle_blocks_on_proc_mesh_init`."""
     with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
         host = state.hosts
         proc_mesh = host.spawn_procs(name="target_proc")
