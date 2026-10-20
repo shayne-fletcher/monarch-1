@@ -1722,7 +1722,7 @@ mod tests {
 
     /// Reserve through the real pending reducer and retain its fill for a
     /// directly driven resolve. The tuple must contain the slot-pop sentinel,
-    /// with no pytokio observer hidden in its arguments.
+    /// rather than an observer hidden in its arguments.
     fn pending_reduce(py: Python<'_>, mesh: &dyn ActorMeshProtocol) -> PicklingState {
         install_pickle_test_module(py).expect("the pickle bindings should install");
         let (state, (callable, args)) = PicklingState::collect_mesh_references_for_test(|| {

@@ -40,7 +40,6 @@ from monarch._rust_bindings.monarch_hyperactor.host_mesh import (
     HostMesh as HyHostMesh,
 )
 from monarch._rust_bindings.monarch_hyperactor.proc import ProcId, Uid
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.shape import Point, Shape, Slice
 from monarch._rust_bindings.monarch_hyperactor.testing import _handle_receiver_count
 from monarch._src.actor.actor_mesh import (
@@ -108,22 +107,14 @@ def test_multi_host_mesh() -> None:
         assert hy_sliced.region.labels == sliced.region.labels
         assert hy_sliced.region.slice() == sliced.region.slice()
 
-        release_host_mesh = threading.Event()
-
-        async def resolve_host_mesh():
-            await PythonTask.spawn_blocking(release_host_mesh.wait)
-            return hy_host
-
         # Keep the native mesh unresolved so slicing must take the pending path.
-        host._inner_host_mesh = PythonTask.from_coroutine(
-            resolve_host_mesh()
-        ).spawn_handle()
+        host._inner_host_mesh, complete_host_mesh = _new_handle_pair()
         try:
             assert host._hy_host_mesh.poll() is None
             pending_sliced = host._new_with_shape(slice_shape)
             assert pending_sliced._hy_host_mesh.poll() is None
         finally:
-            release_host_mesh.set()
+            complete_host_mesh.set_result(hy_host)
 
         hy_pending_sliced = pending_sliced._hy_host_mesh.get()
         assert hy_pending_sliced.region.labels == pending_sliced.region.labels

@@ -1508,7 +1508,7 @@ mod tests {
         // built with.
 
         // Definitely not declared in this crate's inventory:
-        let bad_key: &'static str = "monarch_hyperactor::pytokio::unawaited_pytokio_traceback";
+        let bad_key: &'static str = "undeclared_test_module::unknown_config_key";
 
         // Make an Attrs that pretends to have that key. u32 already
         // implements AttrValue -> SerializableValue, so we can just
