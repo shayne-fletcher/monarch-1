@@ -492,6 +492,8 @@ impl PicklingState {
     /// up `context()` there could create a new client instead. The guard makes
     /// the calling actor's instance available to Port reconstruction during
     /// decoding, then restores the previous receiver, including on error.
+    /// Other unpickle hooks that call `context()` do not inherit the caller's
+    /// Monarch context on this path (T292966706).
     ///
     /// This consumes the stored payload and references and returns the decoded
     /// Python object or a decoding error. The state remains consumed if decoding

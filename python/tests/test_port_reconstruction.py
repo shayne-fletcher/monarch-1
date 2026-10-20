@@ -73,6 +73,17 @@ class PortOwner(Actor):
         )
         return Port(PortRef(port_id), context().actor_instance._as_rust(), None)
 
+    @endpoint
+    async def send_doomed_port(self, destination: Port[Port[int]]) -> None:
+        """Put a Port in a channel payload, not in an endpoint's reply."""
+        port_id = PortId(
+            actor_id=ActorAddr(addr="local:0", proc_name="bogus", actor_name="bogus"),
+            port=1234,
+        )
+        destination.send(
+            Port(PortRef(port_id), context().actor_instance._as_rust(), None)
+        )
+
 
 class _CallerMixin:
     """Captures the sender of any message this actor failed to deliver."""
@@ -108,6 +119,14 @@ class AsyncCaller(_CallerMixin, Actor):
         port.send(1)
 
     @endpoint
+    async def send_doomed_via_channel(self) -> bool:
+        sender, receiver = Channel[Port[int]].open()
+        await self._owner.send_doomed_port.call_one(sender)
+        port = await receiver.recv()
+        port.send(1)
+        return _client_context._val is not None
+
+    @endpoint
     async def collect_identity(self) -> Tuple[str, str]:
         observed = self._undeliverable[0] if self._undeliverable else ""
         return observed, str(context().actor_instance.actor_id)
@@ -128,6 +147,17 @@ class SyncCaller(_CallerMixin, Actor):
     def send_doomed(self) -> None:
         port = self._owner.make_doomed_port.call_one().get()
         port.send(1)
+
+    @endpoint
+    def send_doomed_via_channel(self) -> bool:
+        sender, receiver = Channel[Port[int]].open()
+        self._owner.send_doomed_port.call_one(sender).get()
+        # A timed get() decodes on a Tokio worker, where only the restored
+        # context identifies this actor; an untimed get() here would decode on
+        # this actor's own thread.
+        port = receiver.recv().get(timeout=30)
+        port.send(1)
+        return _client_context._val is not None
 
     @endpoint
     def collect_identity(self) -> Tuple[str, str]:
@@ -239,6 +269,29 @@ def test_port_reconstruction_binds_exact_async_caller_instance() -> None:
         assert observed == caller_actor_id, (
             f"Port bound to {observed}, expected the caller {caller_actor_id}"
         )
+    finally:
+        pm.stop().get()
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("caller_class", [AsyncCaller, SyncCaller])
+def test_channel_port_reconstruction_retains_receiving_actor(
+    caller_class: type[CallerT],
+) -> None:
+    """Channel unpickling must restore the receiver's complete Monarch context.
+
+    A receiver guard alone would not make context() available to other unpickle
+    hooks. Here the Port reconstructor calls context(), and its bounced send
+    identifies the receiving actor without bootstrapping a root client.
+    """
+    pm, _owner, caller = _spawn_owner_and_caller(caller_class)
+    try:
+        assert not caller.send_doomed_via_channel.call_one().get(), (
+            "channel decoding bootstrapped a client in the receiving actor's proc"
+        )
+        observed, actor_id = _await_observed_sender(caller)
+        assert observed, "no bounced envelope returned to the receiving actor"
+        assert observed == actor_id
     finally:
         pm.stop().get()
 
