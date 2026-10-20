@@ -20,8 +20,8 @@ from typing import (
 from monarch._rust_bindings.monarch_hyperactor.actor import MethodSpecifier
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import ActorMeshProtocol
 from monarch._rust_bindings.monarch_hyperactor.context import Instance
+from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 from monarch._rust_bindings.monarch_hyperactor.mailbox import OncePortRef, PortRef
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Shape
 from monarch._rust_bindings.monarch_hyperactor.value_mesh import ValueMesh
 from typing_extensions import ParamSpec
@@ -42,24 +42,48 @@ if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.value_mesh import ValueMesh
 
 @final
+class PendingReply(Generic[R]):
+    """An unstarted stream-item collector held by a Monarch Future.
+
+    Internal, transitional carrier until Handles can hold undecoded replies.
+    Each observation method takes the collector once; a second take raises
+    ValueError.
+    """
+
+    def spawn_handle(self) -> Handle[R]:
+        """Start taking and unpickling one queued reply on Tokio and return
+        a Handle observing its value or error."""
+        ...
+    def block_on(self) -> R:
+        """Take and unpickle one reply, blocking the caller until it completes.
+        Off the main thread the caller drives collection inline; on the main
+        thread Tokio drives it while the caller waits and checks for signals."""
+        ...
+
+@final
 class ValueStream(Iterator[Future[Any]]):
     """
     An iterator that yields Futures for streaming endpoint responses.
 
-    Each call to __next__ returns a Future that resolves to the next
-    response value from the stream.
+    Replies arrive and queue eagerly. Each item takes and unpickles one queued
+    reply only when its Future is first observed, in observation order.
+    Each __next__ uses one iteration slot. Dropping an item unobserved leaves
+    one reply unread after the slots are exhausted; observe every item taken
+    if all replies must be read.
     """
 
     def __iter__(self) -> "ValueStream": ...
     def __next__(self) -> Future[Any]:
         """
-        Get the next response as a Future.
+        Reserve one iteration slot and return a Future for a queued reply.
+        Its collector starts only when the Future is first observed.
 
         Returns:
             A Future that resolves to the next response value.
 
         Raises:
-            StopIteration: When all expected responses have been received.
+            StopIteration: After one iteration slot per actor has been used,
+                whether or not those items have been observed.
         """
         ...
 
@@ -103,10 +127,12 @@ class ActorEndpoint(Generic[P, R]):
         ...
     def stream(self, *args: P.args, **kwargs: P.kwargs) -> ValueStream:
         """
-        Broadcasts to all actors and yields their responses as a stream / generator.
+        Send to all actors now and return an iterator of Futures.
 
-        This enables processing results from multiple actors incrementally as
-        they become available. Returns an async generator of response values.
+        Replies arrive and queue eagerly. Each item takes and unpickles one
+        queued reply only when first observed. Each next() uses one iteration
+        slot; dropping an item unobserved leaves one reply unread after the
+        slots are exhausted. Observe every item taken to read every reply.
         """
         ...
     def broadcast(self, *args: P.args, **kwargs: P.kwargs) -> None:
@@ -198,10 +224,12 @@ class Remote(Generic[P, R]):
         ...
     def stream(self, *args: P.args, **kwargs: P.kwargs) -> ValueStream:
         """
-        Broadcasts to all actors and yields their responses as a stream / generator.
+        Send to all actors now and return an iterator of Futures.
 
-        This enables processing results from multiple actors incrementally as
-        they become available. Returns an async generator of response values.
+        Replies arrive and queue eagerly. Each item takes and unpickles one
+        queued reply only when first observed. Each next() uses one iteration
+        slot; dropping an item unobserved leaves one reply unread after the
+        slots are exhausted. Observe every item taken to read every reply.
         """
         ...
     def broadcast(self, *args: P.args, **kwargs: P.kwargs) -> None:
