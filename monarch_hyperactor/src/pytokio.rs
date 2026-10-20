@@ -152,9 +152,9 @@ pub fn reduce_shared<'py>(
 }
 
 declare_attrs! {
-    /// If true, capture a Python stack trace at `PythonTask` creation
-    /// time and log it when a spawned task errors but is never
-    /// awaited/polled.
+    /// If true, capture a Python stack trace when a `PythonTask` or an
+    /// endpoint `call`/`call_one`/`choose` is created, and log it when that
+    /// work errors but is never awaited/polled.
     @meta(CONFIG = ConfigAttr::new(
         Some("MONARCH_HYPERACTOR_ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK".to_string()),
         Some("enable_unawaited_python_task_traceback".to_string()),
@@ -174,7 +174,7 @@ py_global!(actor_mesh_module, "monarch._src.actor", "actor_mesh");
 ///
 /// Returns `None` when disabled to avoid the overhead of
 /// `traceback.extract_stack()`.
-fn current_traceback() -> PyResult<Option<Py<PyAny>>> {
+pub(crate) fn current_traceback() -> PyResult<Option<Py<PyAny>>> {
     if hyperactor_config::global::get(ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK) {
         monarch_with_gil_blocking(GilSite::Traceback, |py| {
             Ok(Some(
