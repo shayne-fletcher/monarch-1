@@ -342,9 +342,9 @@ doc_legacy_surface = "PythonTask|PyShared|pytokio"
 
 [totals]
 py_python_task_new = 0
-raw_python_task_new = 3
+raw_python_task_new = 2
 from_coro = 1
-rust_from_coro = 1
+rust_from_coro = 0
 from_coroutine = 1
 take_inner = 0
 rust_take_inner = 0
@@ -356,9 +356,9 @@ mesh_storage_spawn = 0
 bootstrap_storage_spawn = 0
 shared_reconstruction = 0
 py_is_tokio_thread = 0
-pytokio_import = 12
+pytokio_import = 11
 pytokio_module_ref = 5
-helper_symbol = 8
+helper_symbol = 6
 helper_definition = 1
 would_block_surface = 0
 binding_stub_symbol = 2
@@ -718,11 +718,8 @@ owns = [
 id = "6.5a"
 allowed_states = ["migrated", "removed_upstream"]
 owns = [
-  "hs.endpoint.ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK",
   "hs.endpoint.PyPythonTask",
   "hs.endpoint.PythonTask",
-  "hs.endpoint.current_traceback",
-  "mr.endpoint.file",
   "np.endpoint.PyValueStream.__next__",
   "np.endpoint.call",
   "np.endpoint.value_collector",
@@ -774,6 +771,8 @@ owns = [
   "doc.pytokio-appendix.document",
   "hd.pytokio.ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK",
   "hs.attrs.unawaited_pytokio_traceback",
+  "hs.endpoint.ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK",
+  "hs.endpoint.current_traceback",
   "hs.lib.register_python_bindings",
   "im.bootstrap.module",
   "im.context.module",
@@ -800,6 +799,7 @@ owns = [
   "im.test_python_actors.module",
   "im.test_rdma_readiness_and_operations.test_ensure_init_observes_its_supplied_shared",
   "mr.attrs.file",
+  "mr.endpoint.file",
   "mr.lib.file",
   "mr.lib.file_2"
 ]
@@ -1719,8 +1719,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/endpoint.rs"
 symbol = "PyPythonTask"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.5a"
+transition_revision = "self"
 
 [[site]]
 id = "hs.endpoint.PythonTask"
@@ -1730,8 +1731,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/endpoint.rs"
 symbol = "PythonTask"
 operation = "helper_symbol"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.5a"
+transition_revision = "self"
 
 [[site]]
 id = "hs.endpoint.current_traceback"
@@ -1742,7 +1744,7 @@ symbol = "current_traceback"
 operation = "helper_symbol"
 scope = "production"
 state = "legacy"
-transition = "6.5a"
+transition = "6.8"
 
 [[site]]
 id = "hs.endpoint.ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK"
@@ -1753,7 +1755,7 @@ symbol = "ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK"
 operation = "helper_symbol"
 scope = "test"
 state = "legacy"
-transition = "6.5a"
+transition = "6.8"
 
 [[site]]
 id = "hs.handle.ensure_python"
@@ -3039,8 +3041,9 @@ path = "fbcode/monarch/python/monarch/_rust_bindings/monarch_hyperactor/endpoint
 symbol = "<module>"
 operation = "pytokio_import"
 scope = "stub"
-state = "legacy"
+state = "migrated"
 transition = "6.8"
+transition_revision = "self"
 members = ["PythonTask"]
 
 [[site]]
@@ -3563,7 +3566,7 @@ symbol = "<file>"
 operation = "pytokio_module_ref"
 scope = "production"
 state = "legacy"
-transition = "6.5a"
+transition = "6.8"
 
 [[site]]
 id = "mr.handle.file"
@@ -3703,8 +3706,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/endpoint.rs"
 symbol = "PyValueStream::__next__"
 operation = "raw_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.5a"
+transition_revision = "self"
 constructor = "raw PythonTask"
 return_surface = "raw PythonTask returned from PyValueStream::__next__"
 consumer = "the per-element Future yielded by ValueStream iteration"
@@ -3844,8 +3848,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/endpoint.rs"
 symbol = "PyValueStream::__next__"
 operation = "rust_from_coro"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.5a"
+transition_revision = "self"
 
 [[site]]
 id = "rf.endpoint.wrap_in_future"

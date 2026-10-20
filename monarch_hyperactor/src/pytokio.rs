@@ -153,8 +153,8 @@ pub fn reduce_shared<'py>(
 
 declare_attrs! {
     /// If true, capture a Python stack trace when a `PythonTask` or an
-    /// endpoint `call`/`call_one`/`choose` is created, and log it when that
-    /// work errors but is never awaited/polled.
+    /// endpoint `call`/`call_one`/`choose` or `ValueStream` item is created,
+    /// and log it when that work errors but is never awaited/polled.
     @meta(CONFIG = ConfigAttr::new(
         Some("MONARCH_HYPERACTOR_ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK".to_string()),
         Some("enable_unawaited_python_task_traceback".to_string()),

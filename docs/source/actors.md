@@ -433,7 +433,9 @@ with procs.activate():
 
 #### 6. `stream()` - Streaming Responses
 
-Stream responses as they arrive.
+`stream()` sends to all actors immediately and returns an iterator of Futures. Replies arrive and queue eagerly, but each item takes and unpickles one queued reply only when first observed. An item nobody observes takes and unpickles nothing.
+
+Each `next()` uses one iteration slot. Dropping an item unobserved leaves one reply unread after the slots are exhausted. Observe every item taken if you need every reply.
 
 ```python
 # Process responses as they arrive (stream returns Iterator[Future])
