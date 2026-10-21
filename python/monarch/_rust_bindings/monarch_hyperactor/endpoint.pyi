@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
-
 import asyncio
 from typing import (
     Any,
@@ -80,10 +78,16 @@ class ActorEndpoint(Generic[P, R]):
     def _call_name(self) -> Any:
         """Something to use in InputChecker to represent calling this thingy."""
         ...
-    def call(self, *args: P.args, **kwargs: P.kwargs) -> "Future[ValueMesh[R]]": ...
+    def call(self, *args: P.args, **kwargs: P.kwargs) -> "Future[ValueMesh[R]]":
+        """Send to all actors and start collecting their replies into a ValueMesh.
+
+        The Future observes completion; dropping it does not stop collection.
+        """
+        ...
     def choose(self, *args: P.args, **kwargs: P.kwargs) -> Future[R]:
         """
-        Sends a message to a randomly selected actor and waits for its result.
+        Send to a randomly selected actor and start collecting its reply.
+        The Future observes completion; dropping it does not stop collection.
 
         Each call independently selects an actor uniformly at random. Selection
         does not account for actor load, so calls are balanced only across many
@@ -91,7 +95,12 @@ class ActorEndpoint(Generic[P, R]):
         deterministic.
         """
         ...
-    def call_one(self, *args: P.args, **kwargs: P.kwargs) -> Future[R]: ...
+    def call_one(self, *args: P.args, **kwargs: P.kwargs) -> Future[R]:
+        """Require exactly one actor, send now and start collecting its reply.
+
+        The Future observes completion; dropping it does not stop collection.
+        """
+        ...
     def stream(self, *args: P.args, **kwargs: P.kwargs) -> ValueStream:
         """
         Broadcasts to all actors and yields their responses as a stream / generator.
@@ -164,10 +173,16 @@ class Remote(Generic[P, R]):
     def _pipe_propagate(
         self, args: Any, kwargs: Any, fake_args: Any, fake_kwargs: Any
     ) -> Any: ...
-    def call(self, *args: P.args, **kwargs: P.kwargs) -> "Future[ValueMesh[R]]": ...
+    def call(self, *args: P.args, **kwargs: P.kwargs) -> "Future[ValueMesh[R]]":
+        """Send to all actors and start collecting their replies into a ValueMesh.
+
+        The Future observes completion; dropping it does not stop collection.
+        """
+        ...
     def choose(self, *args: P.args, **kwargs: P.kwargs) -> Future[R]:
         """
-        Sends a message to a randomly selected actor and waits for its result.
+        Send to a randomly selected actor and start collecting its reply.
+        The Future observes completion; dropping it does not stop collection.
 
         Each call independently selects an actor uniformly at random. Selection
         does not account for actor load, so calls are balanced only across many
@@ -175,7 +190,12 @@ class Remote(Generic[P, R]):
         deterministic.
         """
         ...
-    def call_one(self, *args: P.args, **kwargs: P.kwargs) -> Future[R]: ...
+    def call_one(self, *args: P.args, **kwargs: P.kwargs) -> Future[R]:
+        """Require exactly one actor, send now and start collecting its reply.
+
+        The Future observes completion; dropping it does not stop collection.
+        """
+        ...
     def stream(self, *args: P.args, **kwargs: P.kwargs) -> ValueStream:
         """
         Broadcasts to all actors and yields their responses as a stream / generator.

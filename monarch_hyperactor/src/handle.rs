@@ -128,11 +128,14 @@
 //!   `send_result`, without a result-conversion GIL acquisition (same one-shot
 //!   core and unobserved-error policy as pytokio's producers, HDL-1/HDL-2).
 //!   Dropping the result receiver does not cancel the producer (HDL-4).
+//!   [`PyHandle::spawn_pyobject_with_traceback`] does the same, and also keeps
+//!   the producer's creation traceback for `send_result`'s unobserved-error
+//!   log; the endpoint adverbs use it.
 //!   [`PyHandle::wait_completion`] is the matching observer: it projects the
 //!   terminal value to `PyResult<()>`, touching neither the GIL nor the Python
 //!   value on the ready-success fast path (a discriminant-only read, HDL-3) and
-//!   cloning the `PyErr` under the HDL-9 borrow order only on the error path. Both
-//!   constructors and this observer are `pub` Rust-only methods outside
+//!   cloning the `PyErr` under the HDL-9 borrow order only on the error path. The
+//!   three constructors and this observer are `pub` Rust-only methods outside
 //!   `#[pymethods]` (HDL-11).
 //! - **HDL-14 (Rust value observation is owned and non-consuming).**
 //!   [`PyHandle::wait_future`] returns a `Send + 'static` future over a cloned
@@ -285,11 +288,12 @@ pub(crate) fn send_result(
             let tb = if let Some(tb) = traceback {
                 format_traceback(py, &tb).unwrap()
             } else {
-                // No creation traceback was captured: either a capture-disabled
-                // PythonTask (the default when the env var is unset) or a direct
-                // Handle producer, which never captures one.
-                "creation traceback unavailable (PythonTask producers can set \
-                 `MONARCH_HYPERACTOR_ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK=1` to capture one)\n"
+                // No creation traceback was captured: either the env var is
+                // unset (the default), or the producer is a direct Handle
+                // producer other than an endpoint call, which never captures one.
+                "creation traceback unavailable (PythonTask producers and endpoint calls \
+                 capture one when `MONARCH_HYPERACTOR_ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK=1` \
+                 is set)\n"
                     .into()
             };
             tracing::error!(
@@ -628,14 +632,35 @@ impl PyHandle {
     where
         F: Future<Output = PyResult<Py<PyAny>>> + Send + 'static,
     {
+        Self::spawn_pyobject_with_traceback(fut, None)
+    }
+
+    /// Like [`Self::spawn_pyobject`], but keep the producer's creation
+    /// traceback, as `PythonTask` producers do (HDL-13). `send_result` logs it
+    /// if the task fails and every observer has gone. Rust-only and outside
+    /// `#[pymethods]` (HDL-11).
+    pub fn spawn_pyobject_with_traceback<F>(fut: F, traceback: Option<Py<PyAny>>) -> Self
+    where
+        F: Future<Output = PyResult<Py<PyAny>>> + Send + 'static,
+    {
+        // The task needs its own reference. Clone it only when a traceback was
+        // captured, so the common case takes no GIL here.
+        let task_traceback = traceback
+            .as_ref()
+            .map(|t| monarch_with_gil_blocking(GilSite::Traceback, |py| t.clone_ref(py)));
         let (tx, rx) = watch::channel(None);
         get_tokio_runtime().spawn(async move {
-            // HDL-1/HDL-2/HDL-13: publish exactly once via the shared helper; a
-            // direct Rust producer carries no creation traceback.
-            send_result(tx, fut.await, None);
+            // HDL-1/HDL-2/HDL-13: publish exactly once via the shared helper.
+            send_result(tx, fut.await, task_traceback);
         });
         // HDL-4: a `Handle`'s core never aborts its producer on drop.
-        PyHandle::from_core(HandleCore::new(rx, None))
+        PyHandle::from_core(HandleCore::new(rx, traceback))
+    }
+
+    /// Whether this Handle kept a creation traceback. For tests.
+    #[cfg(test)]
+    pub(crate) fn has_traceback_for_test(&self) -> bool {
+        self.core.traceback.is_some()
     }
 
     /// Observe whether this handle completed successfully, projecting the terminal
@@ -723,7 +748,7 @@ fn _after(ready: Vec<PyRef<'_, PyHandle>>, result: &PyHandle) -> PyHandle {
     let result = result.wait_future();
     // Run the waits on Tokio. `after_ready` observes `result` only if this
     // prerequisite future completes successfully.
-    PyHandle::spawn(after_ready(
+    PyHandle::spawn_pyobject(after_ready(
         async move {
             for completion in ready {
                 // An error ends this future here and becomes the new Handle's
@@ -1152,7 +1177,7 @@ mod tests {
     fn assert_producer_ended_error(py: Python<'_>, error: &PyErr) {
         assert!(
             error.is_instance_of::<PyRuntimeError>(py),
-            "a dropped producer should surface a RuntimeError"
+            "a dropped producer should surface a RuntimeError, got {error}"
         );
         assert_eq!(
             error.to_string(),
@@ -2041,7 +2066,7 @@ def ready_await_order(h):
             let producer = thread::spawn(move || {
                 monarch_with_gil_blocking(GilSite::Test, |_py| drop(tx));
             });
-            let result = PyHandle::get(handle.borrow(py), py, Some(5.0));
+            let result = PyHandle::get(handle.borrow(py), py, Some(60.0));
             (producer, result)
         });
         producer.join().expect("producer thread should finish");

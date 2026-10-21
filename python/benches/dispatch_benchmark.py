@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Measure queue-dispatch cost: the latency of one outstanding noop call, and
+"""Measure queue-dispatch cost: main-thread and nested sync-actor noop calls, and
 how a burst of concurrent calls gets into an actor whose event loop is busy."""
 
 from __future__ import annotations
@@ -54,6 +54,14 @@ class BusyLoopActor(Actor):
         return self.started
 
 
+class SyncCaller(Actor):
+    """Measure noop replies waited for on a sync actor's driver thread."""
+
+    @endpoint
+    def measure(self, peer: SyncNoopActor, iterations: int) -> None:
+        benchmark_noop_rpc(peer, iterations)
+
+
 async def benchmark_burst(busy: BusyLoopActor, count: int) -> None:
     """Send `count` concurrent calls to `busy` at once and report how they got
     in."""
@@ -79,7 +87,11 @@ def main() -> None:
         print("async endpoint:")
         benchmark_noop_rpc(procs.spawn("noop", NoopActor), args.iterations)
         print("sync endpoint:")
-        benchmark_noop_rpc(procs.spawn("sync_noop", SyncNoopActor), args.iterations)
+        sync_noop = procs.spawn("sync_noop", SyncNoopActor)
+        benchmark_noop_rpc(sync_noop, args.iterations)
+        print("nested sync-actor endpoint:")
+        caller = procs.spawn("sync_caller", SyncCaller)
+        caller.measure.call_one(sync_noop, args.iterations).get()
         asyncio.run(benchmark_burst(procs.spawn("busy", BusyLoopActor), args.burst))
     finally:
         procs.stop().get()
