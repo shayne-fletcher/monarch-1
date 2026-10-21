@@ -249,6 +249,8 @@ class Calculator(Actor):
 
 Endpoints support different invocation patterns called **adverbs**:
 
+`call()`, `call_one()` and `choose()` send the request and start collecting replies before they return. Their Future lets you wait for the result; dropping it does not cancel the request or stop reply collection. You can observe the same Future more than once. For `call()`, successful values without mesh references are still decoded when accessed in the returned `ValueMesh`.
+
 #### 1. `call_one()` - Single Actor Call
 
 Call a single actor and get response.

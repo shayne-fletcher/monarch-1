@@ -342,9 +342,9 @@ doc_legacy_surface = "PythonTask|PyShared|pytokio"
 
 [totals]
 py_python_task_new = 0
-raw_python_task_new = 5
+raw_python_task_new = 3
 from_coro = 1
-rust_from_coro = 2
+rust_from_coro = 1
 from_coroutine = 1
 take_inner = 0
 rust_take_inner = 0
@@ -358,7 +358,7 @@ shared_reconstruction = 0
 py_is_tokio_thread = 0
 pytokio_import = 12
 pytokio_module_ref = 5
-helper_symbol = 6
+helper_symbol = 8
 helper_definition = 1
 would_block_surface = 0
 binding_stub_symbol = 2
@@ -718,8 +718,10 @@ owns = [
 id = "6.5a"
 allowed_states = ["migrated", "removed_upstream"]
 owns = [
+  "hs.endpoint.ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK",
   "hs.endpoint.PyPythonTask",
   "hs.endpoint.PythonTask",
+  "hs.endpoint.current_traceback",
   "mr.endpoint.file",
   "np.endpoint.PyValueStream.__next__",
   "np.endpoint.call",
@@ -1728,6 +1730,28 @@ path = "fbcode/monarch/monarch_hyperactor/src/endpoint.rs"
 symbol = "PythonTask"
 operation = "helper_symbol"
 scope = "production"
+state = "legacy"
+transition = "6.5a"
+
+[[site]]
+id = "hs.endpoint.current_traceback"
+category = "helper_residue"
+language = "rust"
+path = "fbcode/monarch/monarch_hyperactor/src/endpoint.rs"
+symbol = "current_traceback"
+operation = "helper_symbol"
+scope = "production"
+state = "legacy"
+transition = "6.5a"
+
+[[site]]
+id = "hs.endpoint.ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK"
+category = "helper_residue"
+language = "rust"
+path = "fbcode/monarch/monarch_hyperactor/src/endpoint.rs"
+symbol = "ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK"
+operation = "helper_symbol"
+scope = "test"
 state = "legacy"
 transition = "6.5a"
 
@@ -3705,8 +3729,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/endpoint.rs"
 symbol = "Endpoint::call"
 operation = "raw_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.5a"
+transition_revision = "self"
 constructor = "raw PythonTask"
 return_surface = "public Future wrapping the raw PythonTask created by call"
 consumer = "production wraps the raw task with monarch._src.actor.future.Future._from_coro; that wrapper is source-grounded at endpoint.rs:615-618, while the oracle substitutes a test-only identity adapter so it can retain the exact response port"
@@ -3716,10 +3741,10 @@ abandonment = "possible after successful construction; dropping the public Futur
 eager_effect = "an eager replacement would begin ValueMesh collection during call; it would not newly submit the operation"
 drop_behavior = "the response port closes and later replies are undeliverable, while the operation submitted before observer construction is not cancelled"
 unobserved_error = "PythonTask::new or Future wrapping can fail after submission and close the response port with no observer; after successful construction, collection, decode and supervision failures surface only when driven"
-disposition = "preserve timing"
+disposition = "intentionally become eager"
 semantic_class = "already_started_lazy_observer"
 oracle = [
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::endpoint::tests::call_submits_cast_before_observer_and_drop_closes_response_port",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::endpoint::tests::call_collects_before_observation_and_survives_observer_drop",
 ]
 
 [[site]]
@@ -3730,8 +3755,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/endpoint.rs"
 symbol = "value_collector"
 operation = "raw_python_task_new"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.5a"
+transition_revision = "self"
 constructor = "raw PythonTask"
 return_surface = "raw PythonTask immediately wrapped by call_one or choose"
 consumer = "the public Future built by make_future for call_one and choose"
@@ -3741,10 +3767,11 @@ abandonment = "possible after successful construction; dropping the public Futur
 eager_effect = "an eager replacement would begin reply collection immediately; it would not resubmit the request"
 drop_behavior = "the response receiver closes, any queued reply is discarded, and later posts are undeliverable"
 unobserved_error = "PythonTask::new can fail after taking ownership of the collector future, dropping it and closing its receiver with no task; after successful construction, receive, conversion and supervision failures surface only when driven"
-disposition = "preserve timing"
+disposition = "intentionally become eager"
 semantic_class = "already_started_lazy_observer"
 oracle = [
-  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::endpoint::tests::value_collector_drop_discards_its_reply",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::endpoint::tests::call_one_collects_before_observation_and_survives_observer_drop",
+  "fbcode//monarch/monarch_hyperactor:monarch_hyperactor-unittest::endpoint::tests::choose_collects_before_observation_and_survives_observer_drop",
 ]
 
 [[site]]
@@ -3828,8 +3855,9 @@ path = "fbcode/monarch/monarch_hyperactor/src/endpoint.rs"
 symbol = "wrap_in_future"
 operation = "rust_from_coro"
 scope = "production"
-state = "legacy"
+state = "migrated"
 transition = "6.5a"
+transition_revision = "self"
 
 [[site]]
 id = "ot.query_engine.DistributedExec_as_ExecutionPlan.execute"
