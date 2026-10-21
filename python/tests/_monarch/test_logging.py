@@ -15,7 +15,11 @@ import pytest
 from monarch._rust_bindings.monarch_hyperactor.handle import _new_handle_pair, Handle
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
 from monarch._src.actor.future import _ready_handle
-from monarch._src.actor.logging import flush_all_proc_mesh_logs, LoggingManager
+from monarch._src.actor.logging import (
+    _LogLevelSetter,
+    flush_all_proc_mesh_logs,
+    LoggingManager,
+)
 
 
 class _AwaitTracker:
@@ -416,7 +420,6 @@ class LoggingManagerAsyncTest(IsolatedAsyncioTestCase):
             raw,
             stream_to_client=True,
             aggregate_window_sec=3,
-            level=logging.INFO,
         )
         self.assertIs(self.logging_manager._logging_mesh_client, mock_client)
 
@@ -429,6 +432,28 @@ class LoggingManagerAsyncTest(IsolatedAsyncioTestCase):
             )
             mock_client.spawn.assert_not_called()
 
+    def test_spawn_log_level_actor_returns_its_initialization_handle(self) -> None:
+        proc_mesh = Mock()
+        raw = _ready_handle(Mock(spec=HyProcMesh))
+        actor = Mock()
+        initialized = _completed_handle()
+        actor.initialized._as_handle.return_value = initialized
+        proc_mesh._spawn_nonblocking_on.return_value = actor
+
+        result = self.logging_manager.spawn_log_level_actor(proc_mesh, raw)
+
+        self.assertIs(result, initialized)
+        self.assertIs(self.logging_manager._log_level_actor, actor)
+        proc_mesh._spawn_nonblocking_on.assert_called_once_with(
+            raw, "log_level", _LogLevelSetter, logging.INFO
+        )
+
+    def test_set_log_level_rejects_an_uninitialized_target(self) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError, "logging level control is not initialized"
+        ):
+            self.logging_manager.set_log_level(logging.INFO)
+
     @patch("monarch._src.actor.logging.context")
     async def test_logging_option_sets_mode_with_valid_parameters(
         self, mock_context: Mock
@@ -438,6 +463,8 @@ class LoggingManagerAsyncTest(IsolatedAsyncioTestCase):
         mock_context.return_value.actor_instance._as_rust.return_value = mock_instance
         mock_client = Mock()
         self.logging_manager._logging_mesh_client_handle = _ready_handle(mock_client)
+        log_level_actor = Mock()
+        self.logging_manager._log_level_actor = log_level_actor
 
         with (
             patch.object(
@@ -459,8 +486,8 @@ class LoggingManagerAsyncTest(IsolatedAsyncioTestCase):
                 mock_instance,
                 stream_to_client=False,
                 aggregate_window_sec=5,
-                level=logging.WARNING,
             )
+            log_level_actor.set_level.broadcast.assert_called_once_with(logging.WARNING)
             # Assert: helper methods were called
             mock_register.assert_called_once()
             mock_enable.assert_called_once()

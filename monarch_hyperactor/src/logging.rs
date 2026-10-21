@@ -9,22 +9,12 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::ops::Deref;
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use anyhow::Result;
-use async_trait::async_trait;
-use hyperactor::Actor;
-use hyperactor::ActorEnvironment;
 use hyperactor::ActorHandle;
-use hyperactor::Context;
 use hyperactor::Endpoint as _;
-use hyperactor::HandleClient;
-use hyperactor::Handler;
-use hyperactor::Instance;
-use hyperactor::RefClient;
-use hyperactor::RemoteSpawn;
 use hyperactor::context;
 use hyperactor_mesh::ActorMesh;
 use hyperactor_mesh::actor_mesh::ActorMeshRef;
@@ -33,15 +23,11 @@ use hyperactor_mesh::logging::LogClientActor;
 use hyperactor_mesh::logging::LogClientMessage;
 use hyperactor_mesh::logging::LogForwardActor;
 use hyperactor_mesh::logging::LogForwardMessage;
-use monarch_types::SerializablePyErr;
 use ndslice::View;
 use pyo3::Bound;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3::types::PyString;
-use serde::Deserialize;
-use serde::Serialize;
-use typeuri::Named;
 
 use crate::context::PyInstance;
 use crate::handle::PyHandle;
@@ -50,84 +36,10 @@ use crate::proc_mesh::PyProcMesh;
 use crate::runtime::GilSite;
 use crate::runtime::monarch_with_gil;
 
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    Named,
-    Handler,
-    HandleClient,
-    RefClient
-)]
-pub enum LoggerRuntimeMessage {
-    SetLogging { level: u8 },
-}
-
-/// Simple Rust actor that invokes python logger APIs. It needs a python runtime.
-#[derive(Debug)]
-#[hyperactor::export(handlers = [LoggerRuntimeMessage])]
-#[hyperactor::spawnable]
-pub struct LoggerRuntimeActor {
-    logger: Arc<Py<PyAny>>,
-}
-
-impl LoggerRuntimeActor {
-    fn get_logger(py: Python) -> PyResult<Py<PyAny>> {
-        // Import the Python AutoReloader class
-        let logging_module = py.import("logging")?;
-        let logger = logging_module.call_method0("getLogger")?;
-
-        Ok(logger.into())
-    }
-
-    fn set_logger_level(py: Python, logger: &Py<PyAny>, level: u8) -> PyResult<()> {
-        let logger = logger.bind(py);
-        logger.call_method1("setLevel", (level,))?;
-        Ok(())
-    }
-}
-#[async_trait]
-impl Actor for LoggerRuntimeActor {
-    async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
-        this.set_system();
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl RemoteSpawn for LoggerRuntimeActor {
-    type Params = ();
-
-    async fn new(_: (), _environment: &ActorEnvironment) -> Result<Self, anyhow::Error> {
-        let logger = monarch_with_gil(GilSite::Logging, |py| {
-            Self::get_logger(py).map_err(SerializablePyErr::from_fn(py))
-        })
-        .await?;
-        Ok(Self {
-            logger: Arc::new(logger),
-        })
-    }
-}
-
-#[async_trait]
-#[hyperactor::handle(LoggerRuntimeMessage)]
-impl LoggerRuntimeMessageHandler for LoggerRuntimeActor {
-    async fn set_logging(&mut self, _cx: &Context<Self>, level: u8) -> Result<(), anyhow::Error> {
-        let logger: Arc<_> = self.logger.clone();
-        monarch_with_gil(GilSite::Logging, |py| {
-            Self::set_logger_level(py, logger.as_ref(), level)
-                .map_err(SerializablePyErr::from_fn(py))
-        })
-        .await?;
-        Ok(())
-    }
-}
-
 /// `LoggingMeshClient` is the Python-facing handle for distributed
 /// logging over a `ProcMesh`.
 ///
-/// Calling `spawn(...)` builds three pieces of logging infra:
+/// Calling `spawn(...)` builds the pure-Rust log-forwarding stack:
 ///
 ///   - `client_actor`: a single `LogClientActor` running in the
 ///     *local* process. It aggregates forwarded stdout/stderr,
@@ -140,15 +52,14 @@ impl LoggerRuntimeMessageHandler for LoggerRuntimeActor {
 ///     at startup; otherwise it's `None` and we never spawn any
 ///     forwarders.
 ///
-///   - `logger_mesh`: an `ActorMesh<LoggerRuntimeActor>` with one
-///     actor per remote proc. Each `LoggerRuntimeActor` controls that
-///     proc's Python logging runtime (log level, handlers, etc.).
-///     This mesh is always created, even if forwarding is disabled.
+/// Neither actor touches a Python runtime, so this client can be
+/// hosted by a Rust-only actor system. Setting a proc's Python log
+/// level is a separate concern handled on the Python side (see
+/// `monarch._src.actor.logging`).
 ///
 /// The Python object you get back holds references to all of this so
 /// that you can:
 ///   - toggle streaming vs "stay quiet" (`set_mode(...)`),
-///   - adjust the per-proc Python log level (`set_mode(...)`),
 ///   - force a sync flush of forwarded output and wait for completion
 ///     (`flush(...)`).
 ///
@@ -156,9 +67,9 @@ impl LoggerRuntimeMessageHandler for LoggerRuntimeActor {
 ///   Dropping the Python handle runs `Drop` on this Rust struct,
 ///   which drains/stops the local `LogClientActor` but does *not*
 ///   synchronously tear down the per-proc meshes. The remote
-///   `LogForwardActor` / `LoggerRuntimeActor` instances keep running
-///   until the remote procs themselves are shut down (e.g. via
-///   `host_mesh.shutdown(...)` in tests).
+///   `LogForwardActor` instances keep running until the remote procs
+///   themselves are shut down (e.g. via `host_mesh.shutdown(...)` in
+///   tests).
 #[pyclass(
     frozen,
     name = "LoggingMeshClient",
@@ -169,22 +80,6 @@ pub struct LoggingMeshClient {
     // remote proc forwards its stdout/stderr back to the client. This
     // actor does not interact with the embedded Python runtime.
     forwarder_mesh: Option<ActorMesh<LogForwardActor>>,
-
-    // Per-proc LoggerRuntimeActor mesh. One LoggerRuntimeActor runs
-    // on every proc in the mesh and is responsible for driving that
-    // proc's Python logging configuration (log level, handlers,
-    // etc.).
-    //
-    // `set_mode(..)` always broadcasts the requested log level to
-    // this mesh, regardless of whether stdout/stderr forwarding is
-    // enabled.
-    //
-    // Even on a proc that isn't meaningfully running Python code, we
-    // still spawn LoggerRuntimeActor and it will still apply the new
-    // level to that proc's Python logger. In that case, updating the
-    // level may have no visible effect simply because nothing on that
-    // proc ever emits logs through Python's `logging` module.
-    logger_mesh: ActorMesh<LoggerRuntimeActor>,
 
     // Client-side LogClientActor. Lives in the client process;
     // receives forwarded output, aggregates and buffers it, and
@@ -264,7 +159,7 @@ impl LoggingMeshClient {
     /// Initialize logging for a `ProcMesh` and return a
     /// `LoggingMeshClient`.
     ///
-    /// This wires up three pieces of logging infrastructure:
+    /// This wires up the pure-Rust log-forwarding stack:
     ///
     /// 1. A single `LogClientActor` in the *client* process. This
     ///    actor receives forwarded stdout/stderr, buffers and
@@ -277,24 +172,21 @@ impl LoggingMeshClient {
     ///    forwarding is disabled at startup, we do not spawn these
     ///    actors and `forwarder_mesh` will be `None`.
     ///
-    /// 3. A `LoggerRuntimeActor` on every remote proc in the mesh.
-    ///    This actor controls the Python logging runtime (log level,
-    ///    handlers, etc.) in that process. This is always spawned,
-    ///    even if log forwarding is disabled.
+    /// Neither actor requires a Python runtime; the per-proc Python
+    /// log level is set separately from the Python side.
     ///
     /// The returned `LoggingMeshClient` holds handles to those
-    /// actors. Later, `set_mode(...)` can adjust per-proc log level
-    /// and (if forwarding was enabled) toggle whether remote output
-    /// is actually streamed back to the client. If forwarding was
-    /// disabled by config, requests to enable streaming will fail.
+    /// actors. Later, `set_mode(...)` can (if forwarding was enabled)
+    /// toggle whether remote output is actually streamed back to the
+    /// client. If forwarding was disabled by config, requests to
+    /// enable streaming will fail.
     #[staticmethod]
-    #[pyo3(signature = (instance, proc_mesh, *, stream_to_client, aggregate_window_sec, level))]
+    #[pyo3(signature = (instance, proc_mesh, *, stream_to_client, aggregate_window_sec))]
     fn spawn(
         instance: &PyInstance,
         proc_mesh: &PyHandle,
         stream_to_client: bool,
         aggregate_window_sec: Option<u64>,
-        level: u8,
     ) -> PyHandle {
         let proc_mesh = proc_mesh.wait_future();
         let instance = instance.clone();
@@ -340,18 +232,11 @@ impl LoggingMeshClient {
                 None
             };
 
-            // 3. Always spawn a `LoggerRuntimeActor` on every proc.
-            let logger_mesh = proc_mesh
-                .spawn(instance.deref(), "logger", &())
-                .await
-                .map_err(anyhow::Error::from)?;
-
             let client = Self {
                 forwarder_mesh,
-                logger_mesh,
                 client_actor,
             };
-            client.set_mode(&instance, stream_to_client, aggregate_window_sec, level)?;
+            client.set_mode(&instance, stream_to_client, aggregate_window_sec)?;
             Ok(client)
         })
     }
@@ -379,17 +264,13 @@ impl LoggingMeshClient {
     /// `Some(..)` while `stream_to_client == false` is invalid and
     /// returns an error.
     ///
-    /// `level` is the desired Python logging level. We always
-    /// broadcast this to the per-proc `LoggerRuntimeActor` mesh so
-    /// each remote process can update its own Python logger
-    /// configuration, regardless of whether stdout/stderr forwarding
-    /// is active.
+    /// The per-proc Python log level is not handled here; it is set
+    /// from the Python side (see `monarch._src.actor.logging`).
     fn set_mode(
         &self,
         instance: &PyInstance,
         stream_to_client: bool,
         aggregate_window_sec: Option<u64>,
-        level: u8,
     ) -> PyResult<()> {
         // We can't ask for an aggregation window if we're not
         // streaming.
@@ -432,16 +313,6 @@ impl LoggingMeshClient {
                 // ));
             }
         }
-
-        // Always update the per-proc Python logging level.
-        self.logger_mesh
-            .cast_with_return_undeliverable(
-                instance.deref(),
-                &Default::default(),
-                LoggerRuntimeMessage::SetLogging { level },
-                false,
-            )
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Always update the client actor's aggregation window.
         self.client_actor.post(
@@ -489,7 +360,7 @@ impl LoggingMeshClient {
 
 // NOTE ON LIFECYCLE / CLEANUP
 //
-// `LoggingMeshClient` is a thin owner for three pieces of logging
+// `LoggingMeshClient` is a thin owner for two pieces of logging
 // infra:
 //
 //   - `client_actor`: a single `LogClientActor` in the *local*
@@ -497,9 +368,6 @@ impl LoggingMeshClient {
 //   - `forwarder_mesh`: (optional) an `ActorMesh<LogForwardActor>`
 //     with one actor per remote proc in the `ProcMesh`, responsible for
 //     forwarding that proc's stdout/stderr back to the client.
-//   - `logger_mesh`: an `ActorMesh<LoggerRuntimeActor>` with one
-//     actor per remote proc, responsible for driving that proc's Python
-//     logging configuration.
 //
 // The Python-facing handle we hand back to callers is a
 // `Py<LoggingMeshClient>`. When that handle is dropped (or goes out
@@ -510,11 +378,10 @@ impl LoggingMeshClient {
 // - In `Drop` we *only* call `drain_and_stop()` on the local
 //   `LogClientActor`. This asks the client-side aggregator to
 //   flush/stop so we don't leave a local task running.
-// - We do NOT synchronously tear down the per-proc meshes here.
-//   Dropping `forwarder_mesh` / `logger_mesh` just releases our
-//   handles; the actual `LogForwardActor` / `LoggerRuntimeActor`
-//   instances keep running on the remote procs until those procs are
-//   shut down.
+// - We do NOT synchronously tear down the per-proc mesh here.
+//   Dropping `forwarder_mesh` just releases our handle; the actual
+//   `LogForwardActor` instances keep running on the remote procs
+//   until those procs are shut down.
 //
 // This is fine in tests because we always shut the world down
 // afterward via `host_mesh.shutdown(&instance)`, which tears down the
@@ -619,7 +486,9 @@ mod tests {
 
     use super::*;
     use crate::actor::PythonActor;
+    use crate::runtime::GilSite;
     use crate::runtime::ensure_python;
+    use crate::runtime::monarch_with_gil;
     use crate::runtime::monarch_with_gil_blocking;
 
     const TEST_DEADLINE: Duration = Duration::from_secs(30);
@@ -667,7 +536,7 @@ mod tests {
         let ready = monarch_with_gil_blocking(GilSite::Test, |py| {
             PyHandle::from_value(PyProcMesh::new_ref(proc_mesh.mesh_ref()?).into_py_any(py)?)
         })?;
-        Ok(LoggingMeshClient::spawn(instance, &ready, false, None, 20))
+        Ok(LoggingMeshClient::spawn(instance, &ready, false, None))
     }
 
     /// Read the current sync-flush version without leaving a flush in progress.
@@ -850,13 +719,15 @@ mod tests {
             let lock = hyperactor_config::global::lock();
             let _guard = lock.override_key(MESH_ENABLE_LOG_FORWARDING, false);
             let before = proc.all_terminated_actor_ids();
-            let logging =
-                LoggingMeshClient::spawn(&PyInstance::from(&instance), &raw, false, None, 20);
+            let logging = LoggingMeshClient::spawn(&PyInstance::from(&instance), &raw, false, None);
             drop(logging);
             release.send(()).expect("raw creation is still waiting");
             // With no observers, the completed client is dropped and stops its
             // coordinator. Its retained termination snapshot proves completion
             // without observing the Handle or racing a short-lived live actor.
+            // The producer releases the unobserved client without the GIL, so
+            // pyo3 defers the release until a thread next takes the GIL.
+            // Nothing else in this test takes it, so the loop does.
             timeout(TEST_DEADLINE, async {
                 loop {
                     if proc.all_terminated_actor_ids().iter().any(|id| {
@@ -868,6 +739,7 @@ mod tests {
                     }) {
                         break;
                     }
+                    monarch_with_gil(GilSite::Test, |_py| ()).await;
                     tokio::task::yield_now().await;
                 }
             })
@@ -904,13 +776,13 @@ mod tests {
 
                 // (a) stream_to_client = false, no aggregate window
                 // -> OK
-                let res = client_ref.set_mode(&py_instance, false, None, 10);
+                let res = client_ref.set_mode(&py_instance, false, None);
                 assert!(res.is_ok(), "expected Ok(..), got {res:?}");
 
                 // (b) stream_to_client = false,
                 // aggregate_window_sec.is_some() -> Err = Some(..) ->
                 // Err
-                let res = client_ref.set_mode(&py_instance, false, Some(1), 10);
+                let res = client_ref.set_mode(&py_instance, false, Some(1));
                 assert!(
                     res.is_err(),
                     "expected Err(..) for window without streaming"
@@ -964,7 +836,7 @@ mod tests {
                 // (d) stream_to_client = true, aggregate_window_sec =
                 //     Some(..) -> OK now that we *do* have forwarders,
                 //     enabling streaming should succeed.
-                let res = client_ref.set_mode(&py_instance, true, Some(2), 20);
+                let res = client_ref.set_mode(&py_instance, true, Some(2));
                 assert!(
                     res.is_ok(),
                     "expected Ok(..) enabling streaming w/ window: {res:?}"
@@ -974,7 +846,7 @@ mod tests {
                 //     stream_to_client = false -> still Err (this
                 //     rule doesn't care about forwarding being
                 //     enabled or not).
-                let res = client_ref.set_mode(&py_instance, false, Some(2), 20);
+                let res = client_ref.set_mode(&py_instance, false, Some(2));
                 assert!(
                     res.is_err(),
                     "expected Err(..) for window without streaming even w/ forwarders"

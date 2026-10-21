@@ -121,8 +121,8 @@ def test_proc_failure():
         actor.kill_nest.call_one().get()
 
     # Any actors on the proc mesh can report the proc failure, so it might be
-    # "nested" or it might be other broken actors such as "logger".
-    capture.assert_fault_occurred("(nested|logger-.*)\\{'a_dim': 0/1\\}")
+    # "nested" or it might be other broken actors such as "log_level".
+    capture.assert_fault_occurred("(nested|log_level)\\{'a_dim': 0/1\\}")
     capture.assert_fault_occurred(
         "the process this actor was running on failed: Killed\\(sig=9\\)"
     )
