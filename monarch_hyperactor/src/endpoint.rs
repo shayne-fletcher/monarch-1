@@ -573,12 +573,18 @@ async fn value_collector_future(
     }
 }
 
-/// Defers conversion of a stream reply until the item is observed.
+/// Defers a stream reply's conversion, or a port receive, until the item is
+/// observed.
 ///
 /// Replies arrive in the stream's shared queue independently of observation.
 /// First observation begins polling the stored Rust future. It takes the
 /// next reply, waiting if necessary, and unpickles it into a Python value.
 /// An unobserved item leaves the queue untouched.
+///
+/// A port receive is held the same way: first observation takes the next
+/// message from the port and unpickles it, and an unobserved receive takes
+/// nothing. When observation spawns a receive, the task stops once nobody can
+/// observe it (HDL-23), so an abandoned receive releases its port receiver.
 ///
 /// `await`, `as_asyncio()` and timed `get()` spawn a Tokio task whose worker
 /// polls the future. Untimed `get()` called from Python's main thread also
@@ -595,21 +601,46 @@ async fn value_collector_future(
     name = "PendingReply",
     module = "monarch._rust_bindings.monarch_hyperactor.endpoint"
 )]
-struct PyPendingReply {
+pub(crate) struct PyPendingReply {
     /// The unstarted Rust future and the item's optional creation traceback.
     /// The first observer takes both. This mutex protects that one-time
     /// transfer, not the reply queue, and is released before the future runs.
     collector: Mutex<Option<(ReplyFuture, Option<Py<PyAny>>)>>,
+    /// Whether a spawned collector stops once nobody can observe it. Port
+    /// receives set it; stream items do not.
+    stop_when_unobserved: bool,
+    /// The `ValueError` text for a second take, naming the kind of item.
+    taken_message: &'static str,
 }
 
+const STREAM_ITEM_TAKEN: &str = "this stream item was already taken by an earlier get(); if that get() was interrupted, it will never produce a result";
+const PORT_RECEIVE_TAKEN: &str = "this receive was already taken by an earlier get(); if that get() was interrupted, it will never produce a result";
+
 impl PyPendingReply {
-    /// Store the unstarted collector and the optional stack captured at creation.
-    fn new(
+    /// Store a stream item's unstarted collector and the optional stack
+    /// captured at creation.
+    fn for_stream_item(
         collector: impl Future<Output = PyResult<Py<PyAny>>> + Send + 'static,
         traceback: Option<Py<PyAny>>,
     ) -> Self {
         Self {
             collector: Mutex::new(Some((Box::pin(collector), traceback))),
+            stop_when_unobserved: false,
+            taken_message: STREAM_ITEM_TAKEN,
+        }
+    }
+
+    /// Store a port receive's unstarted future and the optional stack
+    /// captured at creation. A spawned receive stops once nobody can
+    /// observe it.
+    pub(crate) fn for_port_receive(
+        receive: impl Future<Output = PyResult<Py<PyAny>>> + Send + 'static,
+        traceback: Option<Py<PyAny>>,
+    ) -> Self {
+        Self {
+            collector: Mutex::new(Some((Box::pin(receive), traceback))),
+            stop_when_unobserved: true,
+            taken_message: PORT_RECEIVE_TAKEN,
         }
     }
 
@@ -634,21 +665,18 @@ impl PyPendingReply {
     /// `spawn_handle()` returning and the returned Handle being stored in
     /// `Future._status`.
     ///
-    /// This window belongs to lazy stream items, not to this type: any holder that
-    /// runs the collector without first publishing a Handle has it. T292877484
+    /// This window belongs to lazy items, not to this type: any holder that runs
+    /// the collector without first publishing a Handle has it. T292877484
     /// tracks closing it by giving each item a Handle core on first observation.
     /// T292850732 removes it altogether: once Handles can hold undecoded replies,
-    /// stream items become ordinary Handles, and every observer shares one result.
+    /// stream items and port receives become ordinary Handles, and every observer
+    /// shares one result.
     fn take(&self) -> PyResult<(ReplyFuture, Option<Py<PyAny>>)> {
         self.collector
             .lock()
             .expect("the collector lock is held only while taking its value")
             .take()
-            .ok_or_else(|| {
-                PyValueError::new_err(
-                    "this stream item was already taken by an earlier get(); if that get() was interrupted, it will never produce a result",
-                )
-            })
+            .ok_or_else(|| PyValueError::new_err(self.taken_message))
     }
 }
 
@@ -656,21 +684,28 @@ impl PyPendingReply {
 impl PyPendingReply {
     /// Spawn the item's stored Rust future as a Tokio task and return a Handle
     /// for its result. The future takes the next reply from the stream's queue,
-    /// waiting if necessary, and unpickles it into a Python value.
+    /// or the next message from the port, waiting if necessary, and unpickles it
+    /// into a Python value.
     ///
     /// Handle observers share the same value or error. If the task fails after
     /// every observer has gone, its optional creation traceback is included in
-    /// the error log.
+    /// the error log. A port receive's task instead stops once nobody can
+    /// observe it (HDL-23).
     ///
     /// Raises `ValueError` if the item's future has already been taken.
-    fn spawn_handle(&self) -> PyResult<PyHandle> {
+    pub(crate) fn spawn_handle(&self) -> PyResult<PyHandle> {
         let (collector, traceback) = self.take()?;
+        if self.stop_when_unobserved {
+            return Ok(PyHandle::spawn_pyobject_while_observed(
+                collector, traceback,
+            ));
+        }
         Ok(PyHandle::spawn_pyobject_with_traceback(
             collector, traceback,
         ))
     }
 
-    /// Return one stream item's Python value synchronously, without a Handle.
+    /// Return one item's Python value synchronously, without a Handle.
     /// Used by untimed `Future.get()`.
     ///
     /// On Python's main thread, spawn the stored future as a Tokio task while
@@ -681,7 +716,7 @@ impl PyPendingReply {
     /// The Python `Future` stores the result only after this call returns.
     /// Until then, another observer gets the consumed-item error. An interrupted
     /// call discards its result; see `Self::take` for these observation windows.
-    fn block_on(slf: PyRef<'_, Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    pub(crate) fn block_on(slf: PyRef<'_, Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let (collector, _traceback) = slf.take()?;
         // Release the PyO3 borrow before the wait releases the GIL.
         // The extracted future is now owned by this call.
@@ -769,7 +804,7 @@ impl PyValueStream {
         };
         // Keep the unstarted future and its optional creation traceback together.
         // Capture the stack here, where the item is created, not when it is observed.
-        let reply = PyPendingReply::new(collector, current_traceback()?);
+        let reply = PyPendingReply::for_stream_item(collector, current_traceback()?);
 
         let future = self
             .future_class
@@ -2232,7 +2267,7 @@ mod tests {
         monarch_with_gil_blocking(GilSite::Test, |py| {
             let reply = Py::new(
                 py,
-                PyPendingReply::new(std::future::ready(Ok(py.None())), None),
+                PyPendingReply::for_stream_item(std::future::ready(Ok(py.None())), None),
             )
             .expect("the pending reply should be allocated");
             drop(
