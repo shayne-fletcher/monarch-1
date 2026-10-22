@@ -563,6 +563,7 @@ def _init_client_context(via: Optional[str] = None) -> Context:
     try:
         py_host_mesh = HostMesh._from_rust(hy_host_mesh)
         py_proc_mesh = ProcMesh._from_rust(hy_proc_mesh, py_host_mesh)
+        py_proc_mesh._start_root_logging()
     finally:
         _reset_context(token)
 

@@ -27,6 +27,8 @@ if setup_actor is not None:
 
 `logged` waits for both the Rust client and `_LogLevelSetter`, so the initial `INFO` level is applied before proc initialization completes.
 
+Client bootstrap builds the root client's proc mesh with `ProcMesh._from_rust`, not `from_host_mesh`, and `_start_root_logging` gives it the same logging: a forwarding client and an initial `INFO` level. Its only proc is the driver process, so the level is set directly instead of through `_LogLevelSetter`, and `logging_option(level=...)` updates the driver's root logger.
+
 The setup actor's init message reserves `logged`, not the completion that waits for its own reply. That avoids a dependency cycle. Waiting for `logged` before the setup reply also makes a logging failure the reported initialization error.
 
 ### What Logging Installation Creates

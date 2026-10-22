@@ -77,6 +77,7 @@ class LoggingManager:
     def __init__(self) -> None:
         self._logging_mesh_client_handle: Optional[Handle[LoggingMeshClient]] = None
         self._log_level_actor: Optional[_LogLevelSetter] = None
+        self._sets_local_log_level = False
 
     @property
     def _logging_mesh_client(self) -> Optional[LoggingMeshClient]:
@@ -113,10 +114,19 @@ class LoggingManager:
         )
         return self._log_level_actor.initialized._as_handle()
 
+    def initialize_local_log_level(self, level: int) -> None:
+        """Set this process's Python log level directly. Used for the root
+        client's proc mesh, whose only proc is this process."""
+        self._sets_local_log_level = True
+        logging.getLogger().setLevel(level)
+
     def set_log_level(self, level: int) -> None:
-        if self._log_level_actor is None:
+        if self._log_level_actor is not None:
+            self._log_level_actor.set_level.broadcast(level)
+        elif self._sets_local_log_level:
+            logging.getLogger().setLevel(level)
+        else:
             raise RuntimeError("logging level control is not initialized")
-        self._log_level_actor.set_level.broadcast(level)
 
     def register_flusher_if_in_ipython(self) -> None:
         if IN_IPYTHON:
