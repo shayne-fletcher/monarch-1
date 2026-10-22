@@ -171,28 +171,40 @@ async def _wait_for_event(event: threading.Event, message: str) -> None:
 
 
 class _PendingActorProbe:
+    """A Handle-backed initializer whose completion the test controls."""
+
     def __init__(
         self,
         name: str,
         driven: list[str],
         error: BaseException | None = None,
-        release: threading.Event | None = None,
+        pending: bool = False,
     ) -> None:
         self.entered = threading.Event()
+        self._name = name
+        self._driven = driven
+        self._error = error
+        self._pending = pending
+        self._completed = False
+        self._handle, self._completer = _new_handle_pair()
 
-        async def initialize() -> None:
-            driven.append(name)
+    @property
+    def initialized(self) -> Future[None]:
+        if not self.entered.is_set():
+            self._driven.append(self._name)
             self.entered.set()
-            if release is not None:
-                released = await PythonTask.spawn_blocking(
-                    lambda: release.wait(timeout=30)
-                )
-                if not released:
-                    raise TimeoutError("pending actor release was not published")
-            if error is not None:
-                raise error
+            if not self._pending:
+                self.complete()
+        return Future._from_handle(self._handle)
 
-        self.initialized = Future._from_coro(initialize())
+    def complete(self) -> None:
+        if self._completed:
+            return
+        self._completed = True
+        if self._error is None:
+            self._completer.set_result(None)
+        else:
+            self._completer.set_exception(self._error)
 
 
 class _LoggingManagerProbe:
@@ -668,13 +680,11 @@ def test_proc_stop_completes_for_each_observer_kind() -> None:
 
 @pytest.mark.timeout(60)
 @isolate_in_subprocess
-def test_proc_stop_creates_no_python_task_from_a_coroutine() -> None:
+def test_proc_stop_after_initialization_marks_stopped() -> None:
     with scoped_state(ProcessJob({"hosts": 1}), cached_path=None) as state:
         owner = state.hosts.spawn_procs(per_host={"gpus": 1})
         assert owner.initialized.get(timeout=30) is True
-        with patch.object(Future, "_from_coro", wraps=Future._from_coro) as from_coro:
-            assert owner.stop().get(timeout=30) is None
-        assert from_coro.call_count == 0
+        assert owner.stop().get(timeout=30) is None
         assert owner._stopped
 
 
@@ -682,9 +692,8 @@ def test_proc_stop_creates_no_python_task_from_a_coroutine() -> None:
 @isolate_in_subprocess
 def test_proc_stop_drain_waits_for_spawns_added_meanwhile() -> None:
     driven: list[str] = []
-    release_first, release_added = threading.Event(), threading.Event()
-    first = _PendingActorProbe("first", driven, release=release_first)
-    added = _PendingActorProbe("added", driven, release=release_added)
+    first = _PendingActorProbe("first", driven, pending=True)
+    added = _PendingActorProbe("added", driven, pending=True)
     owner = SimpleNamespace(_pending_actor_spawns=[first])
 
     async def drain_while_appending() -> None:
@@ -693,16 +702,16 @@ def test_proc_stop_drain_waits_for_spawns_added_meanwhile() -> None:
         )
         await _wait_for_event(first.entered, "the drain did not reach its first spawn")
         owner._pending_actor_spawns.append(added)
-        release_first.set()
+        first.complete()
         await _wait_for_event(added.entered, "the drain skipped the added spawn")
-        release_added.set()
+        added.complete()
         await asyncio.wait_for(drain, timeout=30)
 
     try:
         asyncio.run(drain_while_appending())
     finally:
-        release_first.set()
-        release_added.set()
+        first.complete()
+        added.complete()
     assert driven == ["first", "added"]
     assert owner._pending_actor_spawns == []
 
@@ -747,10 +756,9 @@ class _CountedSpawn:
 @isolate_in_subprocess
 def test_overlapping_stop_drains_wait_for_a_late_spawn() -> None:
     driven: list[str] = []
-    release_first, release_late = threading.Event(), threading.Event()
-    first_probe = _PendingActorProbe("first", driven, release=release_first)
+    first_probe = _PendingActorProbe("first", driven, pending=True)
     first = _CountedSpawn(first_probe)
-    late = _PendingActorProbe("late", driven, release=release_late)
+    late = _PendingActorProbe("late", driven, pending=True)
     pending = _AppendBeforeRemoval([first], late)
     owner = SimpleNamespace(_pending_actor_spawns=pending)
 
@@ -770,22 +778,20 @@ def test_overlapping_stop_drains_wait_for_a_late_spawn() -> None:
             )
             await asyncio.sleep(0.01)
         assert first.reads == 2
-        await _wait_for_event(
-            first_probe.entered, "the first spawn did not start initializing"
-        )
-        release_first.set()
+        await _wait_for_event(first_probe.entered, "no drain selected the first spawn")
+        first_probe.complete()
         # The late spawn arrives as one drain removes the first; some drain
         # must wait for it before anything removes it.
         await _wait_for_event(late.entered, "no drain waited for the late spawn")
         assert list(pending) == [late]
-        release_late.set()
+        late.complete()
         await asyncio.wait_for(asyncio.gather(*drains), timeout=30)
 
     try:
         asyncio.run(overlap())
     finally:
-        release_first.set()
-        release_late.set()
+        first_probe.complete()
+        late.complete()
     assert driven == ["first", "late"]
     assert list(pending) == []
 

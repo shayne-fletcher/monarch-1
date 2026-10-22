@@ -42,6 +42,7 @@ from monarch._rust_bindings.monarch_hyperactor.host_mesh import (
 from monarch._rust_bindings.monarch_hyperactor.proc import ProcId, Uid
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.shape import Point, Shape, Slice
+from monarch._rust_bindings.monarch_hyperactor.testing import _handle_receiver_count
 from monarch._src.actor.actor_mesh import (
     _client_context,
     Actor,
@@ -229,18 +230,15 @@ class _AwaitRecord:
 
 
 class _PendingActorRecord:
-    """Expose an initializer that records when the real actor queue drives it."""
+    """Record when the host drain reaches a pending actor's readiness result."""
 
     def __init__(self, record: list[str]) -> None:
         self._record = record
 
     @property
     def initialized(self) -> Future[bool]:
-        async def record() -> bool:
-            self._record.append("pending_actor")
-            return True
-
-        return Future._from_coro(record())
+        self._record.append("pending_actor")
+        return Future._from_handle(_ready_handle(True))
 
 
 class _HostTeardownCallThrough:
@@ -489,12 +487,10 @@ def test_host_teardown_completes_for_each_observer_kind(
                 warnings.simplefilter("ignore", UserWarning)
                 return teardown.get(timeout=30)
 
-        with patch.object(Future, "_from_coro", wraps=Future._from_coro) as from_coro:
-            if observer == "get":
-                assert getattr(hm, method)().get(timeout=30) is None
-            else:
-                assert asyncio.run(observe_in_loop()) is None
-        assert from_coro.call_count == 0
+        if observer == "get":
+            assert getattr(hm, method)().get(timeout=30) is None
+        else:
+            assert asyncio.run(observe_in_loop()) is None
         if method == "shutdown":
             assert hm._inner_host_mesh is None
 
@@ -839,9 +835,6 @@ def test_attach_to_workers_accepts_future_addresses() -> None:
     """
     from monarch._src.actor.future import Future
 
-    async def _resolve(addr: str) -> str:
-        return addr
-
     procs = []
     workers = []
     for _i in range(2):
@@ -867,7 +860,7 @@ def test_attach_to_workers_accepts_future_addresses() -> None:
         )
         procs.append(proc)
         # Pass a Future rather than a string to exercise address resolution.
-        fut: Future[str] = Future._from_coro(_resolve(proc_addr))
+        fut: Future[str] = Future._from_handle(_ready_handle(proc_addr))
         workers.append(fut)
 
     try:
@@ -888,38 +881,28 @@ def test_attach_to_workers_accepts_future_addresses() -> None:
 def test_attach_starts_before_readiness_observation_and_survives_a_dropped_observer() -> (
     None
 ):
-    address_started = threading.Event()
-    release_address = threading.Event()
-
-    async def resolve_address() -> str:
-        address_started.set()
-        released = await PythonTask.spawn_blocking(
-            lambda: release_address.wait(timeout=30)
-        )
-        if not released:
-            raise TimeoutError("worker address release was not published")
-        return addr
-
     with ExitStack() as cleanup:
         job = ProcessJob({"hosts": 1})
         job.apply()
         cleanup.callback(job.kill)
-        cleanup.callback(release_address.set)
         addr = job._host_to_pid["hosts_0"].channel
-        address: Future[str] = Future._from_coro(resolve_address())
+        address_handle, completer = _new_handle_pair()
+        address: Future[str] = Future._from_handle(address_handle)
 
         hosts = attach_to_workers(
             ca="trust_all_connections",
             workers=[address],
         )
 
-        assert address_started.wait(timeout=10)
+        # The native attach has retained an observer of the pending address
+        # before anybody observes host readiness.
+        assert _handle_receiver_count(completer) >= 2
 
         discarded = hosts.initialized
         with pytest.raises(TimeoutError):
             discarded.get(timeout=0.25)
         del discarded
-        release_address.set()
+        completer.set_result(addr)
 
         assert hosts.initialized.get(timeout=30) is True
         assert address.get(timeout=30) == addr
