@@ -74,6 +74,10 @@ class SyncCaller(Actor):
         benchmark_noop_rpc(peer, iterations)
 
     @endpoint
+    def measure_call_one(self, peer: SyncNoopActor, iterations: int) -> None:
+        benchmark_call_one(peer, iterations)
+
+    @endpoint
     def measure_stream(self, peer: SyncNoopActor, iterations: int) -> None:
         benchmark_stream(peer, iterations)
 
@@ -127,6 +131,17 @@ def benchmark_receive_loopback(iterations: int, timeout: float | None = None) ->
     benchmark_receive(receive, iterations)
 
 
+def benchmark_receive_once(iterations: int) -> None:
+    """Open a once channel, send to it, then wait for its receive Future."""
+
+    def receive() -> int:
+        sender, receiver = Channel[int].open(once=True)
+        sender.send(7)
+        return receiver.recv().get()
+
+    benchmark_receive(receive, iterations)
+
+
 async def benchmark_receive_asyncio(iterations: int) -> None:
     """Measure loopback receives observed by await on one asyncio loop."""
     if iterations < 2:
@@ -176,8 +191,10 @@ def benchmark_receive_ping_pong(caller: SyncCaller, iterations: int) -> None:
     completion.get(timeout=10)
 
 
-def benchmark_observation(operation: Callable[[], None], iterations: int) -> None:
-    """Report p50 and p99 for completing a noop stream operation, after warmup."""
+def benchmark_observation(
+    operation: Callable[[], None], iterations: int, label: str = "stream RPC"
+) -> None:
+    """Report p50 and p99 for completing a noop operation, after warmup."""
     if iterations < 2:
         raise ValueError("iterations must be at least 2")
     warmup_iterations = 20
@@ -191,8 +208,8 @@ def benchmark_observation(operation: Callable[[], None], iterations: int) -> Non
     percentiles = statistics.quantiles(latencies_ms, n=100, method="inclusive")
     print(f"warmup iterations: {warmup_iterations}")
     print(f"measured iterations: {iterations}")
-    print(f"p50 stream RPC latency: {percentiles[49]:.3f} ms")
-    print(f"p99 stream RPC latency: {percentiles[98]:.3f} ms")
+    print(f"p50 {label} latency: {percentiles[49]:.3f} ms")
+    print(f"p99 {label} latency: {percentiles[98]:.3f} ms")
 
 
 def benchmark_stream(peer: SyncNoopActor, iterations: int) -> None:
@@ -204,6 +221,33 @@ def benchmark_stream(peer: SyncNoopActor, iterations: int) -> None:
             reply.get()
 
     benchmark_observation(observe, iterations)
+
+
+def benchmark_call_one(peer: SyncNoopActor, iterations: int) -> None:
+    """Measure untimed get() on a call_one() reply, including the off-main
+    inline path when called from SyncCaller."""
+
+    def observe() -> None:
+        peer.noop.call_one().get()
+
+    benchmark_observation(observe, iterations, label="call_one RPC")
+
+
+async def benchmark_call_one_asyncio(peer: SyncNoopActor, iterations: int) -> None:
+    """Measure ``await call_one()`` on one asyncio loop, timed per await."""
+    if iterations < 2:
+        raise ValueError("iterations must be at least 2")
+    latencies_ms = []
+    for index in range(20 + iterations):
+        start = time.perf_counter()
+        await peer.noop.call_one()
+        if index >= 20:
+            latencies_ms.append((time.perf_counter() - start) * 1000)
+    percentiles = statistics.quantiles(latencies_ms, n=100, method="inclusive")
+    print("warmup iterations: 20")
+    print(f"measured iterations: {iterations}")
+    print(f"p50 call_one RPC latency: {percentiles[49]:.3f} ms")
+    print(f"p99 call_one RPC latency: {percentiles[98]:.3f} ms")
 
 
 def benchmark_accumulator(peer: SyncNoopActor, iterations: int) -> None:
@@ -243,9 +287,15 @@ def main() -> None:
         print("sync endpoint:")
         sync_noop = procs.spawn("sync_noop", SyncNoopActor)
         benchmark_noop_rpc(sync_noop, args.iterations)
+        print("main-thread call_one get:")
+        benchmark_call_one(sync_noop, args.iterations)
+        print("asyncio call_one await:")
+        asyncio.run(benchmark_call_one_asyncio(sync_noop, args.iterations))
         print("nested sync-actor endpoint:")
         caller = procs.spawn("sync_caller", SyncCaller)
         caller.measure.call_one(sync_noop, args.iterations).get()
+        print("nested sync-actor call_one get:")
+        caller.measure_call_one.call_one(sync_noop, args.iterations).get()
         print("main-thread stream get:")
         benchmark_stream(sync_noop, args.iterations)
         print("nested sync-actor stream get:")
@@ -256,6 +306,8 @@ def main() -> None:
         benchmark_receive_loopback(args.iterations)
         print("main-thread channel receive timed get:")
         benchmark_receive_loopback(args.iterations, timeout=5)
+        print("main-thread once-port receive get:")
+        benchmark_receive_once(args.iterations)
         print("asyncio channel receive await:")
         asyncio.run(benchmark_receive_asyncio(args.iterations))
         print("plain-thread channel receive get:")
