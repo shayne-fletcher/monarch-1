@@ -43,7 +43,8 @@ if TYPE_CHECKING:
 
 @final
 class PendingReply(Generic[R]):
-    """An unstarted stream-item collector held by a Monarch Future.
+    """An unstarted stream-item collector or port receive held by a Monarch
+    Future.
 
     Internal, transitional carrier until Handles can hold undecoded replies.
     Each observation method takes the collector once; a second take raises
@@ -51,11 +52,13 @@ class PendingReply(Generic[R]):
     """
 
     def spawn_handle(self) -> Handle[R]:
-        """Start taking and unpickling one queued reply on Tokio and return
-        a Handle observing its value or error."""
+        """Start taking and unpickling one queued reply, or one port message,
+        on Tokio and return a Handle observing its value or error. A port
+        receive's task stops once nobody can observe it."""
         ...
     def block_on(self) -> R:
-        """Take and unpickle one reply, blocking the caller until it completes.
+        """Take and unpickle one reply or message, blocking the caller until it
+        completes.
         Off the main thread the caller drives collection inline; on the main
         thread Tokio drives it while the caller waits and checks for signals."""
         ...
