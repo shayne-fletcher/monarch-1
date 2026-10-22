@@ -462,7 +462,8 @@ class ProcMesh(MeshTrait):
 
         instance = context().actor_instance._as_rust()
         log = pm._logging_manager.start(instance, hy_proc_mesh, host_mesh.stream_logs)
-        logged = _after([log], hy_proc_mesh)
+        level = pm._logging_manager.spawn_log_level_actor(pm, hy_proc_mesh)
+        logged = _after([log, level], hy_proc_mesh)
         # The setup actor's init message must reserve logging readiness, not
         # the full completion that waits for the setup actor's own reply.
         pm._proc_mesh = logged

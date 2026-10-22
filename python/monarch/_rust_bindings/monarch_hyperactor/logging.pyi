@@ -25,14 +25,12 @@ class LoggingMeshClient:
         *,
         stream_to_client: bool,
         aggregate_window_sec: int | None,
-        level: int,
     ) -> Handle[LoggingMeshClient]: ...
     def set_mode(
         self,
         instance: Instance,
         stream_to_client: bool,
         aggregate_window_sec: int | None,
-        level: int,
     ) -> None: ...
     def flush(self, instance: Instance) -> Handle[None]: ...
 

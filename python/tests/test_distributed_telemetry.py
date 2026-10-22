@@ -794,7 +794,7 @@ def test_all_actors_in_proc_mesh() -> None:
 
         assert set(child_names) == {
             "worker_actors",
-            "logger",
+            "log_level",
             "setup",
         }
 
@@ -883,7 +883,7 @@ def test_all_actors_in_host_mesh() -> None:
 
         assert set(child_names) == {
             "worker_actors",
-            "logger",
+            "log_level",
             "setup",
         }
 

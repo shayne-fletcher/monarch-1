@@ -505,6 +505,10 @@ class Printer(Actor):
         sys.stdout.flush()
         sys.stderr.flush()
 
+    @endpoint
+    async def root_log_level(self) -> int:
+        return logging.getLogger().level
+
     def _handle_undeliverable_message(
         self, message: UndeliverableMessageEnvelope
     ) -> bool:
@@ -763,6 +767,10 @@ async def test_logging_option_defaults() -> None:
     ) as (_, paths):
         pm = this_host().spawn_procs(per_host={"gpus": 2})
         am = pm.spawn("printer", Printer)
+
+        # Actor procs start with the Python root logger at INFO.
+        levels = await am.root_log_level.call()
+        assert set(levels.values()) == {logging.INFO}, levels
 
         for _ in range(5):
             await am.print.call("print streaming")

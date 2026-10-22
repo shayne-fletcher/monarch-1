@@ -8,18 +8,42 @@ import asyncio
 import logging
 import threading
 import warnings
-from typing import Optional, TextIO, Tuple
+from typing import Optional, TextIO, Tuple, TYPE_CHECKING
 
 from monarch._rust_bindings.monarch_hyperactor.context import Instance
 from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 from monarch._rust_bindings.monarch_hyperactor.logging import LoggingMeshClient
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
-from monarch._src.actor.actor_mesh import context
+from monarch._src.actor.actor_mesh import Actor, context
+from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.ipython_check import is_ipython
+
+if TYPE_CHECKING:
+    from monarch._src.actor.proc_mesh import ProcMesh
 
 IN_IPYTHON: bool = is_ipython()
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+
+class _LogLevelSetter(Actor):
+    """Per-proc actor that applies the Python logging level.
+
+    Spawned on every proc so the pure-Rust log-forwarding client
+    (``LoggingMeshClient``) does not have to drive Python's ``logging``
+    module itself. Keeping this on the Python side lets a Rust-only actor
+    system host the forwarding client.
+    """
+
+    _is_system_actor: bool = True
+
+    def __init__(self, level: int) -> None:
+        logging.getLogger().setLevel(level)
+
+    @endpoint
+    def set_level(self, level: int) -> None:
+        logging.getLogger().setLevel(level)
+
 
 _global_flush_registered = False
 _global_flush_lock = threading.Lock()
@@ -52,6 +76,7 @@ async def _flush_all_proc_mesh_logs_async() -> None:
 class LoggingManager:
     def __init__(self) -> None:
         self._logging_mesh_client_handle: Optional[Handle[LoggingMeshClient]] = None
+        self._log_level_actor: Optional[_LogLevelSetter] = None
 
     @property
     def _logging_mesh_client(self) -> Optional[LoggingMeshClient]:
@@ -72,9 +97,26 @@ class LoggingManager:
             proc_mesh,
             stream_to_client=stream_to_client,
             aggregate_window_sec=3 if stream_to_client else None,
-            level=logging.INFO,
         )
         return self._logging_mesh_client_handle
+
+    def spawn_log_level_actor(
+        self, proc_mesh: "ProcMesh", hy_proc_mesh: Handle[HyProcMesh]
+    ) -> Handle[None]:
+        """Spawn the per-proc actor that applies the Python log level.
+
+        Spawning a Python actor pickles the proc mesh on the calling thread.
+        The returned Handle makes its initialization part of proc readiness.
+        """
+        self._log_level_actor = proc_mesh._spawn_nonblocking_on(
+            hy_proc_mesh, "log_level", _LogLevelSetter, logging.INFO
+        )
+        return self._log_level_actor.initialized._as_handle()
+
+    def set_log_level(self, level: int) -> None:
+        if self._log_level_actor is None:
+            raise RuntimeError("logging level control is not initialized")
+        self._log_level_actor.set_level.broadcast(level)
 
     def register_flusher_if_in_ipython(self) -> None:
         if IN_IPYTHON:
@@ -182,8 +224,8 @@ class LoggingManager:
             context().actor_instance._as_rust(),
             stream_to_client=stream_to_client,
             aggregate_window_sec=aggregate_window_sec,
-            level=level,
         )
+        self.set_log_level(level)
         self.register_flusher_if_in_ipython()
         self.enable_fd_capture_if_in_ipython()
 
