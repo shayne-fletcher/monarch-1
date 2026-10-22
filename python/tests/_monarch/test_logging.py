@@ -448,6 +448,25 @@ class LoggingManagerAsyncTest(IsolatedAsyncioTestCase):
             raw, "log_level", _LogLevelSetter, logging.INFO
         )
 
+    @patch("monarch._src.actor.logging.logging.getLogger")
+    def test_initialize_local_log_level_sets_the_driver_root_logger(
+        self, mock_get_logger: Mock
+    ) -> None:
+        self.logging_manager.initialize_local_log_level(logging.INFO)
+
+        mock_get_logger.return_value.setLevel.assert_called_once_with(logging.INFO)
+
+    @patch("monarch._src.actor.logging.logging.getLogger")
+    def test_set_log_level_updates_the_initialized_local_logger(
+        self, mock_get_logger: Mock
+    ) -> None:
+        self.logging_manager.initialize_local_log_level(logging.INFO)
+        mock_get_logger.return_value.setLevel.reset_mock()
+
+        self.logging_manager.set_log_level(logging.WARNING)
+
+        mock_get_logger.return_value.setLevel.assert_called_once_with(logging.WARNING)
+
     def test_set_log_level_rejects_an_uninitialized_target(self) -> None:
         with self.assertRaisesRegex(
             RuntimeError, "logging level control is not initialized"

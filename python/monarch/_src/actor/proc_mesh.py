@@ -676,6 +676,22 @@ class ProcMesh(MeshTrait):
             hy_proc_mesh.region,
         )
 
+    def _start_root_logging(self) -> None:
+        """Start logging for the root client's proc mesh.
+
+        Client bootstrap builds this mesh with `_from_rust`, not
+        `from_host_mesh`, but it gets the same logging: a forwarding client,
+        and a Python log level that starts at INFO. Its only proc is this
+        process, so the level is set here directly; a `_LogLevelSetter` would
+        make the same call later, racing the caller.
+        """
+        instance = context().actor_instance._as_rust()
+        log = self._logging_manager.start(
+            instance, self._proc_mesh, self._host_mesh.stream_logs
+        )
+        self._logging_manager.initialize_local_log_level(logging.INFO)
+        self._proc_mesh = _after([log], self._proc_mesh)
+
     @classmethod
     def _from_initialized_hy_proc_mesh(
         cls,

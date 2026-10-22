@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import pathlib
 import tempfile
@@ -904,6 +905,23 @@ class PidActor(Actor):
     @endpoint
     def get_pid(self) -> int:
         return os.getpid()
+
+
+@pytest.mark.timeout(60)
+@isolate_in_subprocess
+async def test_this_proc_controls_the_client_root_logger() -> None:
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.WARNING)
+
+    proc = this_proc()
+    assert root_logger.level == logging.INFO
+
+    await proc.logging_option(
+        stream_to_client=False,
+        aggregate_window_sec=None,
+        level=logging.ERROR,
+    )
+    assert root_logger.level == logging.ERROR
 
 
 @pytest.mark.timeout(60)
