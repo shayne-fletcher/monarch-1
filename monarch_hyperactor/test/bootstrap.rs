@@ -21,8 +21,8 @@ async fn main() {
     }
 
     // Initialize the embedded Python interpreter before any actor
-    // code runs. Some per-proc actors (e.g. LoggerRuntimeActor) call
-    // into Python during `new()`. If Python isn't initialized yet,
+    // code runs. Some per-proc actors (e.g. PythonActor) call into
+    // Python during `new()`. If Python isn't initialized yet,
     // PyO3 will panic ("The Python interpreter is not initialized").
     pyo3::Python::initialize();
 

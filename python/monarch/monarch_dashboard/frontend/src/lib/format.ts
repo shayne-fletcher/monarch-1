@@ -117,7 +117,7 @@ export function actorInstance(fullName: string | null | undefined): string | nul
 const SYSTEM_ROLES = new Set([
   "proc_agent",
   "host_agent",
-  "logger",
+  "log_level",
   "setup",
   "telemetry",
   "comm",
