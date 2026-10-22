@@ -4,17 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
-
 import asyncio
 import operator
 import sys
 import unittest.mock
 
 import pytest
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+from monarch._rust_bindings.monarch_hyperactor.handle import _new_handle_pair
 from monarch._src.actor import future as future_mod
-from monarch._src.actor.future import Future
+from monarch._src.actor.future import _ready_handle, Future
 from monarch.actor import Accumulator
 
 
@@ -27,12 +25,8 @@ class _StreamError(Exception):
 
 
 def _future_of(value):
-    """A real, single-use monarch Future resolving to value."""
-
-    async def _v():
-        return value
-
-    return Future._from_coro(_v())
+    """A Handle-backed Future holding one stream value."""
+    return Future._from_handle(_ready_handle(value))
 
 
 def _stream_endpoint(values):
@@ -171,10 +165,9 @@ def test_accumulate_short_circuits_and_propagates_stream_error():
         if value != 2:
             return _future_of(value)
 
-        async def fail():
-            raise _StreamError("stream failed on 2")
-
-        return Future._from_coro(fail())
+        handle, completer = _new_handle_pair()
+        completer.set_exception(_StreamError("stream failed on 2"))
+        return Future._from_handle(handle)
 
     combine = unittest.mock.MagicMock(side_effect=operator.add)
     endpoint = _recording_stream_endpoint([1, 2, 3], events, make_future=make_future)
@@ -268,15 +261,21 @@ def test_accumulate_replays_combine_error_await_then_get():
 def test_accumulate_post_start_abandonment_completes_fold_once():
     gate = {"entered": False, "released": False, "completed": False}
 
-    async def gated_value():
+    handle, completer = _new_handle_pair()
+
+    def stream():
         gate["entered"] = True
-        while not gate["released"]:
-            await PythonTask.sleep(0.005)
+        yield Future._from_handle(handle)
+
+    def release():
+        gate["released"] = True
+        if gate["completed"]:
+            return
         gate["completed"] = True
-        return 2
+        completer.set_result(2)
 
     endpoint = unittest.mock.MagicMock()
-    endpoint.stream.return_value = iter([Future._from_coro(gated_value())])
+    endpoint.stream.return_value = stream()
     combine = unittest.mock.MagicMock(side_effect=operator.add)
     result = Accumulator(endpoint, 1, combine).accumulate()
 
@@ -293,14 +292,14 @@ def test_accumulate_post_start_abandonment_completes_fold_once():
         # asyncio.Future.cancel() changes the state synchronously; callbacks run
         # on a later loop turn, but cancelled() is true when cancel() returns true.
         assert observer.cancelled()
-        gate["released"] = True
+        release()
         return await asyncio.wait_for(result.as_asyncio(), timeout=5)
 
     try:
         observed = asyncio.run(cancel_after_start())
     finally:
         original_error = sys.exc_info()[1]
-        gate["released"] = True
+        release()
         try:
             drained = result.get(timeout=5)
         except Exception as cleanup_error:

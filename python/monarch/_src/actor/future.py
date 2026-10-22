@@ -11,7 +11,6 @@ import warnings
 from typing import (
     Any,
     cast,
-    Coroutine,
     Generator,
     Generic,
     NamedTuple,
@@ -25,7 +24,6 @@ from monarch._rust_bindings.monarch_hyperactor.handle import (
     Handle,
     WouldBlockRuntime,
 )
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
 from monarch._src.actor.telemetry import log_with_tracing
 
@@ -72,16 +70,8 @@ def _validate_timeout(timeout: float | None) -> None:
         )
 
 
-async def _aincomplete(impl: Any, self: Any) -> Any:
-    try:
-        return self._set_result(await impl())
-    except Exception as e:
-        self._set_exception(e)
-        raise
-
-
 class _Unawaited(NamedTuple):
-    coro: "PythonTask[Any] | PendingReply[Any]"
+    coro: "PendingReply[Any]"
 
 
 class _Complete(NamedTuple):
@@ -121,16 +111,6 @@ class Future(Generic[R]):
             "constructed directly."
         )
 
-    # No production callers remain; only legacy characterization tests use this.
-    # The upcoming Future cleanup will delete it and update those tests.
-    @classmethod
-    def _from_coro(cls, coro: "Coroutine[Any, Any, R] | PythonTask[R]") -> "Future[R]":
-        future = cast("Future[R]", object.__new__(cls))
-        future._status = _Unawaited(
-            coro if isinstance(coro, PythonTask) else PythonTask.from_coroutine(coro)
-        )
-        return future
-
     @classmethod
     def _from_pending(cls, reply: "PendingReply[R]") -> "Future[R]":
         """Hold a stream item's collector or a port receive without starting it.
@@ -141,8 +121,8 @@ class Future(Generic[R]):
 
     @classmethod
     def _resolved(cls, value: R) -> "Future[R]":
-        """Return a Future already resolved to ``value``. Unlike ``_from_coro``,
-        this creates no ``PythonTask``, so it never bootstraps the root client."""
+        """Return a Future already resolved to ``value``, without starting work
+        or bootstrapping the root client."""
         future = cast("Future[R]", object.__new__(cls))
         future._status = _Complete(value)
         return future
