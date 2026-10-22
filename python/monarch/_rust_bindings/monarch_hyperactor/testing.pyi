@@ -4,12 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, final
+from typing import Any, Callable, final, TypeVar
 
 from monarch._rust_bindings.monarch_hyperactor.actor import SyncInbox
 from monarch._rust_bindings.monarch_hyperactor.handle import _HandleCompleter, Handle
 from monarch._rust_bindings.monarch_hyperactor.pympsc import PyTestSender
 
+T = TypeVar("T")
+
+def _call_in_tokio_context(f: Callable[[], T]) -> T:
+    """Call a plain function on this thread with Tokio's runtime context active.
+
+    Starts no task and drives no coroutine. The function must not wait for work
+    that needs the GIL. The previous context is restored on return or exception.
+    """
+    ...
 @final
 class TestStruct:
     """Minimal Rust struct for testing @rust_struct mixin patching."""
@@ -38,7 +47,7 @@ class _HandleProbe:
     """Closed control object over one Rust-produced ``Handle``.
 
     Private contract-test support. The handle comes from the real
-    ``PyHandle::spawn`` path, not from ``PythonTask.spawn_handle()``. The probe
+    ``PyHandle::spawn`` path. The probe
     accepts no coroutine, awaitable, callable, future or producer function: it
     only puts a genuine ``Handle`` into one of three reviewed terminal states.
 

@@ -26,8 +26,11 @@ from isolate_in_subprocess import isolate_in_subprocess
 from monarch._rust_bindings.monarch_hyperactor.context import Instance as HyInstance
 from monarch._rust_bindings.monarch_hyperactor.handle import _new_handle_pair, Handle
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
+from monarch._rust_bindings.monarch_hyperactor.testing import (
+    _call_in_tokio_context,
+    _handle_receiver_count,
+)
 from monarch._src.actor.actor_mesh import (
     _client_context,
     Actor,
@@ -834,16 +837,8 @@ def test_proc_mesh_sliced() -> None:
         actor = proc_mesh.spawn("test_actor", TestActor, 42)
         actor.get_proc_rank.call().get()
         hy_proc_mesh = proc_mesh._proc_mesh.get()
-        release_proc_mesh = threading.Event()
-
-        async def resolve_proc_mesh() -> HyProcMesh:
-            await PythonTask.spawn_blocking(release_proc_mesh.wait)
-            return hy_proc_mesh
-
         # Keep the native mesh unresolved so slicing must take the pending path.
-        proc_mesh._proc_mesh = PythonTask.from_coroutine(
-            resolve_proc_mesh()
-        ).spawn_handle()
+        proc_mesh._proc_mesh, complete_proc_mesh = _new_handle_pair()
 
         # Hosts 0 and 2, gpus 1 and 2
         slice_shape = Shape(
@@ -855,7 +850,7 @@ def test_proc_mesh_sliced() -> None:
             sliced = proc_mesh._new_with_shape(slice_shape)
             assert sliced._proc_mesh.poll() is None
         finally:
-            release_proc_mesh.set()
+            complete_proc_mesh.set_result(hy_proc_mesh)
 
         actor = sliced.spawn("test_actor_sliced", TestActor, 42)
         proc_ranks = actor.get_proc_rank.call().get()
@@ -900,16 +895,9 @@ async def test_pickle_initialized_proc_mesh_in_tokio_thread() -> None:
         host = state.hosts
         proc = host.spawn_procs(per_host={"gpus": 2})
 
-        async def task():
-            cloudpickle.dumps(proc)
-
         await proc.initialized
-        PythonTask.from_coroutine(task()).block_on()
-
-        async def task():
-            cloudpickle.dumps(proc.slice(gpus=0, hosts=0))
-
-        PythonTask.from_coroutine(task()).block_on()
+        _call_in_tokio_context(lambda: cloudpickle.dumps(proc))
+        _call_in_tokio_context(lambda: cloudpickle.dumps(proc.slice(gpus=0, hosts=0)))
 
 
 class PidActor(Actor):
@@ -995,23 +983,19 @@ def test_root_client_does_not_leak_proc_meshes() -> None:
 @pytest.mark.timeout(60)
 @isolate_in_subprocess
 def test_actor_spawn_does_not_block_on_proc_mesh_init() -> None:
-    async def sleep_then_mesh(pm: HyProcMesh) -> HyProcMesh:
-        time.sleep(15)
-        return pm
-
-    # Can't use scoped_state here: graceful shutdown blocks on proc_mesh
-    # initialization, but this test intentionally replaces _proc_mesh with a
-    # sleeping coroutine to verify that spawn() doesn't block.
     job = ProcessJob({"hosts": 1})
     try:
         host = job.state(cached_path=None).hosts
         proc_mesh = host.spawn_procs(name="test_proc")
-        proc_mesh._proc_mesh = PythonTask.from_coroutine(
-            sleep_then_mesh(proc_mesh._proc_mesh.get(timeout=30))
-        ).spawn_handle()
-        assert proc_mesh._proc_mesh.poll() is None
-        proc_mesh.spawn("pid", PidActor)
-        assert proc_mesh._proc_mesh.poll() is None
+        hy_proc_mesh = proc_mesh._proc_mesh.get(timeout=30)
+        proc_mesh._proc_mesh, complete_proc_mesh = _new_handle_pair()
+        try:
+            assert proc_mesh._proc_mesh.poll() is None
+            proc_mesh.spawn("pid", PidActor)
+            assert proc_mesh._proc_mesh.poll() is None
+        finally:
+            # Let actor creation and graceful cleanup finish even if an assertion fails.
+            complete_proc_mesh.set_result(hy_proc_mesh)
     finally:
         job.kill()
 
@@ -1019,16 +1003,38 @@ def test_actor_spawn_does_not_block_on_proc_mesh_init() -> None:
 @pytest.mark.timeout(60)
 @isolate_in_subprocess
 def test_raw_proc_mesh_pickle_blocks_on_proc_mesh_init() -> None:
-    async def sleep_then_mesh(pm: HyProcMesh) -> HyProcMesh:
-        time.sleep(15)
-        return pm
-
     proc_mesh = this_host().spawn_procs(name="test_proc")
-    proc_mesh._proc_mesh = PythonTask.from_coroutine(
-        sleep_then_mesh(proc_mesh._proc_mesh.get(timeout=30))
-    ).spawn_handle()
+    hy_proc_mesh = proc_mesh._proc_mesh.get(timeout=30)
+    proc_mesh._proc_mesh, complete_proc_mesh = _new_handle_pair()
     assert proc_mesh._proc_mesh.poll() is None
-    cloudpickle.dumps(proc_mesh)
+    assert _handle_receiver_count(complete_proc_mesh) == 1
+    pickle_returned = threading.Event()
+    wait_seen = threading.Event()
+
+    def complete_after_wait() -> None:
+        try:
+            deadline = time.monotonic() + 10
+            while not pickle_returned.is_set() and time.monotonic() < deadline:
+                if _handle_receiver_count(complete_proc_mesh) == 2:
+                    wait_seen.set()
+                    break
+                pickle_returned.wait(0.001)
+        finally:
+            # Release on timeout or early return too, so a failed witness cannot
+            # strand the pickling call or cleanup.
+            complete_proc_mesh.set_result(hy_proc_mesh)
+
+    completer_thread = threading.Thread(target=complete_after_wait)
+    completer_thread.start()
+    try:
+        blob = cloudpickle.dumps(proc_mesh)
+        assert wait_seen.is_set(), "pickle returned without registering its native wait"
+        assert isinstance(cloudpickle.loads(blob), ProcMesh)
+    finally:
+        pickle_returned.set()
+        completer_thread.join(timeout=15)
+        assert not completer_thread.is_alive(), "pickle completer did not exit"
+        proc_mesh.stop().get(timeout=30)
     assert proc_mesh._proc_mesh.poll() is not None
 
 

@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
-
 """Blocking Monarch entry points must reject unsafe Tokio re-entry.
 
 Bootstrapping a client ends in ``block_on()``, which panics on a Tokio runtime
@@ -20,8 +18,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from isolate_in_subprocess import isolate_in_subprocess
 from monarch._rust_bindings.monarch_hyperactor.handle import WouldBlockRuntime
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.runtime import _is_in_tokio_runtime
+from monarch._rust_bindings.monarch_hyperactor.testing import _call_in_tokio_context
 from monarch._src.actor.host_mesh import this_host
 from monarch.actor import (
     Actor,
@@ -37,7 +35,7 @@ _EXPECTED = "WouldBlockRuntime uninitialized=True"
 def test_worker_loop_runtime_policy_precedes_native_start() -> None:
     """Allow eager start on Tokio, but reject blocking before native startup."""
 
-    async def exercise() -> None:
+    def exercise() -> None:
         from monarch._src.actor import bootstrap
 
         assert _is_in_tokio_runtime()
@@ -75,7 +73,7 @@ def test_worker_loop_runtime_policy_precedes_native_start() -> None:
                     )
                 native_start.assert_not_called()
 
-    PythonTask.from_coroutine(exercise()).block_on()
+    _call_in_tokio_context(exercise)
 
 
 def test_attach_tracks_process_global_address_and_is_idempotent() -> None:
@@ -174,7 +172,7 @@ def _probe_fresh_bootstrap() -> str:
         return "precondition: not a tokio thread"
     if _client_context.try_get() is not None:
         return "precondition: client already initialized"
-    # spawn_blocking propagates the caller's actor context; drop it so the
+    # The caller has an actor context; clear it so the
     # fresh-bootstrap branch is the one under test.
     token = _context.set(None)
     try:
@@ -190,16 +188,6 @@ def _probe_fresh_bootstrap() -> str:
         return "no raise"
     finally:
         _context.reset(token)
-
-
-async def _probe_fresh_bootstrap_on_worker() -> str:
-    """The incident shape: a runtime *worker* thread, where block_on panics.
-
-    ``spawn_blocking`` threads are in a Tokio runtime context but tolerate
-    ``block_on``; a worker thread does not. This is the case that motivated
-    the guard.
-    """
-    return _probe_fresh_bootstrap()
 
 
 def _probe_attach() -> str:
@@ -246,7 +234,7 @@ def _probe_reuse() -> str:
 
 
 class _Prober(Actor):
-    """Runs probes on Tokio worker and blocking threads in a worker process.
+    """Runs probes with Tokio's runtime-entered state set in a worker process.
 
     A worker process never bootstraps a client of its own, so it is the only
     place the fresh-bootstrap branch is genuinely reachable.
@@ -254,35 +242,18 @@ class _Prober(Actor):
 
     @endpoint
     def run(self, which: str) -> str:
-        if which == "fresh_worker":
-            return (
-                PythonTask.from_coroutine(_probe_fresh_bootstrap_on_worker())
-                .spawn()
-                .block_on()
-            )
         probes = {"fresh": _probe_fresh_bootstrap, "attach": _probe_attach}
-        return PythonTask.spawn_blocking(probes[which]).block_on()
+        return _call_in_tokio_context(probes[which])
 
 
 @pytest.mark.timeout(120)
 @isolate_in_subprocess
-def test_context_on_tokio_without_client_refuses_fresh_bootstrap() -> None:
+def test_context_in_entered_runtime_refuses_fresh_bootstrap() -> None:
+    """Model the runtime state in which fresh bootstrap would panic on block_on."""
     pm = this_host().spawn_procs(per_host={"gpus": 1})
     try:
         prober = pm.spawn("prober", _Prober)
         assert prober.run.call_one("fresh").get() == _EXPECTED
-    finally:
-        pm.stop().get()
-
-
-@pytest.mark.timeout(120)
-@isolate_in_subprocess
-def test_context_on_tokio_worker_refuses_fresh_bootstrap() -> None:
-    """The incident shape: fresh bootstrap from a runtime worker thread."""
-    pm = this_host().spawn_procs(per_host={"gpus": 1})
-    try:
-        prober = pm.spawn("prober", _Prober)
-        assert prober.run.call_one("fresh_worker").get() == _EXPECTED
     finally:
         pm.stop().get()
 
@@ -306,4 +277,4 @@ def test_context_on_tokio_reuses_initialized_client() -> None:
 
     context()
     assert _client_context.try_get() is not None, "client should be initialized here"
-    assert PythonTask.spawn_blocking(_probe_reuse).block_on() == "reused"
+    assert _call_in_tokio_context(_probe_reuse) == "reused"

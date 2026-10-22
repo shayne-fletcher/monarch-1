@@ -931,8 +931,8 @@ class _ControllerController(Actor):
 # Lazy init so that the controller_controller and does not produce logs when it isn't used.
 # Checking for the controller (when it does not already exist in the MonarchContext) needs a lock,
 # otherwise two initializing procs will both try to init resulting in duplicates. The critical
-# region is not blocking: it spawns a separate task to do the init, assigns the
-# Shared[_ControllerController] from that task to the global and releases the lock.
+# region is not blocking: it starts spawning the actor, stores its ActorMesh
+# in the global and releases the lock without waiting for initialization.
 _controller_controller: _Lazy[_ControllerController] = _Lazy(
     lambda: context().actor_instance.proc_mesh.spawn(
         "controller_controller", _ControllerController
