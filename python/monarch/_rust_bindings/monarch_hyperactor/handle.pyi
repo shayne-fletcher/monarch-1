@@ -18,8 +18,8 @@ class _HandleCompleter(Generic[T]):
 class Handle(Generic[T]):
     """
     An observe-only handle to a background operation. It resolves once and stays
-    observable by any number of later observers. Unlike Shared, a Handle never
-    drives a Python coroutine. If its producer ends before publishing a result,
+    observable by any number of later observers. A Handle never drives a Python
+    coroutine. If its producer ends before publishing a result,
     every observer raises RuntimeError.
     """
 

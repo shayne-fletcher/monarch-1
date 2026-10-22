@@ -34,13 +34,14 @@ from monarch._rust_bindings.monarch_hyperactor.actor import (
     PythonMessageKind,
 )
 from monarch._rust_bindings.monarch_hyperactor.buffers import Buffer
+from monarch._rust_bindings.monarch_hyperactor.handle import _new_handle_pair
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     PortId,
     PortRef,
     UndeliverableMessageEnvelope,
 )
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorAddr
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+from monarch._rust_bindings.monarch_hyperactor.testing import _handle_receiver_count
 from monarch._src.actor import actor_mesh
 from monarch._src.actor.actor_mesh import ActorMesh, Channel, context, Port
 from monarch._src.actor.host_mesh import _spawn_admin, HostMesh, this_host, this_proc
@@ -1059,10 +1060,10 @@ async def test_flush_async_drives_flush_on_asyncio_loop() -> None:
     """`LoggingManager.flush_async` must actually drive the flush when awaited on
     an asyncio loop.
 
-    Regression guard: `flush_async` awaits the flush and swallows exceptions. If
-    it awaited a bare PythonTask, the pytokio gate would raise under a running
-    asyncio loop and the `except` would eat it -- a silent no-op. Here we buffer
-    logs under a long aggregation window, `await flush_async()` directly on the
+    Regression guard: `flush_async` awaits the flush and swallows exceptions.
+    An error from its await path could therefore turn flushing into a silent
+    no-op. Here we buffer logs under a long aggregation window,
+    `await flush_async()` directly on the
     test's asyncio loop, and require the aggregated lines to appear. With the
     silent-no-op bug this assertion fails (the lines stay buffered).
     """
@@ -1291,34 +1292,6 @@ def test_ported_actor():
     assert 5 == a.add.call_one(2).get()
     assert 7 == a.echo.call_one(7).get()
     proc_mesh.stop().get()
-
-
-async def _recv():
-    return (7, 2, 3)
-
-
-async def consume():
-    r = await PythonTask.from_coroutine(_recv())
-    assert r == (7, 2, 3)
-
-
-@pytest.mark.timeout(60)
-def test_python_task_tuple() -> None:
-    PythonTask.from_coroutine(consume()).block_on()
-
-
-def test_select_result() -> None:
-    def s(t):
-        time.sleep(t)
-        return t
-
-    a = PythonTask.spawn_blocking(lambda: s(4))
-    b = PythonTask.spawn_blocking(lambda: s(0))
-    r = PythonTask.select_one([a.task(), b.task()]).block_on()
-    assert r == (0, 1)
-    # FIXME: Sleep for 6 seconds to ensure that task `a` completes
-    # before the test exits. Otherwise we get a SIGABRT.
-    time.sleep(6)
 
 
 class SleepActor(Actor):
@@ -1972,40 +1945,6 @@ def test_instance_name():
         monarch.actor.config.prefix_python_logs_with_actor = True
 
 
-class TestPytokioActor(Actor):
-    @endpoint
-    def context_propagated_through_spawn(self) -> None:
-        cx = context()
-
-        async def task():
-            assert cx is context()
-
-        PythonTask.from_coroutine(coro=task()).spawn().block_on()
-
-    @endpoint
-    def context_propagated_through_spawn_blocking(self) -> None:
-        cx = context()
-
-        def task():
-            assert cx is context()
-
-        PythonTask.spawn_blocking(task).block_on()
-
-
-def test_context_propagated_through_python_task_spawn():
-    p = this_host().spawn_procs()
-    a = p.spawn("test_pytokio_actor", TestPytokioActor)
-    a.context_propagated_through_spawn.call().get()
-    p.stop().get()
-
-
-def test_context_propagated_through_python_task_spawn_blocking():
-    p = this_host().spawn_procs()
-    a = p.spawn("test_pytokio_actor", TestPytokioActor)
-    a.context_propagated_through_spawn_blocking.call().get()
-    p.stop().get()
-
-
 class ActorWithCleanup(Actor):
     def __init__(self, counter: Counter) -> None:
         self.counter = counter
@@ -2184,19 +2123,42 @@ async def test_run_forever_on_init():
 
 @pytest.mark.timeout(60)
 def test_raw_actor_mesh_pickle_blocks_on_proc_mesh_init() -> None:
-    async def sleep_then_mesh(pm: HyProcMesh) -> HyProcMesh:
-        time.sleep(15)
-        return pm
-
     proc_mesh = this_host().spawn_procs(name="test_proc")
-    proc_mesh._proc_mesh = PythonTask.from_coroutine(
-        sleep_then_mesh(proc_mesh._proc_mesh.get(timeout=30))
-    ).spawn_handle()
     actor_mesh = proc_mesh.spawn("test", Hello)
+    cast(ActorMesh, actor_mesh)._inner.initialized().get(timeout=30)
+    hy_proc_mesh = proc_mesh._proc_mesh.get(timeout=30)
+    # Only the parent proc mesh is pending. Actor initialization has finished,
+    # so its waiter cannot be mistaken for the pickle's native get() below.
+    proc_mesh._proc_mesh, complete_proc_mesh = _new_handle_pair()
     assert proc_mesh._proc_mesh.poll() is None
-    cloudpickle.dumps(actor_mesh)
+    assert _handle_receiver_count(complete_proc_mesh) == 1
+    pickle_returned = threading.Event()
+    wait_seen = threading.Event()
+
+    def complete_after_wait() -> None:
+        try:
+            deadline = time.monotonic() + 10
+            while not pickle_returned.is_set() and time.monotonic() < deadline:
+                if _handle_receiver_count(complete_proc_mesh) == 2:
+                    wait_seen.set()
+                    break
+                pickle_returned.wait(0.001)
+        finally:
+            # Release after a failed handshake too, so pickle and cleanup finish.
+            complete_proc_mesh.set_result(hy_proc_mesh)
+
+    completer_thread = threading.Thread(target=complete_after_wait)
+    completer_thread.start()
+    try:
+        blob = cloudpickle.dumps(actor_mesh)
+        assert wait_seen.is_set(), "pickle returned without registering its native wait"
+        assert isinstance(cloudpickle.loads(blob), ActorMesh)
+    finally:
+        pickle_returned.set()
+        completer_thread.join(timeout=15)
+        assert not completer_thread.is_alive(), "pickle completer did not exit"
+        proc_mesh.stop().get(timeout=30)
     assert proc_mesh._proc_mesh.poll() is not None
-    proc_mesh.stop().get()
 
 
 _GRACEFUL_SHUTDOWN_WORKER = """\

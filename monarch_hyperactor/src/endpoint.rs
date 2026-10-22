@@ -70,7 +70,6 @@ use crate::metrics::EndpointAttrs;
 use crate::metrics::UNKNOWN;
 use crate::pickle::PendingMessage;
 use crate::pickle::PicklingState;
-use crate::pytokio::current_traceback;
 use crate::runtime::GilSite;
 use crate::runtime::monarch_with_gil;
 use crate::runtime::monarch_with_gil_blocking;
@@ -79,6 +78,7 @@ use crate::shape::PyExtent;
 use crate::shape::PyShape;
 use crate::supervision::Supervisable;
 use crate::supervision::SupervisionError;
+use crate::traceback::current_traceback;
 use crate::value_mesh::PyValueMesh;
 
 py_global!(get_context, "monarch._src.actor.actor_mesh", "context");
@@ -1952,7 +1952,7 @@ mod tests {
     use pyo3::exceptions::PyValueError;
 
     use super::*;
-    use crate::pytokio::ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK;
+    use crate::traceback::ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK;
 
     /// Minimal `Endpoint` impl that only serves `get_qualified_name`.
     /// The default `build_operation_context_headers` consults no other
@@ -2685,7 +2685,7 @@ mod tests {
         }
     }
 
-    // Construction captures the same opt-in stack as PythonTask did, and
+    // Construction captures the opt-in creation stack, and
     // starting the item transfers it to the Handle's unobserved-error log.
     #[tokio::test]
     async fn stream_items_capture_creation_traceback_only_when_enabled() {

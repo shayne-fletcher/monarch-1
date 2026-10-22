@@ -122,13 +122,13 @@
 //!   every observer untouched, so a later `poll()`/`get()`/`await` still observes
 //!   completion.
 //! - **HDL-13 (direct Rust producer).** A Rust caller can eagerly produce a
-//!   `Handle` from a `Send + 'static` future without a `PyPythonTask`.
+//!   `Handle` from a `Send + 'static` future.
 //!   [`PyHandle::spawn`] wraps the future with conversion of a successful Rust
 //!   value to `Py<PyAny>` under `monarch_with_gil` and delegates to
 //!   [`PyHandle::spawn_pyobject`]. The latter starts one producer and publishes
 //!   its Python value or error once through
 //!   `send_result`, without a result-conversion GIL acquisition (same one-shot
-//!   core and unobserved-error policy as pytokio's producers, HDL-1/HDL-2).
+//!   core and unobserved-error policy, HDL-1/HDL-2).
 //!   Dropping the result receiver does not cancel the producer (HDL-4).
 //!   [`PyHandle::spawn_pyobject_with_traceback`] does the same, and also keeps
 //!   the producer's creation traceback for `send_result`'s unobserved-error
@@ -150,7 +150,6 @@
 //!   `#[pymethods]`, preserving HDL-11's direct-construction restriction.
 //! - **HDL-16 (permanent Python identity).** `Handle` and `WouldBlockRuntime`
 //!   have the canonical module `monarch._rust_bindings.monarch_hyperactor.handle`.
-//!   The legacy `pytokio` module does not export `Handle`.
 //! - **HDL-17 (GIL-free completion wake).** For a Handle still pending when
 //!   `as_asyncio` is called, on a loop that accepts `add_reader`, the observer
 //!   task holds a `Notifier` (a token,
@@ -282,8 +281,8 @@ fn format_traceback(py: Python<'_>, traceback: &Py<PyAny>) -> PyResult<String> {
 
 /// Publish a completed background-task result to the shared watch channel.
 ///
-/// Shared by `PyPythonTask` spawns, the direct [`PyHandle::spawn_pyobject`] producer
-/// (HDL-13), and the private Python completion pair (HDL-11). If the receiver
+/// Used by the direct [`PyHandle::spawn_pyobject`] producer (HDL-13) and the
+/// private Python completion pair (HDL-11). If the receiver
 /// has already been dropped, `watch::Sender::send` returns the unsent value as
 /// `SendError`: no consumer can ever observe it. An unobserved error is logged
 /// with its producer-creation traceback when one was captured.
@@ -298,9 +297,8 @@ pub(crate) fn send_result(
                 format_traceback(py, &tb).unwrap()
             } else {
                 // No creation traceback was captured: either the env var is
-                // unset (the default), or the producer is a direct Handle
-                // producer other than an endpoint call, which never captures one.
-                "creation traceback unavailable (PythonTask producers and endpoint calls \
+                // unset (the default), or this producer captures no traceback.
+                "creation traceback unavailable (endpoint calls, stream items and port receives \
                  capture one when `MONARCH_HYPERACTOR_ENABLE_UNAWAITED_PYTHON_TASK_TRACEBACK=1` \
                  is set)\n"
                     .into()
@@ -448,13 +446,6 @@ impl HandleCore {
             }
             Ok(rx)
         }
-    }
-
-    /// Clone the creation-site traceback under the GIL.
-    pub(crate) fn traceback_clone(&self) -> Option<Py<PyAny>> {
-        self.traceback
-            .as_ref()
-            .map(|t| monarch_with_gil_blocking(GilSite::Traceback, |py| t.clone_ref(py)))
     }
 }
 
@@ -645,7 +636,7 @@ impl PyHandle {
     }
 
     /// Like [`Self::spawn_pyobject`], but keep the producer's creation
-    /// traceback, as `PythonTask` producers do (HDL-13). `send_result` logs it
+    /// traceback (HDL-13). `send_result` logs it
     /// if the task fails and every observer has gone. Rust-only and outside
     /// `#[pymethods]` (HDL-11).
     pub fn spawn_pyobject_with_traceback<F>(fut: F, traceback: Option<Py<PyAny>>) -> Self
@@ -1570,7 +1561,7 @@ def ready_await_order(h):
     // NOT WouldBlockRuntime, which among the observers stays specific to get()
     // (HDL-6). The refusal consumes nothing: the same handle still observes its
     // value afterwards. Lives here rather than in the Python suite so the Handle
-    // contract does not depend on a PythonTask-driven test helper.
+    // contract is tested directly through its Rust binding.
     // Attests HDL-6, HDL-7.
     #[test]
     fn await_in_tokio_raises_native_and_leaves_handle_observable() {
@@ -2589,7 +2580,7 @@ class MyStop(StopIteration):
     }
 
     // spawn() eagerly runs its producer -- before any observer exists -- and
-    // resolves the converted value; no PyPythonTask is involved.
+    // resolves the converted value.
     // Attests HDL-1, HDL-2, HDL-13.
     #[test]
     fn rust_spawn_eagerly_resolves_handle() {
