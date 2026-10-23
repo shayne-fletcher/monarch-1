@@ -68,12 +68,6 @@ def _validate_timeout(timeout: float | None) -> None:
         )
 
 
-class _Complete(NamedTuple):
-    """A value supplied by Future._resolved(), with no operation to wait for."""
-
-    value: Any
-
-
 class _Handle(NamedTuple):
     """An operation observed through a native Handle, which manages its shared
     value or error. The work itself may be native or Python-owned."""
@@ -88,16 +82,17 @@ class _Body(NamedTuple):
     body: "_BodyCell"
 
 
-# A Future either holds an existing value, observes an operation through a
-# native Handle, or runs a Python async function body.
-_Status = _Complete | _Handle | _Body
+# A Future either observes an operation through a native Handle or runs a
+# Python async function body.
+_Status = _Handle | _Body
 
 
 class Future(Generic[R]):
     """A result returned by Monarch asynchronous operations.
 
     Use ``get()`` from synchronous code. On an asyncio loop, use ``await`` or
-    ``as_asyncio()``. Future objects cannot be constructed directly.
+    ``as_asyncio()``. Future objects cannot be constructed directly, and like
+    ``asyncio.Future`` they cannot be pickled.
     """
 
     _status: _Status
@@ -110,11 +105,9 @@ class Future(Generic[R]):
 
     @classmethod
     def _resolved(cls, value: R) -> "Future[R]":
-        """Return a Future already resolved to ``value``, without starting work
-        or bootstrapping the root client."""
-        future = cast("Future[R]", object.__new__(cls))
-        future._status = _Complete(value)
-        return future
+        """Return a Future over a Handle already resolved to ``value``, without
+        starting work or bootstrapping the root client."""
+        return cls._from_handle(_ready_handle(value))
 
     @classmethod
     def _from_handle(cls, handle: Handle[R]) -> "Future[R]":
@@ -134,8 +127,6 @@ class Future(Generic[R]):
         match self._status:
             case _Handle(handle=handle):
                 return cast("Handle[R]", handle)
-            case _Complete():
-                raise ValueError("Future does not have a Handle in its current state.")
             case _Body():
                 # RF-6: waiting on the Handle of a body nobody has started
                 # would never finish.
@@ -191,8 +182,7 @@ class Future(Generic[R]):
             # handler is on the Python logging chain. A UserWarning (separate
             # from this trace) fires only on a running asyncio loop, never on a
             # Tokio thread: the blocking `_Handle` path raises
-            # `WouldBlockRuntime` before warning, and cached `_Complete` reads
-            # don't block or warn. On asyncio it fires once, via
+            # `WouldBlockRuntime` before warning. On asyncio it fires once, via
             # `Handle.get()`.
             log_with_tracing(
                 logging.WARNING,
@@ -209,8 +199,6 @@ class Future(Generic[R]):
                 # thread) and emits the Python warning itself, so we do not warn
                 # again here.
                 return cast("R", handle.get(timeout))
-            case _Complete(value=value):
-                return cast("R", value)
             case _Body(body=body):
                 # Refuse before binding, leaving the body unstarted.
                 if in_tokio:
@@ -224,21 +212,16 @@ class Future(Generic[R]):
         match self._status:
             case _Handle(handle=handle):
                 return handle.__await__()
+        # Only a `@returns_future` body gets past the match.
         if asyncio._get_running_loop() is not None:
             # Asyncio callers observe through the Handle; `__await__` delegates
             # to `as_asyncio()`.
             return self.as_asyncio().__await__()
         elif _is_in_tokio_runtime():
-            match self._status:
-                case _Body():
-                    raise RuntimeError(
-                        "Future cannot be awaited on a Tokio thread; observe it "
-                        "from an asyncio loop or synchronous context."
-                    )
-                case _:
-                    raise ValueError(
-                        "already converted into a synchronous future, use 'get' to get the value."
-                    )
+            raise RuntimeError(
+                "Future cannot be awaited on a Tokio thread; observe it "
+                "from an asyncio loop or synchronous context."
+            )
         else:
             raise ValueError(
                 "__await__ with no active event loop (either asyncio or tokio)"
@@ -260,10 +243,6 @@ class Future(Generic[R]):
         match self._status:
             case _Handle(handle=handle):
                 return cast("asyncio.Future[R]", handle.as_asyncio())
-            case _Complete(value=value):
-                done = loop.create_future()
-                done.set_result(value)
-                return cast("asyncio.Future[R]", done)
             case _Body(body=body):
                 return cast("asyncio.Future[R]", body.as_asyncio(loop))
             case _:
