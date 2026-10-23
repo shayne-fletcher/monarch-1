@@ -23,7 +23,7 @@ uuid = { version = "1.26.1", features = ["rng-getrandom", "serde", "v4", "v5", "
 wirevalue = { version = "0.0.0", path = "../wirevalue" }
 
 [dev-dependencies]
-inventory = "0.3.24"
+inventory = "0.3.25"
 proptest = "1.11.0"
 timed_test = { version = "0.0.0", path = "../timed_test" }
 tokio = { version = "1.53.2", features = ["full", "test-util", "tracing"] }

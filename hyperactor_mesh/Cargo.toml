@@ -39,7 +39,7 @@ hyperactor_config = { version = "0.0.0", path = "../hyperactor_config" }
 hyperactor_mesh_macros = { version = "0.0.0", path = "../hyperactor_mesh_macros" }
 hyperactor_remote = { version = "0.0.0", path = "../hyperactor_remote" }
 hyperactor_telemetry = { version = "0.0.0", path = "../hyperactor_telemetry" }
-inventory = "0.3.24"
+inventory = "0.3.25"
 libc = "0.2.186"
 ndslice = { version = "0.0.0", path = "../ndslice" }
 opentelemetry = "0.31"
