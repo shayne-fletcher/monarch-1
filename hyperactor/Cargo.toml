@@ -81,7 +81,7 @@ wirevalue = { version = "0.0.0", path = "../wirevalue" }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["async_tokio", "csv_output"] }
-indoc = "2.0.2"
+indoc = "2.0.8"
 maplit = "1.0"
 proptest = "1.11.0"
 serde_bytes = "0.11"

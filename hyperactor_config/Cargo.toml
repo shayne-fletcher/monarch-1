@@ -31,7 +31,7 @@ tracing = { version = "0.1.41", features = ["attributes", "valuable"] }
 typeuri = { version = "0.0.0", path = "../typeuri" }
 
 [dev-dependencies]
-indoc = "2.0.2"
+indoc = "2.0.8"
 tracing-test = { version = "0.2.6", features = ["no-env-filter"] }
 
 [lints]
