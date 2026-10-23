@@ -9,7 +9,7 @@
 //! `Handle`: an observe-only handle to a background operation.
 //!
 //! A `Handle` observes one operation through a shared [`Core`]. The operation's
-//! producer publishes its `PyResult<Py<PyAny>>` there exactly once, and every
+//! producer supplies a Python outcome or a successful reply still pickled, and every
 //! observer reads it: synchronously via `get()`, on an `asyncio` loop via
 //! `as_asyncio()`/`await`, or without blocking via `poll()`. A published result
 //! stays observable by any number of later observers.
@@ -24,18 +24,18 @@
 //! `#[cfg(test)]` test that attests one names it; read the matching entry below
 //! before changing a tagged site.
 //!
-//! - **HDL-1 (single terminal state).** A core's state moves from pending
-//!   (`Unstarted` or `Running`) to `Done` or `Lost` once and never leaves it.
-//!   Enforced by construction: `Publisher::publish` consumes the publisher, its
-//!   drop publishes `Lost` only if it never published, and `Core::finish`
-//!   panics on a transition from any state but `Running`.
+//! - **HDL-1 (single terminal state).** A core moves from `Unstarted`, `Running`
+//!   or `Raw` to `Done` or `Lost` once and never leaves it. Publication consumes
+//!   the Publisher; only the owner of a raw reconstruction claim may finish Raw.
 //! - **HDL-2 (outcome encoding).** `Done(Ok(_))` is success, `Done(Err(_))` a
-//!   producer error, and `Lost` producer loss (HDL-10).
+//!   producer/reconstruction error, and `Lost` producer loss (HDL-10). Raw bytes
+//!   are not a completed Python outcome or successful readiness.
 //! - **HDL-3 (non-consuming reads).** No read moves the outcome out. Under the
 //!   state lock an observer clones only the outcome's `Arc`; after unlocking it
 //!   clones the value or error (`clone_ref`), or, on `wait_completion`'s
 //!   success path, reads just the `Ok`/`Err` tag. Any number of observers see
 //!   the same result.
+//!   Raw replies are reconstructed once before ordinary shared reads (HDL-27).
 //! - **HDL-4 (drop does not cancel; drop never panics).** Dropping a `Handle`
 //!   never cancels a running producer; a `Handle` observes, it does not own the
 //!   producer's lifecycle. Producers hold the core weakly and publish through
@@ -114,6 +114,8 @@
 //!   every observer untouched, so a later `poll()`/`get()`/`await` still
 //!   observes completion. A `get()` that was driving its producer hands it to
 //!   Tokio first (HDL-24).
+//!   The timeout bounds waiting for arrival or another reconstructor, not
+//!   synchronous Python unpickling performed by this observer.
 //! - **HDL-13 (direct Rust producer).** A Rust caller can eagerly produce a
 //!   `Handle` from a `Send + 'static` future.
 //!   [`PyHandle::spawn`] wraps the future with conversion of a successful Rust
@@ -125,10 +127,13 @@
 //!   own copy of the creation traceback when one was captured.
 //!   Dropping the Handle does not cancel the producer (HDL-4).
 //!   [`PyHandle::spawn_pyobject_with_traceback`] does the same, and also keeps
-//!   the producer's creation traceback for that log; the endpoint adverbs use
-//!   it. [`PyHandle::wait_completion`] is the matching observer: it projects the
+//!   the producer's creation traceback for that log; `call()` uses it.
+//!   `call_one()` and `choose()` use [`PyHandle::spawn_raw`], which publishes
+//!   successful bytes and leaves
+//!   reconstruction to an observer; errors keep the same logging path.
+//!   [`PyHandle::wait_completion`] is the matching observer: it projects the
 //!   terminal value to `PyResult<()>`, touching neither the GIL nor the Python
-//!   value on the success path (a tag-only read, HDL-3) and cloning the error
+//!   value on the decoded success path (a tag-only read, HDL-3) and cloning the error
 //!   after unlocking only on the error path (HDL-9). The three constructors and
 //!   this observer are `pub` Rust-only methods outside `#[pymethods]`
 //!   (HDL-11).
@@ -147,11 +152,12 @@
 //!   `as_asyncio` is called, on a loop that accepts `add_reader`, the observer
 //!   task holds a `Notifier` (a token,
 //!   an mpsc sender and an `Arc<Waker>`) and the `wait_terminal` future. It
-//!   publishes by pushing the token and writing the loop's pipe, never reading
-//!   the value and taking no GIL; the loop thread reads the value from the
+//!   reconstructs Raw on its worker before publishing a token. Already-decoded
+//!   outcomes need no GIL in the waiter. It pushes the token and writes the
+//!   loop's pipe; the loop thread reads the value from the
 //!   `Handle` and sets it (see [`crate::handle_wake`]). Enforced by
-//!   construction: `Notifier` has no `Py<_>`, and the task body makes no
-//!   `monarch_with_gil` call.
+//!   construction: `Notifier` has no `Py<_>`, and a token follows Done or Lost,
+//!   never raw arrival or claim release.
 //! - **HDL-18 (notification ordering under supported pipe outcomes).** A
 //!   notifier pushes its token before writing the pipe, and the reader drains
 //!   the pipe before the queue, never returning between the two; both retry
@@ -196,6 +202,8 @@
 //!   `complete_asyncio_future`, with no observer task and no wake-channel
 //!   registration. Awaiting it returns without giving the loop a turn, as for
 //!   any finished asyncio future.
+//!   An unclaimed Raw reply is reconstructed on the loop thread first; a
+//!   claimed reply follows the pending wake path without blocking that thread.
 //! - **HDL-23 (stop when nobody can observe the result).** A `Handle`, its
 //!   clones, a blocked `get()`, a Rust waiter and the native waiter behind
 //!   `await`/`as_asyncio()` each hold the core strongly; producers hold it
@@ -225,6 +233,8 @@
 //!   orders each registration against the publisher's transition, so no
 //!   wake-up is lost. Reading a finished value and driving a producer inline
 //!   create no wake.
+//!   Raw arrival retains the same wake for claim release and settlement; all
+//!   three transitions notify only after releasing the state lock.
 //! - **HDL-26 (interrupted decoding).** A `get()` driving a producer on
 //!   Python's main thread also runs its decoding there, where a signal handler
 //!   can raise mid-decode. Deferred producers decode through
@@ -236,10 +246,20 @@
 //!   the message itself carries, whatever its type. The retry unpickles from
 //!   the start: side effects of the interrupted attempt, such as a user
 //!   `__setstate__`'s, are not undone.
+//! - **HDL-27 (one raw reconstruction claim).** One observer claims a successful
+//!   raw reply under the state lock, then unpickles outside it. Success or an
+//!   ordinary Exception stores one shared outcome. An observer-side BaseException,
+//!   unwind or cancelled GIL wait releases the claim, preserves the original
+//!   payload and wakes waiters. Asyncio pipe/fallback workers instead settle every
+//!   reconstruction failure, including BaseException or caught unwind, before
+//!   delivering a terminal-only completion token. They retain the claim through
+//!   error settlement; no competitor can claim between unwind and publication.
 
 use std::error::Error;
 use std::future::Future;
 use std::mem;
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -483,6 +503,20 @@ struct DeferredReceive {
     observer_loss: ObserverLoss,
 }
 
+/// Rebuild a successful reply without making Handle depend on
+/// endpoint-specific storage.
+///
+/// The endpoint implementation retains the pickled bytes, mesh references and
+/// calling actor's instance. Handle coordinates observers; this trait supplies
+/// the operation that turns those retained components into a Python value.
+///
+/// Each attempt must use fresh unpickling state; an interrupted attempt
+/// may be retried.
+pub(crate) trait Reconstruct: Send + Sync {
+    /// Rebuild the Python value with the GIL held and no core state lock held.
+    fn reconstruct(&self, py: Python<'_>) -> PyResult<Py<PyAny>>;
+}
+
 /// Whether the shared Handle has unstarted receive work, is awaiting a result,
 /// or has finished. Every observer consults the same state under the core's lock.
 enum State {
@@ -500,6 +534,20 @@ enum State {
         /// drops the core. Present only for work with ObserverLoss::Stop;
         /// ordinary producers continue without observers (HDL-23).
         stop: Option<Arc<Notify>>,
+    },
+    /// A successful endpoint reply has arrived, but is still pickled.
+    Raw {
+        /// Retained independently of an attempt, so an interrupted observer
+        /// cannot destroy the bytes needed by the next observer.
+        reply: Arc<dyn Reconstruct>,
+        /// One observer has the sole right to reconstruct and publish (HDL-27).
+        claimed: bool,
+        /// Wake observers waiting for reconstruction to finish (HDL-25).
+        /// Moved from Running if waiters already exist; otherwise created only
+        /// when an observer needs to wait. Releasing the reconstruction claim
+        /// or storing the final value or error wakes them to recheck the state.
+        /// The notification carries no value or error itself.
+        wake: Option<Arc<Notify>>,
     },
     /// The final value or error, never replaced. Every observer shares this
     /// outcome, and reading it does not consume it (HDL-1, HDL-2, HDL-3).
@@ -522,6 +570,9 @@ enum Observed {
     /// No result is available yet. The observer must wait, or return None
     /// if it is only polling.
     Pending,
+    /// This observer has the sole right to reconstruct a pickled reply.
+    /// The guard releases that right if the observation is interrupted (HDL-27).
+    Reconstruct(ReconstructionClaim),
 }
 
 /// Where to run a port or stream-reply receive if this observer starts it.
@@ -531,6 +582,164 @@ enum ReceiveExecution {
     Tokio,
     /// get() takes the receive to poll on the calling thread.
     CallingThread,
+    /// Start deferred receives, but leave raw replies for a polled observer.
+    /// Rust observer factories use this before returning their future.
+    StartOnly,
+}
+
+/// Decide whether an interrupted or panicking unpickle attempt is retryable.
+///
+/// Ordinary Python exceptions become shared Handle errors in both cases.
+#[derive(Clone, Copy)]
+enum ReconstructionFailurePolicy {
+    /// Deliver a signal-like BaseException or Rust unwind to this observer.
+    /// Keep the pickled reply so another observer can retry unpickling it.
+    KeepReplyAfterInterrupt,
+    /// Store every failure as the Handle's shared error before waking asyncio.
+    /// The loop's reader requires a final value or error, not a retryable reply.
+    StoreEveryFailureInHandle,
+}
+
+/// Give one observer the right to unpickle a successful endpoint reply.
+///
+/// Other observers cannot unpickle it at the same time. Python runs without
+/// holding Core.state's mutex. Once this observer stores a value or error,
+/// every observer shares that outcome.
+///
+/// If this claim is dropped before storing an outcome, release it and wake
+/// waiting observers. The retained reply remains available for another attempt.
+struct ReconstructionClaim {
+    /// Keep the core alive throughout this attempt.
+    /// Some means this observer still owns the reconstruction claim. Taken
+    /// before storing the outcome so Drop does not release an already-settled
+    /// claim.
+    core: Option<Arc<Core>>,
+    /// The retained pickled reply. Each attempt builds a new PicklingState,
+    /// sharing the original byte buffers and copying the mesh-reference table.
+    /// Unpickling consumes that attempt's state, not this retained reply.
+    /// If interrupted, another attempt can start from the beginning using
+    /// the same bytes and references.
+    reply: Arc<dyn Reconstruct>,
+}
+
+impl ReconstructionClaim {
+    /// Unpickle this successful endpoint reply and store its value or error
+    /// for every observer. This claim prevents another observer from unpickling
+    /// the reply at the same time (HDL-27).
+    ///
+    /// The caller must hold the GIL, but not Core.state's mutex.
+    /// Ordinary Python exceptions become the Handle's shared error. The
+    /// failure policy determines what happens to other failures:
+    ///
+    /// - KeepReplyAfterInterrupt returns a BaseException outside Exception,
+    ///   such as KeyboardInterrupt, to this observer only. A Rust panic also
+    ///   escapes. Both release the claim and leave Raw available for a retry.
+    /// - StoreEveryFailureInHandle stores every Python exception and converts
+    ///   a Rust panic to a shared RuntimeError. Asyncio workers use this because
+    ///   the loop's reader needs a final value or error, not a Raw reply.
+    ///
+    /// Ok contains the shared outcome, which may itself be an error. Err means
+    /// this observation was interrupted; the retained reply remains retryable.
+    fn reconstruct(
+        mut self,
+        py: Python<'_>,
+        failure_policy: ReconstructionFailurePolicy,
+    ) -> PyResult<Arc<PyResult<Py<PyAny>>>> {
+        let result = match failure_policy {
+            // Let a Rust panic unwind on the observer's thread. Dropping this
+            // claim during unwinding releases Raw for another attempt.
+            ReconstructionFailurePolicy::KeepReplyAfterInterrupt => self.reply.reconstruct(py),
+            ReconstructionFailurePolicy::StoreEveryFailureInHandle => {
+                // Catch only the unpickling call, keeping this claim alive.
+                // Even if that call panics, no competitor can take Raw before
+                // this worker stores the failure as the shared outcome.
+                match catch_unwind(AssertUnwindSafe(|| self.reply.reconstruct(py))) {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        // Preserve a textual panic message when available and
+                        // turn the panic into a Python RuntimeError.
+                        let message = panic
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                            .unwrap_or("Rust unwind while reconstructing an endpoint reply");
+                        Err(PyRuntimeError::new_err(message.to_owned()))
+                    }
+                }
+            }
+        };
+        // If unpickling failed, the policy is KeepReplyAfterInterrupt, and the
+        // error is outside Python's Exception class (e.g. KeyboardInterrupt or
+        // SystemExit), return it to this observer without storing a shared error.
+        // Another observer can then retry the retained reply. Errors derived
+        // from Exception, and every error under StoreEveryFailureInHandle,
+        // continue below to become the Handle's shared outcome.
+        if let Err(error) = &result
+            && matches!(
+                failure_policy,
+                ReconstructionFailurePolicy::KeepReplyAfterInterrupt
+            )
+            && !error.is_instance_of::<PyException>(py)
+        {
+            // Returning drops this claim: its Drop clears Raw.claimed and
+            // wakes waiting observers. Nothing is stored in Done.
+            return Err(result.expect_err("the result was checked as an interrupt"));
+        }
+        // Share one outcome rather than consuming it when an observer reads it.
+        let outcome = Arc::new(result);
+        // Tests can pause with the claim still held, proving a competing
+        // observer cannot claim the reply before this outcome is stored.
+        #[cfg(test)]
+        run_test_hook(&BEFORE_RECONSTRUCTION_SETTLE);
+        // Disarm Drop before storing the outcome. It must not try to release
+        // the reconstruction claim after Raw has become Done.
+        let core = self.core.take().expect("HDL-27: a claim settles once");
+        // Replace Raw with Done under the core's mutex, then wake its waiters
+        // after unlocking. Every later observer reads this same outcome.
+        core.finish(State::Done(Arc::clone(&outcome)));
+        // The outer Ok reports that sharing succeeded; the stored PyResult
+        // still distinguishes a Python value from a shared exception.
+        Ok(outcome)
+    }
+}
+
+impl Drop for ReconstructionClaim {
+    /// Release an unfinished reconstruction claim, allowing another attempt.
+    /// An interrupt or Rust panic can drop this guard before an outcome is
+    /// stored. Keep the reply in Raw, clear its claimed flag under the core's
+    /// mutex, then wake waiting observers after unlocking (HDL-27, HDL-25).
+    /// This prevents a departed observer from leaving the reply permanently
+    /// claimed. It does not retry unpickling itself or guarantee that another
+    /// attempt succeeds; a deterministic panic can recur.
+    ///
+    /// If reconstruct() already stored an outcome, it took this guard's core
+    /// first. In that case, do nothing: the shared outcome must remain intact.
+    fn drop(&mut self) {
+        // None means reconstruct() disarmed this guard before storing Done.
+        // Otherwise this guard still owns the unfinished reconstruction claim.
+        let Some(core) = self.core.take() else {
+            return;
+        };
+        // Release the claim under the mutex and retain the optional wake signal
+        // for use after unlocking. No unpickling or Python calls happen here.
+        let wake = {
+            let mut state = core.lock();
+            match &mut *state {
+                State::Raw { claimed, wake, .. } => {
+                    // Only release exclusive access. Leave the original reply
+                    // in Raw so another observer can reconstruct it from scratch.
+                    *claimed = false;
+                    wake.clone()
+                }
+                _ => unreachable!("HDL-27: an unfinished claim retains Raw"),
+            }
+        };
+        // The block released Core.state's mutex. Wake observers so they recheck
+        // Raw and one can claim the reply; this path stores no value or error.
+        if let Some(wake) = wake {
+            wake.notify_waiters();
+        }
+    }
 }
 
 /// Whether an observer checks the shared result or takes an unstarted receive
@@ -600,6 +809,8 @@ impl Core {
     /// or drop Python objects. Code under this leaf lock must not panic,
     /// so a poisoned mutex indicates a violated invariant (HDL-9).
     fn lock(&self) -> MutexGuard<'_, State> {
+        #[cfg(test)]
+        STATE_LOCK_COUNT.with(|count| count.set(count.get() + 1));
         self.state
             .lock()
             .expect("should not be poisoned: nothing panics under the state lock (HDL-9)")
@@ -614,21 +825,23 @@ impl Core {
         match &*self.lock() {
             State::Done(outcome) => Observed::Done(outcome.clone()),
             State::Lost => Observed::Lost,
-            State::Unstarted(_) | State::Running { .. } => Observed::Pending,
+            State::Unstarted(_) | State::Running { .. } | State::Raw { .. } => Observed::Pending,
         }
     }
 
     /// Check for a result, starting an unstarted port or stream-reply receive
     /// as a Tokio task (HDL-24).
     ///
-    /// Unlike snapshot(), this can start work; it never runs the receive on
-    /// the calling thread. Return the stored outcome, producer loss, or Pending
-    /// without waiting for completion or consuming the result.
+    /// Unlike snapshot(), this can start receive work or claim an available raw
+    /// reply for reconstruction. It never polls a receive or runs Python here.
+    /// Return the shared outcome, loss, Pending or that exclusive claim.
     fn observe(self: &Arc<Self>) -> Observed {
-        // Request Tokio execution, so any unstarted receive is spawned there.
-        // Only ReceiveExecution::CallingThread returns Observation::Drive.
-        // get() chooses that mode to run the receive itself; this Tokio request
-        // cannot return that variant.
+        // observe_or_drive() returns either Observation::Observed (an outcome,
+        // Pending, Lost, or a raw-reply reconstruction claim) or
+        // Observation::Drive (a receive future and publisher for this caller
+        // to run). Choose Tokio so an unstarted receive is spawned there,
+        // rather than handed to this caller. That rules out Drive; unwrap
+        // Observation::Observed and return its inner Observed value below.
         let Observation::Observed(observed) = self.observe_or_drive(ReceiveExecution::Tokio) else {
             unreachable!("only a driving observation receives the producer");
         };
@@ -646,10 +859,17 @@ impl Core {
     ///   that future on its own thread; this function does not poll it.
     /// - `observe()` passes `ReceiveExecution::Tokio`: spawn the receive as a
     ///   Tokio task and return `Observation::Observed(Observed::Pending)`.
+    /// - `start()` passes `StartOnly`: start any unstarted receive on Tokio.
+    ///   Leave an already-arrived pickled reply unclaimed. Creating a Rust
+    ///   observer future does not claim it; polling that future may do so.
     ///
-    /// If the operation is already running or finished, ignore `execution` and
-    /// return its snapshot as `Observation::Observed`. Start no new receive
-    /// and transfer no future to the caller.
+    /// If a pickled reply is available and nobody has claimed it, give the
+    /// caller the exclusive right to unpickle it. With StartOnly, leave it
+    /// unclaimed and return Pending instead.
+    ///
+    /// Return Pending while work is running or another observer is unpickling.
+    /// For a finished operation, return the stored outcome or producer-loss
+    /// status.
     fn observe_or_drive(self: &Arc<Self>, execution: ReceiveExecution) -> Observation {
         // Keep the lock through the start decision and the move to Running,
         // so another observer cannot take the same receive future.
@@ -657,22 +877,60 @@ impl Core {
 
         // Finished or already started: return its snapshot. Otherwise borrow
         // the unstarted receive to decide how it will be started below.
-        let deferred = match &*state {
+        let deferred = match &mut *state {
             State::Done(outcome) => return Observation::Observed(Observed::Done(outcome.clone())),
             State::Lost => return Observation::Observed(Observed::Lost),
             State::Running { .. } => return Observation::Observed(Observed::Pending),
+            State::Raw { reply, claimed, .. } => {
+                // The reply has arrived as pickled bytes, not a Python value.
+                // If another observer owns the claim, leave it alone. StartOnly
+                // also leaves it alone: constructing a Rust observer future
+                // must not claim its reply before that future is polled.
+                if *claimed || matches!(execution, ReceiveExecution::StartOnly) {
+                    return Observation::Observed(Observed::Pending);
+                }
+                // Take the exclusive right to unpickle while Core.state's
+                // mutex is held, so no second observer can claim the same reply.
+                *claimed = true;
+                // Return the claim, not a decoded value. The caller unpickles
+                // after this function releases the mutex. Dropping an unfinished
+                // claim releases that right and wakes waiting observers.
+                return Observation::Observed(Observed::Reconstruct(ReconstructionClaim {
+                    // Keep the shared core alive throughout this attempt.
+                    core: Some(Arc::clone(self)),
+                    // Retain the original reply; no byte buffers are copied here.
+                    reply: Arc::clone(reply),
+                }));
+            }
+            // A deferred port receive or stream item has no observer that has
+            // started its future yet. A message may already be queued, but this
+            // future has not taken or unpickled it. Borrow the stored receive
+            // here; the code below chooses where to start it and moves it out.
             State::Unstarted(deferred) => deferred,
         };
 
-        // Create a signal only for a Tokio receive that must stop when its last
-        // observer disappears. An inline get() keeps the core alive; if it
-        // later hands the receive to Tokio, hand_off() installs the signal then.
+        // Create a stop signal only for a receive that will run on Tokio and
+        // must stop when its last observer disappears. An inline get() keeps
+        // the core alive. If it times out or is interrupted, hand_off() moves
+        // the unfinished receive to Tokio so work continues without that get().
+        // A later get() can wait for the result; it does not run the receive.
+        // hand_off() also installs a stop signal if this receive needs one.
         let stop = match execution {
+            // get() runs the receive itself and keeps the core alive, so no
+            // stop signal is needed now. hand_off() installs one if needed
+            // when a timeout or interrupt moves the receive to Tokio.
             ReceiveExecution::CallingThread => None,
-            ReceiveExecution::Tokio if matches!(deferred.observer_loss, ObserverLoss::Stop) => {
+            // This receive will run on Tokio and must stop if nobody can
+            // observe its result. Create the signal that Core::drop() sends
+            // when the last Handle or active waiter releases the core.
+            ReceiveExecution::Tokio | ReceiveExecution::StartOnly
+                if matches!(deferred.observer_loss, ObserverLoss::Stop) =>
+            {
                 Some(Arc::new(Notify::new()))
             }
-            ReceiveExecution::Tokio => None,
+            // A started stream-item receive continues without observers.
+            // Its task needs no stop signal.
+            ReceiveExecution::Tokio | ReceiveExecution::StartOnly => None,
         };
         // Register for Core::Drop's stop notification before scheduling the
         // task. Otherwise the last observer could drop before registration,
@@ -707,7 +965,7 @@ impl Core {
                 publisher,
                 observer_loss: deferred.observer_loss,
             }),
-            ReceiveExecution::Tokio => {
+            ReceiveExecution::Tokio | ReceiveExecution::StartOnly => {
                 // The task owns the future and publisher. This caller gets a
                 // Pending snapshot without waiting; completion can race its return.
                 spawn_producer(settle(deferred.future), publisher, observer_stop);
@@ -767,32 +1025,65 @@ impl Core {
     /// operation is already running or finished, start nothing (HDL-24).
     /// This neither waits for completion nor consumes the stored result.
     fn start(self: &Arc<Self>) {
-        // observe() starts an unstarted receive and returns a result snapshot.
-        // Discard only that snapshot, not the core, receive or stored outcome.
-        drop(self.observe());
+        // Start deferred receive work, but never claim raw bytes for a Rust
+        // observer before its returned future is polled.
+        drop(self.observe_or_drive(ReceiveExecution::StartOnly));
     }
 
-    /// Store the operation's final value/error (Done) or producer loss (Lost),
-    /// then wake every observer waiting for it (HDL-1, HDL-25).
+    /// Store a producer's raw reply, final value/error, or producer loss,
+    /// then wake observers waiting for progress (HDL-1, HDL-25, HDL-27).
     ///
-    /// Only a Running core may finish; a second completion violates HDL-1.
+    /// While the core is Running, only its producer may publish.
+    /// Once a pickled reply is stored in Raw, only the observer holding its
+    /// reconstruction claim may store the Python value or error. Done and
+    /// Lost must never be replaced by another outcome (HDL-1, HDL-27).
+    ///
+    /// Moving from Running to Raw keeps the same wake signal, so existing
+    /// waiters can also be notified when reconstruction finishes (HDL-25).
+    ///
     /// Replace the state under the lock, but release it before notifying or
     /// dropping the old state's fields (HDL-9). Woken observers read the
-    /// terminal state; the notification itself carries no result.
-    fn finish(&self, terminal: State) {
-        // Install the terminal state and keep ownership of the old state.
-        // The temporary mutex guard drops at this semicolon, releasing the lock.
-        let previous = mem::replace(&mut *self.lock(), terminal);
-        // Extract the wake signal outside the lock. Any state other than
-        // Running means completion was attempted without a running producer.
-        let State::Running { wake, .. } = previous else {
-            panic!("HDL-1: only a running producer publishes");
+    /// new state; the notification itself carries no result.
+    fn finish(&self, mut next_state: State) {
+        // Install the new state under the mutex, retaining the old state for
+        // notification below. This block releases the mutex before returning.
+        let previous_state = {
+            let mut state_guard = self.lock();
+            // The incoming Raw state starts with wake: None. The stored
+            // Running state may already have a Notify because an observer
+            // registered to wait. Copy that notification into Raw before the
+            // swap below, so it remains available for claim release and
+            // completed unpickling as well as this reply's arrival.
+            if let State::Raw { wake: raw_wake, .. } = &mut next_state
+                && let State::Running {
+                    wake: running_wake, ..
+                } = &*state_guard
+            {
+                // Some gives Raw another reference to the existing Notify.
+                // None leaves Raw without a wake signal. No new Notify is
+                // allocated in either case.
+                *raw_wake = running_wake.clone();
+            }
+            // Store next_state in the core and return its previous state.
+            // Retaining that state lets us notify its waiters after unlocking.
+            mem::replace(&mut *state_guard, next_state)
         };
-        // Tests can pause here: the final state is visible, but waiters have
+        // Extract the wake signal outside the lock. Publication requires a
+        // running producer or the observer holding the sole raw claim.
+        let wake = match &previous_state {
+            State::Running { wake, .. }
+            | State::Raw {
+                claimed: true,
+                wake,
+                ..
+            } => wake,
+            _ => panic!("HDL-1: only a producer or reconstruction claim publishes"),
+        };
+        // Tests can pause here: the new state is visible, but waiters have
         // not yet been notified.
         #[cfg(test)]
         run_test_hook(&BEFORE_NOTIFY);
-        // The result is already stored. Notify all registered waiters if a
+        // The new state is already stored. Notify all registered waiters if a
         // wake signal was created; finishing alone never allocates one (HDL-25).
         if let Some(wake) = wake {
             wake.notify_waiters();
@@ -825,11 +1116,10 @@ impl Drop for Core {
     }
 }
 
-/// Wait for the shared value or error, returning an Arc to it without consuming
-/// it. If the producer ended without publishing, return the producer-loss error
-/// instead (HDL-10).
+/// Wait for a shared Python outcome, producer loss or a claim on available bytes.
+/// Raw arrival wakes this waiter but is not itself completed readiness (HDL-27).
 ///
-/// The core must already be Running, Done or Lost. The caller must start any
+/// The core must already be Running, Raw, Done or Lost. The caller must start any
 /// unstarted receive first; this function does not start it (HDL-24).
 /// Its Arc keeps the core alive, so a running port receive cannot stop for lack
 /// of observers while this future waits (HDL-23).
@@ -837,7 +1127,7 @@ impl Drop for Core {
 /// Check the result and register for completion under the same lock. Completion
 /// then either has already happened or will notify this waiter, even before its
 /// first poll of the notification future (HDL-25). Waiting takes no GIL.
-async fn wait_terminal(core: Arc<Core>) -> PyResult<Arc<PyResult<Py<PyAny>>>> {
+async fn wait_observed(core: Arc<Core>) -> Observed {
     loop {
         // The temporary guard lasts through this match, then releases the lock
         // before awaiting. Checking and registering together prevents completion
@@ -845,11 +1135,21 @@ async fn wait_terminal(core: Arc<Core>) -> PyResult<Arc<PyResult<Py<PyAny>>>> {
         let notified = match &mut *core.lock() {
             // Clone only the Arc, not the Python value or error. The caller
             // reads that value after unlocking, with the GIL if needed (HDL-9).
-            State::Done(outcome) => return Ok(outcome.clone()),
-            State::Lost => return Err(handle_producer_ended_error()),
+            State::Done(outcome) => return Observed::Done(Arc::clone(outcome)),
+            State::Lost => return Observed::Lost,
+            State::Raw { reply, claimed, .. } if !*claimed => {
+                let reply = Arc::clone(reply);
+                // Claim inside this same check/register lock, not in a separate
+                // probe. Ready and running non-raw observers retain their cost.
+                *claimed = true;
+                return Observed::Reconstruct(ReconstructionClaim {
+                    core: Some(Arc::clone(&core)),
+                    reply,
+                });
+            }
             // Reuse the shared wake signal, allocating it only for the first
             // waiter. Each waiter creates its own OwnedNotified under this lock.
-            State::Running { wake, .. } => Some(
+            State::Running { wake, .. } | State::Raw { wake, .. } => Some(
                 wake.get_or_insert_with(|| Arc::new(Notify::new()))
                     .clone()
                     .notified_owned(),
@@ -869,9 +1169,30 @@ async fn wait_terminal(core: Arc<Core>) -> PyResult<Arc<PyResult<Py<PyAny>>>> {
     }
 }
 
+/// Asyncio workers settle raw replies before issuing a terminal-only wake token.
+/// Already-decoded outcomes still take no GIL on this readiness path (HDL-17).
+async fn wait_terminal(core: Arc<Core>) -> PyResult<Arc<PyResult<Py<PyAny>>>> {
+    match wait_observed(core).await {
+        Observed::Done(outcome) => Ok(outcome),
+        Observed::Lost => Err(handle_producer_ended_error()),
+        Observed::Reconstruct(claim) => {
+            monarch_with_gil(GilSite::ReplyConvert, move |py| {
+                claim.reconstruct(py, ReconstructionFailurePolicy::StoreEveryFailureInHandle)
+            })
+            .await
+        }
+        Observed::Pending => unreachable!("a waiting observation never returns Pending"),
+    }
+}
+
 #[cfg(test)]
 thread_local! {
-    /// Runs once in `wait_terminal`, after a waiter registers under the lock
+    /// Test-only per-thread count; no code or storage exists in production builds.
+    static STATE_LOCK_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Pause with the claim still held, after reconstruction and before Done.
+    static BEFORE_RECONSTRUCTION_SETTLE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Runs once in `wait_observed`, after a waiter registers under the lock
     /// and before it awaits (HDL-25).
     static AFTER_REGISTER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
@@ -929,6 +1250,20 @@ impl Publisher {
         // If the core remains, it stores this Arc in State::Done. Observers
         // share the stored result; this call does not return it to the producer.
         self.publish_shared(Arc::new(result));
+    }
+
+    /// Supply successful bytes without reconstructing a Python value.
+    /// Disarm publication before handing them to Raw; Drop must not publish Lost.
+    fn publish_raw(mut self, reply: Arc<dyn Reconstruct>) {
+        let core = self.core.take().expect("HDL-1: a Publisher publishes once");
+        if let Some(core) = core.upgrade() {
+            core.finish(State::Raw {
+                reply,
+                claimed: false,
+                wake: None,
+            });
+        }
+        // With no observers, drop the native payload without unpickling or a GIL.
     }
 
     /// Publish a result already held in an Arc. An inline get() uses this to
@@ -1219,6 +1554,9 @@ impl PyHandle {
     /// The future owns a reference to the shared core, not a borrow of `self`.
     /// It can outlive this PyHandle and keeps a port receive observed while it
     /// exists (HDL-23). Other observers can still read the same result (HDL-3).
+    /// An available raw endpoint reply is claimed only when this future is
+    /// polled, then unpickled on its Rust driver under the same GIL acquisition
+    /// used to read the result. Dropping a queued GIL wait releases that claim.
     pub fn wait_future(
         &self,
     ) -> impl Future<Output = PyResult<Py<PyAny>>> + Send + 'static + use<> {
@@ -1227,14 +1565,24 @@ impl PyHandle {
         // Move an independent observer into the future; retain no borrow of self.
         let core = self.core.clone();
         async move {
-            // Wait for completion before requesting the GIL. Producer loss fails
-            // this future here, without trying to read a Python value.
-            let outcome = wait_terminal(core).await?;
-            // Under the GIL, read() returns Ok with another reference to the same
-            // Python value, or Err with a clone of the stored Python exception.
-            // It does not unpickle again or consume the stored outcome; other
-            // observers can still read it.
-            monarch_with_gil(GilSite::Convert, move |py| read(py, &outcome)).await
+            // Wait for a stored outcome or claim an available raw reply.
+            // Producer loss fails here without acquiring the GIL.
+            let observed = wait_observed(core).await;
+            if matches!(observed, Observed::Lost) {
+                return Err(handle_producer_ended_error());
+            }
+            // Reconstruct a claimed reply and read its shared outcome in one
+            // GIL acquisition. Already-decoded results need only read(), which
+            // clones the Python reference or exception without consuming it.
+            monarch_with_gil(GilSite::Convert, move |py| {
+                let outcome = reconstruct_observed(
+                    py,
+                    observed,
+                    ReconstructionFailurePolicy::KeepReplyAfterInterrupt,
+                )?;
+                read(py, &outcome)
+            })
+            .await
         }
     }
 
@@ -1251,6 +1599,16 @@ impl PyHandle {
         // Producer loss returns Err rather than remaining pending. No result is
         // unpickled again or consumed.
         read_observed(py, self.core.snapshot())
+    }
+
+    /// Inspect arrival without claiming or reconstructing, for endpoint witnesses.
+    #[cfg(test)]
+    pub(crate) fn received_raw_for_test(&self) -> Option<bool> {
+        match &*self.core.lock() {
+            State::Raw { .. } => Some(true),
+            State::Done(_) | State::Lost => Some(false),
+            State::Unstarted(_) | State::Running { .. } => None,
+        }
     }
 
     /// Start Rust work on Tokio and return a Handle for its Python result (HDL-13).
@@ -1326,6 +1684,32 @@ impl PyHandle {
         Self { core }
     }
 
+    /// Receive an endpoint reply eagerly on Tokio, retaining success as pickled bytes.
+    /// The first valid observer reconstructs it; ignored successes need no
+    /// reconstruction or result-conversion GIL acquisition.
+    /// Errors are already Python exceptions and retain ordinary unobserved logging.
+    pub(crate) fn spawn_raw<F, R>(future: F, traceback: Option<Py<PyAny>>) -> Self
+    where
+        F: Future<Output = PyResult<R>> + Send + 'static,
+        R: Reconstruct + 'static,
+    {
+        let core = Core::new(
+            State::Running {
+                wake: None,
+                stop: None,
+            },
+            traceback,
+        );
+        let publisher = Publisher::new(Arc::downgrade(&core), core.producer_traceback());
+        get_tokio_runtime().spawn(async move {
+            match future.await {
+                Ok(reply) => publisher.publish_raw(Arc::new(reply)),
+                Err(error) => publisher.publish(Err(error)),
+            }
+        });
+        Self { core }
+    }
+
     /// Whether this Handle kept a creation traceback. For tests.
     #[cfg(test)]
     pub(crate) fn has_traceback_for_test(&self) -> bool {
@@ -1347,8 +1731,10 @@ impl PyHandle {
     /// the core independently of this Handle. While waiting for completion, it
     /// counts as an observer even if nobody is polling it (HDL-23).
     ///
-    /// Success returns `Ok(())` without acquiring the GIL or touching the Python
-    /// value. A stored failure returns a cloned Python exception, under the GIL
+    /// Already-decoded success returns `Ok(())` without acquiring the GIL or
+    /// touching the Python value. Raw success must first be reconstructed on
+    /// this future's driver: arrival alone is not readiness (HDL-27).
+    /// A stored failure returns a cloned Python exception, under the GIL
     /// and outside the state lock (HDL-9). Neither consumes the shared result;
     /// other observers can still read the value or error (HDL-3).
     pub fn wait_completion(&self) -> impl Future<Output = PyResult<()>> + Send + 'static + use<> {
@@ -1358,23 +1744,32 @@ impl PyHandle {
         let core = self.core.clone();
         async move {
             // Wait for the shared outcome. Producer loss returns an error here.
-            let outcome = wait_terminal(core).await?;
+            let observed = wait_observed(core).await;
+            if matches!(observed, Observed::Lost) {
+                return Err(handle_producer_ended_error());
+            }
             // Check only whether the Rust Result is Ok. The Python value is
             // neither borrowed nor cloned, so success needs no GIL acquisition.
-            if outcome.is_ok() {
+            if let Observed::Done(outcome) = &observed
+                && outcome.is_ok()
+            {
                 return Ok(());
             }
-            // wait_terminal() has released the mutex protecting the core's shared
+            // wait_observed() has released the mutex protecting the core's shared
             // result (Core.state). Clone the exception under the GIL, outside that
             // mutex: error cloning can release and reacquire the GIL (HDL-9).
             monarch_with_gil(GilSite::Convert, move |py| -> PyResult<()> {
-                // First borrow the Result inside its Arc, then borrow its error
-                // rather than moving it. The shared outcome remains unchanged.
-                Err(outcome
-                    .as_ref()
-                    .as_ref()
-                    .expect_err("HDL-2: the error branch, discriminant already checked")
-                    .clone_ref(py))
+                // Reconstruct and inspect under the same acquisition. Raw arrival
+                // is not readiness, and a failed reconstruction must fail _after.
+                let outcome = reconstruct_observed(
+                    py,
+                    observed,
+                    ReconstructionFailurePolicy::KeepReplyAfterInterrupt,
+                )?;
+                match outcome.as_ref() {
+                    Ok(_) => Ok(()),
+                    Err(error) => Err(error.clone_ref(py)),
+                }
             })
             .await
         }
@@ -1483,6 +1878,27 @@ fn read_observed(py: Python<'_>, observed: Observed) -> PyResult<Option<Py<PyAny
         // Unstarted or still running: report not ready without waiting or
         // taking ownership of the receive. This is Rust None, not Python None.
         Observed::Pending => Ok(None),
+        Observed::Reconstruct(claim) => {
+            let outcome =
+                claim.reconstruct(py, ReconstructionFailurePolicy::KeepReplyAfterInterrupt)?;
+            read(py, &outcome).map(Some)
+        }
+    }
+}
+
+/// Obtain the shared Python outcome from a terminal snapshot or a raw claim.
+/// Precondition: hold the GIL, not Core.state's mutex. Reconstruction and result
+/// reading can share this acquisition; an interrupted observer leaves Raw intact.
+fn reconstruct_observed(
+    py: Python<'_>,
+    observed: Observed,
+    failure_policy: ReconstructionFailurePolicy,
+) -> PyResult<Arc<PyResult<Py<PyAny>>>> {
+    match observed {
+        Observed::Done(outcome) => Ok(outcome),
+        Observed::Lost => Err(handle_producer_ended_error()),
+        Observed::Reconstruct(claim) => claim.reconstruct(py, failure_policy),
+        Observed::Pending => unreachable!("wait for a pending observation before reading"),
     }
 }
 
@@ -1640,6 +2056,12 @@ impl PyHandle {
     /// `poll()`/`get()`/`await` still observes completion.
     /// A pending wait releases the GIL; once it finishes, the calling thread
     /// reacquires the GIL and reads the stored value or error itself.
+    ///
+    /// If successful endpoint bytes are available, this get() claims and
+    /// unpickles them on the calling thread. The timeout bounds waiting for
+    /// arrival or another observer's claim, not that synchronous unpickling.
+    /// An interrupted reconstruction releases the claim for a later attempt;
+    /// an ordinary unpickle exception becomes the shared result (HDL-27).
     #[pyo3(signature = (timeout = None))]
     fn get(slf: PyRef<'_, Self>, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<PyAny>> {
         // HDL-6: among the observers, get() is the sole WouldBlockRuntime
@@ -1699,37 +2121,40 @@ impl PyHandle {
             // get()'s value or error. A timeout or interrupt hands work to Tokio.
             Observation::Drive(drive) => return drive_inline(py, &core, drive, duration),
         };
-        let outcome = match observed {
-            // Already complete: retain its shared outcome without waiting.
-            Observed::Done(outcome) => outcome,
-            // The producer ended without supplying a result. Raise RuntimeError
-            // rather than wait for work that can no longer complete.
-            Observed::Lost => return Err(handle_producer_ended_error()),
+        let observed = match observed {
             Observed::Pending => {
                 // Work is already running elsewhere. This future only waits for
                 // its shared result; it neither starts nor polls the producer.
                 // Moving core into it keeps this get() counted as an observer.
-                let wait = wait_terminal(core);
+                // Return a raw claim to this thread rather than reconstructing
+                // while detached. This get() uses the GIL it reacquires below.
+                let wait = wait_observed(core);
                 // Poll the waiter here with the GIL released, without spawning a
                 // waiter task. Timeout or Ctrl-C drops this waiter, not a running
                 // producer; no observation error is stored as its result (HDL-12).
                 match duration {
                     // Limit this wait. An elapsed deadline becomes TimeoutError;
-                    // producer-loss errors from wait_terminal() pass through.
+                    // producer loss is returned as an observation below.
                     Some(duration) => signal_safe_block_on_inline(py, async move {
                         tokio::time::timeout(duration, wait)
                             .await
-                            .map_err(|_| PyTimeoutError::new_err(()))?
-                    })?,
+                            .map_err(|_| PyTimeoutError::new_err(()))
+                    })??,
                     // No deadline; Python's main thread still checks for signals.
                     None => signal_safe_block_on_inline(py, wait)?,
-                }?
+                }
             }
+            ready => ready,
         };
         // Core.state's mutex is no longer held. This thread has the GIL; the
         // blocking helper reacquired it if we waited. read() returns Ok with
         // another reference to the stored Python value, or Err with a cloned
         // exception, leaving the shared result available to other observers.
+        let outcome = reconstruct_observed(
+            py,
+            observed,
+            ReconstructionFailurePolicy::KeepReplyAfterInterrupt,
+        )?;
         read(py, &outcome)
     }
 
@@ -1740,6 +2165,10 @@ impl PyHandle {
     /// producer-lifecycle `RuntimeError`. A ready value stays observable by
     /// later observers. Starts an unstarted deferred producer on Tokio
     /// (HDL-24).
+    ///
+    /// An available raw endpoint reply is unpickled here under the caller's
+    /// GIL. Return None if another observer holds its reconstruction claim.
+    /// This never waits for arrival, but unpickle hooks may run Python code.
     pub(crate) fn poll(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         read_observed(py, self.core.observe())
     }
@@ -1756,6 +2185,11 @@ impl PyHandle {
     /// `NotImplementedError`, or when the loop cannot be weakly referenced
     /// (HDL-21). Any other failure to install the channel or register the
     /// future is raised.
+    ///
+    /// An available raw endpoint reply is unpickled immediately on the loop
+    /// thread. If it arrives later, or another observer holds its claim, a
+    /// Tokio waiter reconstructs it before notification. Every reconstruction
+    /// failure on that worker becomes a shared terminal error (HDL-27).
     ///
     /// A Handle that already holds its outcome returns a future already
     /// completed with it, and starts no observer (HDL-22). For a pending
@@ -1778,7 +2212,15 @@ impl PyHandle {
         // unstarted port/stream receive on Tokio (HDL-24). It releases
         // Core.state's mutex before we read or publish any Python result here.
         match slf.core.observe() {
-            Observed::Done(outcome) => {
+            observed @ (Observed::Done(_) | Observed::Reconstruct(_)) => {
+                // An available raw reply is reconstructed on this loop thread.
+                // Another observer's claim instead returns Pending below, so
+                // the loop never waits for that observer while holding the GIL.
+                let outcome = reconstruct_observed(
+                    py,
+                    observed,
+                    ReconstructionFailurePolicy::KeepReplyAfterInterrupt,
+                )?;
                 // The Handle already has a value or error. Under the GIL, read()
                 // returns another reference to that value or a cloned exception,
                 // without consuming the core's result.
@@ -1806,9 +2248,9 @@ impl PyHandle {
             // observe(), not by this waiter.
             Observed::Pending => {}
         }
-        // Retain a native observer of the core. It waits for completion without
-        // reading the Python value or acquiring the GIL, and keeps a port receive
-        // observed until it finishes (HDL-23).
+        // Retain a native observer through completion (HDL-23). Already-decoded
+        // results need no GIL here; raw replies must be reconstructed and settled
+        // before a terminal-only pipe token or fallback callback can be sent.
         let wait = wait_terminal(slf.core.clone());
 
         // Reuse or install this loop's shared pipe-based wake channel. None means
@@ -1820,9 +2262,9 @@ impl PyHandle {
             // The notifier carries only a registration token and native wake state.
             let notifier = LoopWake::register(&channel, &fut, slf.into())?;
             get_tokio_runtime().spawn(async move {
-                // Wait only for readiness, then discard this task's copy of the
-                // outcome. The loop callback reads the registered Handle's stored
-                // value or error; this task never acquires the GIL (HDL-17).
+                // Settle any raw reply, then discard this task's outcome copy.
+                // The loop callback reads only the stored value/error or Lost.
+                // For already-decoded results this task takes no GIL (HDL-17).
                 drop(wait.await);
                 // Queue the registration token, then make the pipe readable.
                 // The loop thread handles that token and completes fut; no Python
@@ -1841,8 +2283,9 @@ impl PyHandle {
         let fut_handle = fut.clone().unbind();
 
         get_tokio_runtime().spawn(async move {
-            // Finish the GIL-free wait first. outcome is either the shared value/
-            // error or the RuntimeError for a producer that ended without a result.
+            // Wait for a final Python outcome, or report producer loss.
+            // A raw reply is unpickled and stored on this worker first;
+            // already-decoded results take no GIL during this wait.
             let outcome = wait.await;
             let scheduled = monarch_with_gil(GilSite::Convert, move |py| {
                 // wait_terminal() has released Core.state's mutex. Under the GIL,
@@ -2001,6 +2444,468 @@ mod tests {
     // drives completion explicitly.
     fn pending_handle() -> (Publisher, PyHandle) {
         PyHandle::pending()
+    }
+
+    /// A module-private reconstructor, not a Python producer or endpoint fixture.
+    struct TestReply {
+        calls: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        rebuild: Box<dyn Fn(Python<'_>, usize) -> PyResult<Py<PyAny>> + Send + Sync>,
+    }
+
+    impl Reconstruct for TestReply {
+        fn reconstruct(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
+            (self.rebuild)(py, attempt)
+        }
+    }
+
+    impl Drop for TestReply {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn test_reply(
+        rebuild: impl Fn(Python<'_>, usize) -> PyResult<Py<PyAny>> + Send + Sync + 'static,
+    ) -> (Arc<dyn Reconstruct>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        (
+            Arc::new(TestReply {
+                calls: Arc::clone(&calls),
+                drops: Arc::clone(&drops),
+                rebuild: Box::new(rebuild),
+            }),
+            calls,
+            drops,
+        )
+    }
+
+    fn raw_claim(handle: &PyHandle) -> ReconstructionClaim {
+        match handle.core.observe() {
+            Observed::Reconstruct(claim) => claim,
+            _ => panic!("the raw reply should be available to claim"),
+        }
+    }
+
+    // HDL-1, HDL-3, HDL-27: pending native observers do not claim at construction;
+    // concurrent polled observers and a clone share exactly one Python object.
+    #[tokio::test]
+    async fn raw_reply_has_one_shared_reconstruction() {
+        ensure_python();
+        let (publisher, handle) = pending_handle();
+        let (reply, calls, drops) = test_reply(|py, _| vec![1, 2, 3].into_py_any(py));
+        publisher.publish_raw(reply);
+        let clone = handle.clone_ref();
+        let first = handle.wait_future();
+        let second = clone.wait_future();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "unpolled Rust observers must not reconstruct"
+        );
+        let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(first, second)
+        })
+        .await
+        .expect("both raw observers must complete");
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            let first = first.expect("first reconstruction succeeds");
+            let second = second.expect("second observer succeeds");
+            let third = clone
+                .poll(py)
+                .expect("clone polls")
+                .expect("value is ready");
+            assert!(
+                first.is(&second) && first.is(&third),
+                "observers must share one Python object"
+            );
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "Done retires the raw payload"
+        );
+    }
+
+    // HDL-2, HDL-27: raw arrival is not readiness, including _after prerequisites.
+    #[tokio::test]
+    async fn raw_reconstruction_error_fails_readiness_and_after() {
+        ensure_python();
+        let (publisher, handle) = pending_handle();
+        let (reply, calls, _) = test_reply(|_, _| Err(PyValueError::new_err("unpickle failed")));
+        publisher.publish_raw(reply);
+        let readiness = handle.wait_completion();
+        let result = monarch_with_gil_blocking(GilSite::Test, |py| PyHandle::from_value(py.None()));
+        let after = PyHandle::spawn_pyobject(after_ready(readiness, move || result.wait_future()));
+        let error = tokio::time::timeout(Duration::from_secs(5), after.wait_future())
+            .await
+            .expect("_after must settle")
+            .expect_err("raw is not successful readiness");
+        let again = handle
+            .wait_future()
+            .await
+            .expect_err("stored reconstruction error is shared");
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            assert!(
+                error.value(py).is(again.value(py)),
+                "_after and the original share the error"
+            );
+            let polled = handle.poll(py).expect_err("poll sees the same error");
+            assert!(error.value(py).is(polled.value(py)));
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // HDL-27: direct interrupts/unwinds release the claim, not the original bytes.
+    #[test]
+    fn raw_observer_interrupt_and_unwind_leave_a_retry() {
+        ensure_python();
+        for unwind in [false, true] {
+            let (publisher, handle) = pending_handle();
+            let (reply, calls, _) = test_reply(move |py, attempt| {
+                if attempt == 0 {
+                    if unwind {
+                        panic!("observer unwind");
+                    }
+                    return Err(PyKeyboardInterrupt::new_err("observer interrupted"));
+                }
+                42.into_py_any(py)
+            });
+            publisher.publish_raw(reply);
+            let attempt = catch_unwind(AssertUnwindSafe(|| {
+                monarch_with_gil_blocking(GilSite::Test, |py| handle.poll(py))
+            }));
+            if unwind {
+                assert!(attempt.is_err());
+            } else {
+                assert!(attempt.expect("not an unwind").is_err());
+            }
+            assert!(matches!(handle.core.snapshot(), Observed::Pending));
+            monarch_with_gil_blocking(GilSite::Test, |py| {
+                let value = handle
+                    .poll(py)
+                    .expect("retry succeeds")
+                    .expect("reply is retained");
+                assert_eq!(value.extract::<i64>(py).expect("integer reply"), 42);
+            });
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    // HDL-25, HDL-27: register before the first notification poll, then perform
+    // each transition. The hook acknowledges the required race, not a sleep.
+    #[test]
+    fn raw_arrival_release_and_settlement_wake_registered_waiters() {
+        ensure_python();
+        for transition in ["arrival", "release", "settle"] {
+            let (publisher, handle) = pending_handle();
+            let (reply, calls, _) = test_reply(|py, _| 9.into_py_any(py));
+            let change: Box<dyn FnOnce()> = if transition == "arrival" {
+                Box::new(move || publisher.publish_raw(reply))
+            } else {
+                publisher.publish_raw(reply);
+                let claim = raw_claim(&handle);
+                if transition == "release" {
+                    Box::new(move || drop(claim))
+                } else {
+                    Box::new(move || {
+                        monarch_with_gil_blocking(GilSite::Test, |py| {
+                            claim
+                                .reconstruct(
+                                    py,
+                                    ReconstructionFailurePolicy::KeepReplyAfterInterrupt,
+                                )
+                                .expect("settle succeeds");
+                        });
+                    })
+                }
+            };
+            let acknowledged = Arc::new(AtomicBool::new(false));
+            let acknowledgement = Arc::clone(&acknowledged);
+            AFTER_REGISTER.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    acknowledgement.store(true, Ordering::SeqCst);
+                    change();
+                }))
+            });
+            let outcome = get_tokio_runtime()
+                .block_on(async {
+                    tokio::time::timeout(
+                        Duration::from_secs(5),
+                        wait_terminal(Arc::clone(&handle.core)),
+                    )
+                    .await
+                })
+                .expect("registered raw waiter must wake")
+                .expect("the reply reconstructs");
+            assert!(
+                acknowledged.load(Ordering::SeqCst),
+                "the transition must follow registration"
+            );
+            assert!(outcome.is_ok());
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    // HDL-27: even a caught worker unwind retains the claim until Done.
+    #[test]
+    fn worker_failure_keeps_claim_until_terminal_publication() {
+        ensure_python();
+        for unwind in [false, true] {
+            let (publisher, handle) = pending_handle();
+            let (reply, calls, _) = test_reply(move |_, _| {
+                if unwind {
+                    panic!("worker unwind");
+                }
+                Err(PyKeyboardInterrupt::new_err("worker payload failure"))
+            });
+            publisher.publish_raw(reply);
+            let competitor = Arc::clone(&handle.core);
+            let acknowledged = Arc::new(AtomicBool::new(false));
+            let acknowledgement = Arc::clone(&acknowledged);
+            BEFORE_RECONSTRUCTION_SETTLE.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    let (tx, rx) = mpsc::channel();
+                    let thread = thread::spawn(move || {
+                        let pending = matches!(competitor.observe(), Observed::Pending);
+                        tx.send(pending).expect("competitor acknowledges");
+                    });
+                    assert!(
+                        rx.recv_timeout(Duration::from_secs(5))
+                            .expect("competitor runs"),
+                        "no competitor may claim between worker failure and Done"
+                    );
+                    thread.join().expect("acknowledged competitor exits");
+                    acknowledgement.store(true, Ordering::SeqCst);
+                }))
+            });
+            let outcome = monarch_with_gil_blocking(GilSite::Test, |py| {
+                raw_claim(&handle)
+                    .reconstruct(py, ReconstructionFailurePolicy::StoreEveryFailureInHandle)
+                    .expect("worker failures must settle, not escape")
+            });
+            assert!(acknowledged.load(Ordering::SeqCst));
+            assert!(outcome.is_err());
+            assert!(matches!(handle.core.snapshot(), Observed::Done(_)));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    // HDL-27: cancelling an observer queued for the async GIL releases its claim.
+    #[test]
+    fn cancelled_raw_gil_wait_releases_claim() {
+        use futures::FutureExt;
+
+        ensure_python();
+        let (publisher, handle) = pending_handle();
+        let (reply, calls, _) = test_reply(|py, _| 7.into_py_any(py));
+        publisher.publish_raw(reply);
+        let claim = raw_claim(&handle);
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (exited_tx, exited_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            get_tokio_runtime().block_on(monarch_with_gil(GilSite::Test, move |_py| {
+                held_tx.send(()).expect("GIL holder acknowledges");
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release GIL holder");
+            }));
+            exited_tx.send(()).expect("holder acknowledges exit");
+        });
+        held_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("async GIL lock is held");
+        let mut waiting = Box::pin(monarch_with_gil(GilSite::ReplyConvert, move |py| {
+            claim.reconstruct(py, ReconstructionFailurePolicy::KeepReplyAfterInterrupt)
+        }));
+        assert!(
+            waiting.as_mut().now_or_never().is_none(),
+            "observer must be queued for the GIL"
+        );
+        drop(waiting);
+        let released = matches!(handle.core.observe(), Observed::Reconstruct(_));
+        release_tx.send(()).expect("release holder");
+        exited_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("GIL holder exits");
+        holder.join().expect("acknowledged holder exits");
+        assert!(released, "cancellation must release the raw claim");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        get_tokio_runtime()
+            .block_on(handle.wait_future())
+            .expect("another observer reconstructs");
+    }
+
+    // HDL-13, HDL-27: ignored raw success is discarded without running Python.
+    #[test]
+    fn ignored_raw_reply_drops_once_without_reconstruction() {
+        let (publisher, handle) = pending_handle();
+        let (reply, calls, drops) = test_reply(|_, _| panic!("ignored reply must not reconstruct"));
+        publisher.publish_raw(reply);
+        drop(handle);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    /// Test-only publication gate; it supplies bytes after asyncio registration.
+    #[pyclass]
+    struct RawPublication {
+        publication: Mutex<Option<(Publisher, Arc<dyn Reconstruct>)>>,
+    }
+
+    #[pymethods]
+    impl RawPublication {
+        fn publish(&self) {
+            let (publisher, reply) = self
+                .publication
+                .lock()
+                .expect("test publication lock")
+                .take()
+                .expect("publish once");
+            publisher.publish_raw(reply);
+        }
+
+        fn entries(&self, py: Python<'_>, event_loop: &Bound<'_, PyAny>) -> PyResult<usize> {
+            Ok(
+                LoopWake::for_loop(py, event_loop)?
+                    .map_or(0, |channel| channel.get().entry_count()),
+            )
+        }
+    }
+
+    // HDL-17, HDL-27: both asyncio workers finish every failure before a normal
+    // pipe token/callback; their reader never faces Raw, and entries are removed.
+    #[test]
+    fn raw_worker_failures_settle_asyncio_and_release_entries() {
+        ensure_python();
+        for fallback in [false, true] {
+            for unwind in [false, true] {
+                let (publisher, handle) = pending_handle();
+                let (reply, calls, _) = test_reply(move |_, _| {
+                    if unwind {
+                        panic!("worker reconstruction unwind");
+                    }
+                    Err(PyKeyboardInterrupt::new_err(
+                        "worker reconstruction failure",
+                    ))
+                });
+                let gate = RawPublication {
+                    publication: Mutex::new(Some((publisher, reply))),
+                };
+                monarch_with_gil_blocking(GilSite::Test, |py| {
+                    let helper = PyModule::from_code(
+                        py,
+                        cr#"
+import asyncio
+
+def run(handle, gate, fallback):
+    loop = asyncio.new_event_loop()
+    if fallback:
+        def no_reader(*args):
+            raise NotImplementedError
+        loop.add_reader = no_reader
+    async def observe():
+        pending = handle.as_asyncio()
+        assert not pending.done(), 'the raw publication must follow registration'
+        assert gate.entries(loop) == (0 if fallback else 1)
+        gate.publish()
+        try:
+            await asyncio.wait_for(pending, 5)
+        except BaseException as error:
+            assert pending.done(), 'worker error must settle the asyncio Future'
+            assert gate.entries(loop) == 0, 'normal delivery must remove its entry'
+            return error
+        raise AssertionError('worker reconstruction must fail')
+    try:
+        return loop.run_until_complete(observe())
+    finally:
+        loop.close()
+"#,
+                        c"raw_worker_test.py",
+                        c"raw_worker_test",
+                    )
+                    .expect("worker test helper");
+                    let handle = Py::new(py, handle).expect("test Handle");
+                    let delivered = helper
+                        .call_method1("run", (&handle, gate, fallback))
+                        .expect("asyncio must return the reconstruction error");
+                    let error = handle.borrow(py).poll(py).expect_err("shared worker error");
+                    assert!(
+                        error.value(py).is(&delivered),
+                        "worker and later poll share one error"
+                    );
+                    assert_eq!(calls.load(Ordering::SeqCst), 1);
+                    if unwind {
+                        assert!(error.is_instance_of::<PyRuntimeError>(py));
+                    } else {
+                        assert!(error.is_instance_of::<PyKeyboardInterrupt>(py));
+                    }
+                });
+            }
+        }
+    }
+
+    // HDL-25: the raw feature adds no lock probe to ready get/poll, a running
+    // get's check/register/recheck, or an inline deferred receive.
+    #[test]
+    fn non_raw_observations_keep_the_state_lock_budget() {
+        ensure_python();
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            let handle = Py::new(py, PyHandle::from_value(py.None())).expect("ready Handle");
+            for operation in ["get", "poll"] {
+                STATE_LOCK_COUNT.with(|count| count.set(0));
+                handle
+                    .call_method0(py, operation)
+                    .expect("ready observation");
+                assert_eq!(
+                    STATE_LOCK_COUNT.with(|count| count.get()),
+                    1,
+                    "{operation} has one check"
+                );
+            }
+            let (publisher, handle) = pending_handle();
+            let handle = Py::new(py, handle).expect("pending Handle");
+            AFTER_REGISTER.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    let (tx, rx) = mpsc::channel();
+                    let thread = thread::spawn(move || {
+                        publisher.publish(Err(PyValueError::new_err("budget failure")));
+                        tx.send(()).expect("publisher acknowledges");
+                    });
+                    rx.recv_timeout(Duration::from_secs(5))
+                        .expect("publication completes");
+                    thread.join().expect("publisher exits");
+                }))
+            });
+            STATE_LOCK_COUNT.with(|count| count.set(0));
+            handle.call_method0(py, "get").expect_err("stored failure");
+            assert_eq!(
+                STATE_LOCK_COUNT.with(|count| count.get()),
+                3,
+                "check, register, recheck"
+            );
+            let handle = Py::new(
+                py,
+                PyHandle::deferred(
+                    py,
+                    async { ReceiveOutcome::Outcome(Err(PyValueError::new_err("inline failure"))) },
+                    None,
+                    ObserverLoss::Continue,
+                ),
+            )
+            .expect("deferred Handle");
+            STATE_LOCK_COUNT.with(|count| count.set(0));
+            handle.call_method0(py, "get").expect_err("inline failure");
+            assert_eq!(
+                STATE_LOCK_COUNT.with(|count| count.get()),
+                2,
+                "claim and publication, no wait"
+            );
+        });
     }
 
     fn assert_producer_ended_error(py: Python<'_>, error: &PyErr) {
