@@ -92,6 +92,8 @@ class ActorEndpoint(Generic[P, R]):
         """
         Send to a randomly selected actor and start collecting its reply.
         The Future observes completion; dropping it does not stop collection.
+        A successful reply stays pickled until first observation. Later
+        observers share its Python value; ignored successes are never unpickled.
 
         Each call independently selects an actor uniformly at random. Selection
         does not account for actor load, so calls are balanced only across many
@@ -103,6 +105,8 @@ class ActorEndpoint(Generic[P, R]):
         """Require exactly one actor, send now and start collecting its reply.
 
         The Future observes completion; dropping it does not stop collection.
+        A successful reply stays pickled until first observation. Later
+        observers share its Python value; ignored successes are never unpickled.
         """
         ...
     def stream(self, *args: P.args, **kwargs: P.kwargs) -> ValueStream:
@@ -189,6 +193,8 @@ class Remote(Generic[P, R]):
         """
         Send to a randomly selected actor and start collecting its reply.
         The Future observes completion; dropping it does not stop collection.
+        A successful reply stays pickled until first observation. Later
+        observers share its Python value; ignored successes are never unpickled.
 
         Each call independently selects an actor uniformly at random. Selection
         does not account for actor load, so calls are balanced only across many
@@ -200,6 +206,8 @@ class Remote(Generic[P, R]):
         """Require exactly one actor, send now and start collecting its reply.
 
         The Future observes completion; dropping it does not stop collection.
+        A successful reply stays pickled until first observation. Later
+        observers share its Python value; ignored successes are never unpickled.
         """
         ...
     def stream(self, *args: P.args, **kwargs: P.kwargs) -> ValueStream:
