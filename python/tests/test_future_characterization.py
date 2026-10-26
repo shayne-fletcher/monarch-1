@@ -15,6 +15,7 @@ carrier, so that any change to that behavior is caught here and made explicit.
 
 import _thread
 import asyncio
+import pickle
 import sys
 import threading
 import time
@@ -181,8 +182,8 @@ def test_as_handle_returns_the_one_receive_handle():
 
 def test_as_handle_returns_the_handle_after_completion():
     """A completed receive Future keeps its Handle, so _as_handle() returns it
-    after success or failure. A Future._resolved value has no Handle and
-    still refuses, without mutation."""
+    after success or failure. A Future._resolved value is a ready Handle, and
+    _as_handle() returns that Handle too."""
     complete: Future[int] = _received_value(1)
     assert complete.get() == 1
 
@@ -198,9 +199,22 @@ def test_as_handle_returns_the_handle_after_completion():
 
     resolved: Future[int] = Future._resolved(1)
     status = resolved._status
-    with pytest.raises(ValueError, match="does not have a Handle"):
-        resolved._as_handle()
+    assert isinstance(status, future_mod._Handle)
+    assert resolved._as_handle() is status.handle
     assert resolved._status is status
+    assert resolved.get() == 1
+
+
+def test_futures_cannot_be_pickled():
+    """Like asyncio.Future, no Monarch Future can be pickled: a resolved value,
+    a Handle-backed operation and a returns_future body each refuse."""
+    for fut in (
+        Future._resolved(1),
+        _handle_future_observable("success"),
+        _body("success"),
+    ):
+        with pytest.raises(TypeError, match="cannot pickle"):
+            pickle.dumps(fut)
 
 
 def test_get_success_stays_a_handle_and_is_idempotent():
@@ -871,6 +885,13 @@ def _handle_future_observable(outcome: str):
     return Future._from_handle(_handle_observable(outcome))
 
 
+def _resolved_observable(outcome: str):
+    """A Future._resolved value. It can only be resolved to a value, so only
+    the success outcome exists."""
+    assert outcome == "success", f"no resolved observable for {outcome!r}"
+    return Future._resolved(_PROBE_SUCCESS_VALUE)
+
+
 def _handle_future_gated():
     """A gated producer observed through a Handle-backed Future."""
     control, handle = _handle_gated()
@@ -920,6 +941,13 @@ PRESERVED_BY_BOTH = [
 TARGET_ONLY = [
     pytest.param(_handle_observable, id="raw_handle"),
     pytest.param(_handle_future_observable, id="handle_backed_future"),
+]
+
+# The same rows plus a Future._resolved value, for assertions that observe
+# only success: a resolved Future follows the same Handle semantics.
+SUCCESS_TARGETS = [
+    *TARGET_ONLY,
+    pytest.param(_resolved_observable, id="resolved_future"),
 ]
 
 # Rows needing a producer held mid-flight, plus the control that releases it.
@@ -1211,7 +1239,7 @@ async def test_fm_cancelled_observer_survives_cancellation(make_gated):
 # -- fm.ready_get_on_loop_warns ----------------------------------------------
 
 
-@pytest.mark.parametrize("make_observable", TARGET_ONLY)
+@pytest.mark.parametrize("make_observable", SUCCESS_TARGETS)
 async def test_fm_ready_get_on_loop_warns_when_ready(make_observable):
     """Target behavior: get() warns on a running loop *even when already
     ready*, as a completed receive Future does (see
@@ -1263,6 +1291,12 @@ def test_fm_ready_get_on_tokio_refuses_completed_receive():
             "observe the Future from a synchronous or asyncio context.",
             id="handle_backed_future",
         ),
+        pytest.param(
+            _resolved_observable,
+            "Future.get() cannot block from within a Tokio runtime; "
+            "observe the Future from a synchronous or asyncio context.",
+            id="resolved_future",
+        ),
     ],
 )
 def test_fm_ready_get_on_tokio_refuses_when_ready(make_observable, message):
@@ -1286,7 +1320,7 @@ def test_fm_invalid_timeout_on_completed_receive_validates_first():
     assert fut.get() == 8
 
 
-@pytest.mark.parametrize("make_observable", TARGET_ONLY)
+@pytest.mark.parametrize("make_observable", SUCCESS_TARGETS)
 def test_fm_invalid_timeout_on_ready_validates_first(make_observable):
     """Target behavior: the timeout is validated before readiness is observed,
     so a ready observable still rejects a bad value (HDL-12)."""
@@ -1306,14 +1340,15 @@ async def test_fm_ready_as_asyncio_settlement_completed_receive_is_done():
     assert await settled == 9
 
 
-@pytest.mark.parametrize("make_observable", TARGET_ONLY)
+@pytest.mark.parametrize("make_observable", SUCCESS_TARGETS)
 async def test_fm_ready_as_asyncio_settlement_is_done_synchronously(make_observable):
-    """Target behavior: a ready observable's loop future is already done, as a
-    cached Future's is (HDL-22)."""
+    """Target behavior: a ready observable's loop future is already done, and
+    awaiting the observable itself returns its value (HDL-22)."""
     ok = make_observable("success")
     observer = ok.as_asyncio()
     assert observer.done()
     assert await observer == _PROBE_SUCCESS_VALUE
+    assert await ok == _PROBE_SUCCESS_VALUE
 
 
 # -- fm.terminal_baseexception_reobservable ----------------------------------
@@ -1352,7 +1387,7 @@ def test_fm_off_loop_as_asyncio_refuses_and_is_non_consuming(make_observable):
 # -- fm.off_loop_await -------------------------------------------------------
 
 
-@pytest.mark.parametrize("make_observable", TARGET_ONLY)
+@pytest.mark.parametrize("make_observable", SUCCESS_TARGETS)
 def test_fm_off_loop_await_raises_native(make_observable):
     """Target behavior: __await__() off a loop raises asyncio's native
     RuntimeError without consuming the observable. A receive Future does the
@@ -1363,7 +1398,7 @@ def test_fm_off_loop_await_raises_native(make_observable):
 # -- fm.tokio_await ----------------------------------------------------------
 
 
-@pytest.mark.parametrize("make_observable", TARGET_ONLY)
+@pytest.mark.parametrize("make_observable", SUCCESS_TARGETS)
 def test_fm_tokio_await_raises_native_not_would_block(make_observable):
     """Target behavior in a Tokio context with no asyncio loop:
     __await__() raises the native no-running-asyncio-loop RuntimeError, and the
