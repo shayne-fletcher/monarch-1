@@ -47,6 +47,7 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
+use tokio_util::bytes::Bytes;
 use tokio_util::codec::FramedRead;
 use tokio_util::codec::FramedWrite;
 use tokio_util::codec::LengthDelimitedCodec;
@@ -326,39 +327,39 @@ pub async fn sender(
             // Send conda env fingerprint
             let src_env = CondaFingerprint::from_env(src).await?;
             to_receiver
-                .send(bincode::serde::encode_to_vec(&src_env, bincode::config::legacy())?.into())
+                .send(Bytes::from(bincode::serde::encode_to_vec(
+                    &src_env,
+                    bincode::config::legacy(),
+                )?))
                 .await
                 .context("sending src conda fingerprint")?;
-            to_receiver.flush().await?;
+            SinkExt::<Bytes>::flush(&mut to_receiver).await?;
 
             // Send file lists.
             while let Some((path, metadata)) = ent_rx.recv().await {
                 to_receiver
-                    .send(
-                        bincode::serde::encode_to_vec(
-                            FileList::Entry(path, metadata),
-                            bincode::config::legacy(),
-                        )?
-                        .into(),
-                    )
+                    .send(Bytes::from(bincode::serde::encode_to_vec(
+                        FileList::Entry(path, metadata),
+                        bincode::config::legacy(),
+                    )?))
                     .await
                     .context("sending file ent")?;
             }
             to_receiver
-                .send(
-                    bincode::serde::encode_to_vec(FileList::Done, bincode::config::legacy())?
-                        .into(),
-                )
+                .send(Bytes::from(bincode::serde::encode_to_vec(
+                    FileList::Done,
+                    bincode::config::legacy(),
+                )?))
                 .await
                 .context("sending file list end")?;
-            to_receiver.flush().await?;
+            SinkExt::<Bytes>::flush(&mut to_receiver).await?;
 
             anyhow::Ok(())
         },
     )?;
 
     // Convert back to raw stream to send file header + contents.
-    to_receiver.flush().await?;
+    SinkExt::<Bytes>::flush(&mut to_receiver).await?;
     let mut to_receiver = to_receiver.into_inner();
 
     let hdr: FileSectionHeader = bincode::serde::decode_from_slice(
@@ -640,31 +641,25 @@ pub async fn receiver(
         },
         async {
             to_sender
-                .send(
-                    bincode::serde::encode_to_vec(
-                        &FileSectionHeader { num: files.len() },
-                        bincode::config::legacy(),
-                    )?
-                    .into(),
-                )
+                .send(Bytes::from(bincode::serde::encode_to_vec(
+                    &FileSectionHeader { num: files.len() },
+                    bincode::config::legacy(),
+                )?))
                 .await
                 .context("sending sig section header")?;
             for (path, (_, recv)) in files.iter() {
                 to_sender
-                    .send(
-                        bincode::serde::encode_to_vec(
-                            &FileHeader {
-                                path: path.clone(),
-                                symlink: matches!(recv, Receive::Symlink),
-                            },
-                            bincode::config::legacy(),
-                        )?
-                        .into(),
-                    )
+                    .send(Bytes::from(bincode::serde::encode_to_vec(
+                        &FileHeader {
+                            path: path.clone(),
+                            symlink: matches!(recv, Receive::Symlink),
+                        },
+                        bincode::config::legacy(),
+                    )?))
                     .await
                     .context("sending sig header")?;
             }
-            to_sender.flush().await?;
+            SinkExt::<Bytes>::flush(&mut to_sender).await?;
             anyhow::Ok(())
         },
     )?;
