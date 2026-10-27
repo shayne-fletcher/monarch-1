@@ -1322,9 +1322,9 @@ class Port(Generic[R]):
         def _reconstruct_port(
             port_ref: PortRef | OncePortRef, rank: Optional[int]
         ) -> "Port[R]":
-            # Prefer the receiver the decoder installed. An eager reply decode
-            # runs on a Tokio worker with no Monarch context, where `context()`
-            # would bootstrap a client inside the receiving actor's process.
+            # Prefer the receiver the decoder installed, whether unpickling runs
+            # on an observer's thread or on Tokio. A worker without Monarch
+            # context would otherwise bootstrap a client inside this process.
             # Outside such a decode -- ordinary client-side reconstruction --
             # there is no receiver and the context path is unchanged.
             receiver = _current_receiver_instance()
