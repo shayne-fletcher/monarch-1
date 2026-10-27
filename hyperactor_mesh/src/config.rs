@@ -115,7 +115,8 @@ declare_attrs! {
     /// Accepted values: "native" (default), "systemd".
     /// Trimmed and lowercased before matching.
     ///
-    /// **Precedence:** Python spawner (via SetProcSpawner) overrides this.
+    /// **Precedence:** a launcher installed with `HostMesh.set_proc_launcher`
+    /// overrides this.
     @meta(CONFIG = ConfigAttr::new(
         Some("HYPERACTOR_MESH_PROC_LAUNCHER_KIND".to_string()),
         Some("proc_launcher_kind".to_string()),

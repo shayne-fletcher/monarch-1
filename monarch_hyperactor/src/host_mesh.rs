@@ -42,6 +42,7 @@ use hyperactor_mesh::proc_mesh::telemetry_actor_mesh_id;
 use hyperactor_mesh::shared_cell::SharedCell;
 use hyperactor_mesh::transport::default_bind_spec;
 use hyperactor_telemetry::hash_to_u64;
+use monarch_types::PickledPyObject;
 use ndslice::View;
 use ndslice::view::Extent;
 use ndslice::view::RankedSliceable;
@@ -52,12 +53,20 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::types::PyMapping;
+use pyo3::types::PyType;
 
+use crate::actor::ActorKind;
+use crate::actor::MethodSpecifier;
 use crate::actor::PythonActor;
+use crate::actor::PythonActorParams;
+use crate::actor::PythonMessage;
+use crate::actor::PythonMessageKind;
 use crate::actor::to_py_error;
+use crate::buffers::FrozenBuffer;
 use crate::context::PyInstance;
 use crate::context::shutdown_root_client;
 use crate::handle::PyHandle;
+use crate::proc_launcher::install_proc_launcher;
 use crate::proc_mesh::PyProcMesh;
 use crate::runtime::GilSite;
 use crate::runtime::monarch_with_gil;
@@ -500,6 +509,38 @@ impl PyHostMesh {
                 "cannot stop `HostMesh` that is a reference instead of owned",
             )),
         }
+    }
+
+    /// Install a Python proc launcher on every host of this mesh.
+    ///
+    /// `actor` is the `_Actor` wrapper class and `init_args` the pickled
+    /// `(args, kwargs)` of the launcher's `Init` message. Return a Handle
+    /// that resolves once every host has installed the launcher, or raises
+    /// an error naming each host that failed.
+    fn set_proc_launcher(
+        &self,
+        py: Python<'_>,
+        instance: &PyInstance,
+        actor: Py<PyType>,
+        init_args: FrozenBuffer,
+        kind: ActorKind,
+    ) -> PyResult<PyHandle> {
+        let hosts = self.mesh_ref()?;
+        let actor_type = PickledPyObject::pickle(actor.bind(py).as_any())?;
+        let init_message = PythonMessage::new_from_buf(
+            PythonMessageKind::CallMethod {
+                name: MethodSpecifier::Init {},
+                response_port: None,
+                correlation_id: None,
+            },
+            init_args,
+        );
+        let launcher = PythonActorParams::new(actor_type, Some(init_message), kind);
+        let instance = instance.clone();
+        Ok(PyHandle::spawn(async move {
+            install_proc_launcher(instance.deref(), &hosts, launcher).await?;
+            Ok(())
+        }))
     }
 }
 

@@ -15,16 +15,41 @@
 //! This enables custom spawning strategies (Docker, VMs, etc.) while
 //! reusing the existing lifecycle management in
 //! `BootstrapProcManager`.
+//!
+//! [`install_proc_launcher`] installs such a launcher on every host of a
+//! mesh through a [`ProcLauncherInstaller`] on each host's system proc.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use async_trait::async_trait;
+use futures::StreamExt;
+use futures::stream;
+use hyperactor::Actor;
 use hyperactor::ActorHandle;
+use hyperactor::ActorRef;
+use hyperactor::Context;
 use hyperactor::Endpoint as _;
+use hyperactor::HandleClient;
+use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Mailbox;
+use hyperactor::OncePortRef;
+use hyperactor::RefClient;
+use hyperactor::actor::ActorStatus;
+use hyperactor::actor::remote::Remote;
+use hyperactor::context;
+use hyperactor::context::Mailbox as _;
+use hyperactor::mailbox::MessageEnvelope;
+use hyperactor::mailbox::Undeliverable;
+use hyperactor::mailbox::UndeliverableReason;
+use hyperactor::supervision::ActorSupervisionEvent;
+use hyperactor_mesh::host_mesh::HostMeshRef;
+use hyperactor_mesh::host_mesh::host_agent::GspawnSystemActorClient;
+use hyperactor_mesh::host_mesh::host_agent::HostAgent;
+use hyperactor_mesh::host_mesh::host_agent::SetProcLauncherClient;
 use hyperactor_mesh::proc_launcher::LaunchOptions;
 use hyperactor_mesh::proc_launcher::LaunchResult;
 use hyperactor_mesh::proc_launcher::ProcExitKind;
@@ -32,12 +57,20 @@ use hyperactor_mesh::proc_launcher::ProcExitResult;
 use hyperactor_mesh::proc_launcher::ProcLauncher;
 use hyperactor_mesh::proc_launcher::ProcLauncherError;
 use hyperactor_mesh::proc_launcher::StdioHandling;
+use ndslice::ViewExt;
+use ndslice::extent;
+use ndslice::view::Ranked;
 use pyo3::prelude::*;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
+use typeuri::Named;
 
 use crate::actor::MethodSpecifier;
 use crate::actor::PythonActor;
+use crate::actor::PythonActorParams;
 use crate::actor::PythonMessage;
 use crate::actor::PythonMessageKind;
 use crate::mailbox::EitherPortRef;
@@ -548,7 +581,7 @@ use py::import_cloudpickle;
 /// [`ProcLauncher`] methods don't take a context parameter, but
 /// sending actor messages does. This launcher stores an
 /// [`Instance<()>`] ("client-only" actor) to use as the send context.
-/// The instance is created via [`Proc::client()`] and must remain
+/// The instance is created via [`Instance::child()`] and must remain
 /// valid for the lifetime of the launcher.
 #[derive(Debug)]
 pub struct ActorProcLauncher {
@@ -563,7 +596,7 @@ pub struct ActorProcLauncher {
     /// Client-only actor instance used as the send context for all
     /// messages to `spawner`.
     ///
-    /// Created via `Proc::client()`. The `()` type indicates this
+    /// Created via `Instance::child()`. The `()` type indicates this
     /// is not a real actor—just a sending context. Must outlive the
     /// launcher.
     instance: Instance<()>,
@@ -584,7 +617,7 @@ impl ActorProcLauncher {
     ///   `ProcLauncher` ABC.
     /// * `mailbox` - Mailbox used to create one-shot exit ports.
     /// * `instance` - Send context for `ActorHandle::send` (typically
-    ///   from `Proc::client()`). Any valid instance granting send
+    ///   from `Instance::child()`). Any valid instance granting send
     ///   capability is sufficient; it need not be
     ///   `Instance<PythonActor>`. Must remain valid for the
     ///   launcher's lifetime.
@@ -629,6 +662,13 @@ impl ProcLauncher for ActorProcLauncher {
         proc_id: &hyperactor::ProcAddr,
         opts: LaunchOptions,
     ) -> Result<LaunchResult, ProcLauncherError> {
+        let spawner_status = self.spawner.status().borrow().clone();
+        if spawner_status.is_terminal() {
+            return Err(ProcLauncherError::Other(format!(
+                "launcher actor stopped: {spawner_status}"
+            )));
+        }
+
         let (exit_port, exit_port_rx) = self.mailbox.open_once_port::<PythonMessage>();
 
         let pickled_args = monarch_with_gil_blocking(
@@ -725,20 +765,32 @@ impl ProcLauncher for ActorProcLauncher {
         let active_procs: Arc<Mutex<HashSet<hyperactor::ProcAddr>>> =
             Arc::clone(&self.active_procs);
         let proc_id_clone = proc_id.clone();
+        let mut spawner_status = self.spawner.status();
 
         tokio::spawn(async move {
-            let result = match exit_port_rx.recv().await {
-                Ok(py_message) => {
-                    convert_py_exit_result(py_message).unwrap_or_else(|e| ProcExitResult {
+            // An exit report that has already arrived wins over the
+            // spawner having stopped since.
+            let result = tokio::select! {
+                biased;
+                reply = exit_port_rx.recv() => match reply {
+                    Ok(py_message) => {
+                        convert_py_exit_result(py_message).unwrap_or_else(|e| ProcExitResult {
+                            kind: ProcExitKind::Failed {
+                                reason: format!("failed to decode exit result: {e}"),
+                            },
+                            stderr_tail: None,
+                        })
+                    }
+                    Err(_) => ProcExitResult {
                         kind: ProcExitKind::Failed {
-                            reason: format!("failed to decode exit result: {e}"),
+                            reason: "exit port closed (spawner crashed or forgot to send)".into(),
                         },
                         stderr_tail: None,
-                    })
-                }
-                Err(_) => ProcExitResult {
+                    },
+                },
+                stopped = wait_terminal(&mut spawner_status) => ProcExitResult {
                     kind: ProcExitKind::Failed {
-                        reason: "exit port closed (spawner crashed or forgot to send)".into(),
+                        reason: format!("launcher actor stopped: {stopped}"),
                     },
                     stderr_tail: None,
                 },
@@ -844,6 +896,246 @@ impl ProcLauncher for ActorProcLauncher {
 
         self.spawner.post(&self.instance, message);
         Ok(())
+    }
+}
+
+/// Wait until `status` reports a terminal state and return it. A closed
+/// channel means the actor is gone, so its last reported status is returned.
+async fn wait_terminal(status: &mut watch::Receiver<ActorStatus>) -> ActorStatus {
+    loop {
+        let current = status.borrow_and_update().clone();
+        if current.is_terminal() {
+            return current;
+        }
+        if status.changed().await.is_err() {
+            return status.borrow().clone();
+        }
+    }
+}
+
+/// Label of the installer actor that [`install_proc_launcher`] spawns on
+/// each host's system proc.
+const INSTALLER_LABEL: &str = "proc_launcher_installer";
+
+/// Install a Python proc launcher on every host of `hosts`.
+///
+/// Hosts are installed concurrently. Succeeds only if every host installed
+/// the launcher; otherwise the error names each failed host. Hosts that did
+/// install keep the launcher.
+pub(crate) async fn install_proc_launcher(
+    cx: &impl context::Actor,
+    hosts: &HostMeshRef,
+    launcher: PythonActorParams,
+) -> anyhow::Result<()> {
+    let installer_type = Remote::global()
+        .name_of::<ProcLauncherInstaller>()
+        .context("ProcLauncherInstaller is not registered")?;
+    let params = bincode::serde::encode_to_vec((), bincode::config::legacy())?;
+    let num_hosts = hosts.region().num_ranks();
+
+    let failures: Vec<String> = stream::iter(hosts.values().enumerate())
+        .map(|(rank, agent)| {
+            let launcher = launcher.clone();
+            let params = params.clone();
+            async move {
+                let host = agent.actor_addr().proc_addr().clone();
+                install_on_host(cx, agent, installer_type, params, launcher)
+                    .await
+                    .map_err(|e| format!("host rank {rank} ({host}): {e:#}"))
+            }
+        })
+        .buffer_unordered(num_hosts.max(1))
+        .filter_map(|result| async move { result.err() })
+        .collect()
+        .await;
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "set_proc_launcher failed on {} of {} hosts:\n{}",
+        failures.len(),
+        num_hosts,
+        failures.join("\n")
+    )
+}
+
+/// Spawn an installer on `agent`'s system proc and have it install
+/// `launcher` there.
+async fn install_on_host(
+    cx: &impl context::Actor,
+    agent: ActorRef<HostAgent>,
+    installer_type: &str,
+    params: Vec<u8>,
+    launcher: PythonActorParams,
+) -> anyhow::Result<()> {
+    let installer = agent
+        .gspawn_system_actor(
+            cx,
+            installer_type.to_string(),
+            INSTALLER_LABEL.to_string(),
+            params,
+        )
+        .await?
+        .map_err(|e| anyhow::anyhow!("failed to spawn the installer: {e}"))?;
+    ActorRef::<ProcLauncherInstaller>::attest(installer)
+        .install_proc_launcher(cx, launcher, agent)
+        .await?
+        .map_err(anyhow::Error::msg)
+}
+
+/// Installs a Python proc launcher on the host whose system proc it runs on.
+///
+/// It spawns the launcher actor as its child, waits for the launcher's
+/// constructor to succeed, wraps the actor in an [`ActorProcLauncher`] and
+/// hands that to the host agent. After a successful install it stays alive
+/// as the launcher actor's parent and absorbs that actor's failures, so a
+/// faulty launcher cannot fail the system proc. After a failed install it
+/// stops, which stops the launcher actor with it.
+#[derive(Debug, Default)]
+#[hyperactor::export(handlers = [InstallProcLauncher])]
+#[hyperactor::spawnable]
+pub struct ProcLauncherInstaller;
+
+#[async_trait]
+impl Actor for ProcLauncherInstaller {
+    async fn handle_supervision_event(
+        &mut self,
+        _this: &Instance<Self>,
+        event: &ActorSupervisionEvent,
+    ) -> Result<bool, anyhow::Error> {
+        if event.is_error() {
+            tracing::error!(%event, "proc launcher actor failed; procs it launched are no longer supervised");
+        }
+        Ok(true)
+    }
+
+    async fn handle_undeliverable_message(
+        &mut self,
+        _cx: &Instance<Self>,
+        reason: UndeliverableReason,
+        _undeliverable: Undeliverable<MessageEnvelope>,
+    ) -> Result<(), anyhow::Error> {
+        tracing::warn!(
+            ?reason,
+            "message for the proc launcher actor was undeliverable"
+        );
+        Ok(())
+    }
+}
+
+/// Ask a [`ProcLauncherInstaller`] to install a Python launcher on its host.
+#[derive(Debug, Serialize, Deserialize, Named, Handler, HandleClient, RefClient)]
+pub struct InstallProcLauncher {
+    /// Spawn parameters of the Python launcher actor.
+    pub launcher: PythonActorParams,
+    /// The host agent on the installer's system proc.
+    pub host_agent: ActorRef<HostAgent>,
+    /// Receives `Ok(())` once installed, or why installation failed.
+    #[reply]
+    pub result: OncePortRef<Result<(), String>>,
+}
+wirevalue::register_type!(InstallProcLauncher);
+
+#[async_trait]
+impl Handler<InstallProcLauncher> for ProcLauncherInstaller {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        InstallProcLauncher {
+            launcher,
+            host_agent,
+            result,
+        }: InstallProcLauncher,
+    ) -> anyhow::Result<()> {
+        let outcome = install(cx, launcher, &host_agent).await;
+        let failed = outcome.is_err();
+        result.post(cx, outcome);
+        if failed && let Err(e) = cx.stop("proc launcher installation failed") {
+            tracing::warn!(%e, "failed to stop proc launcher installer");
+        }
+        Ok(())
+    }
+}
+
+/// Spawn the launcher actor, wait for its constructor, and install it on
+/// `host_agent`'s host.
+async fn install(
+    cx: &Context<'_, ProcLauncherInstaller>,
+    launcher: PythonActorParams,
+    host_agent: &ActorRef<HostAgent>,
+) -> Result<(), String> {
+    let (actor_type, init_message, kind) = launcher.into_parts();
+    let mut init_message = init_message.ok_or("launcher spawn parameters carry no Init message")?;
+    let (init_reply, init_reply_rx) = cx.mailbox().open_once_port::<PythonMessage>();
+    init_message.kind = PythonMessageKind::CallMethod {
+        name: MethodSpecifier::Init {},
+        response_port: Some(EitherPortRef::Once(PythonOncePortRef::from(
+            init_reply.bind(),
+        ))),
+        correlation_id: None,
+    };
+    let point = extent!()
+        .point_of_rank(0)
+        .expect("the empty extent should have rank 0");
+    let actor = PythonActor::new(actor_type, Some(init_message), Some(point), kind)
+        .map_err(|e| format!("failed to construct the launcher actor: {e}"))?;
+    let launcher_actor = cx.spawn(actor);
+
+    let mut status = launcher_actor.status();
+    let reply = tokio::select! {
+        biased;
+        reply = init_reply_rx.recv() => reply
+            .map_err(|e| format!("launcher actor never acknowledged its construction: {e}"))?,
+        stopped = wait_terminal(&mut status) => {
+            return Err(format!("launcher actor stopped during construction: {stopped}"));
+        }
+    };
+    check_init_reply(&reply)?;
+
+    let (send_context, _) = cx.child();
+    let mailbox = send_context.mailbox().clone();
+    let proc_launcher: Arc<dyn ProcLauncher> = Arc::new(ActorProcLauncher::new(
+        launcher_actor,
+        mailbox,
+        send_context,
+    ));
+    let agent = host_agent
+        .downcast_handle(cx)
+        .ok_or("installer is not co-located with the host agent")?;
+    agent
+        .set_proc_launcher(cx, proc_launcher)
+        .await
+        .map_err(|e| format!("host agent did not answer: {e}"))?
+}
+
+/// Map the launcher's reply to its `Init` message: success, or the
+/// constructor's exception.
+fn check_init_reply(reply: &PythonMessage) -> Result<(), String> {
+    match &reply.kind {
+        PythonMessageKind::Result { .. } => Ok(()),
+        PythonMessageKind::Exception { .. } => {
+            Err(monarch_with_gil_blocking(GilSite::Convert, |py| {
+                let decoded =
+                    import_cloudpickle(py)
+                        .map_err(|e| e.to_string())
+                        .and_then(|cloudpickle| {
+                            cloudpickle
+                                .call_method1("loads", (reply.message.to_bytes().as_ref(),))
+                                .map_err(|e| e.to_string())
+                        });
+                match decoded {
+                    Ok(error) => format!(
+                        "launcher constructor failed: {}",
+                        py::pyany_to_error_string(&error)
+                    ),
+                    Err(e) => {
+                        format!("launcher constructor failed; its error could not be decoded: {e}")
+                    }
+                }
+            }))
+        }
+        _ => Err("unexpected reply to the launcher's construction".to_string()),
     }
 }
 

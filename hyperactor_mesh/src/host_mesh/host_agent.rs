@@ -31,6 +31,7 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 use anyhow::Context as _;
@@ -39,6 +40,8 @@ use enum_as_inner::EnumAsInner;
 use futures::FutureExt;
 use futures::future::Either;
 use hyperactor::Actor;
+use hyperactor::ActorAddr;
+use hyperactor::ActorEnvironment;
 use hyperactor::ActorHandle;
 use hyperactor::ActorRef;
 use hyperactor::Addr;
@@ -57,6 +60,7 @@ use hyperactor::RemoteEndpoint as _;
 use hyperactor::Uid;
 use hyperactor::actor::ActorStatus;
 use hyperactor::actor::ActorStoppingReason;
+use hyperactor::actor::remote::Remote;
 use hyperactor::context;
 use hyperactor::id::Label;
 use hyperactor::mailbox::MailboxSender as _;
@@ -88,6 +92,7 @@ use crate::mesh_id::HostMeshId;
 use crate::mesh_id::ProcMeshId;
 use crate::mesh_id::ResourceId;
 use crate::proc_agent::ProcAgent;
+use crate::proc_launcher::ProcLauncher;
 use crate::pyspy::PySpyDump;
 use crate::pyspy::PySpyProfile;
 use crate::pyspy::PySpyProfileWorker;
@@ -599,6 +604,7 @@ impl fmt::Debug for DrainWorker {
         PySpyDump,
         PySpyProfile,
         ConfigDump,
+        GspawnSystemActor,
         crate::proc_agent::SelfCheck,
     ]
 )]
@@ -2578,6 +2584,106 @@ impl Handler<GetLocalProc> for HostAgent {
             Ok(agent) => proc_mesh_agent.post(cx, agent.clone()),
         };
 
+        Ok(())
+    }
+}
+
+/// Install a proc launcher on this host's [`BootstrapProcManager`].
+///
+/// Local-only: it carries an `Arc<dyn ProcLauncher>`, so only an actor in
+/// this process can send it. Fails for an in-process (`Local`) host, for a
+/// host that is draining or shut down, and once the host has a launcher,
+/// whether installed earlier or locked in by its first proc spawn.
+#[derive(hyperactor::Handler, hyperactor::HandleClient)]
+pub struct SetProcLauncher {
+    /// The launcher to install.
+    pub launcher: Arc<dyn ProcLauncher>,
+    /// Receives `Ok(())` once installed, or why installation failed.
+    #[reply]
+    pub result: PortHandle<Result<(), String>>,
+}
+
+impl fmt::Debug for SetProcLauncher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SetProcLauncher")
+            .field("launcher", &"<dyn ProcLauncher>")
+            .field("result", &self.result)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl Handler<SetProcLauncher> for HostAgent {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        SetProcLauncher { launcher, result }: SetProcLauncher,
+    ) -> anyhow::Result<()> {
+        let outcome = match self.host() {
+            Some(HostAgentMode::Process { host, .. }) => host
+                .manager()
+                .set_launcher(launcher)
+                .map_err(|e| e.to_string()),
+            Some(HostAgentMode::Local(_)) => {
+                Err("in-process hosts do not support custom proc launchers".to_string())
+            }
+            None => Err("host is draining or shut down".to_string()),
+        };
+        result.post(cx, outcome);
+        Ok(())
+    }
+}
+
+/// Spawn a registered actor type on this host's system proc.
+///
+/// The type is resolved by name through the [`Remote`] registry of the host
+/// process and spawned as a root actor with a fresh uid labelled
+/// `actor_label`. The reply carries the new actor's address as soon as it is
+/// spawned, or why it could not be: the host is draining or shut down, the
+/// label is invalid, or the type is not registered in this process. This
+/// lets crates that `hyperactor_mesh` does not depend on place actors beside
+/// the host agent.
+#[derive(Debug, Serialize, Deserialize, Named, Handler, HandleClient, RefClient)]
+pub struct GspawnSystemActor {
+    /// Registered type name of the actor to spawn.
+    pub actor_type: String,
+    /// Display label for the spawned actor's uid.
+    pub actor_label: String,
+    /// Serialized spawn parameters for `actor_type`.
+    pub params: hyperactor::Data,
+    /// Receives the spawned actor's address, or why spawning failed.
+    #[reply]
+    pub result: hyperactor::OncePortRef<Result<ActorAddr, String>>,
+}
+wirevalue::register_type!(GspawnSystemActor);
+
+#[async_trait]
+impl Handler<GspawnSystemActor> for HostAgent {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        GspawnSystemActor {
+            actor_type,
+            actor_label,
+            params,
+            result,
+        }: GspawnSystemActor,
+    ) -> anyhow::Result<()> {
+        let outcome = match (self.host(), Label::new(&actor_label)) {
+            (None, _) => Err("host is draining or shut down".to_string()),
+            (Some(_), Err(e)) => Err(format!("invalid actor label {actor_label:?}: {e}")),
+            (Some(host), Ok(label)) => Remote::global()
+                .gspawn(
+                    host.system_proc(),
+                    &actor_type,
+                    Uid::instance(label),
+                    params,
+                    ActorEnvironment::default(),
+                )
+                .await
+                .map_err(|e| e.to_string()),
+        };
+        result.post(cx, outcome);
         Ok(())
     }
 }
@@ -5022,5 +5128,211 @@ mod tests {
             reported[range.start] = true;
         }
         assert!(reported.into_iter().all(|reported| reported));
+    }
+
+    /// A launcher that counts launch requests and refuses them.
+    #[derive(Debug, Default)]
+    struct RecordingLauncher {
+        launches: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProcLauncher for RecordingLauncher {
+        async fn launch(
+            &self,
+            _proc_id: &ProcAddr,
+            _opts: crate::proc_launcher::LaunchOptions,
+        ) -> Result<crate::proc_launcher::LaunchResult, crate::proc_launcher::ProcLauncherError>
+        {
+            self.launches.fetch_add(1, Ordering::SeqCst);
+            Err(crate::proc_launcher::ProcLauncherError::Other(
+                "recording launcher does not launch".into(),
+            ))
+        }
+
+        async fn terminate(
+            &self,
+            _proc_id: &ProcAddr,
+            _timeout: Duration,
+        ) -> Result<(), crate::proc_launcher::ProcLauncherError> {
+            Ok(())
+        }
+
+        async fn kill(
+            &self,
+            _proc_id: &ProcAddr,
+        ) -> Result<(), crate::proc_launcher::ProcLauncherError> {
+            Ok(())
+        }
+    }
+
+    /// An actor type registered for spawning by name.
+    #[derive(Debug, Default)]
+    #[hyperactor::export(handlers = [])]
+    #[hyperactor::spawnable]
+    struct SystemProcProbe;
+
+    impl Actor for SystemProcProbe {}
+
+    async fn spawn_process_host_agent() -> (ActorHandle<HostAgent>, Client) {
+        let host = Host::new(
+            BootstrapProcManager::new(BootstrapCommand::test()).unwrap(),
+            ChannelTransport::Unix.any(),
+        )
+        .await
+        .unwrap();
+        let host_agent = host
+            .system_proc()
+            .clone()
+            .spawn_with_uid(
+                Uid::singleton(Label::new(HOST_MESH_AGENT_ACTOR_NAME).unwrap()),
+                HostAgent::new_process(host, None),
+            )
+            .unwrap();
+        HostAgent::wait_initialized(&host_agent).await.unwrap();
+        let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
+        (host_agent, client_proc.client("client"))
+    }
+
+    // A launcher installed on a fresh host is the one asked to launch the
+    // host's next proc, and it stays installed: a second install fails.
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_set_proc_launcher_is_used_for_spawns() {
+        let (host_agent, client) = spawn_process_host_agent().await;
+        let launches = Arc::new(AtomicUsize::new(0));
+        host_agent
+            .set_proc_launcher(
+                &client,
+                Arc::new(RecordingLauncher {
+                    launches: Arc::clone(&launches),
+                }),
+            )
+            .await
+            .unwrap()
+            .expect("install on a fresh host should succeed");
+
+        host_agent
+            .create_or_update(
+                &client,
+                ResourceId::instance(Label::new("proc1").unwrap()),
+                resource::Rank::new(0),
+                ProcSpec::default(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while launches.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the installed launcher should be asked to launch the proc");
+
+        let err = host_agent
+            .set_proc_launcher(&client, Arc::new(RecordingLauncher::default()))
+            .await
+            .unwrap()
+            .expect_err("a second install should fail");
+        assert!(
+            err.contains("already initialized"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // Once the first spawn has locked in the default launcher, installing a
+    // launcher fails.
+    #[async_timed_test(timeout_secs = 60)]
+    async fn test_set_proc_launcher_after_first_spawn_fails() {
+        let (host_agent, client) = spawn_process_host_agent().await;
+        let id = ResourceId::instance(Label::new("proc1").unwrap());
+        host_agent
+            .create_or_update(
+                &client,
+                id.clone(),
+                resource::Rank::new(0),
+                ProcSpec::default(),
+            )
+            .await
+            .unwrap();
+        let (port, mut rx) = client.open_port::<crate::StatusOverlay>();
+        host_agent
+            .wait_rank_status(
+                &client,
+                id,
+                resource::Rank::new(0),
+                resource::Status::Running,
+                idle_flush_status_reply(port.bind()),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("the default launcher should start the proc")
+            .expect("reply channel closed");
+
+        let err = host_agent
+            .set_proc_launcher(&client, Arc::new(RecordingLauncher::default()))
+            .await
+            .unwrap()
+            .expect_err("install after the first spawn should fail");
+        assert!(
+            err.contains("already initialized"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // An in-process host has no process launcher to replace.
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_set_proc_launcher_on_local_host_fails() {
+        let spawn: ProcManagerSpawnFn =
+            Box::new(|proc| Box::pin(std::future::ready(ProcAgent::boot_v1(proc, None))));
+        let host_agent = spawn_local_host_agent(spawn).await;
+        let client_proc = Proc::direct(ChannelTransport::Unix.any(), "client".to_string()).unwrap();
+        let client = client_proc.client("client");
+
+        let err = host_agent
+            .set_proc_launcher(&client, Arc::new(RecordingLauncher::default()))
+            .await
+            .unwrap()
+            .expect_err("install on an in-process host should fail");
+        assert!(err.contains("in-process"), "unexpected error: {err}");
+    }
+
+    // A registered actor type is spawned on the host's system proc.
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_gspawn_system_actor_spawns_on_system_proc() {
+        let (host_agent, client) = spawn_process_host_agent().await;
+        let actor_type = Remote::global()
+            .name_of::<SystemProcProbe>()
+            .expect("SystemProcProbe should be registered");
+        let params = bincode::serde::encode_to_vec((), bincode::config::legacy()).unwrap();
+
+        let spawned = host_agent
+            .gspawn_system_actor(&client, actor_type.to_string(), "probe".to_string(), params)
+            .await
+            .unwrap()
+            .expect("spawning a registered type should succeed");
+        assert_eq!(
+            spawned.proc_addr(),
+            host_agent.actor_addr().proc_addr(),
+            "the spawned actor should live on the host agent's system proc"
+        );
+    }
+
+    // An unregistered actor type is reported, not spawned.
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_gspawn_system_actor_rejects_unregistered_type() {
+        let (host_agent, client) = spawn_process_host_agent().await;
+        let err = host_agent
+            .gspawn_system_actor(
+                &client,
+                "no::such::Actor".to_string(),
+                "probe".to_string(),
+                Vec::new(),
+            )
+            .await
+            .unwrap()
+            .expect_err("spawning an unregistered type should fail");
+        assert!(err.contains("not registered"), "unexpected error: {err}");
     }
 }
