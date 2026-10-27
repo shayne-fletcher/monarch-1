@@ -170,10 +170,11 @@ impl PyValueMesh {
 }
 
 impl PyValueMesh {
-    /// Create a lazy ValueMesh from raw pickled parts, unpickled on demand at
-    /// `get()`/`values()`: the no-refs decode path for the `.call()` collector.
+    /// Create a lazy `ValueMesh` from raw pickled parts, unpickled on demand at
+    /// `get()`/`values()`: the no-refs path for `.call()` `ValueMesh`
+    /// construction.
     /// See the out-of-band mesh-reference invariants in [`crate::pickle`] for
-    /// why the collector gates on refs and why this lazy decode is sound.
+    /// why construction gates on refs and why this lazy decode is sound.
     pub fn build_from_parts(extent: &Extent, parts: Vec<Part>) -> PyResult<Self> {
         let lazy_values: Vec<LazyCell> = parts
             .into_iter()
@@ -189,8 +190,8 @@ impl PyValueMesh {
         Ok(Self { inner })
     }
 
-    /// Create a ValueMesh from already-unpickled objects: the eager, ref-aware
-    /// decode path for the `.call()` collector when responses carry refs. See
+    /// Create a `ValueMesh` from already-unpickled objects: the ref-aware
+    /// construction path for `.call()` when responses carry refs. See
     /// the out-of-band mesh-reference invariants in [`crate::pickle`]; the
     /// no-ref case uses `build_from_parts`.
     pub fn build_from_objects(extent: &Extent, objects: Vec<Py<PyAny>>) -> PyResult<Self> {

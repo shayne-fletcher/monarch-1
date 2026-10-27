@@ -83,9 +83,15 @@ class ActorEndpoint(Generic[P, R]):
         """Something to use in InputChecker to represent calling this thingy."""
         ...
     def call(self, *args: P.args, **kwargs: P.kwargs) -> "Future[ValueMesh[R]]":
-        """Send to all actors and start collecting their replies into a ValueMesh.
+        """Send to all actors and start accumulating their replies.
 
-        The Future observes completion; dropping it does not stop collection.
+        The `Future` observes completion; dropping it does not stop collection.
+        The first observer builds the successful `ValueMesh`; later observers
+        share it. If no reply carries mesh references, all elements stay pickled
+        until accessed. If any reply carries mesh references, building the
+        `ValueMesh` unpickles every reply, including those without references.
+        An ignored successful batch is never built. Remote errors are processed
+        on arrival.
         """
         ...
     def choose(self, *args: P.args, **kwargs: P.kwargs) -> Future[R]:
@@ -184,9 +190,15 @@ class Remote(Generic[P, R]):
         self, args: Any, kwargs: Any, fake_args: Any, fake_kwargs: Any
     ) -> Any: ...
     def call(self, *args: P.args, **kwargs: P.kwargs) -> "Future[ValueMesh[R]]":
-        """Send to all actors and start collecting their replies into a ValueMesh.
+        """Send to all actors and start accumulating their replies.
 
-        The Future observes completion; dropping it does not stop collection.
+        The `Future` observes completion; dropping it does not stop collection.
+        The first observer builds the successful `ValueMesh`; later observers
+        share it. If no reply carries mesh references, all elements stay pickled
+        until accessed. If any reply carries mesh references, building the
+        `ValueMesh` unpickles every reply, including those without references.
+        An ignored successful batch is never built. Remote errors are processed
+        on arrival.
         """
         ...
     def choose(self, *args: P.args, **kwargs: P.kwargs) -> Future[R]:

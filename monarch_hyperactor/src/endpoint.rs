@@ -7,7 +7,6 @@
  */
 
 use std::cell::Cell;
-use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -70,7 +69,7 @@ use crate::metrics::ENDPOINT_STREAM_THROUGHPUT;
 use crate::metrics::EndpointAttrs;
 use crate::metrics::UNKNOWN;
 use crate::pickle::PendingMessage;
-use crate::pickle::PicklingState;
+use crate::pickle::unpickle_reply;
 use crate::runtime::GilSite;
 use crate::runtime::monarch_with_gil;
 use crate::runtime::monarch_with_gil_blocking;
@@ -338,9 +337,14 @@ pub(crate) struct EndpointReply {
 
 impl Reconstruct for EndpointReply {
     fn reconstruct(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        // Fresh PicklingState on every attempt: failed unpickling consumes that
-        // state, not the original bytes or the caller's mesh-reference table.
-        unpickle_reply(py, self.message.clone(), self.refs.clone(), &self.instance)
+        // Unpickle cloned components through the shared helper. A failed
+        // attempt cannot consume the original bytes or reference table.
+        unpickle_reply(
+            py,
+            self.message.clone(),
+            self.refs.iter().cloned(),
+            &self.instance,
+        )
     }
 }
 
@@ -379,25 +383,228 @@ impl CollectedEndpointReply {
     }
 }
 
-/// Rebuild an endpoint's return value or exception object from its reply payload.
-/// The caller must already have acquired the GIL.
+/// The serialized replies from every actor targeted by `call()`.
 ///
-/// Supply the separate mesh-reference table so unpickling can reconstruct mesh
-/// objects. Temporarily install the calling actor's `instance` as the receiver,
-/// so any Ports in the payload are reconstructed for that actor, not against
-/// whichever actor context happens to be on the decoding thread.
+/// For a successful batch, the `Handle` retains this data until its first
+/// observer builds a Python `ValueMesh`. `Port`s are rebuilt for the actor that
+/// made the call, even if another thread observes the result.
+struct EndpointReplyBatch {
+    /// Shape of the `ValueMesh` to build.
+    extent: Extent,
+    /// Replies grouped into runs, ordered by rank. Each run covers adjacent
+    /// ranks with identical responses, storing their pickle bytes and
+    /// mesh-reference table once for the whole range.
+    overlay: ValueOverlay<PythonResponseMessage>,
+    /// The actor that made the call, used to rebuild `Port`s in its replies.
+    instance: Instance<PythonActor>,
+}
+
+impl Reconstruct for EndpointReplyBatch {
+    /// Build a Python `ValueMesh` from the batch retained by the `Handle`.
+    ///
+    /// The `Handle` calls this under the GIL when an observer needs the result.
+    /// It stores the returned `ValueMesh` or error for all observers to share.
+    /// `Ok` always contains a `ValueMesh`; `Reconstruct` erases its type.
+    ///
+    /// If no reply carries mesh references, every cell starts as pickle bytes.
+    /// Later, `ValueMesh.get()` unpickles the accessed cell and replaces its
+    /// bytes with the Python object. A partially read mesh can contain both
+    /// pickled cells and already-unpickled cells.
+    ///
+    /// If any reply carries mesh references, unpickle every reply run using
+    /// its reference table and the calling actor's instance before building
+    /// the `ValueMesh`. All cells then contain Python objects from the start;
+    /// later cell access does not need to unpickle them.
+    ///
+    /// Collection metrics ended before this batch entered the `Handle`,
+    /// so pass no metrics guard here. Construction and unpickling errors
+    /// are still returned normally.
+    fn reconstruct(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        build_reply_mesh(py, self, None).map(Py::into_any)
+    }
+}
+
+/// A successful reply batch with its latency and trace measurements still open.
 ///
-/// An exception payload returns its Python exception object; this helper does
-/// not raise it. A failure to unpickle returns Err instead.
-fn unpickle_reply(
+/// Dropping `record_guard` records elapsed latency. Dropping `span_guard` ends
+/// the endpoint's trace span. Keeping them here controls when those
+/// measurements finish.
+///
+/// Python `call()` drops them in `into_raw()`, before storing the batch in the
+/// `Handle`. Native `call_future()` keeps them through `ValueMesh` construction
+/// in `into_value()`, so its measurements still include that construction.
+pub(crate) struct CollectedEndpointReplyBatch {
+    /// Collected reply bytes and mesh references, not yet a Python `ValueMesh`.
+    reply: EndpointReplyBatch,
+    /// Timer started when reply collection began. Drop records its elapsed
+    /// time in `call()`'s latency histogram.
+    record_guard: RecordEndpointGuard,
+    /// Trace span for this `call()` invocation. It starts before sending the
+    /// endpoint call to the target actors and ends when this guard is dropped.
+    span_guard: SpanGuard,
+}
+
+impl CollectedEndpointReplyBatch {
+    /// Finish Python `call()`'s timing and return the serialized batch.
+    ///
+    /// This consumes the wrapper. The reply moves out; Rust drops
+    /// `record_guard` and `span_guard`, recording latency and ending the span
+    /// before storing the batch in the `Handle`. No `ValueMesh` is built here.
+    fn into_raw(self) -> EndpointReplyBatch {
+        self.reply
+    }
+
+    /// Build the Python `ValueMesh` returned by `ActorEndpoint::call_future()`.
+    ///
+    /// `call_future()` awaits collection, then calls this for a successful
+    /// batch. It must return a `ValueMesh`, not serialized data in a `Handle`.
+    /// Python `call()` uses `into_raw()` and builds when an observer reads the
+    /// `Handle`.
+    ///
+    /// Both paths use `build_reply_mesh()`: without mesh references, cells stay
+    /// pickled until accessed; with references, all reply runs are unpickled
+    /// before the `ValueMesh` is returned.
+    ///
+    /// The Rust caller polls this future as part of `call_future()`. Wait for
+    /// the GIL, then call `build_reply_mesh()`; no extra task or `Handle` is
+    /// created. Keep both timing guards until construction finishes, so native
+    /// measurements still include building the `ValueMesh`.
+    async fn into_value(self) -> PyResult<Py<PyAny>> {
+        let Self {
+            reply,
+            record_guard,
+            span_guard,
+        } = self;
+        // Keep the trace span open through the GIL wait and `ValueMesh` build.
+        let _span_guard = span_guard;
+        monarch_with_gil(GilSite::ReplyConvert, move |py| {
+            // This batch contains only successful replies. Keep its timer until
+            // construction ends, but skip the builder's remote-error scan.
+            let _record_guard = record_guard;
+            build_reply_mesh(py, &reply, None).map(Py::into_any)
+        })
+        .await
+    }
+}
+
+/// Build a Python `ValueMesh` from the collected reply batch.
+///
+/// Python `call()` uses this when its successful result is first observed.
+/// Native `call_future()` also uses it. The caller must hold the GIL.
+///
+/// For a successful batch, building the mesh and unpickling its contents are
+/// separate steps:
+///
+/// - No mesh references anywhere: build cells containing pickle bytes.
+///   Nothing is unpickled here. Reading a cell later unpickles that cell.
+/// - Any mesh references: unpickle every run now, including runs without
+///   references, then build cells containing Python objects. Reading those
+///   cells later needs no unpickling. Lazy cells cannot carry the reference
+///   tables needed to decode these replies, so this path decodes before
+///   building the mesh.
+///
+/// If an observation is interrupted while unpickling a reference-bearing
+/// batch, the original bytes and reference tables remain in `reply`. Another
+/// observation can rebuild from that original batch, starting at the first run.
+///
+/// An actor may raise an exception instead of returning a value. That
+/// exception is sent back as its reply. If the batch contains such a reply,
+/// the Tokio task collecting `call()` replies calls this function once all
+/// targeted actors have replied, without waiting for an observer.
+///
+/// Unpickling a reply here can also fail. That local error is distinct
+/// from an exception sent by an actor.
+///
+/// Before unpickling, mark a supplied `record_guard` if any reply is a remote
+/// exception. That actor failure is counted even if an earlier successful reply
+/// fails to unpickle. Then process runs in rank order and return the first
+/// error encountered. A local unpickling failure alone does not mark the guard.
+/// Known-successful batches pass no guard and skip this remote-error scan.
+fn build_reply_mesh(
     py: Python<'_>,
-    message: Part,
-    refs: Vec<MeshRef>,
-    instance: &Instance<PythonActor>,
-) -> PyResult<Py<PyAny>> {
-    let mesh_references: VecDeque<Option<MeshRef>> = refs.into_iter().map(Some).collect();
-    PicklingState::from_parts(message, VecDeque::new(), mesh_references)
-        .unpickle_with_receiver(py, instance)
+    reply: &EndpointReplyBatch,
+    record_guard: Option<&RecordEndpointGuard>,
+) -> PyResult<Py<PyValueMesh>> {
+    // A supplied guard records remote failures before any reply is unpickled.
+    // Known-successful callers pass `None`, so they skip this scan.
+    if let Some(guard) = record_guard
+        && reply
+            .overlay
+            .runs()
+            .any(|(_, payload)| matches!(payload, PythonResponseMessage::Exception { .. }))
+    {
+        // Record the actor's failure independently of which error decoding
+        // returns. A local unpickling error must not hide the actor's failure.
+        guard.mark_error();
+    }
+    // Choose the cell representation for the entire mesh. Both return values
+    // and exception replies can carry mesh-reference tables; either kind can
+    // require the all-unpickled path below.
+    let has_refs = reply.overlay.runs().any(|(_, payload)| {
+        let (PythonResponseMessage::Result { refs, .. }
+        | PythonResponseMessage::Exception { refs, .. }) = payload;
+        !refs.is_empty()
+    });
+    // Reserve one cell per actor rank, not per run of identical replies.
+    let expected_count = reply.extent.num_ranks();
+    if !has_refs {
+        // No reference tables are needed: successful replies remain pickled.
+        let mut parts = Vec::with_capacity(expected_count);
+        for (range, payload) in reply.overlay.runs() {
+            match payload {
+                PythonResponseMessage::Result { part, .. } => {
+                    // Each rank in this run gets the same serialized reply.
+                    // Clone the `Part` without unpickling it.
+                    parts.extend(range.clone().map(|_| part.clone()));
+                }
+                PythonResponseMessage::Exception { .. } => {
+                    // Exceptions cannot be stored as successful mesh cells.
+                    // Unpickle the actor's exception and return it as `Err`.
+                    // If unpickling fails, `?` returns that local error.
+                    return Err(PyErr::from_value(
+                        payload.decode(py, &reply.instance)?.into_bound(py),
+                    ));
+                }
+            }
+        }
+        // `build_from_parts()` merges adjacent cells with equal pickle bytes.
+        // Allocate the Python wrapper; `unbind()` returns an owned reference.
+        // Reading a cell later unpickles it.
+        return Ok(PyValueMesh::build_from_parts(&reply.extent, parts)?
+            .into_pyobject(py)?
+            .unbind());
+    }
+
+    // At least one reply needs a reference table. Unpickle every run now,
+    // including runs without references, before building Python-object cells.
+    let mut objects = Vec::with_capacity(expected_count);
+    for (range, payload) in reply.overlay.runs() {
+        match payload {
+            PythonResponseMessage::Result { .. } => {
+                // Reunite this reply's bytes and reference table, rebuilding
+                // for the actor that made the call, not the observing thread.
+                // `?` returns immediately if unpickling fails.
+                let object = payload.decode(py, &reply.instance)?;
+                // Decode once per run. Every rank in it shares the resulting
+                // Python object; `clone_ref()` adds another reference to it.
+                objects.extend(range.clone().map(|_| object.clone_ref(py)));
+            }
+            PythonResponseMessage::Exception { .. } => {
+                // Return this actor's exception unless unpickling it fails.
+                // Earlier local failures have already returned. The guard was
+                // marked for remote exceptions before decoding began.
+                return Err(PyErr::from_value(
+                    payload.decode(py, &reply.instance)?.into_bound(py),
+                ));
+            }
+        }
+    }
+    // `build_from_objects()` merges adjacent cells sharing the same Python
+    // object, not merely equal objects. Allocate its Python wrapper and return
+    // an owned reference; cell reads need no unpickling.
+    Ok(PyValueMesh::build_from_objects(&reply.extent, objects)?
+        .into_pyobject(py)?
+        .unbind())
 }
 
 /// Take the next reply from an endpoint's port without unpickling its payload.
@@ -481,18 +688,21 @@ async fn collect_value(
 // HOT PATH: Be mindful of performance when making changes here.
 // To test how performance is affected by a change, run the RPC benchmarks in
 // `monarch/python/benches/`.
+/// Wait for the accumulated batch without constructing a Python `ValueMesh`.
+/// Successful batches retain bytes and references for Python observation or
+/// native construction. Batches with exceptions are processed here in order.
+/// A supervision fault wins a simultaneous poll; a closed monitor is an error.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn collect_valuemesh(
     extent: Extent,
     rx: OncePortReceiver<PythonMessage>,
     attrs: Arc<EndpointAttrs>,
     supervision_monitor: Option<Arc<dyn Supervisable>>,
-    instance: &Instance<PythonActor>,
+    instance: Instance<PythonActor>,
     qualified_endpoint_name: Option<String>,
-) -> PyResult<Py<PyAny>> {
+    span_guard: SpanGuard,
+) -> PyResult<CollectedEndpointReplyBatch> {
     let start = tokio::time::Instant::now();
-
-    let expected_count = extent.num_ranks();
 
     let record_guard = RecordEndpointGuard::new(start, attrs, EndpointAdverb::Call);
 
@@ -506,7 +716,7 @@ async fn collect_valuemesh(
         Some(sup) => {
             tokio::select! {
                 biased;
-                result = sup.supervision_event(instance) => {
+                result = sup.supervision_event(&instance) => {
                     match result {
                         Some(err) => RaceResult::SupervisionError(err),
                         None => RaceResult::RecvError(
@@ -536,70 +746,28 @@ async fn collect_valuemesh(
                     "failed to extract overlay from collected responses: {e}"
                 ))
             })?;
-            // Move `record_guard` into the Send closure: the guard's `Cell<bool>` is not Sync.
-            monarch_with_gil(GilSite::ReplyConvert, move |py| {
-                // Out-of-band mesh refs reunite only while the `PicklingState` is
-                // live, i.e. during decode, so a ref-carrying response must be
-                // decoded here (eagerly, at accumulation): a lazy decode on access
-                // would have no state to reunite against, the REFS-1 failure. But
-                // decoding *every* response here would revert D96180139, which made
-                // valuemesh values unpickle lazily on access so a large
-                // OnceBuffer-accumulated `.call()` does not pay one big unpickle
-                // burst at the end of collection.
-                //
-                // Reconcile the two by gating on refs. A `.call()` fans one
-                // endpoint over the mesh, so the batch is uniform: either every
-                // response carries refs (the endpoint returns a mesh, the minority)
-                // or none does (plain values, the common case). With no refs we
-                // keep the raw parts and let them unpickle on access (D96180139,
-                // preserved); only with refs present do we decode eagerly to
-                // reunite them.
-                let has_refs = overlay.runs().any(|(_, payload)| {
-                    let (PythonResponseMessage::Result { refs, .. }
-                    | PythonResponseMessage::Exception { refs, .. }) = payload;
-                    !refs.is_empty()
+            let all_success = overlay
+                .runs()
+                .all(|(_, payload)| matches!(payload, PythonResponseMessage::Result { .. }));
+            let reply = EndpointReplyBatch {
+                extent,
+                overlay,
+                instance,
+            };
+            if all_success {
+                return Ok(CollectedEndpointReplyBatch {
+                    reply,
+                    record_guard,
+                    span_guard,
                 });
-
-                if !has_refs {
-                    let mut parts = Vec::with_capacity(expected_count);
-                    for (range, payload) in overlay.runs() {
-                        match payload {
-                            PythonResponseMessage::Result { part, .. } => {
-                                parts.extend(range.clone().map(|_| part.clone()));
-                            }
-                            PythonResponseMessage::Exception { .. } => {
-                                record_guard.mark_error();
-                                return Err(PyErr::from_value(
-                                    payload.decode(py, instance)?.into_bound(py),
-                                ));
-                            }
-                        }
-                    }
-                    return Ok(PyValueMesh::build_from_parts(&extent, parts)?
-                        .into_pyobject(py)?
-                        .into_any()
-                        .unbind());
-                }
-
-                let mut objects: Vec<Py<PyAny>> = Vec::with_capacity(expected_count);
-                for (range, payload) in overlay.runs() {
-                    match payload {
-                        PythonResponseMessage::Result { .. } => {
-                            let obj = payload.decode(py, instance)?;
-                            objects.extend(range.clone().map(|_| obj.clone_ref(py)));
-                        }
-                        PythonResponseMessage::Exception { .. } => {
-                            record_guard.mark_error();
-                            return Err(PyErr::from_value(
-                                payload.decode(py, instance)?.into_bound(py),
-                            ));
-                        }
-                    }
-                }
-                Ok(PyValueMesh::build_from_objects(&extent, objects)?
-                    .into_pyobject(py)?
-                    .into_any()
-                    .unbind())
+            }
+            // Keep errors on the collection worker, in the existing run order.
+            // Move the guard into the closure: its `Cell` is `Send`, but not
+            // `Sync`.
+            let _span_guard = span_guard;
+            monarch_with_gil(GilSite::ReplyConvert, move |py| {
+                build_reply_mesh(py, &reply, Some(&record_guard))?;
+                unreachable!("a batch containing an exception cannot build successfully")
             })
             .await
         }
@@ -943,12 +1111,14 @@ pub(crate) trait Endpoint {
     // `monarch/python/benches/`.
     /// Send the call to all actors now and return its owned reply collector.
     #[tracing::instrument(name = "call", level = "debug", skip_all)]
-    fn call_future<'py>(
+    fn call_batch_future<'py>(
         &self,
         py: Python<'py>,
         args: &Bound<'py, PyTuple>,
         kwargs: Option<&Bound<'py, PyDict>>,
-    ) -> PyResult<impl Future<Output = PyResult<Py<PyAny>>> + Send + 'static + use<Self>> {
+    ) -> PyResult<
+        impl Future<Output = PyResult<CollectedEndpointReplyBatch>> + Send + 'static + use<Self>,
+    > {
         let instance = self.get_current_instance(py)?;
         let correlation_id: u64 = fastrand::u64(..);
         let span_guard =
@@ -973,19 +1143,28 @@ pub(crate) trait Endpoint {
             Some(correlation_id),
         )?;
 
-        let instance_for_task = instance.clone_for_py();
-        Ok(async move {
-            let _span_guard = span_guard;
-            collect_valuemesh(
-                extent,
-                receiver,
-                attrs,
-                supervision_monitor,
-                &instance_for_task,
-                qualified_endpoint_name,
-            )
-            .await
-        })
+        Ok(collect_valuemesh(
+            extent,
+            receiver,
+            attrs,
+            supervision_monitor,
+            instance.clone_for_py(),
+            qualified_endpoint_name,
+            span_guard,
+        ))
+    }
+
+    /// Send now and build the `ValueMesh` on the native future's Rust driver.
+    /// Unlike Python `call()`, this retains the end-of-construction
+    /// measurement.
+    fn call_future<'py>(
+        &self,
+        py: Python<'py>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<impl Future<Output = PyResult<Py<PyAny>>> + Send + 'static + use<Self>> {
+        let reply = self.call_batch_future(py, args, kwargs)?;
+        Ok(async move { reply.await?.into_value().await })
     }
 
     /// Send this endpoint call to every actor in the mesh and start collecting
@@ -993,14 +1172,20 @@ pub(crate) trait Endpoint {
     ///
     /// Return a Python Future whose result is a ValueMesh of the actors' return
     /// values. Dropping the Future does not cancel the call or stop collection.
+    /// A successful batch stays serialized until the first observer builds
+    /// the `ValueMesh`. Later observers share it; ignored successes are not
+    /// built.
+    /// Ref-free elements remain pickled until accessed. If any reply carries
+    /// mesh references, building unpickles all runs for the calling actor.
     fn call<'py>(
         &self,
         py: Python<'py>,
         args: &Bound<'py, PyTuple>,
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let handle = PyHandle::spawn_pyobject_with_traceback(
-            self.call_future(py, args, kwargs)?,
+        let reply = self.call_batch_future(py, args, kwargs)?;
+        let handle = PyHandle::spawn_raw(
+            async move { Ok(reply.await?.into_raw()) },
             current_traceback()?,
         );
         wrap_in_future(py, handle)
@@ -1492,7 +1677,11 @@ impl ActorEndpoint {
         Ok(result.unbind())
     }
 
-    /// Call the endpoint on all actors and collect all responses into a ValueMesh.
+    /// Send to every actor and start accumulating replies before returning.
+    /// Its first observer builds the `ValueMesh`; later observers share it.
+    /// Ref-free elements remain lazy. Ref-bearing batches are unpickled when
+    /// built. Dropping the `Future` does not stop collection; ignored successes
+    /// are not built.
     #[pyo3(signature = (*args, **kwargs), name = "call")]
     fn py_call<'py>(
         &self,
@@ -1674,7 +1863,11 @@ impl Remote {
         }
     }
 
-    /// Call the endpoint on all actors and collect all responses into a ValueMesh.
+    /// Send to every actor and start accumulating replies before returning.
+    /// Its first observer builds the `ValueMesh`; later observers share it.
+    /// Ref-free elements remain lazy. Ref-bearing batches are unpickled when
+    /// built. Dropping the `Future` does not stop collection; ignored successes
+    /// are not built.
     #[pyo3(signature = (*args, **kwargs), name = "call")]
     fn py_call<'py>(
         &self,
@@ -2039,6 +2232,96 @@ mod tests {
             kind: PythonMessageKind::Result { rank },
             ..Default::default()
         }
+    }
+
+    /// A later actor failure must be counted even when an earlier reply cannot
+    /// be unpickled. A local unpickling failure alone must not mark the guard.
+    #[tokio::test]
+    // OSS: unpickling needs Monarch's Python package, which cargo tests lack.
+    #[cfg_attr(not(fbcode_build), ignore)]
+    async fn call_batch_marks_remote_error_before_earlier_unpickle_failure() -> PyResult<()> {
+        Python::initialize();
+        let instance = test_instance("batch_error_metrics");
+        monarch_with_gil_blocking(GilSite::Test, |py| {
+            let proc_addr = instance.self_addr().proc_addr();
+            let agent = hyperactor::ActorRef::attest(
+                proc_addr.actor_addr(hyperactor_mesh::proc_agent::PROC_AGENT_ACTOR_NAME),
+            );
+            let mesh = hyperactor_mesh::proc_mesh::ProcMeshRef::new_singleton(
+                hyperactor_mesh::mesh_id::ProcMeshId::singleton(
+                    Label::new("batch_error_metrics").expect("valid test label"),
+                ),
+                hyperactor_mesh::proc_mesh::ProcRef::new(proc_addr, 0, agent),
+            )
+            .expect("valid singleton reference");
+            let exception = PyValueError::new_err("later remote error").into_value(py);
+            let pickle = py.import("pickle")?;
+            let bytes = pickle.call_method1("dumps", (exception,))?;
+            let exception_part = Part::from(Bytes::from(bytes.extract::<Vec<u8>>()?));
+
+            for (remote_exception, exception_only_refs) in
+                [(false, false), (true, false), (true, true)]
+            {
+                let guard = RecordEndpointGuard::new(
+                    tokio::time::Instant::now(),
+                    Arc::new(EndpointAttrs::new("batch_error_metrics", None)),
+                    EndpointAdverb::Call,
+                );
+                let second = if remote_exception {
+                    PythonResponseMessage::Exception {
+                        part: exception_part.clone(),
+                        // Real actor exceptions have no reply reference table.
+                        // Craft one to check the batch-wide refs predicate.
+                        refs: if exception_only_refs {
+                            vec![MeshRef::Proc(Box::new(mesh.clone()))]
+                        } else {
+                            Vec::new()
+                        },
+                    }
+                } else {
+                    PythonResponseMessage::Result {
+                        part: Part::from(Bytes::from_static(b"N.")),
+                        refs: Vec::new(),
+                    }
+                };
+                let reply = EndpointReplyBatch {
+                    extent: ndslice::extent!(rank = 2),
+                    overlay: ValueOverlay::try_from_runs(vec![
+                        (
+                            0..1,
+                            PythonResponseMessage::Result {
+                                // Protocol 255 cannot unpickle. References on
+                                // either run must force decoding this one.
+                                part: Part::from(Bytes::from_static(b"\x80\xff")),
+                                refs: if exception_only_refs {
+                                    Vec::new()
+                                } else {
+                                    vec![MeshRef::Proc(Box::new(mesh.clone()))]
+                                },
+                            },
+                        ),
+                        (1..2, second),
+                    ])
+                    .expect("two consecutive ranks form a valid overlay"),
+                    instance: instance.clone_for_py(),
+                };
+                let error = build_reply_mesh(py, &reply, Some(&guard))
+                    .expect_err("the earlier reply must fail to unpickle");
+                assert!(
+                    error.is_instance_of::<PyValueError>(py)
+                        && error
+                            .to_string()
+                            .contains("unsupported pickle protocol: 255"),
+                    "the earlier local failure must win, not the later remote error: {error}",
+                );
+                assert_eq!(
+                    guard.error_occurred.get(),
+                    remote_exception,
+                    "only a remote-exception reply should mark the error guard",
+                );
+            }
+            Ok(())
+        })
     }
 
     fn unexpected_message(name: &str) -> (PythonMessage, String) {
@@ -2476,8 +2759,8 @@ mod tests {
         assert_native_collector_ownership(EndpointAdverb::CallOne).await;
     }
 
-    /// Poll an eagerly collected reply. For call_one/choose, polling may rebuild
-    /// successful bytes; it does not drive their reply-receive producer.
+    /// Poll an eagerly collected reply. Polling may reconstruct successful
+    /// bytes; it does not drive the reply-receive producer.
     async fn poll_reply(handle: &Py<PyHandle>) -> PyResult<Py<PyAny>> {
         tokio::time::timeout(WAIT, async {
             loop {
@@ -2634,19 +2917,48 @@ mod tests {
     // HDL-13, HDL-27: the real Python adverbs collect successful bytes without
     // reconstructing them. Their last owner releases those bytes when ignored.
     #[tokio::test]
-    async fn single_reply_adverbs_retain_raw_success_until_observation() {
+    async fn adverbs_retain_raw_success_until_observation() {
         pyo3::Python::initialize();
-        for adverb in [EndpointAdverb::CallOne, EndpointAdverb::Choose] {
+        for adverb in [
+            EndpointAdverb::Call,
+            EndpointAdverb::CallOne,
+            EndpointAdverb::Choose,
+        ] {
             let instance = test_instance(adverb.as_str());
             let endpoint = RecordingCallEndpoint::new(instance.clone_for_py());
             let observer = call_observer(&endpoint, adverb);
-            let EitherPortRef::Unbounded(port) = endpoint.take_recorded_port() else {
-                panic!("single-reply adverbs use an unbounded reply port");
-            };
+            let port = endpoint.take_recorded_port();
             let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel();
-            let mut reply = result_message(None);
+            let mut reply = result_message(Some(0));
             reply.message = Part::from(Bytes::from_owner(ReplyBytes(Some(dropped_tx))));
-            port.inner.post(&instance, reply);
+            match port {
+                EitherPortRef::Unbounded(port) => port.inner.post(&instance, reply),
+                EitherPortRef::Once(PythonOncePortRef { inner: Some(port) }) => {
+                    // A non-live reference forces the ref-bearing batch path
+                    // without starting another proc. The serialized `None` and
+                    // reference table must stay `Raw` until observation.
+                    let proc_addr = instance.self_addr().proc_addr();
+                    let agent = hyperactor::ActorRef::attest(
+                        proc_addr.actor_addr(hyperactor_mesh::proc_agent::PROC_AGENT_ACTOR_NAME),
+                    );
+                    let mesh = hyperactor_mesh::proc_mesh::ProcMeshRef::new_singleton(
+                        hyperactor_mesh::mesh_id::ProcMeshId::singleton(
+                            Label::new("retained_reply").expect("valid test label"),
+                        ),
+                        hyperactor_mesh::proc_mesh::ProcRef::new(proc_addr, 0, agent),
+                    )
+                    .expect("valid singleton reference");
+                    reply.refs.push(MeshRef::Proc(Box::new(mesh)));
+                    let (return_handle, _return_receiver) = instance
+                        .mailbox_for_py()
+                        .open_port::<Undeliverable<MessageEnvelope>>();
+                    instance
+                        .mailbox_for_py()
+                        .serialize_and_send_once(port, reply, return_handle)
+                        .expect("the once-port batch should serialize");
+                }
+                _ => panic!("the recorded response port must be populated"),
+            }
             let raw = tokio::time::timeout(WAIT, async {
                 loop {
                     let arrived = monarch_with_gil_blocking(GilSite::Test, |py| {

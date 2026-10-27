@@ -21,6 +21,18 @@ use pyo3::types::PyTuple;
 #[test]
 #[cfg_attr(not(fbcode_build), ignore)]
 fn native_call_one_sends_before_polling_and_decodes_on_its_driver() -> PyResult<()> {
+    assert_native_reply_driver(false)
+}
+
+/// `call_future()` must build a ref-bearing `ValueMesh` on its Rust driver.
+/// A no-ref cell accessed later would not witness construction-time unpickling.
+#[test]
+#[cfg_attr(not(fbcode_build), ignore)]
+fn native_call_sends_before_polling_and_builds_valuemesh_on_its_driver() -> PyResult<()> {
+    assert_native_reply_driver(true)
+}
+
+fn assert_native_reply_driver(call_mesh: bool) -> PyResult<()> {
     Python::initialize();
     let (actor_mesh, receiver, reply) = monarch_with_gil_blocking(GilSite::Test, |py| {
         let module = PyModule::from_code(
@@ -37,8 +49,11 @@ class UnpickleThread:
 
 class ReplyActor(Actor):
     @endpoint
-    def reply(self, acknowledged):
+    def reply(self, acknowledged, with_refs):
         acknowledged.send(1)
+        if with_refs:
+            from monarch._src.actor.actor_mesh import context
+            return UnpickleThread(), context().actor_instance.proc_mesh
         return UnpickleThread()
 
 def create():
@@ -55,8 +70,18 @@ def create():
             Py<PyAny>,
             Py<PyAny>,
         ) = module.getattr("create")?.call0()?.extract()?;
-        let args = PyTuple::new(py, [sender])?;
-        let reply = endpoint.borrow(py).call_one_future(py, &args, None)?;
+        let args = PyTuple::new(
+            py,
+            [
+                sender,
+                call_mesh.into_pyobject(py)?.to_owned().unbind().into_any(),
+            ],
+        )?;
+        let reply = if call_mesh {
+            endpoint.borrow(py).call_future(py, &args, None)?
+        } else {
+            endpoint.borrow(py).call_one_future(py, &args, None)?
+        };
         Ok::<_, PyErr>((actor_mesh, receiver, reply))
     })?;
 
@@ -88,7 +113,26 @@ def create():
             let value = tokio::time::timeout(std::time::Duration::from_secs(30), reply)
                 .await
                 .map_err(|_| pyo3::exceptions::PyTimeoutError::new_err("native reply wait"))??;
-            let decoded_on = monarch_with_gil(GilSite::Test, |py| value.extract::<u64>(py)).await?;
+            let decoded_on = monarch_with_gil(GilSite::Test, |py| {
+                if call_mesh {
+                    if !value
+                        .bind(py)
+                        .is_instance_of::<monarch_hyperactor::value_mesh::PyValueMesh>()
+                    {
+                        return Err(pyo3::exceptions::PyAssertionError::new_err(
+                            "native call must return a ValueMesh",
+                        ));
+                    }
+                    value
+                        .bind(py)
+                        .call_method1("get", (0,))?
+                        .get_item(0)?
+                        .extract::<u64>()
+                } else {
+                    value.extract::<u64>(py)
+                }
+            })
+            .await?;
             Ok::<_, PyErr>((driver, decoded_on))
         })
     })();

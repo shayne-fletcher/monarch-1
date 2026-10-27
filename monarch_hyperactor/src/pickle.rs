@@ -38,13 +38,14 @@
 //! These invariants have one sound exception. A table entry and a
 //! `pop_mesh_reference` sentinel are emitted together during pickling (1:1),
 //! so an empty `refs` table means the payload carries no sentinels: a bare
-//! decode of it pops nothing and is sound. The `.call()` valuemesh collector
-//! (`collect_valuemesh` in `endpoint.rs`) relies on this to preserve
-//! D96180139's lazy unpickle: it decodes a ref-empty batch lazily via
-//! `PyValueMesh::build_from_parts` (`value_mesh.rs`), which resolves on access
-//! outside the ref-aware path, and only a ref-carrying batch eagerly via
-//! `build_from_objects`. That lazy build is the sole bare decode of a payload
-//! that *could* carry refs; see `collect_valuemesh` for the gate itself.
+//! decode of it pops nothing and is sound. `ValueMesh` construction
+//! (`build_reply_mesh` in `endpoint.rs`) uses this to preserve lazy element
+//! unpickling: a ref-empty batch uses `PyValueMesh::build_from_parts`, whose
+//! cells resolve on access outside the ref-aware path. A ref-carrying batch
+//! instead reunites every run's refs before `build_from_objects`. Successful
+//! Python batches are built at observation; exception batches on the collector.
+//! This lazy cell access is the sole bare decode of a payload that could carry
+//! refs; the batch-wide check in `build_reply_mesh()` is its gate.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -153,9 +154,10 @@ thread_local! {
     ///
     /// A reply can be decoded on a Tokio worker with no Monarch context, so
     /// `Port._reconstruct_port` cannot recover the receiver from `context()`
-    /// without bootstrapping a client in a worker process. The eager decoders
-    /// install the caller instance they already hold here for the duration of
-    /// the decode.
+    /// without bootstrapping a client in a worker process. Error collectors and
+    /// deferred reply reconstruction install their retained calling instance
+    /// here for the duration of unpickling, independently of the decoding
+    /// thread.
     ///
     /// Deliberately a sibling of `ACTIVE_PICKLING_STATE` rather than a field
     /// on it: the receiver is decode context, not pickling payload state, and
@@ -478,11 +480,37 @@ impl PicklingState {
     }
 }
 
+/// Unpickle an endpoint reply for the actor that made the call.
+///
+/// Reunite the pickle bytes with their mesh-reference table, and temporarily
+/// install `instance` so any `Port` is rebuilt for the calling actor. Restore
+/// the previous receiver on success or error. The caller must hold the GIL;
+/// this function does not acquire it or schedule work.
+///
+/// The supplied bytes and references are consumed. A caller retaining the
+/// original reply must pass a cloned `Part` and cloned references. Accepting
+/// an iterator lets that caller clone references directly into the table,
+/// without allocating an intermediate vector.
+///
+/// Return the Python value or exception object, or a local unpickling error.
+/// The caller interprets an exception object according to the reply's kind;
+/// this function does not turn that object into a returned `PyErr`.
+pub(crate) fn unpickle_reply(
+    py: Python<'_>,
+    message: Part,
+    refs: impl IntoIterator<Item = MeshRef>,
+    instance: &Instance<PythonActor>,
+) -> PyResult<Py<PyAny>> {
+    let mesh_references = refs.into_iter().map(Some).collect();
+    PicklingState::from_parts(message, VecDeque::new(), mesh_references)
+        .unpickle_with_receiver(py, instance)
+}
+
 impl PicklingState {
     /// Decode an endpoint reply for the actor that made the call.
     ///
-    /// Reply collectors in `endpoint.rs` build this state from the reply's
-    /// serialized payload and mesh references, then call this method under the
+    /// The shared `unpickle_reply()` helper builds this state from the reply's
+    /// serialized payload and mesh references, then calls this method under the
     /// GIL. `instance` is the calling actor, captured when it sent the request;
     /// that actor is now receiving the reply.
     ///
