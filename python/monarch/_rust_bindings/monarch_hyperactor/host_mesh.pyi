@@ -4,12 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, final, Mapping
+from typing import Any, final, Mapping, Type, TYPE_CHECKING
 
+from monarch._rust_bindings.monarch_hyperactor.buffers import FrozenBuffer
 from monarch._rust_bindings.monarch_hyperactor.context import Instance
 from monarch._rust_bindings.monarch_hyperactor.handle import Handle
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
 from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Region
+
+if TYPE_CHECKING:
+    from monarch._rust_bindings.monarch_hyperactor.actor import ActorKind
 
 @final
 class HostMesh:
@@ -108,6 +112,27 @@ class HostMesh:
 
         Arguments:
         - `instance`: The instance to use to stop the mesh.
+        """
+        ...
+
+    def set_proc_launcher(
+        self,
+        instance: Instance,
+        actor: Type[Any],
+        init_args: FrozenBuffer,
+        kind: "ActorKind",
+    ) -> Handle[None]:
+        """
+        Install a Python proc launcher on every host of this mesh. The
+        Handle resolves once every host has installed it, or raises an
+        error naming each host that failed.
+
+        Arguments:
+        - `instance`: The instance to send the installation requests from.
+        - `actor`: The `_Actor` wrapper class.
+        - `init_args`: The pickled `(args, kwargs)` of the launcher's
+          `Init` message.
+        - `kind`: The launcher class's actor kind.
         """
         ...
 
