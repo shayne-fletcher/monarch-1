@@ -349,12 +349,12 @@ def test_port_reconstruction_through_stream_binds_caller_instance() -> None:
 
 
 @pytest.mark.timeout(120)
-def test_ref_bearing_call_decodes_port_and_mesh_eagerly() -> None:
-    """A reply carrying a ``Port`` *and* a mesh takes the eager valuemesh branch.
+def test_ref_bearing_call_decodes_port_and_mesh_on_observation() -> None:
+    """Observing a ref-bearing reply builds its ValueMesh and reunites references.
 
     A nonzero mesh-pop count in the caller's process proves the out-of-band
-    reference was reunited during that eager decode, so this exercises the
-    ref-bearing path rather than the lazy one.
+    reference was reunited when building the ValueMesh, rather than through
+    lazy element access. The rebuilt Port must belong to the calling actor.
     """
     pm = this_host().spawn_procs(per_host={"gpus": 2})
     try:
@@ -367,6 +367,6 @@ def test_ref_bearing_call_decodes_port_and_mesh_eagerly() -> None:
         assert not bootstrapped, (
             "a client context was bootstrapped inside the caller actor process"
         )
-        assert mesh_pops > 0, "the eager mesh-reference decode path did not run"
+        assert mesh_pops > 0, "ValueMesh construction did not reunite mesh references"
     finally:
         pm.stop().get()

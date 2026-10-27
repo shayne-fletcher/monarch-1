@@ -103,7 +103,14 @@ class Endpoint(Protocol[P, R]):
         """
         ...
 
-    def call(self, *args: P.args, **kwargs: P.kwargs) -> "Future[ValueMesh[R]]": ...
+    def call(self, *args: P.args, **kwargs: P.kwargs) -> "Future[ValueMesh[R]]":
+        """Send to all actors and return a Future for their ValueMesh.
+
+        Receive the replies eagerly; build the ValueMesh on first observation
+        and share it with later observers. If no reply carries mesh references,
+        elements stay pickled until accessed. Ignored successes are not built.
+        """
+        ...
 
     def stream(self, *args: P.args, **kwargs: P.kwargs) -> Iterator[Future[R]]:
         """

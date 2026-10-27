@@ -126,17 +126,14 @@
 //!   observers have all gone logs an error result instead, with the producer's
 //!   own copy of the creation traceback when one was captured.
 //!   Dropping the Handle does not cancel the producer (HDL-4).
-//!   [`PyHandle::spawn_pyobject_with_traceback`] does the same, and also keeps
-//!   the producer's creation traceback for that log; `call()` uses it.
-//!   `call_one()` and `choose()` use [`PyHandle::spawn_raw`], which publishes
-//!   successful bytes and leaves
-//!   reconstruction to an observer; errors keep the same logging path.
+//!   `call()`, `call_one()` and `choose()` use [`PyHandle::spawn_raw`], which
+//!   retains the supplied creation traceback, publishes successful bytes and
+//!   leaves reconstruction to an observer; errors keep the same logging path.
 //!   [`PyHandle::wait_completion`] is the matching observer: it projects the
 //!   terminal value to `PyResult<()>`, touching neither the GIL nor the Python
 //!   value on the decoded success path (a tag-only read, HDL-3) and cloning the error
-//!   after unlocking only on the error path (HDL-9). The three constructors and
-//!   this observer are `pub` Rust-only methods outside `#[pymethods]`
-//!   (HDL-11).
+//!   after unlocking only on the error path (HDL-9). These are Rust-only
+//!   methods outside `#[pymethods]` (HDL-11).
 //! - **HDL-14 (Rust value observation is owned and non-consuming).**
 //!   [`PyHandle::wait_future`] returns a `Send + 'static` future that owns a
 //!   strong reference to the core. The waiter borrows nothing from the
@@ -1648,21 +1645,6 @@ impl PyHandle {
     where
         F: Future<Output = PyResult<Py<PyAny>>> + Send + 'static,
     {
-        Self::spawn_pyobject_with_traceback(fut, None)
-    }
-
-    /// Start Rust work as in [`Self::spawn_pyobject`], retaining a caller-supplied
-    /// creation traceback for logging failures that nobody observes (HDL-13).
-    ///
-    /// This does not capture a stack itself; `None` means none was supplied.
-    /// The publisher keeps its own reference to the traceback, so it can report
-    /// where the operation was created even after every Handle and waiter is gone.
-    /// Dropping the Handle does not cancel the work (HDL-4).
-    /// This is a Rust constructor, not a Python method (HDL-11).
-    pub fn spawn_pyobject_with_traceback<F>(fut: F, traceback: Option<Py<PyAny>>) -> Self
-    where
-        F: Future<Output = PyResult<Py<PyAny>>> + Send + 'static,
-    {
         // A producer will supply the result. Allocate no waiter notification yet,
         // and install no observer-loss stop signal for this ordinary producer.
         let core = Core::new(
@@ -1670,13 +1652,13 @@ impl PyHandle {
                 wake: None,
                 stop: None,
             },
-            traceback,
+            None,
         );
         // The task publishes through a weak reference; it does not keep the core
-        // alive as an observer. Its separate traceback reference survives the core.
+        // alive as an observer. This producer carries no creation traceback.
         spawn_producer(
             fut,
-            Publisher::new(Arc::downgrade(&core), core.producer_traceback()),
+            Publisher::new(Arc::downgrade(&core), None),
             // Keep running if every observer disappears (HDL-4).
             ObserverStop::Never,
         );

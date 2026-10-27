@@ -88,6 +88,7 @@ use crate::mailbox::PyMailbox;
 use crate::mailbox::PythonUndeliverableMessageEnvelope;
 use crate::pickle::PicklingState;
 use crate::pickle::pickle_to_part;
+use crate::pickle::unpickle_reply;
 use crate::proc::PyActorAddr;
 use crate::pympsc::Sender;
 use crate::runtime::GilSite;
@@ -187,8 +188,10 @@ impl PythonResponseMessage {
     /// accumulated (valuemesh / `.call()`) path.
     /// `instance` is the receiving actor, required so a `Port` in the payload
     /// reconstructs against it rather than falling back to `context()` on a
-    /// Tokio worker. Mandatory rather than optional: this is only ever called
-    /// from an eager collector, all of which hold the caller instance.
+    /// Tokio worker or a different observing thread. Both the error collector
+    /// and deferred `ValueMesh` reconstruction retain this calling instance.
+    /// Pass cloned components to `unpickle_reply()` so a failed attempt leaves
+    /// this retained response intact for another observation.
     pub(crate) fn decode(
         &self,
         py: Python<'_>,
@@ -198,9 +201,7 @@ impl PythonResponseMessage {
             PythonResponseMessage::Result { part, refs }
             | PythonResponseMessage::Exception { part, refs } => (part, refs),
         };
-        let mesh_references = refs.iter().cloned().map(Some).collect();
-        let mut state = PicklingState::from_parts(part.clone(), VecDeque::new(), mesh_references);
-        state.unpickle_with_receiver(py, instance)
+        unpickle_reply(py, part.clone(), refs.iter().cloned(), instance)
     }
 }
 

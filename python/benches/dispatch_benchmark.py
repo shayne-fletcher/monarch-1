@@ -17,12 +17,14 @@ import statistics
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
 from monarch.actor import (
     Accumulator,
     Actor,
     Channel,
     concurrent_endpoint,
+    context,
     endpoint,
     Port,
     this_host,
@@ -95,6 +97,16 @@ class SyncCaller(Actor):
         """Receive each request through a channel and send it to the caller's channel."""
         for _ in range(count):
             reply.send(self._input_receiver.recv().get())
+
+
+class BatchReplyActor(Actor):
+    """Return a fixed small value, optionally with an out-of-band mesh reference."""
+
+    @endpoint
+    def value(self, with_refs: bool) -> Any:
+        if with_refs:
+            return 7, context().actor_instance.proc_mesh
+        return 7
 
 
 def report_receive_latencies(latencies_ms: list[float]) -> None:
@@ -250,6 +262,54 @@ async def benchmark_call_one_asyncio(peer: SyncNoopActor, iterations: int) -> No
     print(f"p99 call_one RPC latency: {percentiles[98]:.3f} ms")
 
 
+async def benchmark_call_asyncio(peer: SyncNoopActor, iterations: int) -> None:
+    """Measure an actual asyncio observation of call(), timed per await."""
+    if iterations < 2:
+        raise ValueError("iterations must be at least 2")
+    latencies_ms = []
+    for index in range(20 + iterations):
+        start = time.perf_counter()
+        await peer.noop.call()
+        if index >= 20:
+            latencies_ms.append((time.perf_counter() - start) * 1000)
+    percentiles = statistics.quantiles(latencies_ms, n=100, method="inclusive")
+    print("warmup iterations: 20")
+    print(f"measured iterations: {iterations}")
+    print(f"p50 call RPC latency: {percentiles[49]:.3f} ms")
+    print(f"p99 call RPC latency: {percentiles[98]:.3f} ms")
+
+
+def benchmark_call_batch(
+    peer: BatchReplyActor, iterations: int, with_refs: bool
+) -> None:
+    """Measure four-rank Future observation, then element access separately.
+
+    Each access sample gets a fresh ValueMesh outside its measured interval.
+    This keeps the lazy-cell cost distinct from building the Python ValueMesh.
+    """
+
+    def observe() -> None:
+        value = peer.value.call(with_refs).get()
+        assert len(value) == 4
+
+    benchmark_observation(observe, iterations, label="batch call")
+    latencies_ms = []
+    for index in range(20 + iterations):
+        value = peer.value.call(with_refs).get()
+        start = time.perf_counter()
+        values = list(value.values())
+        assert (
+            [item[0] for item in values] == [7] * 4 if with_refs else values == [7] * 4
+        )
+        if index >= 20:
+            latencies_ms.append((time.perf_counter() - start) * 1000)
+    percentiles = statistics.quantiles(latencies_ms, n=100, method="inclusive")
+    print("warmup iterations: 20")
+    print(f"measured iterations: {iterations}")
+    print(f"p50 batch elements latency: {percentiles[49]:.3f} ms")
+    print(f"p99 batch elements latency: {percentiles[98]:.3f} ms")
+
+
 def benchmark_accumulator(peer: SyncNoopActor, iterations: int) -> None:
     """Measure the stream's await path inside an Accumulator's private loop."""
     accumulator = Accumulator(peer.noop, None, lambda accumulated, _: accumulated)
@@ -291,6 +351,8 @@ def main() -> None:
         benchmark_call_one(sync_noop, args.iterations)
         print("asyncio call_one await:")
         asyncio.run(benchmark_call_one_asyncio(sync_noop, args.iterations))
+        print("asyncio call await:")
+        asyncio.run(benchmark_call_asyncio(sync_noop, args.iterations))
         print("nested sync-actor endpoint:")
         caller = procs.spawn("sync_caller", SyncCaller)
         caller.measure.call_one(sync_noop, args.iterations).get()
@@ -316,6 +378,15 @@ def main() -> None:
         caller.measure_receive.call_one(args.iterations).get()
         print("cross-proc channel receive ping-pong:")
         benchmark_receive_ping_pong(caller, args.iterations)
+        batch_procs = this_host().spawn_procs(per_host={"batch_rank": 4})
+        try:
+            batch_peer = batch_procs.spawn("batch_reply", BatchReplyActor)
+            print("main-thread four-rank no-ref call get:")
+            benchmark_call_batch(batch_peer, args.iterations, with_refs=False)
+            print("main-thread four-rank ref-bearing call get:")
+            benchmark_call_batch(batch_peer, args.iterations, with_refs=True)
+        finally:
+            batch_procs.stop().get()
         asyncio.run(benchmark_burst(procs.spawn("busy", BusyLoopActor), args.burst))
     finally:
         procs.stop().get()
