@@ -291,7 +291,7 @@ impl LoopWake {
         // Checked, so a token is never reused.
         let token = this
             .next_token
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |token| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |token| {
                 token.checked_add(1)
             })
             .map_err(|_| PyRuntimeError::new_err("handle wake tokens exhausted"))?;
@@ -458,7 +458,7 @@ impl LoopWake {
         }
     }
 
-    fn entry_count(&self) -> usize {
+    pub(crate) fn entry_count(&self) -> usize {
         self.entries
             .lock()
             .expect("entries lock should not be poisoned")
