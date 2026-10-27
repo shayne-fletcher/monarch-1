@@ -2017,7 +2017,7 @@ mod tests {
 
         let schema = schemars::schema_for!(dto::NodePayloadDto);
         let schema_value = serde_json::to_value(&schema).unwrap();
-        let compiled = jsonschema::JSONSchema::compile(&schema_value).expect("schema must compile");
+        let compiled = jsonschema::Validator::new(&schema_value).expect("schema must compile");
 
         let epoch = std::time::UNIX_EPOCH;
         let proc_id = ResourceId::proc_addr_from_name(ChannelAddr::Local(0), "worker");

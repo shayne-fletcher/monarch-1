@@ -93,7 +93,7 @@ impl OpenApiValidator {
                 obj.insert("$defs".into(), defs.clone());
             }
             rewrite_component_refs_to_defs(&mut standalone);
-            let result = jsonschema::JSONSchema::compile(&standalone);
+            let result = jsonschema::Validator::new(&standalone);
             assert!(
                 result.is_ok(),
                 "MIT-40: schema {name} failed to compile: {:?}",
@@ -145,7 +145,7 @@ impl OpenApiValidator {
     ///
     /// Resolves `$ref` if the schema is a reference, injects all
     /// component schemas as `$defs`, rewrites refs, and compiles.
-    fn compile_response_schema(&self, path: &str, status: u16) -> jsonschema::JSONSchema {
+    fn compile_response_schema(&self, path: &str, status: u16) -> jsonschema::Validator {
         let pointer = format!(
             "/paths/{}/get/responses/{}/content/application~1json/schema",
             escape_pointer_segment(path),
@@ -172,7 +172,7 @@ impl OpenApiValidator {
         }
         rewrite_component_refs_to_defs(&mut standalone);
 
-        jsonschema::JSONSchema::compile(&standalone)
+        jsonschema::Validator::new(&standalone)
             .unwrap_or_else(|e| panic!("compile_response_schema({path}, {status}): {e}"))
     }
 
