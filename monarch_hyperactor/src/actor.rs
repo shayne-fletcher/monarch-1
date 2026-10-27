@@ -1716,6 +1716,11 @@ impl PythonActorParams {
             kind,
         }
     }
+
+    /// Split into `(actor_type, init_message, kind)`.
+    pub(crate) fn into_parts(self) -> (PickledPyObject, Option<PythonMessage>, ActorKind) {
+        (self.actor_type, self.init_message, self.kind)
+    }
 }
 
 #[async_trait]

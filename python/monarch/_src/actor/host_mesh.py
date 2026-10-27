@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Awaitable, Callable, Dict, Literal, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Literal, Optional, Tuple, Type
 
 from monarch._rust_bindings.monarch_hyperactor.handle import _after, Handle
 from monarch._rust_bindings.monarch_hyperactor.host_mesh import (
@@ -13,10 +13,18 @@ from monarch._rust_bindings.monarch_hyperactor.host_mesh import (
     HostMesh as HyHostMesh,
     PyMeshAdminRef,
 )
+from monarch._rust_bindings.monarch_hyperactor.pickle import pickle
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
 from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Point, Region
-from monarch._src.actor.actor_mesh import _Lazy, context
+from monarch._src.actor.actor_mesh import (
+    _Actor,
+    _actor_kind,
+    _Lazy,
+    ActorInitArgs,
+    context,
+)
 from monarch._src.actor.future import _ready_handle, Future
+from monarch._src.actor.proc_launcher import ProcLauncher
 from monarch._src.actor.proc_mesh import _get_bootstrap_args, ProcMesh
 from monarch._src.actor.returns_future import returns_future
 from monarch._src.actor.shape import MeshTrait, NDSlice, Shape
@@ -421,6 +429,56 @@ class HostMesh(MeshTrait):
         await self._drain_pending_spawns()
         hy_mesh = await self._hy_host_mesh
         await hy_mesh.stop(context().actor_instance._as_rust())
+
+    @returns_future
+    async def set_proc_launcher(
+        self,
+        launcher: Type[ProcLauncher],
+        params: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Install a Python proc launcher on every host of this mesh.
+
+        Calling this method alone does not start installation. Await the
+        returned Future or call ``.get()`` to start it and wait for completion.
+
+        Each host constructs ``launcher(params)`` on its system proc. Procs
+        spawned on the host afterwards are launched, stopped and reported on
+        by that launcher instead of the built-in one. Wait for the returned
+        Future before spawning procs on these hosts: a host that has already
+        spawned a proc keeps the launcher it used, and installing there fails.
+        The launcher stays installed for the lifetime of each host process,
+        including across ``stop()`` and later clients.
+
+        Args:
+            launcher: A subclass of
+                ``monarch._src.actor.proc_launcher.ProcLauncher``.
+            params: Picklable configuration passed to the launcher's
+                constructor on every host.
+
+        Returns:
+            Future[None]: Completes once every host has installed the
+            launcher. Raises an error naming each host that failed; hosts
+            that succeeded keep the launcher.
+        """
+        if not (isinstance(launcher, type) and issubclass(launcher, ProcLauncher)):
+            raise TypeError(f"{launcher!r} is not a ProcLauncher subclass")
+        kind = _actor_kind(launcher)
+        init_args = pickle(
+            (
+                (
+                    ActorInitArgs(
+                        launcher, None, None, "proc_launcher", None, (params,)
+                    ),
+                ),
+                {},
+            ),
+            allow_tensor_engine_references=False,
+        ).buffer()
+        hy_mesh = await self._hy_host_mesh
+        await hy_mesh.set_proc_launcher(
+            context().actor_instance._as_rust(), _Actor, init_args, kind
+        )
 
     async def __aenter__(self) -> "HostMesh":
         if self._inner_host_mesh is None:
