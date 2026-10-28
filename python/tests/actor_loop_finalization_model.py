@@ -12,7 +12,8 @@ Run by ``test_actor_loop_finalization``. Two arms:
 
 ``unmitigated``
     suppress the loop marker so the production reaper cannot see the loops,
-    then hold one of them inside a PyO3 call across interpreter finalization.
+    and the loops' ``stop`` so root-client cleanup cannot stop them, then hold
+    one of them inside a PyO3 call across interpreter finalization.
     CPython <= 3.12 force-exits that daemon thread with ``pthread_exit``; the
     forced unwind crosses PyO3's ``catch_unwind`` and glibc aborts.
 
@@ -74,6 +75,10 @@ def _note(message: str) -> None:
 def _fail_model(message: str, exit_code: int) -> None:
     _note(f"finalization model failed: {message}")
     os._exit(exit_code)
+
+
+def _ignore_loop_stop() -> None:
+    pass
 
 
 def _gil_enabled() -> bool:
@@ -261,7 +266,7 @@ def main() -> None:
     _note(f"{mode} captured {len(_actor_drivers)} actor drivers")
 
     if mode == "unmitigated":
-        for _loop, thread in _actor_loops:
+        for loop, thread in _actor_loops:
             # Strict: if production stopped marking actor-loop threads, this
             # arm would silently become a second copy of `fixed`.
             if not hasattr(thread, _ACTOR_EVENT_LOOP_ATTRIBUTE):
@@ -270,6 +275,7 @@ def main() -> None:
                     f"{_ACTOR_EVENT_LOOP_ATTRIBUTE} marker to suppress"
                 )
             delattr(thread, _ACTOR_EVENT_LOOP_ATTRIBUTE)
+            loop.stop = _ignore_loop_stop
 
 
 if __name__ == "__main__":
