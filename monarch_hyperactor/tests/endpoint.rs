@@ -19,7 +19,7 @@ use pyo3::types::PyTuple;
 /// module-private dispatch double. The actor acknowledges the request before
 /// the native reply future is polled; unpickling reports its driver's thread.
 #[test]
-#[cfg_attr(not(fbcode_build), ignore)]
+#[ignore = "in opt builds an import in this embedded interpreter hits an unresolved ServiceRouter symbol"]
 fn native_call_one_sends_before_polling_and_decodes_on_its_driver() -> PyResult<()> {
     assert_native_reply_driver(false)
 }
@@ -27,7 +27,7 @@ fn native_call_one_sends_before_polling_and_decodes_on_its_driver() -> PyResult<
 /// `call_future()` must build a ref-bearing `ValueMesh` on its Rust driver.
 /// A no-ref cell accessed later would not witness construction-time unpickling.
 #[test]
-#[cfg_attr(not(fbcode_build), ignore)]
+#[ignore = "in opt builds an import in this embedded interpreter hits an unresolved ServiceRouter symbol"]
 fn native_call_sends_before_polling_and_builds_valuemesh_on_its_driver() -> PyResult<()> {
     assert_native_reply_driver(true)
 }

@@ -2237,8 +2237,7 @@ mod tests {
     /// A later actor failure must be counted even when an earlier reply cannot
     /// be unpickled. A local unpickling failure alone must not mark the guard.
     #[tokio::test]
-    // OSS: unpickling needs Monarch's Python package, which cargo tests lack.
-    #[cfg_attr(not(fbcode_build), ignore)]
+    #[ignore = "unpickling needs Monarch's Python package, which this unittest does not load"]
     async fn call_batch_marks_remote_error_before_earlier_unpickle_failure() -> PyResult<()> {
         Python::initialize();
         let instance = test_instance("batch_error_metrics");
