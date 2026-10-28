@@ -47,7 +47,7 @@ from monarch._src.actor import actor_mesh
 from monarch._src.actor.actor_mesh import ActorError, ActorMesh, Channel, context, Port
 from monarch._src.actor.host_mesh import _spawn_admin, HostMesh, this_host, this_proc
 from monarch._src.actor.logging import _pending_flush_tasks
-from monarch._src.actor.proc_mesh import get_or_spawn_controller, HyProcMesh
+from monarch._src.actor.proc_mesh import get_or_spawn_controller
 from monarch._src.job.job import LoginJob, ProcessState
 from monarch._src.job.process import ProcessJob
 from monarch._src.job.service_identity import new_service_proc_id, service_proc_addr
