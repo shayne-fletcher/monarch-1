@@ -50,7 +50,7 @@
 //! to `Probe`, not through the rendezvous actor.
 //!
 //! This example chooses to give the trainer the client's actor address so
-//! `ProbeHost` can log who joined. The token mechanism does not require an
+//! `ProbeHost` can log who connected. The token mechanism does not require an
 //! actor address: other tokens can exchange other serializable values. Giving
 //! the trainer this address does not make the trainer send requests to the
 //! client or start supervising it.
@@ -296,7 +296,7 @@ impl Handler<token::Joined<ActorAddr>> for ProbeHost {
         _cx: &Context<Self>,
         message: token::Joined<ActorAddr>,
     ) -> anyhow::Result<()> {
-        println!("trainer: client {} joined", message.peer);
+        println!("trainer: client {} connected", message.peer);
         Ok(())
     }
 }
@@ -399,13 +399,15 @@ async fn run_client(token_file: PathBuf, learning_rate: f64) -> anyhow::Result<(
     // Wait for an answer without waiting indefinitely. Acceptance supplies the
     // `Probe` reference; rejection returns an error instead of querying the probe.
     let probe = match tokio::time::timeout(REPLY_TIMEOUT, result_rx.recv()).await {
-        Err(_) => anyhow::bail!("no answer to the join; is the trainer running?"),
+        Err(_) => anyhow::bail!("no answer from the trainer; is it running?"),
         Ok(result) => match result? {
             token::JoinResult::Joined { peer } => peer,
-            token::JoinResult::Rejected { reason } => anyhow::bail!("join rejected: {reason}"),
+            token::JoinResult::Rejected { reason } => {
+                anyhow::bail!("the trainer rejected the connection: {reason}")
+            }
         },
     };
-    println!("client: joined; probe is {}", probe.actor_addr());
+    println!("client: connected; probe is {}", probe.actor_addr());
 
     // Contact `Probe` directly for the initial state; rendezvous is no longer
     // involved. `snapshot()` sends a request with its own one-shot reply port.

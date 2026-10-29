@@ -125,20 +125,20 @@ expect_line() {
 # through the same token, rather than creating or resetting a trainer.
 first_log="$test_dir/client_first.log"
 run_client 0.05 "$first_log" || fail 'first client failed or timed out'
-expect_line '^client: joined; probe is ' "$first_log"
+expect_line '^client: connected; probe is ' "$first_log"
 expect_line '^client: step [0-9]+ loss [^ ]+ learning rate 0.01$' "$first_log"
 expect_line '^client: learning rate changed from 0.01 to 0.05$' "$first_log"
 expect_line '^client: step [0-9]+ loss [^ ]+ learning rate 0.05$' "$first_log"
 
 second_log="$test_dir/client_second.log"
 run_client 0.02 "$second_log" || fail 'second client failed or timed out'
-expect_line '^client: joined; probe is ' "$second_log"
+expect_line '^client: connected; probe is ' "$second_log"
 expect_line '^client: step [0-9]+ loss [^ ]+ learning rate 0.05$' "$second_log"
 expect_line '^client: learning rate changed from 0.05 to 0.02$' "$second_log"
 expect_line '^client: step [0-9]+ loss [^ ]+ learning rate 0.02$' "$second_log"
 kill -0 "$trainer_pid" 2>/dev/null || fail 'trainer stopped when a client exited'
 
-# Reap the trainer before trying its retained token, so a successful join cannot
+# Reap the trainer before trying its retained token, so a successful connection cannot
 # race shutdown. The client's own failure must end it, not our outer timeout.
 stop_trainer || fail 'could not stop the trainer'
 set +e

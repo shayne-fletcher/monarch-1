@@ -90,12 +90,12 @@ echo "client exit status: $?"
 
 Check that:
 
-- The client prints `client: joined; probe is ...`.
+- The client prints `client: connected; probe is ...`.
 - Its first state report shows learning rate `0.01`.
 - It prints `client: learning rate changed from 0.01 to 0.05`.
 - Its second state report shows learning rate `0.05`.
 - It exits with status `0`, returning to the shell prompt.
-- The trainer pane logs `trainer: client ... joined` and continues printing progress.
+- The trainer pane logs `trainer: client ... connected` and continues printing progress.
 
 Step counts and loss values depend on when you run the client; they are not fixed expected values. The join notification and client output can appear in either order across the panes: the rendezvous actor does not wait for `ProbeHost` to finish logging before replying to the client.
 
