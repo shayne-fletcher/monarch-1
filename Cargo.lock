@@ -2756,12 +2756,11 @@ dependencies = [
 
 [[package]]
 name = "fancy-regex"
-version = "0.15.0"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6215aee357f8c7c989ebb4b8466ca4d7dc93b3957039f2fc3ea2ade8ea5f279"
+checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
 dependencies = [
  "bit-set 0.8.0",
- "derivative",
  "regex-automata",
  "regex-syntax",
 ]
@@ -4120,15 +4119,15 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.31.0"
+version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffb1de698f287416adf20d0925832b20f2b14026110d9ff6d4e1fad43d42d5d0"
+checksum = "24690c68dfcdde5980d676b0f1820981841016b1f29eecb4c42ad48ab4118681"
 dependencies = [
  "ahash",
  "base64 0.22.1",
  "bytecount",
  "email_address",
- "fancy-regex 0.15.0",
+ "fancy-regex 0.16.2",
  "fraction",
  "idna",
  "itoa",
@@ -6508,9 +6507,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.31.0"
+version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e53649e498ada7d1dae579c08ad8dc043278980409fd42daeb0f6665005593fb"
+checksum = "7a3d769362109497b240e66462606bc28af68116436c8669bac17069533b908e"
 dependencies = [
  "ahash",
  "fluent-uri",
