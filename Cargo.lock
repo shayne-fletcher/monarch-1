@@ -4693,6 +4693,7 @@ dependencies = [
  "hyperactor",
  "hyperactor_config",
  "hyperactor_mesh",
+ "hyperactor_remote",
  "hyperactor_telemetry",
  "hyperactor_telemetry_sqlite",
  "inventory",
