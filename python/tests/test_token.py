@@ -45,10 +45,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Literal, NamedTuple
 
+import monarch.actor
 import pytest
 import token_owner
 from monarch._src.actor.token import connect, publish
-from monarch.actor import this_host
+from monarch.actor import MeshFailure, this_host
 from token_owner import Probe
 
 # Seconds allowed for helper startup, ordinary endpoint calls, and each
@@ -226,8 +227,14 @@ def test_an_invalid_timeout_is_rejected_before_connecting(timeout: float) -> Non
 
 
 @pytest.mark.timeout(120)
-def test_stopping_the_owning_actor_ends_the_token() -> None:
-    """Stopping `Publisher` ends its token without ending the helper process."""
+def test_stopping_the_owning_actor_ends_the_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stopping `Publisher` ends its token without ending the helper process,
+    and connecting afterwards fails only that call, not this process."""
+    # Record root-actor faults instead of letting the default hook exit.
+    faults: list[MeshFailure] = []
+    monkeypatch.setattr(monarch.actor, "unhandled_fault_hook", faults.append)
     with _owner("actor") as owner:
         probe = connect(owner.token, Probe)
         # Establish that the token works before stopping its publishing actor.
@@ -238,6 +245,9 @@ def test_stopping_the_owning_actor_ends_the_token() -> None:
         assert owner.process.poll() is None, "the owner's process keeps running"
         with pytest.raises(TimeoutError):
             connect(owner.token, Probe, timeout=3.0)
+        # A request returned from the stopped rendezvous would have failed
+        # this process's root actor well before the timeout.
+        assert faults == [], faults
 
 
 @pytest.mark.timeout(120)
