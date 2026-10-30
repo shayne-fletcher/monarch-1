@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use hyperactor::Actor;
 use hyperactor::ActorAddr;
+use hyperactor::Endpoint as _;
 use hyperactor::Instance;
 use hyperactor::PortReceiver;
 use hyperactor::PortRef;
@@ -209,8 +210,9 @@ fn create_token(instance: &PyInstance, mesh: &PythonActorMesh) -> PyResult<PyPub
 /// Python's `connect()` waits on this Handle and wraps the mesh using `Class`.
 ///
 /// Raise `ValueError` for an invalid timeout or token, or a rejected
-/// connection. If no answer arrives within `timeout_secs`, close the reply
-/// port and raise `TimeoutError` through the Handle.
+/// connection. If no answer arrives within `timeout_secs`, including when the
+/// token's owner has stopped, close the reply port and raise `TimeoutError`
+/// through the Handle.
 #[pyfunction]
 fn connect_token(instance: &PyInstance, token: &str, timeout_secs: f64) -> PyResult<PyHandle> {
     // Reject invalid durations before opening a port or sending a request.
@@ -231,11 +233,27 @@ fn connect_token(instance: &PyInstance, token: &str, timeout_secs: f64) -> PyRes
     let (result, mut results) =
         instance.open_port::<token::JoinResult<ActorMeshRef<PythonActor>>>();
 
-    // Send the connecting actor's address and the reply-port reference now.
-    // Native `join()` sends the request; it does not wait for the answer.
-    token
-        .join(&**instance, instance.self_addr().clone(), result.bind())
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    // Send the connecting actor's address and the reply-port reference now,
+    // without waiting for the answer. If the token's owner has stopped, its
+    // rendezvous actor is gone: drop the request rather than return it to
+    // `instance`, where it would fail the caller's root actor and end its
+    // process. The caller then times out, as when the owner's process exits.
+    //
+    // TODO: `Token::join` returns an undeliverable request to the caller, so
+    // this posts `Join` on the rendezvous's port directly. Give `join` a
+    // policy for undeliverable requests (or make dropping them its only
+    // behavior) and call it here instead.
+    let mut join_port = token
+        .rendezvous()
+        .port::<token::Join<ActorMeshRef<PythonActor>, ActorAddr>>();
+    join_port.return_undeliverable(false);
+    join_port.post(
+        &**instance,
+        token::Join {
+            joiner: instance.self_addr().clone(),
+            result: result.bind(),
+        },
+    );
 
     // Start a Tokio task waiting for the answer and return its `PyHandle`.
     // Dropping the Handle does not cancel this task.
